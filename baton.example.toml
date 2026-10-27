@@ -1,0 +1,60 @@
+# baton host configuration. Copy to ~/.config/baton/baton.toml (or pass --config) and edit.
+# Every path, host name and credential lives here; nothing is built into baton.
+
+[host]
+# The URL clients use to reach this host, without /mcp. For local use only:
+public_url = "http://127.0.0.1:8765"
+listen_host = "127.0.0.1"
+listen_port = 8765
+data_dir = "~/.local/share/baton"
+# Extra browser origins allowed to call /mcp (rarely needed).
+# allowed_origins = ["https://client.example.com"]
+
+# Roles are the names agents act as. Each credential maps to exactly one role.
+[roles.planner]
+description = "Breaks work into jobs and reviews results"
+
+[roles.worker]
+description = "Picks up jobs and reports back"
+
+# Optional: wake a role when something is waiting for it. Use one of: a webhook, a command, an integration.
+# [roles.worker.wake]
+# webhook = "https://hooks.example.com/baton"
+# secret_env = "BATON_WORKER_WEBHOOK_SECRET"   # signs with Standard Webhooks when set
+# command = ["/usr/local/bin/notify-worker"]   # argv, no shell; the wake JSON arrives on stdin
+# integration = "<name>"                       # an enabled integration; see docs/integrations/
+# timeout_seconds = 10
+
+# Bearer tokens: create with `baton token new --name <name> --role <role>` and paste the printed entry.
+# [[auth.tokens]]
+# name = "worker-laptop"
+# role = "worker"
+# sha256 = "<64 hex characters>"
+
+# Optional OAuth 2.1 for remote MCP clients that support it.
+# [auth.oauth]
+# enabled = true
+# passphrase_hash = "scrypt$..."               # from `baton hash-passphrase`; or passphrase_hash_env = "VAR"
+# roles = ["planner"]                          # roles the consent page may grant
+# redirect_uris = ["https://client.example.com/oauth/callback"]   # exact matches
+# allow_loopback_redirects = true              # http://127.0.0.1:<any port>/... for desktop clients
+
+# Job states. Omit this table for the default: open -> working -> done | failed | cancelled.
+[jobs]
+initial = "open"
+
+[jobs.states.open]
+waiting_on = "worker"
+next = ["working", "cancelled"]
+
+[jobs.states.working]
+waiting_on = "worker"
+next = ["review", "cancelled"]
+
+[jobs.states.review]
+waiting_on = "planner"
+next = ["done", "working"]
+
+[jobs.states.done]
+
+[jobs.states.cancelled]

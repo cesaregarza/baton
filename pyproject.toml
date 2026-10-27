@@ -1,0 +1,40 @@
+[project]
+name = "baton"
+version = "0.1.0"
+description = "A small MCP host that relays messages and job state between agents"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "httpcore>=1.0.9,<2",
+    "mcp>=2.3.0,<3",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+baton = "baton.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.14",
+]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "baton"
+module-root = ""
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
