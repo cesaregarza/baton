@@ -576,6 +576,10 @@ def test_jobs_past_the_page_bound_are_counted_and_shown_apart(tmp_path) -> None:
         for index in range(dashboard.MAX_NEEDS_JOBS + 1):
             jobs.create(conn, config.jobs, request_id=f"20261029T120000Z-bound-{index}", actor="orchestrator",
                         title=f"Waiting job {index}")
+        for index in range(3):  # waiting on someone else: never counted for the viewer
+            other = jobs.create(conn, config.jobs, request_id=f"20261029T120000Z-other-{index}",
+                                actor="orchestrator", title=f"Reviewer job {index}")
+            jobs.move(conn, config.jobs, other["job_id"], "working", actor="operator")
     finally:
         conn.close()
     body = text(get(config, "/needs"))
