@@ -19,6 +19,9 @@ from urllib.parse import parse_qsl, urlparse
 CONFIG_ENV = "BATON_CONFIG"
 DEFAULT_CONFIG = Path("~/.config/baton/baton.toml")
 ROLE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+# A DNS name of lowercase labels, then an optional port of 1-5 digits without a leading zero.
+PROXY_HOST = re.compile(r"(?P<name>[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)"
+                        r"(?::(?P<port>[1-9][0-9]{0,4}))?")
 INTEGRATION_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 # Used when the config has no [jobs] table: a plain open → working → done flow.
@@ -127,6 +130,8 @@ class Dashboard:
     viewer_role: str | None = None
     listen_host: str = "127.0.0.1"
     listen_port: int = 8766
+    # One more Host the view answers to, exactly, for an authenticating proxy in front of it. Off by default.
+    proxy_host: str | None = None
 
 
 @dataclass(frozen=True)
@@ -342,7 +347,24 @@ def _dashboard(table: dict[str, Any], roles: dict[str, Role], conversations: Con
         raise ConfigError(f"dashboard.listen_host must be a loopback address ({' or '.join(LOOPBACK_HOSTS)}): the "
                           "view has no login, so reaching it from elsewhere needs its own auth in front of it")
     return Dashboard(True, viewer_role, listen_host,
-                     _number(table, "listen_port", 8766, "dashboard.listen_port", 1, 65535, integer=True))
+                     _number(table, "listen_port", 8766, "dashboard.listen_port", 1, 65535, integer=True),
+                     _proxy_host(table.get("proxy_host")))
+
+
+def _proxy_host(value: Any) -> str | None:
+    """An exact Host value, `name` or `name:port`: lowercase DNS labels, no wildcard, scheme, path or userinfo.
+
+    It is compared to the request's Host header as a whole string, so it must be written the way a client
+    sends it. Validating the Host is not authentication; see the Dashboard section of docs/design.md.
+    """
+    if value is None:
+        return None
+    match = PROXY_HOST.fullmatch(value) if isinstance(value, str) else None
+    port = match and match["port"]
+    if match is None or len(match["name"]) > 253 or (port is not None and not 1 <= int(port) <= 65535):
+        raise ConfigError("dashboard.proxy_host must be one exact host name, optionally with :port, such as "
+                          "dash.example.com or dash.example.com:8443: lowercase, with no wildcard, scheme or path")
+    return value
 
 
 def _integrations(tables: dict[str, Any], roles: dict[str, Role]) -> dict[str, dict[str, Any]]:

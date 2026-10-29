@@ -130,6 +130,7 @@ needs a live test.
 | An open registration endpoint used to fill memory or disk | Size and rate limits, a cap on clients, and unused registrations expire after 24 h |
 | Redirect-based code theft | Exact redirect allowlist, PKCE, single-use codes valid for 5 minutes |
 | DNS rebinding against a local host | `Host` and `Origin` checks |
+| Reaching the dashboard through a proxy (`dashboard.proxy_host`, off by default) | It accepts one exact extra Host value and never reads `X-Forwarded-*`. That is Host validation, not authentication: any local process can send that Host, so the proxy in front must authenticate, and admit only people entitled to everything the viewer role sees (every conversation, with `can_view_all_conversations`). Tailnet membership alone isn't that permission |
 | The host made to fetch internal URLs (SSRF) | The core never fetches a client-given URL: its wake targets come only from the operator's config. The optional MCP Events integration accepts client callbacks only under an operator allowlist, with the defences below |
 | A forged or replayed wake | A wake carries no content; the agent reads with its own credential. Webhooks can be signed (Standard Webhooks) |
 | A message flood | Per-recipient unread cap (`mailbox_full`, or `conversation_full` with no copy stored), message size cap, per-role tool rate limits, and an hourly cap per conversation that wakes an escalation role |
