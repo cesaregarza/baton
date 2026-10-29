@@ -37,7 +37,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from mcp.server.auth.provider import (
     AccessToken,
@@ -224,6 +224,15 @@ class StaticTokenVerifier:
         return static_token(self._config, token)
 
 
+def carries_iss(uri: str) -> bool:
+    """Whether a callback already has an `iss` parameter (RFC 9207 reserves it for the issuer the host adds)."""
+    try:
+        query = urlparse(uri).query
+    except ValueError:
+        return True
+    return any(key.lower() == "iss" for key, _ in parse_qsl(query, keep_blank_values=True))
+
+
 def valid_redirect_uri(uri: str, config: Config) -> bool:
     """Exactly a configured URI, or (if allowed) a plain-HTTP loopback address on any port (RFC 8252 §7.3)."""
     if uri in config.oauth.redirect_uris:
@@ -338,6 +347,10 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         for uri in client_info.redirect_uris or []:
+            if carries_iss(str(uri)):
+                log.warning("registration refused: redirect URI carries the reserved iss parameter: %s",
+                            loggable_uri(str(uri)))
+                raise RegistrationError("invalid_redirect_uri", "a redirect URI may not carry an iss parameter")
             if not valid_redirect_uri(str(uri), self.config):
                 log.warning("registration refused: redirect URI not allowed: %s", loggable_uri(str(uri)))
                 raise RegistrationError("invalid_redirect_uri", "redirect URI is not on the host's allowlist")

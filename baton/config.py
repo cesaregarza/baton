@@ -14,6 +14,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlparse
 
 CONFIG_ENV = "BATON_CONFIG"
 DEFAULT_CONFIG = Path("~/.config/baton/baton.toml")
@@ -345,7 +346,12 @@ def _oauth(table: dict[str, Any], roles: dict[str, Role]) -> OAuth:
     if humans:
         raise ConfigError(f"auth.oauth.roles lists the human role {humans[0]!r}: a human role signs in only with "
                           "its own token from `baton token new`, never through the consent page")
-    return OAuth(True, str(passphrase_hash), oauth_roles, tuple(table.get("redirect_uris", [])),
+    redirect_uris = tuple(table.get("redirect_uris", []))
+    for uri in redirect_uris:
+        if any(key.lower() == "iss" for key, _ in parse_qsl(urlparse(str(uri)).query, keep_blank_values=True)):
+            raise ConfigError(f"auth.oauth.redirect_uris has {uri!r}, which carries an iss parameter: the host adds "
+                              "iss itself (RFC 9207), so a callback may not carry one")
+    return OAuth(True, str(passphrase_hash), oauth_roles, redirect_uris,
                  _boolean(table, "allow_loopback_redirects", True, "auth.oauth.allow_loopback_redirects"))
 
 
