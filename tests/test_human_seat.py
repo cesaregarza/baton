@@ -438,3 +438,30 @@ def test_a_revoked_token_no_longer_counts_as_live_authority(seat_host, capsys) -
     assert host.config.tokens[0].name == "operator-token" and authority_live(host.config, authority)
     assert run_cli(capsys, "--config", str(host.path), "token", "revoke", "operator-token")[0] == 0
     assert not authority_live(host.config, authority)
+
+
+def test_each_revocation_takes_effect_even_after_an_earlier_one(seat_host, capsys) -> None:
+    from baton.auth import static_token
+
+    host = seat_host
+    revoke = ("--config", str(host.path), "token", "revoke")
+    assert run_cli(capsys, *revoke, "assistant-token")[0] == 0
+    assert static_token(host.config, host.tokens["assistant"]) is None
+    assert static_token(host.config, host.tokens["operator"]).subject == "operator"  # the list is now cached
+    assert run_cli(capsys, *revoke, "operator-token")[0] == 0
+    assert static_token(host.config, host.tokens["operator"]) is None
+    assert static_token(host.config, host.tokens["reviewer"]).subject == "reviewer"
+    code, refused = run_cli(capsys, *revoke, "no-such-token")
+    assert code == 2 and "no-such-token" in refused["detail"]
+
+
+def test_the_remote_cli_keeps_the_hosts_refusal_codes(seat_host, capsys, monkeypatch) -> None:
+    host = seat_host
+    code, refused = remote(host, capsys, monkeypatch, "conversation", "history", "conv_missing")
+    assert (code, refused["error"]) == (1, "unknown_conversation")
+    code, refused = remote(host, capsys, monkeypatch, "message", "--to", "nobody", "--text", "x")
+    assert (code, refused["error"]) == (1, "unknown_role")
+    code, refused = remote(host, capsys, monkeypatch, "read", token="baton_not-a-real-token")
+    assert (code, refused["error"]) == (1, "unauthorized")
+    code, refused = remote(host, capsys, monkeypatch, "job", "list")
+    assert code == 2 and "host only" in refused["detail"]
