@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
             from baton.app import serve  # lazily: the MCP SDK is slow to import for one-shot commands
 
             logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+            logging.getLogger("httpx").setLevel(logging.WARNING)  # it logs every URL; a webhook's can hold a token
             serve(config)
             return 0
         result = args.handler(config, args)
