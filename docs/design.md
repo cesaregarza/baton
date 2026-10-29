@@ -250,6 +250,8 @@ All credentials resolve to a role.
     token rotation and revocation.
   - Consent is a page on the host. The operator enters a passphrase, stored only as an scrypt hash, and
     picks one of the roles listed in `auth.oauth.roles`.
+  - Every authorization response redirected to a client carries `iss` (RFC 9207), and the metadata
+    advertises it, so clients that require issuer identification can use one stable, exact callback.
   - Redirect URIs must exactly match `auth.oauth.redirect_uris`, or be loopback (RFC 8252 §7.3) when
     `allow_loopback_redirects` is on.
   - Tokens are opaque and random, and stored only as SHA-256 digests. Access tokens last 1 hour, and

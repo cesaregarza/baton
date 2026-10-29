@@ -12,7 +12,9 @@ token's `claims["role"]`; tools act as that role and nothing else.
   token rotation and revocation. Consent is a page on the host where the
   operator enters a passphrase (stored as an scrypt hash) and picks the role
   the client may act as. Redirect URIs must be on the configured allowlist, or
-  loopback addresses (RFC 8252) if allowed.
+  loopback addresses (RFC 8252) if allowed. Every authorization response sent
+  back to a client names the issuer (RFC 9207), so a client can tell which
+  server answered; some clients then use one stable, exact callback URI.
 
 OAuth tokens are opaque and stored only as SHA-256 digests in one 0600 JSON
 file in the checked data directory (`baton.datadir`). Access tokens last an
@@ -323,6 +325,7 @@ class PendingLogin:
 class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]):
     def __init__(self, config: Config) -> None:
         self.config = config
+        self.issuer = config.public_url  # exactly the metadata's `issuer`; RFC 9207 clients compare it as a string
         self.store = TokenStore.load(config.oauth_state_path)
         self.codes: dict[str, tuple[AuthorizationCode, str]] = {}  # code -> (code, role)
         self.pending: dict[str, PendingLogin] = {}
@@ -336,7 +339,7 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         for uri in client_info.redirect_uris or []:
             if not valid_redirect_uri(str(uri), self.config):
-                log.warning("registration refused: redirect URI not allowed")
+                log.warning("registration refused: redirect URI not allowed: %s", loggable_uri(str(uri)))
                 raise RegistrationError("invalid_redirect_uri", "redirect URI is not on the host's allowlist")
         with self.store.mutation() as store:
             if len(store.clients) >= MAX_CLIENTS:
@@ -380,7 +383,8 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
             resource=self.config.resource_url, subject=role,
         ), role)
         log.info("login approved for client %s as role %s", login.client_id, role)
-        return construct_redirect_uri(str(login.params.redirect_uri), code=code, state=login.params.state)
+        return construct_redirect_uri(str(login.params.redirect_uri), code=code, state=login.params.state,
+                                      iss=self.issuer)
 
     async def load_authorization_code(self, client: OAuthClientInformationFull, authorization_code: str):
         entry = self.codes.get(authorization_code)
@@ -510,6 +514,89 @@ class EndpointGuard:
         self._sources[key] = calls
         self._sources.move_to_end(key)
         return True
+
+
+class IssuerIdentification:
+    """ASGI middleware for RFC 9207: advertise issuer identification, and add `iss` to `/authorize` error redirects.
+
+    The SDK serves the authorization-server metadata and sends `/authorize`
+    errors back to the client itself, without `iss`. This adds the metadata
+    flag, and `iss` to every `/authorize` redirect that goes back to a client.
+    The redirect to the host's own consent page is left alone; the consent
+    page adds `iss` to its success redirect itself (`complete_login`).
+    """
+
+    METADATA_PATH = "/.well-known/oauth-authorization-server"
+
+    def __init__(self, app: ASGIApp, provider: PassphraseProvider) -> None:
+        self._app = app
+        self._issuer = provider.issuer
+        self._consent_page = provider.config.public_url + "/login?"
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope.get("path", "")
+        if scope["type"] != "http" or path not in (self.METADATA_PATH, "/authorize"):
+            return await self._app(scope, receive, send)
+        if path == "/authorize":
+            return await self._app(scope, receive, self._with_iss(send))
+        await self._app(scope, receive, self._with_flag(send))
+
+    def _with_iss(self, send: Send) -> Send:
+        async def wrapped(message: dict) -> None:
+            if message["type"] == "http.response.start" and message["status"] in (302, 303, 307):
+                headers = []
+                for name, value in message.get("headers", []):
+                    location = value.decode("latin-1")
+                    if name.lower() == b"location" and not location.startswith(self._consent_page):
+                        value = construct_redirect_uri(location, iss=self._issuer).encode("latin-1")
+                    headers.append((name, value))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        return wrapped
+
+    def _with_flag(self, send: Send) -> Send:
+        start: dict | None = None
+        body = b""
+
+        async def wrapped(message: dict) -> None:
+            nonlocal start, body
+            if message["type"] == "http.response.start":
+                start = message
+                return
+            body += message.get("body", b"")
+            if message.get("more_body"):
+                return
+            assert start is not None
+            if start["status"] == 200:
+                metadata = json.loads(body)
+                metadata["authorization_response_iss_parameter_supported"] = True
+                body = json.dumps(metadata).encode()
+            headers = [(n, str(len(body)).encode() if n.lower() == b"content-length" else v)
+                       for n, v in start.get("headers", [])]
+            await send({**start, "headers": headers})
+            await send({"type": "http.response.body", "body": body})
+
+        return wrapped
+
+
+MAX_LOGGED_URI = 200
+
+
+def loggable_uri(uri: str) -> str:
+    """A refused redirect URI as it may be logged: scheme, host and path only, printable, capped.
+
+    Userinfo, the port, the query and the fragment are dropped, since they may
+    carry credentials, codes or tokens; control characters are removed, so a
+    hostile URI can't forge log lines.
+    """
+    try:
+        parsed = urlparse(uri)
+        shown = f"{parsed.scheme}://{parsed.hostname or ''}{parsed.path}"
+    except ValueError:
+        shown = "<unparseable>"
+    printable = "".join(ch for ch in shown if ch.isprintable())
+    return printable if len(printable) <= MAX_LOGGED_URI else printable[:MAX_LOGGED_URI] + "...(truncated)"
 
 
 def _within_window(calls: deque[float], now: float) -> deque[float]:
