@@ -11,7 +11,8 @@ repository, not in a public issue.
   credential maps to exactly one role, and tools act only as that role. No tool takes a role, a path or a
   command.
 - **Bearer tokens** are 256-bit random values. The config holds only their SHA-256 digests, which are
-  compared in constant time. If a token leaks, delete its entry and restart the host.
+  compared in constant time. Each token's name is unique per host. If a token leaks, `baton token revoke
+  <name>` ends exactly that token from its next call, with no restart; then delete its entry.
 - **OAuth** (off by default):
   - Clients register dynamically, but only with redirect URIs that exactly match the allowlist, or with
     loopback URIs if those are allowed.
@@ -24,8 +25,21 @@ repository, not in a public issue.
 - **Transport.** The MCP endpoint refuses a `Host` header other than its `public_url` name or loopback, and a
   browser `Origin` other than its own and those configured. It listens on loopback by default. Use TLS
   whenever traffic leaves the machine (see [docs/exposing.md](docs/exposing.md)).
-- **Local CLI.** The CLI opens the database directly and trusts `--as`. Anyone who can run it as the host's
-  user can act as any role. The filesystem permissions on `data_dir` are the boundary (below).
+- **Local CLI.** The CLI opens the database directly and trusts `--as`, except for a human role, which it
+  refuses. Anyone who can run it as the host's user can act as any other role. The filesystem permissions on
+  `data_dir` are the boundary (below).
+- **Human roles** (`human = true`) hold only bearer tokens. They can't be offered through OAuth, the CLI
+  refuses `--as` for them, and a request naming an author field is refused (`forbidden_field`).
+
+### What `author_kind` guarantees
+
+`author_kind: human` on a message means it was sent with a human role's own token, through this host, and
+was recorded that way when sent. It doesn't guarantee:
+
+- anything if the host machine is compromised: whoever controls it can write into the database directly;
+- anything if the person's token leaks: revoke it with `baton token revoke`;
+- authority: an authenticated message from a person is information, and whether an assistant acts on it is
+  that assistant's own policy. baton has no approval message type.
 
 ## The data directory
 
@@ -95,10 +109,11 @@ needs a live test.
 | Threat | Mitigation |
 |---|---|
 | Someone on the network calls the MCP endpoint | A token or an OAuth grant is required; scopes and an hourly limit apply to every tool |
-| One client impersonates another role | The role comes from the credential, never from arguments. A message's `from_role` is always its sender's credential role |
+| One client impersonates another role | The role comes from the credential, never from arguments. A message's `from_role` is always its sender's credential role, and a request carrying an author field is refused (`forbidden_field`) |
+| An assistant posting as the person, or making relayed text read as theirs | A human role has only its own bearer token: never an OAuth grant, never `--as`. `author_kind` is recorded at send time from the sender's role; quoted or relayed words read as the sender's (`agent`) |
 | A message, or words relayed in one, taken as an approval | Messages are information, never authority: no message changes a job's state, revision or approvals. Relayed words are typed apart from the sender's text and are never anyone's authenticated authorship |
 | A role reading or posting in a conversation it isn't in | Only current participants can send or read (`not_a_participant`); creating conversations and managing participants each need a config permission |
-| A stolen access token | Expires in 1 hour; revoke with `baton oauth revoke-all`, or by removing the bearer token |
+| A stolen access token | Expires in 1 hour; revoke with `baton oauth revoke-all`, or `baton token revoke <name>` for a bearer token |
 | Guessing the consent passphrase | scrypt hash, 5 failures per hour, then lockout |
 | An open registration endpoint used to fill memory or disk | Size and rate limits, a cap on clients, and unused registrations expire after 24 h |
 | Redirect-based code theft | Exact redirect allowlist, PKCE, single-use codes valid for 5 minutes |
@@ -119,7 +134,7 @@ Out of scope:
 All of it is under `data_dir`:
 
 - `baton.db` (SQLite):
-  - **message text** with sender, recipient and time, and any relayed words with their stated source and
+  - **message text** with sender, recipient, time and `author_kind`, and any relayed words with their stated source and
     time. A conversation message is stored once per recipient. Read messages are deleted 30 days after
     they were sent; unread ones are kept until they are read;
   - **conversation titles and participants**. Kept until you delete the database;
@@ -131,6 +146,8 @@ All of it is under `data_dir`:
   their expiry, scopes and role. No token is stored in the clear.
 - With the MCP Events integration on, its state file holds each subscription's role, client id, callback
   URL, expiry and **signing secret** (`0600`). Delete it to drop every subscription.
+- `revoked_tokens.json` (`0600`): the digest, name and role of each bearer token ended by `baton token revoke`,
+  and when.
 - `audit.jsonl`: one line per tool call with the time, role, tool, ids and outcome. **Never message text,
   job bodies or credentials.**
 

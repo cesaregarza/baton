@@ -1,8 +1,11 @@
 """The `baton` command: run the host, and let local agents message, wait and move jobs.
 
 Local commands open the host's database directly, so they are for agents on
-the host machine; a remote agent connects to the MCP server instead. `--as`
-(or `$BATON_ROLE`) names the role to act as. Every command prints JSON on
+the host machine; `--as` (or `$BATON_ROLE`) names the role to act as, and a
+human role is never available that way. With `--host URL` (or `$BATON_HOST`)
+the same message, read, wait and conversation commands go through that host's
+MCP server instead, as the role of the token in `$BATON_TOKEN` (see
+`baton.remote`); that is how a person takes part. Every command prints JSON on
 stdout; a refusal prints `{"error": <code>, "detail": ...}` and exits 1, and
 a configuration problem exits 2.
 """
@@ -15,10 +18,11 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import Any
 
 from baton import config as config_module
-from baton import conversations, datadir, inbox, jobs, messages, wakes
+from baton import conversations, datadir, inbox, jobs, messages, remote, wakes
 from baton.config import Config, ConfigError
 from baton.errors import BatonError, InvalidRequest
 from baton.store import connect
@@ -29,13 +33,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hash-passphrase":
         return _hash_passphrase()
     try:
+        if args.host:
+            result = _remote(args)
+            _print(result)
+            return 0
         config = config_module.load(args.config)
         os.umask(0o077)  # SQLite's own files, and anything else created, stay private
         datadir.check(config.data_dir)
         if hasattr(args, "role"):  # a command that acts as a role
+            args.role = args.role or os.environ.get("BATON_ROLE")
             if not args.role:
                 raise ConfigError("name a role with --as or $BATON_ROLE")
-            config.require_role(args.role)
+            if config.require_role(args.role).human:
+                raise ConfigError(f"{args.role} is a human role: it acts only with its own token, through "
+                                  f"`baton --host URL` with ${remote.TOKEN_ENV}, never with --as")
         if args.command == "serve":
             from baton.app import serve  # lazily: the MCP SDK is slow to import for one-shot commands
 
@@ -57,6 +68,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="baton", description="A small MCP host for agent messages and jobs.")
     parser.add_argument("--config", help=f"config file (default: ${config_module.CONFIG_ENV} or "
                                          f"{config_module.DEFAULT_CONFIG})")
+    parser.add_argument("--host", default=os.environ.get(remote.HOST_ENV),
+                        help=f"act through this host's URL with the token in ${remote.TOKEN_ENV} or the command in "
+                             f"${remote.TOKEN_COMMAND_ENV}, instead of a local database (default: ${remote.HOST_ENV})")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("serve", help="run the MCP server and the wake dispatcher")
 
@@ -68,6 +82,10 @@ def _parser() -> argparse.ArgumentParser:
     message.add_argument("--job", dest="job_id", help="the job it is about")
     message.add_argument("--relayed-json", help="words passed on from someone else: a JSON list of "
                                                 "{source, at, text}, kept apart from --text")
+    message.add_argument("--reply-to", help="in a conversation: the message_id this one answers")
+    message.add_argument("--attention", help="in a conversation: comma-separated participants to ask to look")
+    message.add_argument("--needs-decision", action="store_true",
+                         help="in a conversation: ask for a decision. Attention only, never an approval")
     message.add_argument("--request-id", help="reuse a printed request_id to retry safely")
     message.set_defaults(handler=_message)
 
@@ -90,6 +108,9 @@ def _parser() -> argparse.ArgumentParser:
     new.add_argument("--name", required=True)
     new.add_argument("--role", dest="token_role", required=True)
     new.set_defaults(handler=_new_token)
+    revoke = token.add_parser("revoke", help="end a configured token from its next call on, with no restart")
+    revoke.add_argument("name", help="the token's auth.tokens name")
+    revoke.set_defaults(handler=lambda config, args: _revoke_token(config, args.name))
 
     commands.add_parser("hash-passphrase", help="hash an OAuth consent passphrase for the config")
     oauth = commands.add_parser("oauth", help="OAuth grants").add_subparsers(dest="oauth_command", required=True)
@@ -166,8 +187,7 @@ def _add_conversation_commands(commands: Any) -> None:
 
 
 def _with_role(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--as", dest="role", default=os.environ.get("BATON_ROLE"),
-                        help="the role to act as (default: $BATON_ROLE)")
+    parser.add_argument("--as", dest="role", help="the role to act as (default: $BATON_ROLE); local mode only")
     return parser
 
 
@@ -177,6 +197,11 @@ def _db(config: Config, operation: Any) -> Any:
         return operation(conn)
     finally:
         conn.close()
+
+
+def _attention(args: argparse.Namespace) -> list[str] | None:
+    """`--attention a,b` as the list the host expects, or None when it was left out."""
+    return args.attention.split(",") if args.attention is not None else None
 
 
 def _message(config: Config, args: argparse.Namespace) -> dict[str, Any]:
@@ -189,12 +214,17 @@ def _message(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     except json.JSONDecodeError:
         raise InvalidRequest("--relayed-json must be JSON: a list of {source, at, text} entries") from None
     text = args.text if args.text is not None else sys.stdin.read()
+    attention = _attention(args)
     if args.conversation_id is not None:
         return _db(config, lambda conn: conversations.send(
             conn, config, sender=args.role, conversation_id=args.conversation_id, text=text, relayed=relayed,
-            request_id=args.request_id, job_id=args.job_id))
+            request_id=args.request_id, job_id=args.job_id, reply_to=args.reply_to, attention=attention,
+            needs_decision=args.needs_decision))
     return _db(config, lambda conn: messages.send(conn, sender=args.role, recipient=args.to, text=text,
-                                                  request_id=args.request_id, job_id=args.job_id, relayed=relayed))
+                                                  request_id=args.request_id, job_id=args.job_id, relayed=relayed,
+                                                  author_kind=config.author_kind(args.role),
+                                                  reply_to=args.reply_to, attention=attention,
+                                                  needs_decision=args.needs_decision))
 
 
 def _list_conversations(config: Config, args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -212,6 +242,9 @@ def _new_token(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     from baton.auth import new_token
 
     config.require_role(args.token_role)
+    if any(entry.name == args.name for entry in config.tokens):
+        raise ConfigError(f"a token named {args.name!r} is already configured; token names must be unique, so "
+                          "pick another name (or revoke and remove the old one first)")
     token, digest = new_token()
     entry = f'[[auth.tokens]]\nname = "{args.name}"\nrole = "{args.token_role}"\nsha256 = "{digest}"'
     return {"token": token, "config_entry": entry,
@@ -227,6 +260,60 @@ def _hash_passphrase() -> int:
         return 1
     _print({"passphrase_hash": hash_passphrase(passphrase)})
     return 0
+
+
+def _revoke_token(config: Config, name: str) -> dict[str, Any]:
+    from baton.auth import revoke_token
+
+    return revoke_token(config, name)
+
+
+def _remote(args: argparse.Namespace) -> Any:
+    """Run a message, read, wait or conversation list/history command through the host, as the token's role."""
+    if getattr(args, "role", None):
+        raise ConfigError("--as has no effect with --host: the token decides the role")
+    command = " ".join(filter(None, [args.command, getattr(args, "conversation_command", None)]))
+    if command == "message":
+        if (args.to is None) == (args.conversation_id is None):
+            raise InvalidRequest("name a recipient with --to or a conversation with --conversation")
+        try:
+            relayed = json.loads(args.relayed_json) if args.relayed_json is not None else None
+        except json.JSONDecodeError:
+            raise InvalidRequest("--relayed-json must be JSON: a list of {source, at, text} entries") from None
+        text = args.text if args.text is not None else sys.stdin.read()
+        # Every argument the local command takes, or the field is accepted here and never sent.
+        arguments = {"text": text, "to": args.to, "conversation_id": args.conversation_id, "job_id": args.job_id,
+                     "relayed": relayed, "request_id": args.request_id, "reply_to": args.reply_to,
+                     "attention": _attention(args), "needs_decision": True if args.needs_decision else None}
+        return _call(args, "send_message", arguments)
+    if command == "read":
+        return _call(args, "read_messages", {"after_seq": args.after_seq, "limit": args.limit})
+    if command == "wait":
+        return _remote_wait(args)
+    if command == "conversation list":
+        return _call(args, "list_conversations", {})
+    if command == "conversation history":
+        return _call(args, "read_history", {"conversation_id": args.conversation_id, "after_seq": args.after_seq,
+                                            "limit": args.limit})
+    raise ConfigError(f"`baton {command}` runs on the host only; with --host use message, read, wait, "
+                      "conversation list or conversation history")
+
+
+def _remote_wait(args: argparse.Namespace) -> Any:
+    """Wait in rounds the host allows, until something arrives or `--timeout` passes."""
+    from baton.app import MAX_WAIT_SECONDS
+
+    deadline = None if args.timeout is None else time.monotonic() + max(0.0, args.timeout)
+    while True:
+        left = MAX_WAIT_SECONDS if deadline is None else max(0.0, min(MAX_WAIT_SECONDS, deadline - time.monotonic()))
+        taken = _call(args, "wait", {"timeout_seconds": left})
+        if taken["events"] or (deadline is not None and time.monotonic() >= deadline):
+            return taken
+
+
+def _call(args: argparse.Namespace, tool: str, arguments: dict[str, Any]) -> Any:
+    return remote.call(args.host, remote.token(), tool, {key: value for key, value in arguments.items()
+                                                         if value is not None})
 
 
 def _revoke_all(config: Config, args: argparse.Namespace) -> dict[str, Any]:

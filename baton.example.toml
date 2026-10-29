@@ -17,6 +17,10 @@ description = "Breaks work into jobs and reviews results"
 [roles.worker]
 description = "Picks up jobs and reports back"
 
+# Optional: a person rather than an agent. A human role uses only its own bearer token (never OAuth or --as),
+# and its messages read as author_kind "human". See the README's "Human participants".
+# human = true
+
 # Optional, with [conversations] enabled: what a role may do in group conversations (both default to false).
 # can_create_conversations = true
 # can_manage_participants = true
@@ -28,6 +32,9 @@ description = "Picks up jobs and reports back"
 # command = ["/usr/local/bin/notify-worker"]   # argv, no shell; the wake JSON arrives on stdin
 # integration = "<name>"                       # an enabled integration; see docs/integrations/
 # timeout_seconds = 10
+# only_when_addressed = true                   # still receives every message, but a conversation message
+#                                              # wakes it only when it names the role in attention or asks
+#                                              # for a decision. Direct messages and job changes still do.
 
 # Optional: group conversations among three or more roles. Off unless enabled.
 # [conversations]

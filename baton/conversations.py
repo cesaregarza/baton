@@ -10,6 +10,12 @@ message.
 `history` is separate from that delivery: it returns the conversation as a
 participant has seen it, its own messages included, and moves no bookmark.
 
+A message may answer another through `reply_to`, and may single out the
+participants it asks to look at it through `attention`, or ask the
+conversation for a decision through `needs_decision`. Those three are what a
+reader and a quiet role's wake policy go on; none of them is an approval, and
+naming a role neither adds it to the conversation nor speaks for it.
+
 The config says which roles may create conversations and manage
 participants. A message's author is always the sender, the role its
 credential is bound to. Words the sender passes on from someone else travel
@@ -127,8 +133,14 @@ def remove(conn: sqlite3.Connection, config: Config, conversation_id: str, parti
 
 
 def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_id: str, text: str,
-         relayed: Any = None, request_id: str | None = None, job_id: str | None = None) -> dict[str, Any]:
+         relayed: Any = None, request_id: str | None = None, job_id: str | None = None,
+         reply_to: str | None = None, attention: Any = None, needs_decision: bool = False) -> dict[str, Any]:
     """Send to every other participant at once; `seqs` gives each recipient's seq. A retry replays.
+
+    `reply_to` is the message_id of a message in this conversation that the
+    sender can see. `attention` names the participants it asks to look, and
+    `needs_decision` asks the conversation for one; both only draw attention,
+    and a role woken only when addressed goes by them.
 
     Refused whole, so no recipient gets a copy, when the sender isn't a
     participant, a recipient's mailbox is full (`conversation_full`), or the
@@ -139,8 +151,12 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
     request_id = request_id or messages.new_request_id()
     created_at = messages.request_time(request_id)
     relayed = messages.check(text, relayed)
+    attention = _check_attention(config, attention)
     digest = events.request_digest("send", {"sender": sender, "conversation_id": conversation_id, "text": text,
-                                            "job_id": job_id, **({"relayed": relayed} if relayed else {})})
+                                            "job_id": job_id, **({"relayed": relayed} if relayed else {}),
+                                            **({"reply_to": reply_to} if reply_to else {}),
+                                            **({"attention": attention} if attention else {}),
+                                            **({"needs_decision": True} if needs_decision else {})})
     with transaction(conn):
         existing = events.replayed(conn, "message_requests", request_id, digest)
         if existing is not None:
@@ -150,6 +166,11 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
         participants = _participants(conn, conversation_id)
         if sender not in participants:
             raise NotAParticipant(f"{sender} is not in {conversation_id}")
+        outside = [role for role in attention or () if role not in participants]
+        if outside:
+            raise NotAParticipant(f"attention names {outside[0]}, which is not in {conversation_id}; naming a "
+                                  "role never adds it to a conversation")
+        _check_reply_to(conn, conversation_id, sender, reply_to)
         if job_id is not None:
             from baton import jobs  # lazily: jobs imports messages, which this module imports
 
@@ -160,7 +181,9 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
         else:
             message_id = messages.new_message_id()
             seqs = _fan_out(conn, conversation_id, [role for role in participants if role != sender], sender=sender,
-                            text=text, relayed=relayed, job_id=job_id, message_id=message_id)
+                            text=text, relayed=relayed, job_id=job_id, message_id=message_id,
+                            author_kind=config.author_kind(sender), reply_to=reply_to, attention=attention,
+                            needs_decision=needs_decision)
             conn.execute("INSERT INTO message_requests (request_id, request_digest, message_id, seqs, created_at)"
                          " VALUES (?, ?, ?, ?, ?)", (request_id, digest, message_id, json.dumps(seqs),
                                                      created_at.isoformat()))
@@ -195,13 +218,15 @@ def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq
                             " AND (recipient = ? OR sender = ?) GROUP BY conversation_seq"
                             " ORDER BY conversation_seq LIMIT ?", (conversation_id, after_seq, role, role, limit)
                             ).fetchall()
-    page = messages.as_page(rows, _history_entry)
+        page = messages.as_page_for(conn, role, rows, _history_entry)
     return {"messages": page, "next_seq": page[-1]["seq"] if page else after_seq}
 
 
 def _fan_out(conn: sqlite3.Connection, conversation_id: str, recipients: list[str], *, sender: str | None,
              text: str, relayed: list[dict] | None = None, notice: dict[str, str] | None = None,
-             job_id: str | None = None, message_id: str | None = None) -> dict[str, int]:
+             job_id: str | None = None, message_id: str | None = None, author_kind: str | None = None,
+             reply_to: str | None = None, attention: list[str] | None = None,
+             needs_decision: bool = False) -> dict[str, int]:
     """Store one copy for each recipient under one message_id, or refuse before storing any."""
     full = [role for role in recipients if messages.unread(conn, role) >= messages.MAX_UNREAD]
     if full:
@@ -212,7 +237,9 @@ def _fan_out(conn: sqlite3.Connection, conversation_id: str, recipients: list[st
     conversation_seq = _load(conn, conversation_id)["last_seq"]
     return {role: messages.store_copy(conn, message_id=message_id, sender=sender, recipient=role, text=text,
                                       job_id=job_id, conversation_id=conversation_id,
-                                      conversation_seq=conversation_seq, relayed=relayed, notice=notice)
+                                      conversation_seq=conversation_seq, relayed=relayed, notice=notice,
+                                      author_kind=author_kind, reply_to=reply_to, attention=attention,
+                                      needs_decision=needs_decision)
             for role in recipients}
 
 
@@ -242,15 +269,45 @@ def _may_manage(config: Config, actor: str, participant: str) -> Conversations:
     return settings
 
 
-def _check_roles(config: Config, roles: Any) -> list[str]:
+def _check_roles(config: Config, roles: Any, field: str = "participants") -> list[str]:
     if not isinstance(roles, list) or not all(isinstance(role, str) for role in roles):
-        raise InvalidRequest("participants must be a list of role names")
+        raise InvalidRequest(f"{field} must be a list of role names")
     unknown = [role for role in roles if role not in config.roles]
     if unknown:
         raise UnknownRole(f"no role {unknown[0]!r}; call whoami for the list")
     if len(set(roles)) != len(roles):
-        raise InvalidRequest("participants lists a role twice")
+        raise InvalidRequest(f"{field} lists a role twice")
     return roles
+
+
+def _check_attention(config: Config, attention: Any) -> list[str] | None:
+    """The participants a message asks to look at it: a structured list of roles, never @names in the text.
+
+    Checked against the config here and against the conversation's current participants by `send`, so a
+    message can neither single out a role that left nor reach one that was never in.
+    """
+    if attention is None:
+        return None
+    roles = _check_roles(config, attention, "attention")
+    if not roles:
+        raise InvalidRequest("attention must name at least one participant, or be left out")
+    return roles
+
+
+def _check_reply_to(conn: sqlite3.Connection, conversation_id: str, sender: str, reply_to: Any) -> None:
+    """A reply answers a message of this conversation that the sender can see, and nothing else.
+
+    Refusing a parent the sender cannot see keeps a reply from pointing at a message that was never
+    the sender's to answer: one from before it joined, one from another conversation or none at all.
+    """
+    if reply_to is None:
+        return
+    seen = isinstance(reply_to, str) and conn.execute(
+        "SELECT 1 FROM messages WHERE conversation_id = ? AND id = ? AND (recipient = ? OR sender = ?) LIMIT 1",
+        (conversation_id, reply_to, sender, sender)).fetchone() is not None
+    if not seen:
+        raise InvalidRequest(f"reply_to must be the message_id of a message in {conversation_id} that you can "
+                             "see; this host has no such message for you")
 
 
 def _load(conn: sqlite3.Connection, conversation_id: str) -> sqlite3.Row:
@@ -265,9 +322,9 @@ def _participants(conn: sqlite3.Connection, conversation_id: str) -> list[str]:
     return [row["role"] for row in rows]
 
 
-def _history_entry(row: sqlite3.Row) -> dict[str, Any]:
+def _history_entry(row: sqlite3.Row, reply_to: dict[str, Any] | None = None) -> dict[str, Any]:
     """A message as history shows it: numbered in the conversation, not in any one mailbox."""
-    return {**messages.as_dict(row), "seq": row["conversation_seq"]}
+    return {**messages.as_dict(row, reply_to), "seq": row["conversation_seq"]}
 
 
 def _summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
