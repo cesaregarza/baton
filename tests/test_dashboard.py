@@ -65,7 +65,8 @@ def seeded(config: Config) -> tuple[str, str]:
 
 
 def get(config: Config, target: str, *, method: str = "GET", host: str | None = None) -> Any:
-    return dashboard.respond(config, method, target, host or f"127.0.0.1:{config.dashboard.listen_port}")
+    own = f"127.0.0.1:{config.dashboard.listen_port}"
+    return dashboard.respond(config, method, target, own if host is None else host)
 
 
 def text(response: Any) -> str:
@@ -278,7 +279,8 @@ def test_every_response_carries_a_strict_csp_and_the_pages_load_nothing_from_els
     for response in responses[:2]:
         body = text(response)
         assert "<script" not in body and "<form" not in body and "<textarea" not in body
-        assert not re.search(r"""(?:src|href)\s*=\s*["']?(?!/)""", body), "a page links outside the host"
+        links = re.findall(r"""(?:src|href)\s*=\s*["']?([^"'\s>]*)""", body)
+        assert links and all(link.startswith("/") and not link.startswith("//") for link in links), links
 
 
 def test_no_response_grants_another_origin_access(tmp_path) -> None:
