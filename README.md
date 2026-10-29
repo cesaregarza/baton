@@ -200,7 +200,8 @@ baton token new --name operator-laptop --role operator   # paste the printed ent
 - **Fixed when sent.** `author_kind` is recorded with each message from the sender role's config at that
   moment. Changing a role's `human` flag later doesn't change how its earlier messages read.
 - **Revocation without a restart.** `baton token revoke operator-laptop` ends that token from its next call.
-  Remove its entry from the config when convenient.
+  Remove its entry from the config when convenient. Token names are unique per host (the config refuses a
+  repeated name, and so does `baton token new`), so revoking a name always ends exactly one token.
 
 The person uses the CLI in remote mode, from any machine that can reach the host:
 

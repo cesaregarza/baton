@@ -11,8 +11,8 @@ repository, not in a public issue.
   credential maps to exactly one role, and tools act only as that role. No tool takes a role, a path or a
   command.
 - **Bearer tokens** are 256-bit random values. The config holds only their SHA-256 digests, which are
-  compared in constant time. If a token leaks, `baton token revoke <name>` ends it from its next call, with
-  no restart; then delete its entry.
+  compared in constant time. Each token's name is unique per host. If a token leaks, `baton token revoke
+  <name>` ends exactly that token from its next call, with no restart; then delete its entry.
 - **OAuth** (off by default):
   - Clients register dynamically, but only with redirect URIs that exactly match the allowlist, or with
     loopback URIs if those are allowed.
