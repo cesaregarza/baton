@@ -15,9 +15,12 @@ repository, not in a public issue.
   <name>` ends exactly that token from its next call, with no restart; then delete its entry.
 - **OAuth** (off by default):
   - Clients register dynamically, but only with redirect URIs that exactly match the allowlist, or with
-    loopback URIs if those are allowed. There is no prefix or wildcard matching. A refused registration is
-    logged as the callback's scheme, host and path only: never userinfo, query or fragment, with control
-    characters removed and the length capped.
+    loopback URIs if those are allowed. There is no prefix or wildcard matching, and a callback that
+    carries its own `iss` parameter is refused. A refused registration is logged as the callback's scheme
+    and host, and its path only when the path is in an ordinary shape (up to six segments of letters,
+    digits, `_` and `-`). Any other path is replaced by a redaction marker. Userinfo, port, path parameters,
+    query and fragment are never logged, control characters are removed, and the whole value is capped at
+    200 characters.
   - Issuer identification (RFC 9207): the metadata advertises `authorization_response_iss_parameter_supported`,
     and every authorization response redirected to a client, success or error, carries `iss` equal to the
     metadata's `issuer`. A client that checks it can't be tricked into sending a code to the wrong server

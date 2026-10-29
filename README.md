@@ -115,8 +115,10 @@ sha256 = "<from baton token new>"
 identification: its authorization-server metadata advertises `authorization_response_iss_parameter_supported`,
 and every authorization response sent back to a client carries `iss`, the host's `public_url`. Some clients
 use one stable callback URI only when the server does this, and otherwise a per-connection one. Look up your
-client's documented stable callback and list it in `redirect_uris`. If a registration is refused, the host
-logs the callback's scheme, host and path (never its query), so you can see exactly what the client sent.
+client's documented stable callback and list it in `redirect_uris`. A callback may not carry its own `iss`
+parameter. If a registration is refused, the host logs the callback's scheme and host, plus its path when
+the path has an ordinary shape. It never logs the query, so you can see what the client sent without
+logging a secret.
 
 - The assistant connects to `https://baton.example.com/mcp`, signs in on the host's consent page, and
   subscribes to the `baton.attention` event. A message to `assistant` then sends it one signed,
