@@ -15,7 +15,19 @@ repository, not in a public issue.
   <name>` ends exactly that token from its next call, with no restart; then delete its entry.
 - **OAuth** (off by default):
   - Clients register dynamically, but only with redirect URIs that exactly match the allowlist, or with
-    loopback URIs if those are allowed.
+    loopback URIs if those are allowed. There is no prefix or wildcard matching, and a callback that
+    carries its own `iss` parameter is refused. A client stored before that rule, whose callback carries
+    `iss`, is ignored, and no redirect is ever sent to a callback that already has one. A refused
+    registration is logged as the callback's scheme and host only, with a `[path redacted]` marker. No
+    character of its path, nor its userinfo, port, query or fragment, is ever logged. Control characters are
+    removed, and the whole value is capped at 200 characters.
+  - Issuer identification (RFC 9207): `public_url` is the issuer, so it must be written exactly as the OAuth
+    metadata publishes it, with a plain ASCII path. The config refuses any other form and names the one to
+    write. The metadata advertises
+    `authorization_response_iss_parameter_supported`,
+    and every authorization response redirected to a client, success or error, carries `iss` equal to the
+    metadata's `issuer`. A client that checks it can't be tricked into sending a code to the wrong server
+    (a mix-up attack).
   - Authorization requires PKCE and the operator's passphrase on the host's consent page. The passphrase
     is stored as an scrypt hash. Five wrong attempts lock the page for an hour.
   - Access and refresh tokens are opaque, and stored only as SHA-256 digests. Refresh tokens rotate.
