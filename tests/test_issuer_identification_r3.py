@@ -171,4 +171,3 @@ def test_the_refusal_line_for_an_alphanumeric_secret_path(issuer_host: IssuerHos
     [line] = [r.getMessage() for r in caplog.records if "redirect" in r.getMessage()]
     assert "abc123def456" not in line and "reset" not in line and "client.example.test" in line
     assert len(line) <= 300
-
