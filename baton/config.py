@@ -201,6 +201,7 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
     public_url = str(host.get("public_url", "")).rstrip("/")
     if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", public_url):
         raise ConfigError("host.public_url must be the http(s) URL clients reach the host at, without /mcp")
+    _require_canonical(public_url)
     data_dir = Path(str(host.get("data_dir", "~/.local/share/baton"))).expanduser()
     roles = {name: _role(name, table) for name, table in raw.get("roles", {}).items()}
     if not roles:
@@ -230,6 +231,31 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         conversations=conversations,
         dashboard=_dashboard(raw.get("dashboard", {}), roles, conversations),
     )
+
+
+def _require_canonical(public_url: str) -> None:
+    """Refuse a public_url that URL handling would rewrite, since it is also the OAuth issuer.
+
+    The issuer must read exactly the same in the metadata (which the MCP SDK
+    normalizes) and in every `iss` the host sends, so the config has to be in
+    that normal form already: a lower-case host, no default port, and an ASCII
+    path with no percent-encoding.
+    """
+    parsed = urlparse(public_url)
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ConfigError(f"host.public_url {public_url!r} has an invalid port") from None
+    problem = None
+    if parsed.netloc != parsed.netloc.lower():
+        problem = "its host must be lower case"
+    elif port == {"https": 443, "http": 80}[parsed.scheme]:
+        problem = f"leave out the default port {port}"
+    elif not parsed.path.isascii() or "%" in parsed.path:
+        problem = "its path must be plain ASCII, with no percent-encoding"
+    if problem:
+        raise ConfigError(f"host.public_url {public_url!r} is not in canonical form: {problem}. It is the OAuth "
+                          "issuer, which clients compare character for character")
 
 
 def _boolean(table: dict[str, Any], key: str, default: bool, where: str) -> bool:
