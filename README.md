@@ -116,9 +116,9 @@ identification: its authorization-server metadata advertises `authorization_resp
 and every authorization response sent back to a client carries `iss`, the host's `public_url`. Some clients
 use one stable callback URI only when the server does this, and otherwise a per-connection one. Look up your
 client's documented stable callback and list it in `redirect_uris`. A callback may not carry its own `iss`
-parameter. If a registration is refused, the host logs the callback's scheme and host, plus its path when
-the path has an ordinary shape. It never logs the query, so you can see what the client sent without
-logging a secret.
+parameter. If a registration is refused, the host logs only the callback's scheme and host, never its path
+or query, since either may hold a secret. `public_url` is the issuer, so write it in canonical form: a
+lower-case host, no default port, and a plain ASCII path.
 
 - The assistant connects to `https://baton.example.com/mcp`, signs in on the host's consent page, and
   subscribes to the `baton.attention` event. A message to `assistant` then sends it one signed,
