@@ -30,6 +30,7 @@ import html
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from collections import OrderedDict, deque
@@ -614,22 +615,30 @@ class IssuerIdentification:
 
 
 MAX_LOGGED_URI = 200
+# A path is logged only in the shape an ordinary callback has: up to six segments of plain characters.
+# Anything else may carry a value (a session, a reset code), so it is replaced by a marker.
+_LOGGABLE_PATH = re.compile(r"(/[A-Za-z0-9_-]{1,64}){0,6}/?")
+_REDACTED_PATH = "/<redacted path>"
+_TRUNCATED = "...(truncated)"
 
 
 def loggable_uri(uri: str) -> str:
-    """A refused redirect URI as it may be logged: scheme, host and path only, printable, capped.
+    """A refused redirect URI as it may be logged: scheme, host and an ordinary path only, at most MAX_LOGGED_URI.
 
     Userinfo, the port, the query and the fragment are dropped, since they may
-    carry credentials, codes or tokens; control characters are removed, so a
-    hostile URI can't forge log lines.
+    carry credentials, codes or tokens. A path of any other shape is replaced
+    by a marker. Control characters are removed, so a hostile URI can't forge
+    log lines, and the bound covers the whole value, truncation marker included.
     """
     try:
         parsed = urlparse(uri)
-        shown = f"{parsed.scheme}://{parsed.hostname or ''}{parsed.path}"
+        scheme, host, path = parsed.scheme, parsed.hostname or "", parsed.path
     except ValueError:
-        shown = "<unparseable>"
-    printable = "".join(ch for ch in shown if ch.isprintable())
-    return printable if len(printable) <= MAX_LOGGED_URI else printable[:MAX_LOGGED_URI] + "...(truncated)"
+        return "<unparseable>"
+    if parsed.params or not _LOGGABLE_PATH.fullmatch(path):
+        path = _REDACTED_PATH
+    shown = "".join(ch for ch in f"{scheme}://{host}{path}" if ch.isprintable())
+    return shown if len(shown) <= MAX_LOGGED_URI else shown[:MAX_LOGGED_URI - len(_TRUNCATED)] + _TRUNCATED
 
 
 def _within_window(calls: deque[float], now: float) -> deque[float]:
