@@ -452,7 +452,7 @@ def test_each_revocation_takes_effect_even_after_an_earlier_one(seat_host, capsy
     assert static_token(host.config, host.tokens["operator"]) is None
     assert static_token(host.config, host.tokens["reviewer"]).subject == "reviewer"
     code, refused = run_cli(capsys, *revoke, "no-such-token")
-    assert code == 2 and "no-such-token" in refused["detail"]
+    assert (code, refused["error"]) == (1, "unknown_token") and "no-such-token" in refused["detail"]
 
 
 def test_the_remote_cli_keeps_the_hosts_refusal_codes(seat_host, capsys, monkeypatch) -> None:
