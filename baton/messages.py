@@ -95,7 +95,7 @@ def store_copy(conn: sqlite3.Connection, *, message_id: str, sender: str | None,
                  " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq", (recipient, seq))
     conn.execute("INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, author_kind, recipient,"
                  " seq, text, relayed, notice, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                 (message_id, job_id, conversation_id, conversation_seq, sender, author_kind if sender else None,
+                 (message_id, job_id, conversation_id, conversation_seq, sender, author_kind,
                   recipient, seq, text, json.dumps(relayed) if relayed else None,
                   json.dumps(notice) if notice else None, events.now()))
     # The event carries no text, so retention deleting the message leaves no copy behind.
