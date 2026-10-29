@@ -272,12 +272,24 @@ def test_every_response_carries_a_strict_csp_and_the_pages_load_nothing_from_els
         assert directives["frame-ancestors"] == "'none'"
         assert directives["form-action"] == "'none'"
         assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["X-Frame-Options"] == "DENY"
         assert response.headers["Cache-Control"] == "no-store"
         assert response.headers["Referrer-Policy"] == "no-referrer"
     for response in responses[:2]:
         body = text(response)
         assert "<script" not in body and "<form" not in body and "<textarea" not in body
         assert not re.search(r"""(?:src|href)\s*=\s*["']?(?!/)""", body), "a page links outside the host"
+
+
+def test_no_response_grants_another_origin_access(tmp_path) -> None:
+    """No CORS headers anywhere, preflight included: a page on another site can't read a response."""
+    config = view_config(tmp_path, view_all=True)
+    mine, _ = seeded(config)
+    for method in ("GET", "HEAD", "OPTIONS", "POST"):
+        for target in ("/", f"/c/{mine}", "/style.css", "/missing"):
+            response = get(config, target, method=method)
+            granted = [name for name in response.headers if name.lower().startswith("access-control-")]
+            assert granted == [], (method, target, granted)
 
 
 def test_relayed_entries_and_participant_notices_render_apart_from_the_senders_text(tmp_path) -> None:
