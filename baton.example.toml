@@ -73,7 +73,7 @@ description = "Picks up jobs and reports back"
 # [integrations.decision_push]
 # enabled = true
 # role = "planner"
-# url = "https://ntfy.example.com/decisions"
+# url = "https://push.example.com/decisions"
 # secret_env = "BATON_PUSH_TOKEN"            # optional: a bearer token, read from the environment
 # link_base = "https://dash.example.com"     # optional: link each push to the dashboard item
 # max_per_hour = 10

@@ -4,7 +4,7 @@ Enabled by `[integrations.decision_push]`:
 
     enabled = true
     role = "operator"                          # the role whose decisions are pushed
-    url = "https://ntfy.example.com/decisions" # where the notice is POSTed
+    url = "https://push.example.com/decisions" # where the notice is POSTed
     secret_env = "BATON_PUSH_TOKEN"            # optional: the variable holding a bearer token
     link_base = "https://dash.example.com"     # optional: the dashboard, for a link to the item
     max_per_hour = 10
@@ -13,8 +13,8 @@ Enabled by `[integrations.decision_push]`:
 A message pushes when the configured role received it and it carries
 `needs_decision`; nothing else pushes. The request is a plain POST: its body is
 a fixed notice and, when `link_base` is set, the link to the message on the
-dashboard; its `Title` and `Click` headers are what ntfy reads, and any other
-webhook may ignore them. It never carries the message's words, its relayed
+dashboard; its `Title` and `Click` headers are what some push services read,
+and any other webhook may ignore them. It never carries the message's words, its relayed
 words, its conversation's title or who sent it, because a push passes through
 someone else's servers. The URL and the token come only from the operator's
 config and environment, and neither is ever logged.
@@ -88,7 +88,7 @@ def parse_settings(config: Config, table: dict[str, Any]) -> Settings:
     if role not in config.roles:
         raise ConfigError(f"{where}.role must name a configured role")
     url = table.get("url")
-    if not _http_url(url) or "@" in urlsplit(url).netloc:
+    if not _http_url(url) or _has_credentials(url):
         raise ConfigError(f"{where}.url must be an http(s) URL with no credentials in it")
     secret_env = table.get("secret_env")
     if secret_env is not None:
@@ -100,7 +100,7 @@ def parse_settings(config: Config, table: dict[str, Any]) -> Settings:
     link_base = table.get("link_base")
     if link_base is not None:
         parts = urlsplit(link_base) if isinstance(link_base, str) else None
-        if not _http_url(link_base) or parts.query or parts.fragment or "@" in parts.netloc:
+        if not _http_url(link_base) or parts.query or parts.fragment or _has_credentials(link_base):
             raise ConfigError(f"{where}.link_base must be the dashboard's http(s) address, with no query, "
                               "fragment or credentials")
         link_base = link_base.rstrip("/")
@@ -256,6 +256,11 @@ def _shape(raw: dict[str, Any]) -> dict[str, Any]:
     counts = raw.get("counts") or {}
     return {"after_seq": raw.get("after_seq"), "window": list(raw.get("window") or []),
             "counts": {key: int(counts.get(key, 0)) for key in ("sent", "failed", "capped")}}
+
+
+def _has_credentials(url: str) -> bool:
+    """Whether the URL names a user (and perhaps a password) before its host."""
+    return urlsplit(url).username is not None
 
 
 def _http_url(value: Any) -> bool:

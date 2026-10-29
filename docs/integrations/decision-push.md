@@ -1,13 +1,13 @@
 # Decision push
 
-An optional integration that tells one role's channel, such as an [ntfy](https://ntfy.sh) topic, that a
-decision is waiting for it. It never says what the decision is. It is off unless the config enables it.
+An optional integration that tells one role's channel, such as a topic on a push-notification service, that
+a decision is waiting for it. It never says what the decision is. It is off unless the config enables it.
 
 ```toml
 [integrations.decision_push]
 enabled = true
 role = "operator"                           # whose decisions are pushed
-url = "https://ntfy.example.com/decisions"  # where the notice is POSTed
+url = "https://push.example.com/decisions"  # where the notice is POSTed
 secret_env = "BATON_PUSH_TOKEN"             # optional: the environment variable holding a bearer token
 link_base = "https://dash.example.com"      # optional: the dashboard's address, for a link to the item
 max_per_hour = 10                           # 1 to 1000
@@ -36,7 +36,8 @@ A decision is waiting in Baton.
 <link_base>/c/<conversation_id>#m-<seq>
 ```
 
-`Title` and `Click` are what ntfy reads; another webhook can read the body and ignore them. Without
+`Title` and `Click` are headers some push services read as the notification's title and tap target; another
+webhook can read the body and ignore them. Without
 `link_base` there is no `Click` and no link. A push never carries the message's words, relayed words, the
 conversation's title or who sent it, because a push passes through someone else's servers. The link
 names only the conversation's id and the message's number, and opens the item in the dashboard, which
