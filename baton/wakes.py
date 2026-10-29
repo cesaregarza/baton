@@ -5,7 +5,10 @@ A wake carries no message text or job body, only what to look at:
 credentials, so a duplicated, late or forged wake is harmless.
 
 Messages coalesce: a role is woken once per unread batch, keyed by its first
-unread seq, and a read supersedes a pending wake. Every wake is recorded
+unread seq, and a read supersedes a pending wake. A role configured with
+`only_when_addressed` is woken only by a message that singles it out, and
+then still from its first unread seq, so one wake covers the quiet ones
+already waiting. Every wake is recorded
 before delivery and retried with backoff until it succeeds, is superseded, or
 runs out of attempts.
 
@@ -130,6 +133,9 @@ class Dispatcher:
         if role is None or not role.wake.enabled:
             return None
         if event["kind"] == "message":
+            seq = json.loads(event["data"])["seq"]
+            if role.wake.only_when_addressed and not messages.addressed_to(conn, role.name, seq):
+                return None  # it is in the role's mailbox, waiting; it just does not interrupt it
             first_unread = messages.first_unread_seq(conn, role.name)
             if first_unread is None:
                 return None

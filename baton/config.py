@@ -36,13 +36,19 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class Wake:
-    """How a role is told something is waiting for it: at most one of a webhook, a command or an integration."""
+    """How a role is told something is waiting for it: at most one of a webhook, a command or an integration.
+
+    `only_when_addressed` narrows *when*: the role still receives every message, but a conversation
+    message wakes it only if it singles the role out for attention or asks for a decision. Anything else
+    addressed to the role alone -- a direct message, a job change, an escalation -- wakes it either way.
+    """
 
     webhook: str | None = None
     secret_env: str | None = None
     command: tuple[str, ...] = ()
     integration: str | None = None
     timeout_seconds: float = 10.0
+    only_when_addressed: bool = False
 
     @property
     def enabled(self) -> bool:
@@ -223,6 +229,8 @@ def _role(name: str, table: dict[str, Any]) -> Role:
     return Role(name, str(table.get("description", "")), Wake(
         webhook=webhook, secret_env=wake.get("secret_env"), command=tuple(command), integration=integration,
         timeout_seconds=_number(wake, "timeout_seconds", 10.0, f"roles.{name}.wake.timeout_seconds", 0.1, 300),
+        only_when_addressed=_boolean(wake, "only_when_addressed", False,
+                                     f"roles.{name}.wake.only_when_addressed"),
     ), _boolean(table, "can_create_conversations", False, f"roles.{name}.can_create_conversations"),
         _boolean(table, "can_manage_participants", False, f"roles.{name}.can_manage_participants"))
 

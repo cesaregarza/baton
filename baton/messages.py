@@ -4,7 +4,8 @@ Each recipient's messages carry a gap-free `seq`. A reader passes the last
 `seq` it has seen and gets what follows; the host also remembers the last seq
 it delivered (`read_seq`), so a reader that passes nothing gets only unread
 messages. A message may name a job it is about, belong to a conversation (see
-baton.conversations), and carry words relayed from someone else.
+baton.conversations), carry words relayed from someone else, answer another
+message in its conversation, and single out the roles it asks to look at it.
 """
 
 from __future__ import annotations
@@ -39,6 +40,9 @@ REQUEST_MAX_AGE = timedelta(days=30)
 REQUEST_MAX_SKEW = timedelta(minutes=5)
 IDENTITY_RETENTION = REQUEST_MAX_AGE + timedelta(days=1)
 
+# How a page turns one row into a message, given the reader's view of the parent it answers.
+type Shape = Callable[[sqlite3.Row, dict[str, Any] | None], dict[str, Any]]
+
 # The actor a host notice's event names: not a valid role name, so no role can be mistaken for it.
 HOST_ACTOR = "@host"
 RELAYED_FIELDS = ("source", "at", "text")
@@ -50,8 +54,14 @@ def new_request_id() -> str:
 
 
 def send(conn: sqlite3.Connection, *, sender: str, recipient: str, text: str, request_id: str | None = None,
-         job_id: str | None = None, relayed: Any = None) -> dict[str, Any]:
-    """Store a message as the recipient's next seq. Retrying with the same request_id is safe."""
+         job_id: str | None = None, relayed: Any = None, reply_to: str | None = None, attention: Any = None,
+         needs_decision: bool = False) -> dict[str, Any]:
+    """Store a message as the recipient's next seq. Retrying with the same request_id is safe.
+
+    `reply_to`, `attention` and `needs_decision` belong to a conversation send and are refused here, so
+    no interface can pass them to a direct message and have them quietly dropped.
+    """
+    only_in_a_conversation(reply_to=reply_to, attention=attention, needs_decision=needs_decision)
     request_id = request_id or new_request_id()
     created_at = request_time(request_id)
     relayed = check(text, relayed)
@@ -79,16 +89,20 @@ def send(conn: sqlite3.Connection, *, sender: str, recipient: str, text: str, re
 
 def store_copy(conn: sqlite3.Connection, *, message_id: str, sender: str | None, recipient: str, text: str,
                job_id: str | None = None, conversation_id: str | None = None, conversation_seq: int | None = None,
-               relayed: list[dict] | None = None, notice: dict[str, str] | None = None) -> int:
+               relayed: list[dict] | None = None, notice: dict[str, str] | None = None,
+               reply_to: str | None = None, attention: list[str] | None = None,
+               needs_decision: bool = False) -> int:
     """Store one copy as the recipient's next seq, with its event; the caller holds the write lock and checked room."""
     last_seq, read_seq = _mailbox(conn, recipient)
     seq = last_seq + 1
     conn.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)"
                  " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq", (recipient, seq))
     conn.execute("INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, recipient, seq, text,"
-                 " relayed, notice, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 " relayed, notice, reply_to, attention, needs_decision, at)"
+                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  (message_id, job_id, conversation_id, conversation_seq, sender, recipient, seq, text,
-                  json.dumps(relayed) if relayed else None, json.dumps(notice) if notice else None, events.now()))
+                  json.dumps(relayed) if relayed else None, json.dumps(notice) if notice else None,
+                  reply_to, json.dumps(attention) if attention else None, int(needs_decision), events.now()))
     # The event carries no text, so retention deleting the message leaves no copy behind.
     # A job-less event uses the message's seq as its own.
     events.append(conn, job_id=job_id, seq=None if job_id else seq, actor=sender or HOST_ACTOR,
@@ -105,6 +119,47 @@ def new_message_id() -> str:
 def unread(conn: sqlite3.Connection, recipient: str) -> int:
     last_seq, read_seq = _mailbox(conn, recipient)
     return last_seq - read_seq
+
+
+def only_in_a_conversation(**fields: Any) -> None:
+    """Refuse the fields that only a conversation send carries, naming the ones that were passed."""
+    named = sorted(name for name, value in fields.items() if value)
+    if named:
+        raise InvalidRequest(f"{' and '.join(named)} belongs to a conversation send: pass a conversation_id, "
+                             "or leave it out. A direct message is already addressed to its recipient.")
+
+
+def addressed_to(conn: sqlite3.Connection, recipient: str, seq: int) -> bool:
+    """Whether the recipient's message `seq` singles it out, rather than only reaching it.
+
+    A direct message does, by definition. A conversation message does when it names the recipient for
+    attention or asks for a decision; one that does neither still arrives, but singles nobody out. A
+    message retention has already deleted singles nobody out either: there is nothing left to look at.
+    """
+    row = conn.execute("SELECT conversation_id, attention, needs_decision FROM messages"
+                       " WHERE recipient = ? AND seq = ?", (recipient, seq)).fetchone()
+    if row is None:
+        return False
+    if row["conversation_id"] is None:
+        return True
+    return bool(row["needs_decision"]) or recipient in json.loads(row["attention"] or "[]")
+
+
+def reply_references(conn: sqlite3.Connection, reader: str,
+                     rows: list[sqlite3.Row]) -> dict[str, dict[str, Any]]:
+    """What `reader` may be told about each parent the rows answer, keyed by that parent's message_id.
+
+    A reader may see a message it received or sent and retention has not taken. Where it may not, the
+    reference keeps the id the sender put on the reply but gives `seq` as None, so a reader can say the
+    parent is unavailable without learning its text or its author.
+    """
+    parents = {row["reply_to"] for row in rows if row["reply_to"]}
+    if not parents:
+        return {}
+    places = ", ".join("?" * len(parents))
+    visible = dict(conn.execute(f"SELECT id, conversation_seq FROM messages WHERE id IN ({places})"
+                                " AND (recipient = ? OR sender = ?)", (*parents, reader, reader)).fetchall())
+    return {parent: {"message_id": parent, "seq": visible.get(parent)} for parent in parents}
 
 
 def check(text: str, relayed: Any) -> list[dict[str, str]] | None:
@@ -166,7 +221,7 @@ def read(conn: sqlite3.Connection, recipient: str, after_seq: int | None = None,
         rows = conn.execute("SELECT * FROM messages WHERE recipient = ? AND seq > ? ORDER BY seq LIMIT ?",
                             (recipient, start, limit)).fetchall()
         oldest = conn.execute("SELECT MIN(seq) FROM messages WHERE recipient = ?", (recipient,)).fetchone()[0]
-        page = as_page(rows)
+        page = as_page_for(conn, recipient, rows)
         if page:
             mark_read(conn, recipient, page[-1]["seq"])
         unread = last_seq - _mailbox(conn, recipient)[1]
@@ -203,12 +258,25 @@ def wire_bytes(text: str) -> int:
     return len(json.dumps(text)) - 2
 
 
-def as_dict(row: sqlite3.Row) -> dict[str, Any]:
-    """A message as readers see it. `from_role` is the sender's credential role, or None for a host notice."""
+def as_dict(row: sqlite3.Row, reply_to: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A message as readers see it. `from_role` is the sender's credential role, or None for a host notice.
+
+    `reply_to` is the reader's view of the message this one answers, from `reply_references`; None means
+    this message answers nothing, or that it is being shaped for no particular reader.
+    """
     return {"seq": row["seq"], "message_id": row["id"], "sender": row["sender"], "from_role": row["sender"],
             "conversation_id": row["conversation_id"], "job_id": row["job_id"], "text": row["text"],
             "relayed": json.loads(row["relayed"]) if row["relayed"] else None,
-            "notice": json.loads(row["notice"]) if row["notice"] else None, "at": row["at"]}
+            "notice": json.loads(row["notice"]) if row["notice"] else None, "reply_to": reply_to,
+            "attention": json.loads(row["attention"]) if row["attention"] else None,
+            "needs_decision": bool(row["needs_decision"]), "at": row["at"]}
+
+
+def as_page_for(conn: sqlite3.Connection, reader: str, rows: list[sqlite3.Row],
+                shape: Shape = as_dict) -> list[dict[str, Any]]:
+    """A page of messages as `reader` sees them, with each reply's parent resolved in one query."""
+    references = reply_references(conn, reader, rows)
+    return as_page(rows, lambda row: shape(row, references.get(row["reply_to"])))
 
 
 def as_page(rows: list[sqlite3.Row],

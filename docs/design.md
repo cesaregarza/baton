@@ -105,6 +105,28 @@ back after a removal sees each stretch it was in. A message drops out of a reade
 retention deletes the reader's copy. A removed role can't read the history at all, but the messages it
 already received stay in its mailbox.
 
+**Threads.** A conversation message may carry `reply_to`, the `message_id` of a message it answers. A
+reply is an ordinary message in every other way: it fans out, pages, retries and expires like any other,
+and `reply_to` is part of the send's retry identity. `reply_to` must name a message in the same
+conversation that the sender can see, or the send is refused as `invalid_request` and nothing is stored,
+so a reply can never point at a message that was not the sender's to answer. A direct message has no
+thread to reply into.
+
+Readers see `reply_to` as `{"message_id", "seq"}`, where `seq` is the parent's place in the conversation.
+Visibility is the reader's, not the sender's: where the reader cannot see the parent -- it joined after
+the parent was sent, or retention has taken its copy -- `seq` is `null` and a reader shows the reply as
+*parent unavailable*. The reference never carries the parent's text or its author, so a thread cannot
+leak a message the reader was not party to. Nesting is left to the reader: the host stores one flat
+conversation order and does not limit how deep replies go.
+
+**Attention.** A conversation message may name the participants it asks to look, in `attention`, a list
+of roles, and may ask the conversation for a decision with `needs_decision`. Both only draw attention.
+`attention` is structured, never parsed from `@name` text, and is checked against the conversation's
+current participants: naming a role that is not in the conversation is refused (`not_a_participant` for
+a configured role, `unknown_role` for one the config does not have), and naming a role never adds it or
+speaks for it. `needs_decision` is a label and nothing more: like any message it leaves every job's
+state, revision and approvals alone. baton still has no approval message type.
+
 **Participants.** Adding a participant sends a host notice to every participant, the new one included.
 Removing one sends a notice to those who remain, and the removed role receives nothing from then on. A
 host notice has `from_role: null` and a `notice` object (`{"event", "participant", "by"}`). A conversation
@@ -180,6 +202,19 @@ and changes nothing.
 **Message wakes coalesce.** The wake is keyed by the role's first unread seq, so a burst of messages wakes
 the role once. The next wake comes only after the role has read. A read also supersedes a pending,
 undelivered wake.
+
+**A role can ask to be woken only when a message addresses it**, with `only_when_addressed` in its
+`[roles.<name>.wake]` table. It still receives every message: the setting changes which ones interrupt
+it, not which ones reach it, and a quiet message waits unread in its mailbox like any other. A
+conversation message addresses the role when it names the role in `attention` or sets `needs_decision`;
+one that does neither wakes nothing. Anything addressed to the role alone wakes it either way: a direct
+message, a job change, a `conversation.rate_limited` escalation. A host notice singles nobody out, so it
+does not wake a quiet role.
+
+Quiet messages never swallow the next one that matters. Because the wake is keyed by the role's first
+unread seq, a message that addresses a role with a batch of quiet messages already waiting still wakes
+it exactly once, and that one wake points at the first unread seq, so the role reads the whole batch.
+Coalescing and retries cannot turn that into two wakes: the key is the same either way.
 
 **Job wakes** are keyed by the job and its event seq. A `conversation.rate_limited` event, the one event
 outside any job, gets one wake of its own: `{"reason": "conversation.rate_limited", "conversation_id": ...}`.

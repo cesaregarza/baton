@@ -74,6 +74,16 @@ class Tools:
             description="Words you pass on from someone else, kept apart from your own text: a list of "
                         "{source, at (ISO 8601 with offset), text}. They are never that person's authenticated "
                         "authorship; the message is still yours.")] = None,
+        reply_to: Annotated[str | None, Field(
+            description="The message_id this message answers. Only in a conversation, and only a message you "
+                        "can see.")] = None,
+        attention: Annotated[list[str] | None, Field(
+            description="The participants you ask to look at this message. Only in a conversation, and only "
+                        "its current participants. It draws attention and nothing else: it never adds anyone "
+                        "to the conversation and never speaks for them.")] = None,
+        needs_decision: Annotated[bool, Field(
+            description="Ask the conversation for a decision. A label for attention only: it is not an "
+                        "approval and changes no job.")] = False,
         request_id: Annotated[str | None, Field(
             description="YYYYMMDDTHHMMSSZ-<suffix>, its UTC creation time first. Reuse it to retry safely; "
                         "omit it and the host makes one.")] = None,
@@ -81,17 +91,21 @@ class Tools:
         """Send a message to one role (`to`) or a conversation (`conversation_id`), optionally about a job.
 
         Returns its seq in the recipient's mailbox, or for a conversation each recipient's seq in `seqs`.
+        A conversation message may answer another (`reply_to`) and may ask particular participants to look
+        (`attention`, `needs_decision`); a direct message is already addressed to its recipient.
         """
         if (to is None) == (conversation_id is None):
             raise InvalidRequest("send_message takes exactly one of to and conversation_id")
         with self._conn() as conn:
             if conversation_id is not None:
                 return conversations.send(conn, self._config, sender=role, conversation_id=conversation_id,
-                                          text=text, relayed=relayed, request_id=request_id, job_id=job_id)
+                                          text=text, relayed=relayed, request_id=request_id, job_id=job_id,
+                                          reply_to=reply_to, attention=attention, needs_decision=needs_decision)
             if to not in self._config.roles:
                 raise UnknownRole(f"no role {to!r}; call whoami for the list")
             return messages.send(conn, sender=role, recipient=to, text=text, request_id=request_id, job_id=job_id,
-                                 relayed=relayed)
+                                 relayed=relayed, reply_to=reply_to, attention=attention,
+                                 needs_decision=needs_decision)
 
     def read_messages(
         self, role: str, after_seq: Annotated[int | None, Field(ge=0)] = None,
@@ -207,7 +221,8 @@ CONVERSATION_TOOLS = (
     ("add_participant", auth.SCOPE_WRITE, False),
     ("remove_participant", auth.SCOPE_WRITE, False),
 )
-AUDITED_IDS = ("to", "conversation_id", "participant", "job_id", "request_id", "to_state", "expected_revision")
+AUDITED_IDS = ("to", "conversation_id", "participant", "job_id", "reply_to", "request_id", "to_state",
+               "expected_revision")
 
 
 class Guard:

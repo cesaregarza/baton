@@ -68,6 +68,10 @@ def _parser() -> argparse.ArgumentParser:
     message.add_argument("--job", dest="job_id", help="the job it is about")
     message.add_argument("--relayed-json", help="words passed on from someone else: a JSON list of "
                                                 "{source, at, text}, kept apart from --text")
+    message.add_argument("--reply-to", help="in a conversation: the message_id this one answers")
+    message.add_argument("--attention", help="in a conversation: comma-separated participants to ask to look")
+    message.add_argument("--needs-decision", action="store_true",
+                         help="in a conversation: ask for a decision. Attention only, never an approval")
     message.add_argument("--request-id", help="reuse a printed request_id to retry safely")
     message.set_defaults(handler=_message)
 
@@ -189,12 +193,16 @@ def _message(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     except json.JSONDecodeError:
         raise InvalidRequest("--relayed-json must be JSON: a list of {source, at, text} entries") from None
     text = args.text if args.text is not None else sys.stdin.read()
+    attention = args.attention.split(",") if args.attention is not None else None
     if args.conversation_id is not None:
         return _db(config, lambda conn: conversations.send(
             conn, config, sender=args.role, conversation_id=args.conversation_id, text=text, relayed=relayed,
-            request_id=args.request_id, job_id=args.job_id))
+            request_id=args.request_id, job_id=args.job_id, reply_to=args.reply_to, attention=attention,
+            needs_decision=args.needs_decision))
     return _db(config, lambda conn: messages.send(conn, sender=args.role, recipient=args.to, text=text,
-                                                  request_id=args.request_id, job_id=args.job_id, relayed=relayed))
+                                                  request_id=args.request_id, job_id=args.job_id, relayed=relayed,
+                                                  reply_to=args.reply_to, attention=attention,
+                                                  needs_decision=args.needs_decision))
 
 
 def _list_conversations(config: Config, args: argparse.Namespace) -> list[dict[str, Any]]:

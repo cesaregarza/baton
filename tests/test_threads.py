@@ -60,7 +60,7 @@ def test_1_a_reply_fans_out_like_any_message_and_reads_back_with_its_parent(db, 
     assert sorted(row["recipient"] for row in copies) == ["assistant", "orchestrator"]
     assert {row["id"] for row in copies} == {answer["message_id"]}  # one shared message_id
     assert {row["reply_to"] for row in copies} == {parent["message_id"]}
-    assert mailbox(db, "reviewer") == []  # the sender gets no copy of its own reply
+    assert [row["text"] for row in mailbox(db, "reviewer")] == ["which release?"]  # no copy of its own reply
     for role, seqs in (("orchestrator", [1]), ("assistant", [1, 2])):
         assert [row["seq"] for row in mailbox(db, role)] == seqs
 

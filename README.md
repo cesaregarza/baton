@@ -165,6 +165,32 @@ it, the messages you received and the ones you sent, numbered in conversation or
 read a conversation's history. A role added later sees it from its join on, and a removed role can't read it
 at all, though the messages it already received stay in its mailbox.
 
+**Threads.** A conversation message can answer another: pass `reply_to`, the `message_id` of a message in
+the same conversation that you can see. A reply is an ordinary message in every other way. Readers get
+`reply_to` as `{"message_id", "seq"}`, the parent's place in the conversation -- or a `seq` of `null`
+where the reader cannot see the parent, because it joined later or retention has taken its copy. Show
+that as *parent unavailable*: the reference carries nothing of the parent's text or author.
+
+**Asking someone to look.** A conversation message can name the participants it asks to look, in
+`attention`, and can ask for a decision with `needs_decision`. Both only draw attention. `attention` is a
+list of roles, never `@names` in the text, and must name current participants: naming a role never adds
+it to the conversation and never speaks for it. `needs_decision` is a label, not an approval.
+
+**Being woken only when addressed.** A role can ask not to be woken for every message in a busy
+conversation:
+
+```toml
+[roles.operator.wake]
+command = ["/usr/local/bin/notify-operator"]
+only_when_addressed = true
+```
+
+It still receives every message; it is woken only by one that names it in `attention` or sets
+`needs_decision`. Anything addressed to it alone -- a direct message, a job change, a conversation over
+its hourly limit -- wakes it either way. A message that addresses it while quiet messages are already
+waiting still wakes it exactly once, pointing at its first unread message, so nothing is lost: it reads
+the whole batch.
+
 **Who said it.** `from_role` is always the sender's role, taken from its credential. A host notice, such as
 a participant being added, has `from_role: null`. When a sender passes on someone else's words, it puts
 them in `relayed`, a list of `{source, at, text}` entries kept apart from its own `text`. Relayed words are
@@ -180,7 +206,7 @@ Every tool acts as the caller's role, which comes from the caller's credential.
 | Tool | What it does |
 |---|---|
 | `whoami` | Your role, the other roles, and the job states |
-| `send_message(text, to? \| conversation_id?, job_id?, relayed?, request_id?)` | Send a message to a role, or to every other participant of a conversation |
+| `send_message(text, to? \| conversation_id?, job_id?, relayed?, reply_to?, attention?, needs_decision?, request_id?)` | Send a message to a role, or to every other participant of a conversation. `reply_to`, `attention` and `needs_decision` are for a conversation only |
 | `read_messages(after_seq?, limit?)` | Your messages after a cursor. The default is the undelivered ones |
 | `wait(timeout_seconds?)` | Block up to 30 s for messages or job changes addressed to you |
 | `create_job(title, body?, request_id?)` | Open a job in the initial state |
@@ -196,6 +222,7 @@ Every tool acts as the caller's role, which comes from the caller's credential.
 baton serve                                   run the MCP server and the wake dispatcher
 baton message --as R --to R [--text T]        send a message; reads stdin if --text is omitted
 baton message --as R --conversation C ...     send to every other participant of conversation C
+                                              --reply-to M, --attention R1,R2, --needs-decision
 baton read --as R [--after-seq N]             read messages
 baton conversation new|list|history|add|remove   group conversations
 baton wait --as R [--timeout S]               block until something reaches role R
