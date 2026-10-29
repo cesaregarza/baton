@@ -65,6 +65,9 @@ _REBUILT = {
 # entry here is all a later version needs. SQLite adds columns in place, so no rebuild is involved.
 _ADDED_COLUMNS = {
     # A reply's parent, the roles a message singles out, and whether it asks for a decision.
+    # No release ever created a version-4 database: the work that added these columns reached a release
+    # already combined with version 5's. The step stays so that a data directory left by a build of that
+    # work on its own is upgraded rather than refused.
     4: ("reply_to TEXT", "attention TEXT", "needs_decision INTEGER NOT NULL DEFAULT 0"),
     # Whether a human or an agent wrote it, fixed when it was sent.
     5: ("author_kind TEXT",),
