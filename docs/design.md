@@ -40,6 +40,10 @@ tools never take a role argument. The role comes from the credential (see [Auth]
 can't speak for another role. The local CLI takes `--as <role>`, because anyone who can run it can already
 read the database.
 
+A role marked `human = true` is a person. It holds only a bearer token, never an OAuth grant or `--as`, and
+every message records an `author_kind` (`human` or `agent`) at send time, so participants can tell a
+person's words from an assistant's. See the README's "Human participants".
+
 ## Messages
 
 `send_message(to, text, job_id?, relayed?, request_id?)` stores the text as the recipient's next sequence number
@@ -258,18 +262,19 @@ appends one line to `audit.jsonl`. The line records the time, role, tool, the id
 
 ## Storage
 
-One SQLite database (`<data_dir>/baton.db`) in WAL mode, at schema version 3. Every operation is one
+One SQLite database (`<data_dir>/baton.db`) in WAL mode, at schema version 5. Every operation is one
 `BEGIN IMMEDIATE` transaction, so the MCP server, the CLI and the dispatcher can all write safely.
 
 **Migration.** A version-2 database is upgraded in place the first time version 3 opens it, in one
 transaction, so a crash leaves it at version 2. `messages` and `message_requests` are rebuilt, because a
 conversation message's copies share one id and a conversation send records several seqs; every row is
-copied, so no seq, cursor or retry identity changes. Any other version is refused before anything is
-written. Its tables:
+copied, so no seq, cursor or retry identity changes. A version-3 database gains `messages.author_kind`.
+Either way, every message already stored is marked `agent`, since no role could be human before. Any other
+version is refused before anything is written. Its tables:
 
 | Table | Holds |
 |---|---|
-| `messages` | one row per copy: text, sender, recipient, seq, optional job, conversation, relayed words or host notice |
+| `messages` | one row per copy: text, sender, `author_kind`, recipient, seq, optional job, conversation, relayed words or host notice |
 | `mailboxes` | each recipient's last and read seq |
 | `message_requests` | retry identity of each send (digest only) and its seq or seqs, for 31 days |
 | `conversations`, `participants` | each conversation's title, creator, last `conversation_seq` and current participants |

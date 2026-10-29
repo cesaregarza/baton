@@ -181,8 +181,9 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
         else:
             message_id = messages.new_message_id()
             seqs = _fan_out(conn, conversation_id, [role for role in participants if role != sender], sender=sender,
-                            text=text, relayed=relayed, job_id=job_id, message_id=message_id, reply_to=reply_to,
-                            attention=attention, needs_decision=needs_decision)
+                            text=text, relayed=relayed, job_id=job_id, message_id=message_id,
+                            author_kind=config.author_kind(sender), reply_to=reply_to, attention=attention,
+                            needs_decision=needs_decision)
             conn.execute("INSERT INTO message_requests (request_id, request_digest, message_id, seqs, created_at)"
                          " VALUES (?, ?, ?, ?, ?)", (request_id, digest, message_id, json.dumps(seqs),
                                                      created_at.isoformat()))
@@ -223,8 +224,9 @@ def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq
 
 def _fan_out(conn: sqlite3.Connection, conversation_id: str, recipients: list[str], *, sender: str | None,
              text: str, relayed: list[dict] | None = None, notice: dict[str, str] | None = None,
-             job_id: str | None = None, message_id: str | None = None, reply_to: str | None = None,
-             attention: list[str] | None = None, needs_decision: bool = False) -> dict[str, int]:
+             job_id: str | None = None, message_id: str | None = None, author_kind: str | None = None,
+             reply_to: str | None = None, attention: list[str] | None = None,
+             needs_decision: bool = False) -> dict[str, int]:
     """Store one copy for each recipient under one message_id, or refuse before storing any."""
     full = [role for role in recipients if messages.unread(conn, role) >= messages.MAX_UNREAD]
     if full:
@@ -236,7 +238,8 @@ def _fan_out(conn: sqlite3.Connection, conversation_id: str, recipients: list[st
     return {role: messages.store_copy(conn, message_id=message_id, sender=sender, recipient=role, text=text,
                                       job_id=job_id, conversation_id=conversation_id,
                                       conversation_seq=conversation_seq, relayed=relayed, notice=notice,
-                                      reply_to=reply_to, attention=attention, needs_decision=needs_decision)
+                                      author_kind=author_kind, reply_to=reply_to, attention=attention,
+                                      needs_decision=needs_decision)
             for role in recipients}
 
 

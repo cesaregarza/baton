@@ -203,6 +203,54 @@ a claim by the sender, never the authenticated authorship of whoever it names.
 **Messages are information, never authority.** No message, and nothing relayed in one, changes a job's
 state, its revision or any approval. Only `move_job` moves a job.
 
+## Human participants
+
+A person can take part in conversations as a role marked `human = true`. Every participant then sees which
+messages that person wrote: each message carries `author_kind`, `human` or `agent` (`null` for a host
+notice), next to `from_role`.
+
+```toml
+[roles.operator]
+description = "The person running this host"
+human = true
+can_create_conversations = true
+```
+
+A human role has exactly one kind of credential: a bearer token made on the host and kept by the person.
+
+```sh
+baton token new --name operator-laptop --role operator   # paste the printed entry into the config
+```
+
+- **No other way in.** A human role can't be listed in `auth.oauth.roles`, so no OAuth client, and no one who
+  knows the consent passphrase, can get a grant for it. The local CLI refuses `--as` for it.
+- **Authorship can't be claimed.** A tool call that carries `from_role`, `author_kind`, `author`, `sender`,
+  `from`, `role` or `on_behalf_of` is refused with `forbidden_field`, and nothing is stored. An assistant that
+  quotes the person, or relays their words in `relayed`, still sends an `agent` message.
+- **Fixed when sent.** `author_kind` is recorded with each message from the sender role's config at that
+  moment. Changing a role's `human` flag later doesn't change how its earlier messages read.
+- **Revocation without a restart.** `baton token revoke operator-laptop` ends that token from its next call.
+  Remove its entry from the config when convenient. Token names are unique per host (the config refuses a
+  repeated name, and so does `baton token new`), so revoking a name always ends exactly one token.
+
+The person uses the CLI in remote mode, from any machine that can reach the host:
+
+```sh
+export BATON_HOST=https://baton.example.com
+export BATON_TOKEN_COMMAND="security find-generic-password -s baton -w"   # macOS keychain
+# or: BATON_TOKEN_COMMAND="secret-tool lookup service baton"             # Linux secret service
+# or: BATON_TOKEN=...                                                     # the token itself
+baton conversation list
+baton conversation history <conversation_id>
+baton message --conversation <conversation_id> --text "Ship it on Friday."
+baton read
+baton wait --timeout 300
+```
+
+`author_kind: human` means "sent with that role's own token through this host". It doesn't mean the host
+itself is trustworthy: whoever controls the host machine can write anything into its database. And it marks
+authorship, not authority: what an assistant does with a message from a person is that assistant's own rule.
+
 ## MCP tools
 
 Every tool acts as the caller's role, which comes from the caller's credential.
@@ -232,12 +280,15 @@ baton conversation new|list|history|add|remove   group conversations
 baton wait --as R [--timeout S]               block until something reaches role R
 baton job create|show|list|move|events        jobs; move takes --request-id and --expected-revision
 baton token new --name N --role R             make a bearer token
+baton token revoke N                          end token N from its next call, with no restart
+baton --host URL message|read|wait|conversation list|history
+                                              the same commands through a host, as $BATON_TOKEN's role
 baton hash-passphrase                         hash an OAuth consent passphrase
 baton oauth revoke-all                        end every OAuth grant
 baton wakes                                   recent wakes and how they ended
 ```
 
-`--as` defaults to `$BATON_ROLE`, and `--config` defaults to `$BATON_CONFIG` or
+`--as` defaults to `$BATON_ROLE` (never a human role), `--host` to `$BATON_HOST`, and `--config` to `$BATON_CONFIG` or
 `~/.config/baton/baton.toml`. Every command prints JSON. A refusal prints `{"error": code, "detail": ...}`
 and exits with status 1. A configuration problem exits with status 2.
 

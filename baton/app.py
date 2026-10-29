@@ -27,7 +27,7 @@ import uvicorn
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
 from starlette.types import ASGIApp
 
@@ -104,8 +104,8 @@ class Tools:
             if to not in self._config.roles:
                 raise UnknownRole(f"no role {to!r}; call whoami for the list")
             return messages.send(conn, sender=role, recipient=to, text=text, request_id=request_id, job_id=job_id,
-                                 relayed=relayed, reply_to=reply_to, attention=attention,
-                                 needs_decision=needs_decision)
+                                 relayed=relayed, author_kind=self._config.author_kind(role),
+                                 reply_to=reply_to, attention=attention, needs_decision=needs_decision)
 
     def read_messages(
         self, role: str, after_seq: Annotated[int | None, Field(ge=0)] = None,
@@ -253,6 +253,23 @@ class Guard:
         guarded.__signature__ = _without_role(body)  # type: ignore[attr-defined]
         return guarded
 
+    async def refuse_author_fields(self, ctx: Any, call_next: Any) -> Any:
+        """Server middleware: refuse a tool call that names an author, before its arguments are validated.
+
+        The SDK would otherwise drop an unknown argument silently, so a client trying to speak as someone
+        else would never learn that it can't. The refusal is an MCP tool error carrying the usual
+        {"error", "detail"}, and nothing is stored.
+        """
+        params = ctx.params if isinstance(getattr(ctx, "params", None), dict) else {}
+        arguments = params.get("arguments")
+        named = sorted(set(arguments) & set(messages.AUTHOR_FIELDS)) if isinstance(arguments, dict) else []
+        if getattr(ctx, "method", None) != "tools/call" or not named:
+            return await call_next(ctx)
+        name = str(params.get("name", ""))
+        refusal = self._refuse(name, auth.role_of(get_access_token()), arguments, "forbidden_field",
+                               f"{named[0]} is not accepted: a message's author is always your credential's role")
+        return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))], is_error=True)
+
     def _within_limit(self, role: str, name: str, per_hour: int) -> bool:
         now = time.monotonic()
         with self._lock:
@@ -292,7 +309,9 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
     connect(config.db_path).close()
     if integrations is None:
         integrations = load_enabled(config)
-    middleware = [item for integration in integrations.values() for item in integration.middleware()]
+    tools, guard = Tools(config), Guard(config)
+    middleware = [guard.refuse_author_fields,
+                  *(item for integration in integrations.values() for item in integration.middleware())]
     settings = auth.auth_settings(config)
     common = {"name": "baton", "version": __version__, "instructions": INSTRUCTIONS, "auth": settings,
               "middleware": middleware}
@@ -302,7 +321,6 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
         auth.register_login_routes(server, provider)
     else:
         server = MCPServer(token_verifier=auth.StaticTokenVerifier(config), **common)
-    tools, guard = Tools(config), Guard(config)
     for name, scope, read_only in TOOLS + (CONVERSATION_TOOLS if config.conversations.enabled else ()):
         server.add_tool(guard.wrap(name, scope, getattr(tools, name)), name=name,
                         annotations=ToolAnnotations(readOnlyHint=read_only, destructiveHint=False,

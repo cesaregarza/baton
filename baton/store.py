@@ -17,7 +17,7 @@ from pathlib import Path
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
 MIGRATES_FROM = (2, 3)
 
@@ -34,13 +34,15 @@ _MESSAGE_REQUESTS = """CREATE TABLE IF NOT EXISTS message_requests (
     )"""
 # One row per copy: `seq` numbers each recipient's messages without gaps, and
 # a conversation message's copies share its `id` and its `conversation_seq`,
-# the conversation's own gap-free order. A host notice has no sender.
+# the conversation's own gap-free order. A host notice has no sender. `author_kind` (`human` or
+# `agent`, NULL for a host notice) is fixed when the message is sent, from the sender role's config.
 _MESSAGES = """CREATE TABLE IF NOT EXISTS messages (
         id TEXT NOT NULL,
         job_id TEXT REFERENCES jobs(id),
         conversation_id TEXT REFERENCES conversations(id),
         conversation_seq INTEGER,
         sender TEXT,
+        author_kind TEXT,
         recipient TEXT NOT NULL,
         seq INTEGER NOT NULL,
         text TEXT NOT NULL,
@@ -210,7 +212,9 @@ def _refuse_other_schema(conn: sqlite3.Connection) -> None:
 
 
 def _listed(versions: tuple[int, ...]) -> str:
-    return "version " + " and ".join(str(version) for version in versions)
+    names = [str(version) for version in versions]
+    joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
+    return ("version " if len(names) == 1 else "versions ") + joined
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -223,20 +227,25 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             raise SchemaMismatch(f"schema version {version}, expected {SCHEMA_VERSION}")  # a second line of defence
         # Version 3 lets a conversation message's copies share one id and a send record several seqs, which
         # SQLite can't change in place: the two tables are set aside, recreated, and every row copied back.
-        # A rebuild creates them from the current schema, so it arrives at version 4 with nothing more to do.
+        # A rebuild creates them from the current schema, so it needs no column added.
         rebuilding = version == 2
         if rebuilding:
             for table in _REBUILT:
                 conn.execute(f"ALTER TABLE {table} RENAME TO {table}_v2")
+        elif version == 3:
+            conn.execute("ALTER TABLE messages ADD COLUMN author_kind TEXT")
+            for column in _ADDED_IN_4:
+                conn.execute(f"ALTER TABLE messages ADD COLUMN {column}")
         for statement in _SCHEMA[1:]:
             conn.execute(statement)
         if rebuilding:
             for table, columns in _REBUILT.items():
                 conn.execute(f"INSERT INTO {table} ({columns}) SELECT {columns} FROM {table}_v2")
                 conn.execute(f"DROP TABLE {table}_v2")
-        elif version == 3:
-            for column in _ADDED_IN_4:
-                conn.execute(f"ALTER TABLE messages ADD COLUMN {column}")
+        if version is not None and version != SCHEMA_VERSION:
+            # Before version 5 no role could be human, so every message a role sent was an agent's.
+            # Only while upgrading: on an ordinary open this would relabel every human message.
+            conn.execute("UPDATE messages SET author_kind = 'agent' WHERE sender IS NOT NULL")
         if version is None:
             conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         elif version != SCHEMA_VERSION:
