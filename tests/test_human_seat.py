@@ -398,3 +398,32 @@ def test_changing_a_roles_human_flag_later_does_not_relabel_messages_already_sen
     read_under = Tools(config_module.load(path))
     assert authors(read_under.read_messages("reviewer", after_seq=0)) == [
         ("operator", "human", "from the person"), ("assistant", "agent", "from an agent")]
+
+
+def test_a_version_3_database_is_migrated_and_its_messages_read_as_agents(tmp_path: Path) -> None:
+    import os
+    import sqlite3
+
+    from baton import messages, store
+
+    path = seat_config(tmp_path, 8765, {"operator": new_token()[1]})
+    config = config_module.load(path)
+    config.data_dir.mkdir(mode=0o700)
+    raw = sqlite3.connect(config.db_path)
+    raw.executescript((Path(__file__).parent / "fixtures" / "schema_v3.sql").read_text())
+    with raw:
+        raw.execute("INSERT INTO mailboxes VALUES ('reviewer', 2, 0)")
+        raw.execute("INSERT INTO messages (id, sender, recipient, seq, text, at) VALUES"
+                    " ('msg_old', 'assistant', 'reviewer', 1, 'before the upgrade', '2026-10-29T07:00:00+00:00')")
+        raw.execute("INSERT INTO messages (id, sender, recipient, seq, text, notice, at) VALUES ('msg_note', NULL,"
+                    " 'reviewer', 2, 'a notice', '{\"event\": \"participant_added\"}', '2026-10-29T07:01:00+00:00')")
+    raw.close()
+    os.chmod(config.db_path, 0o600)
+
+    db = connect(config.db_path)
+    assert db.execute("SELECT version FROM schema_version").fetchone()[0] == store.SCHEMA_VERSION
+    messages.send(db, sender="operator", recipient="reviewer", text="after", author_kind=config.author_kind("operator"))
+    assert authors(messages.read(db, "reviewer", after_seq=0)) == [
+        ("assistant", "agent", "before the upgrade"), (None, None, "a notice"), ("operator", "human", "after")]
+    db.close()
+    connect(config.db_path).close()  # a second open changes nothing
