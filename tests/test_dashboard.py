@@ -7,6 +7,7 @@ config enables it, binds only to loopback, shows what one configured viewer role
 
 from __future__ import annotations
 
+import dataclasses
 import http.client
 import re
 import sqlite3
@@ -43,7 +44,8 @@ def view_config(tmp_path: Path, *, view_all: bool = False, dashboard_table: dict
         "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
         "roles": {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True, **WAKE},
                   "reviewer": WAKE, "assistant": WAKE, "outsider": WAKE,
-                  "operator": {"can_view_all_conversations": view_all}},
+                  "operator": {"can_view_all_conversations": view_all},
+                  "person": {"human": True, "can_create_conversations": True}},
         "conversations": {"enabled": conversations_enabled},
         "dashboard": table,
     })
@@ -394,3 +396,99 @@ def test_after_seq_accepts_the_largest_64_bit_value(tmp_path) -> None:
     response = get(config, f"/c/{mine}?after_seq=9223372036854775807")
     assert response.status == 200
     assert "plan is drafted" not in text(response)
+
+
+# Threads and authorship (after merging reply_to and author_kind) ------------------------------------------
+
+
+def thread(config: Config) -> tuple[str, dict[str, str]]:
+    """A parent with a reply, a reply to that reply, and a separate top-level message."""
+    conn = connect(config.db_path)
+    try:
+        cid = conversations.create(conn, config, actor="orchestrator", title="Threads",
+                                   participants=GROUP)["conversation_id"]
+        ids = {"parent": conversations.send(conn, config, sender="orchestrator", conversation_id=cid,
+                                            text="parent words")["message_id"]}
+        ids["reply"] = conversations.send(conn, config, sender="reviewer", conversation_id=cid, text="reply words",
+                                          reply_to=ids["parent"])["message_id"]
+        ids["nested"] = conversations.send(conn, config, sender="orchestrator", conversation_id=cid,
+                                           text="reply to the reply", reply_to=ids["reply"])["message_id"]
+        ids["other"] = conversations.send(conn, config, sender="reviewer", conversation_id=cid,
+                                          text="a new topic")["message_id"]
+    finally:
+        conn.close()
+    return cid, ids
+
+
+def item(body: str, words: str) -> str:
+    """The rendered list item for the message containing `words`, with everything nested inside it."""
+    start = body.rindex('<li class="message"', 0, body.index(words))
+    depth = 0
+    for tag in re.finditer(r"<(/?)li\b[^>]*>", body[start:]):
+        depth += -1 if tag.group(1) else 1
+        if depth == 0:
+            return body[start:start + tag.end()]
+    raise AssertionError("unclosed list item")
+
+
+@pytest.mark.parametrize("view_all", [False, True])
+def test_replies_nest_under_their_parent(tmp_path, view_all) -> None:
+    config = view_config(tmp_path, view_all=view_all)
+    cid, _ = thread(config)
+    body = text(get(config, f"/c/{cid}"))
+    parent, reply = item(body, "parent words"), item(body, "reply words")
+    assert "reply words" in parent and "reply to the reply" in parent
+    assert '<ul class="replies">' in parent
+    assert "reply to the reply" in reply
+    assert "a new topic" not in parent
+    assert body.index(item(body, "a new topic")) >= body.index(parent) + len(parent)
+
+
+def test_a_reply_whose_parent_the_viewer_cannot_see_shows_parent_unavailable_and_nothing_of_it(tmp_path) -> None:
+    config = view_config(tmp_path)
+    conn = connect(config.db_path)
+    try:
+        cid = conversations.create(conn, config, actor="orchestrator", title="Joined later",
+                                   participants=["orchestrator", "reviewer"])["conversation_id"]
+        hidden = conversations.send(conn, config, sender="reviewer", conversation_id=cid,
+                                    text="hidden parent words")["message_id"]
+        conversations.add(conn, config, cid, "operator", actor="orchestrator")
+        conversations.send(conn, config, sender="orchestrator", conversation_id=cid, text="answering it",
+                           reply_to=hidden)
+    finally:
+        conn.close()
+    body = text(get(config, f"/c/{cid}"))
+    assert "hidden parent words" not in body
+    answer = item(body, "answering it")
+    assert "answering it" in answer
+    marker = re.search(r'<p class="reply-to unavailable">(.*?)</p>', answer)
+    assert marker and marker.group(1) == "parent unavailable"
+    assert "reviewer" not in answer and hidden not in body
+    # A viewer allowed every conversation can see that parent, so there the same reply nests under it.
+    operator = dataclasses.replace(config.roles["operator"], can_view_all_conversations=True)
+    everyone = dataclasses.replace(config, roles={**config.roles, "operator": operator})
+    body = text(get(everyone, f"/c/{cid}"))
+    assert "parent unavailable" not in body
+    assert "answering it" in item(body, "hidden parent words")
+
+
+def test_the_badge_follows_the_stored_author_kind_and_a_notice_shows_none(tmp_path) -> None:
+    config = view_config(tmp_path)
+    conn = connect(config.db_path)
+    try:
+        cid = conversations.create(conn, config, actor="person", title="Mixed authors",
+                                   participants=["person", "orchestrator", "operator"])["conversation_id"]
+        conversations.send(conn, config, sender="person", conversation_id=cid, text="written by a person")
+        conversations.send(conn, config, sender="orchestrator", conversation_id=cid, text="written by an agent")
+        conversations.add(conn, config, cid, "reviewer", actor="orchestrator")
+    finally:
+        conn.close()
+    body = text(get(config, f"/c/{cid}"))
+    def entry(words: str) -> str:
+        return re.search(r'<li class="message"[^>]*>(?:(?!</li>).)*?' + words + r".*?</li>", body, re.S).group(0)
+
+    human, agent = entry("written by a person"), entry("written by an agent")
+    assert '<span class="badge human">human</span>' in human and "badge agent" not in human
+    assert '<span class="badge agent">agent</span>' in agent and "badge human" not in agent
+    notice = re.search(r'<li class="notice">(.*?)</li>', body, re.S).group(1)
+    assert "badge" not in notice
