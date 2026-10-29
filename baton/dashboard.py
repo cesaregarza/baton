@@ -215,11 +215,15 @@ def _span(shown: int, total: int, page: int, size: int, noun: str, newest: bool 
     return f"showing {first}–{first + shown - 1} of {total}{noun}"
 
 
-def _pager(path: str, params: dict[str, str], name: str, page: int, size: int, total: int, label: str) -> str:
-    """A link to the next page of one list, and one back to its first, keeping the page's other parameters."""
+def _pager(path: str, params: dict[str, str], name: str, page: int, size: int, total: int, label: str,
+           anchor: str = "") -> str:
+    """A link to the next page of one list, and one back to its first. Each keeps the page's other parameters,
+    so the other lists stay where they are, and lands on its own list's `anchor`."""
     def href(number: int) -> str:
-        query = {**params, **({name: str(number)} if number > 1 else {})}
-        return path + ("?" + "&amp;".join(f"{key}={_e(value)}" for key, value in query.items()) if query else "")
+        query = {key: value for key, value in params.items() if key != name}
+        query.update({name: str(number)} if number > 1 else {})
+        return (path + ("?" + "&amp;".join(f"{key}={_e(value)}" for key, value in query.items()) if query else "")
+                + (f"#{anchor}" if anchor else ""))
     links = []
     if page * size < total:
         links.append(f'<a href="{href(page + 1)}">{label}</a>')
@@ -309,26 +313,33 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
     found, replied = _asking(config, conn, topic)
     mine = [pair for pair in found if viewer in (pair[1].get("attention") or [])]
     others = [pair for pair in found if viewer not in (pair[1].get("attention") or [])]
-    params = {"topic": topic} if topic else {}
+    # Each list's links keep the topic and where the other lists are, so paging one leaves the others in place.
+    params = {**({"topic": topic} if topic else {}),
+              **{name: str(number) for name, number in pages.items() if number > 1}}
     shown = _slice(mine, pages["page"], MAX_NEEDS)
     span = _span(len(shown), len(mine), pages["page"], MAX_NEEDS, "")
     count = f'{len(mine)} message{"" if len(mine) == 1 else "s"} asked for you' + (f", {span}" if span else "")
     other_count = f' · {len(others)} decision{"" if len(others) == 1 else "s"} not addressed to you'
     where = f" under {_e(topic)}" if topic else ""
     items = "".join(_signal(viewer, conversation, item, replied) for conversation, item in shown)
-    pager = _pager("/needs", params, "page", pages["page"], MAX_NEEDS, len(mine), "Older messages for you")
+    pager = _pager("/needs", params, "page", pages["page"], MAX_NEEDS, len(mine), "Older messages for you",
+                   "for-you")
     other_shown = _slice(others, pages["others_page"], MAX_NEEDS)
     other_span = _span(len(other_shown), len(others), pages["others_page"], MAX_NEEDS, "")
     other_items = "".join(_signal(viewer, conversation, item, replied) for conversation, item in other_shown)
     other_pager = _pager("/needs", params, "others_page", pages["others_page"], MAX_NEEDS, len(others),
-                         "Older decisions")
-    other_block = (f'<details><summary>Decisions not addressed to you ({len(others)})</summary>'
+                         "Older decisions", "decisions")
+    # Collapsed until the reader pages through it; then it reloads open, where the new items start.
+    opened = " open" if pages["others_page"] > 1 else ""
+    other_block = (f'<details id="decisions"{opened}>'
+                   f'<summary>Decisions not addressed to you ({len(others)})</summary>'
                    f'<p class="muted">Decision requests that name another role, or nobody, in the conversations '
                    f'you can read.{" " + other_span.capitalize() + "." if other_span else ""}</p>'
                    f'<ul>{other_items or "<li class=muted>None.</li>"}</ul>{other_pager}</details>')
     if topic is not None:
-        job_count, job_block = "", ('<h2>Jobs</h2><p class="muted">Jobs have no topic, so none are shown under a '
-                                    'topic filter. <a href="/needs">See every job waiting on you</a>.</p>')
+        job_count, job_block = "", ('<h2 id="jobs">Jobs</h2><p class="muted">Jobs have no topic, so none are '
+                                    'shown under a topic filter. <a href="/needs">See every job waiting on you</a>.'
+                                    '</p>')
     else:
         total = jobs.count_jobs(conn, waiting_on=viewer)
         waiting = jobs.list_jobs(conn, waiting_on=viewer, limit=MAX_NEEDS_JOBS,
@@ -336,14 +347,18 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
         job_span = _span(len(waiting), total, pages["jobs_page"], MAX_NEEDS_JOBS, "", newest=False)
         job_count = f' · {total} job{" is" if total == 1 else "s are"} waiting on you' + (
             f", {job_span}" if job_span else "")
-        job_pager = _pager("/needs", params, "jobs_page", pages["jobs_page"], MAX_NEEDS_JOBS, total, "More jobs")
-        job_block = ('<h2>Jobs waiting on you</h2><ul>' + ("".join(_job(job) for job in waiting)
+        job_pager = _pager("/needs", params, "jobs_page", pages["jobs_page"], MAX_NEEDS_JOBS, total, "More jobs",
+                           "jobs")
+        job_block = ('<h2 id="jobs">Jobs waiting on you</h2><ul>' + ("".join(_job(job) for job in waiting)
                                                            or "<li class=muted>None.</li>") + "</ul>" + job_pager)
     crumbs = '<p><a href="/">All conversations</a>' + (' · <a href="/needs">Needs you</a>' if topic else "") + "</p>"
     return (f'{crumbs}<h1>Needs you{where}</h1><p class="muted">As {_e(viewer)}. {count}{other_count}{job_count}.</p>'
             '<p class="muted">Each message is a retained signal: it asked for you, or for a decision, when it was '
             'sent. "you replied" only means you sent a reply to it, and viewing changes nothing.</p>'
-            f'<h2>For you</h2><ul>{items or "<li class=muted>None.</li>"}</ul>{pager}{other_block}{job_block}')
+            '<p class="muted">Jump to <a href="#for-you">For you</a> · <a href="#decisions">Decisions not addressed '
+            'to you</a> · <a href="#jobs">Jobs</a></p>'
+            f'<h2 id="for-you">For you</h2><ul>{items or "<li class=muted>None.</li>"}</ul>{pager}'
+            f'{other_block}{job_block}')
 
 
 def _asking(config: Config, conn: Any, topic: str | None) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]],

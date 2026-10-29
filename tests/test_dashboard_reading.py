@@ -268,7 +268,7 @@ def test_by_default_needs_lists_only_what_names_the_viewer(tmp_path) -> None:
     config = page_config(tmp_path)
     mixed(config)
     body = text(get(config, "/needs"))
-    mine = section(body, "<h2>For you</h2>")
+    mine = section(body, "<h2 id=\"for-you\">For you</h2>")
     assert needs_items(mine) == ["operator, A or B?", "operator, please look"]
     assert "2 messages asked for you" in body
 
