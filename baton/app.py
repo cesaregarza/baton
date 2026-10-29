@@ -361,6 +361,7 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
     ))
     if config.oauth.enabled:
         app.add_middleware(auth.EndpointGuard, provider=provider)
+        app.add_middleware(auth.IssuerIdentification, provider=provider)
     return app
 
 

@@ -12,7 +12,9 @@ token's `claims["role"]`; tools act as that role and nothing else.
   token rotation and revocation. Consent is a page on the host where the
   operator enters a passphrase (stored as an scrypt hash) and picks the role
   the client may act as. Redirect URIs must be on the configured allowlist, or
-  loopback addresses (RFC 8252) if allowed.
+  loopback addresses (RFC 8252) if allowed. Every authorization response sent
+  back to a client names the issuer (RFC 9207), so a client can tell which
+  server answered; some clients then use one stable, exact callback URI.
 
 OAuth tokens are opaque and stored only as SHA-256 digests in one 0600 JSON
 file in the checked data directory (`baton.datadir`). Access tokens last an
@@ -35,7 +37,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from mcp.server.auth.provider import (
     AccessToken,
@@ -222,6 +224,15 @@ class StaticTokenVerifier:
         return static_token(self._config, token)
 
 
+def carries_iss(uri: str) -> bool:
+    """Whether a callback already has an `iss` parameter (RFC 9207 reserves it for the issuer the host adds)."""
+    try:
+        query = urlparse(uri).query
+    except ValueError:
+        return True
+    return any(key.lower() == "iss" for key, _ in parse_qsl(query, keep_blank_values=True))
+
+
 def valid_redirect_uri(uri: str, config: Config) -> bool:
     """Exactly a configured URI, or (if allowed) a plain-HTTP loopback address on any port (RFC 8252 §7.3)."""
     if uri in config.oauth.redirect_uris:
@@ -323,6 +334,7 @@ class PendingLogin:
 class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]):
     def __init__(self, config: Config) -> None:
         self.config = config
+        self.issuer = config.public_url  # exactly the metadata's `issuer`; RFC 9207 clients compare it as a string
         self.store = TokenStore.load(config.oauth_state_path)
         self.codes: dict[str, tuple[AuthorizationCode, str]] = {}  # code -> (code, role)
         self.pending: dict[str, PendingLogin] = {}
@@ -331,12 +343,22 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         self.store.sync()
         data = self.store.clients.get(client_id)
-        return OAuthClientInformationFull.model_validate(data) if data else None
+        if not data:
+            return None
+        # A client stored before callbacks with their own iss were refused is unusable: the host adds iss.
+        if any(carries_iss(str(uri)) for uri in data.get("redirect_uris") or []):
+            log.warning("stored client %s ignored: a redirect URI carries the reserved iss parameter", client_id)
+            return None
+        return OAuthClientInformationFull.model_validate(data)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         for uri in client_info.redirect_uris or []:
+            if carries_iss(str(uri)):
+                log.warning("registration refused: redirect URI carries the reserved iss parameter: %s",
+                            loggable_uri(str(uri)))
+                raise RegistrationError("invalid_redirect_uri", "a redirect URI may not carry an iss parameter")
             if not valid_redirect_uri(str(uri), self.config):
-                log.warning("registration refused: redirect URI not allowed")
+                log.warning("registration refused: redirect URI not allowed: %s", loggable_uri(str(uri)))
                 raise RegistrationError("invalid_redirect_uri", "redirect URI is not on the host's allowlist")
         with self.store.mutation() as store:
             if len(store.clients) >= MAX_CLIENTS:
@@ -354,7 +376,23 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
         scopes = [scope for scope in (params.scopes or ALL_SCOPES) if scope in ALL_SCOPES]
         login_id = secrets.token_urlsafe(32)
         self.pending[login_id] = PendingLogin(client.client_id, params, scopes, time.time() + LOGIN_TTL)
+        return self.consent_url(login_id)
+
+    def consent_url(self, login_id: str) -> str:
         return f"{self.config.public_url}/login?id={login_id}"
+
+    def is_consent_redirect(self, location: str) -> bool:
+        """Whether `location` is exactly the shape of this host's redirect to its consent page: one `id`, nothing else.
+
+        Compared whole, not by prefix. A redirect back to a client always adds
+        at least `error` or `code`, so a client callback that merely looks like
+        the consent page (same origin and path) is never mistaken for it.
+        """
+        try:
+            pairs = parse_qsl(urlparse(location).query, keep_blank_values=True)
+        except ValueError:
+            return False
+        return len(pairs) == 1 and pairs[0][0] == "id" and location == self.consent_url(pairs[0][1])
 
     def complete_login(self, login_id: str, passphrase: str, role: str) -> str | None:
         """The client's redirect URL on success; None for a wrong, expired or locked-out attempt."""
@@ -365,7 +403,7 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
             log.warning("login locked out for the rest of the hour")
             return None
         login = self.pending.get(login_id)
-        if login is None or role not in self.config.oauth.roles:
+        if login is None or role not in self.config.oauth.roles or carries_iss(str(login.params.redirect_uri)):
             return None
         if not check_passphrase(passphrase, self.config.oauth.passphrase_hash):
             self.login_failures.append(now)
@@ -380,7 +418,8 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
             resource=self.config.resource_url, subject=role,
         ), role)
         log.info("login approved for client %s as role %s", login.client_id, role)
-        return construct_redirect_uri(str(login.params.redirect_uri), code=code, state=login.params.state)
+        return construct_redirect_uri(str(login.params.redirect_uri), code=code, state=login.params.state,
+                                      iss=self.issuer)
 
     async def load_authorization_code(self, client: OAuthClientInformationFull, authorization_code: str):
         entry = self.codes.get(authorization_code)
@@ -510,6 +549,110 @@ class EndpointGuard:
         self._sources[key] = calls
         self._sources.move_to_end(key)
         return True
+
+
+class IssuerIdentification:
+    """ASGI middleware for RFC 9207: advertise issuer identification, and add `iss` to `/authorize` error redirects.
+
+    The SDK serves the authorization-server metadata and sends `/authorize`
+    errors back to the client itself, without `iss`. This adds the metadata
+    flag, and `iss` to every `/authorize` redirect that goes back to a client.
+    Only the host's own redirect to its consent page, recognized exactly
+    (`is_consent_redirect`), is left alone; the consent page adds `iss` to its
+    success redirect itself (`complete_login`).
+    """
+
+    METADATA_PATH = "/.well-known/oauth-authorization-server"
+
+    def __init__(self, app: ASGIApp, provider: PassphraseProvider) -> None:
+        self._app = app
+        self._issuer = provider.issuer
+        self._provider = provider
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope.get("path", "")
+        if scope["type"] != "http" or path not in (self.METADATA_PATH, "/authorize"):
+            return await self._app(scope, receive, send)
+        if path == "/authorize":
+            return await self._app(scope, receive, self._with_iss(send))
+        await self._app(scope, receive, self._with_flag(send))
+
+    def _with_iss(self, send: Send) -> Send:
+        refused = False
+
+        async def wrapped(message: dict) -> None:
+            nonlocal refused
+            if refused:
+                return  # the original response's body, replaced below
+            if message["type"] == "http.response.start" and message["status"] in (302, 303, 307):
+                headers = []
+                for name, value in message.get("headers", []):
+                    location = value.decode("latin-1")
+                    if name.lower() == b"location" and not self._provider.is_consent_redirect(location):
+                        if carries_iss(location):
+                            # Never send a client two issuers; the guards upstream should make this unreachable.
+                            refused = True
+                            log.warning("refused an /authorize redirect whose callback already carries iss")
+                            body = json.dumps({"error": "invalid_request"}).encode()
+                            await send({"type": "http.response.start", "status": 400,
+                                        "headers": [(b"content-type", b"application/json"),
+                                                    (b"content-length", str(len(body)).encode())]})
+                            await send({"type": "http.response.body", "body": body})
+                            return
+                        value = construct_redirect_uri(location, iss=self._issuer).encode("latin-1")
+                    headers.append((name, value))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        return wrapped
+
+    def _with_flag(self, send: Send) -> Send:
+        start: dict | None = None
+        body = b""
+
+        async def wrapped(message: dict) -> None:
+            nonlocal start, body
+            if message["type"] == "http.response.start":
+                start = message
+                return
+            body += message.get("body", b"")
+            if message.get("more_body"):
+                return
+            assert start is not None
+            if start["status"] == 200:
+                metadata = json.loads(body)
+                metadata["authorization_response_iss_parameter_supported"] = True
+                body = json.dumps(metadata).encode()
+            headers = [(n, str(len(body)).encode() if n.lower() == b"content-length" else v)
+                       for n, v in start.get("headers", [])]
+            await send({**start, "headers": headers})
+            await send({"type": "http.response.body", "body": body})
+
+        return wrapped
+
+
+MAX_LOGGED_URI = 200
+_PATH_REDACTED = " [path redacted]"
+_TRUNCATED = "...(truncated)"
+
+
+def loggable_uri(uri: str) -> str:
+    """A refused redirect URI as it may be logged: its scheme and host only, at most MAX_LOGGED_URI characters.
+
+    No character of the path is logged, nor userinfo, port, path parameters,
+    query or fragment: any of them may carry a secret, including a plain
+    alphanumeric one. A fixed marker says a path was there. Control characters
+    are removed, so a hostile URI can't forge log lines, and the bound covers
+    the whole value, truncation marker included.
+    """
+    try:
+        parsed = urlparse(uri)
+        scheme, host = parsed.scheme, parsed.hostname or ""
+    except ValueError:
+        return "<unparseable>"
+    hidden = parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment
+    shown = "".join(ch for ch in f"{scheme}://{host}" if ch.isprintable()) + (_PATH_REDACTED if hidden else "")
+    return shown if len(shown) <= MAX_LOGGED_URI else shown[:MAX_LOGGED_URI - len(_TRUNCATED)] + _TRUNCATED
 
 
 def _within_window(calls: deque[float], now: float) -> deque[float]:

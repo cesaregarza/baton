@@ -9,6 +9,12 @@ These rules apply to all of them:
 - **Serve baton at the root of its own host name**, such as `https://baton.example.com`. OAuth clients
   look for metadata at `/.well-known/...` on the host itself. With a path prefix such as `/baton`, those
   root paths would have to be forwarded separately.
+- **Under a path prefix, forward the path-form metadata route.** With `public_url` set to
+  `https://example.com/baton`, RFC 8414 clients ask for
+  `/.well-known/oauth-authorization-server<path>`, here `/.well-known/oauth-authorization-server/baton`.
+  baton serves that metadata, with the full `public_url` as its issuer, only at its own root route
+  `/.well-known/oauth-authorization-server`. So the proxy must forward the path form to that root route.
+  baton has no native path-form route.
 - **Keep `listen_host = "127.0.0.1"`** and let the proxy or tunnel connect locally. The host trusts
   `X-Forwarded-For` only from a loopback peer, and uses it only for rate limiting.
 - **`public_url` must match exactly** what clients use, scheme and port included. It is the OAuth issuer,

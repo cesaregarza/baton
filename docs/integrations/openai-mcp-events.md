@@ -61,7 +61,7 @@ wake = { integration = "openai_mcp_events" }
 enabled = true
 passphrase_hash = "scrypt$<from baton hash-passphrase>"
 roles = ["assistant"]
-redirect_uris = ["https://client.example.com/oauth/callback"]
+redirect_uris = ["https://client.example.com/oauth/callback"]   # the client's stable callback, exactly
 
 [integrations.openai_mcp_events]
 enabled = true

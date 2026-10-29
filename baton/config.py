@@ -14,6 +14,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlparse
 
 CONFIG_ENV = "BATON_CONFIG"
 DEFAULT_CONFIG = Path("~/.config/baton/baton.toml")
@@ -200,6 +201,7 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
     public_url = str(host.get("public_url", "")).rstrip("/")
     if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", public_url):
         raise ConfigError("host.public_url must be the http(s) URL clients reach the host at, without /mcp")
+    _require_canonical(public_url)
     data_dir = Path(str(host.get("data_dir", "~/.local/share/baton"))).expanduser()
     roles = {name: _role(name, table) for name, table in raw.get("roles", {}).items()}
     if not roles:
@@ -229,6 +231,43 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         conversations=conversations,
         dashboard=_dashboard(raw.get("dashboard", {}), roles, conversations),
     )
+
+
+def canonical_issuer(public_url: str) -> str:
+    """`public_url` exactly as the OAuth metadata will publish it as the issuer.
+
+    The MCP SDK holds the issuer as a pydantic `AnyHttpUrl` (keeping an empty
+    path empty) and serializes that. This builds the same value, without
+    importing the SDK, which is slow to load for a one-shot CLI command; a
+    test checks it against the SDK's own result.
+    """
+    from pydantic import AnyHttpUrl, BaseModel, ConfigDict, ValidationError
+
+    class Issuer(BaseModel):
+        model_config = ConfigDict(url_preserve_empty_path=True)
+        url: AnyHttpUrl
+
+    try:
+        return str(Issuer(url=public_url).url)
+    except ValidationError:
+        raise ConfigError(f"host.public_url {public_url!r} is not a valid URL") from None
+
+
+def _require_canonical(public_url: str) -> None:
+    """Refuse a public_url the metadata would publish differently, since every `iss` must equal the published issuer.
+
+    A percent-encoded path is refused as well, though published as written:
+    the protected-resource metadata route is registered under that encoded
+    path, which the router compares against the decoded one, so it can't be
+    reached.
+    """
+    canonical = canonical_issuer(public_url)
+    if "%" in urlparse(canonical).path:
+        raise ConfigError(f"host.public_url {public_url!r} has a percent-encoded (or non-ASCII) path, under which the "
+                          "OAuth metadata routes can't be reached; use a plain ASCII path")
+    if canonical != public_url:
+        raise ConfigError(f"host.public_url must be written exactly as the OAuth metadata publishes it, since clients "
+                          f"compare the issuer character for character: write public_url = {canonical!r}")
 
 
 def _boolean(table: dict[str, Any], key: str, default: bool, where: str) -> bool:
@@ -345,7 +384,12 @@ def _oauth(table: dict[str, Any], roles: dict[str, Role]) -> OAuth:
     if humans:
         raise ConfigError(f"auth.oauth.roles lists the human role {humans[0]!r}: a human role signs in only with "
                           "its own token from `baton token new`, never through the consent page")
-    return OAuth(True, str(passphrase_hash), oauth_roles, tuple(table.get("redirect_uris", [])),
+    redirect_uris = tuple(table.get("redirect_uris", []))
+    for uri in redirect_uris:
+        if any(key.lower() == "iss" for key, _ in parse_qsl(urlparse(str(uri)).query, keep_blank_values=True)):
+            raise ConfigError(f"auth.oauth.redirect_uris has {uri!r}, which carries an iss parameter: the host adds "
+                              "iss itself (RFC 9207), so a callback may not carry one")
+    return OAuth(True, str(passphrase_hash), oauth_roles, redirect_uris,
                  _boolean(table, "allow_loopback_redirects", True, "auth.oauth.allow_loopback_redirects"))
 
 
