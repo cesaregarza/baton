@@ -229,3 +229,23 @@ def test_9_a_role_that_was_there_for_the_parent_still_sees_it_after_a_round_trip
     conversations.add(db, config, conversation_id, "assistant", actor="orchestrator")
     say(db, config, "reviewer", conversation_id, "answering", reply_to=parent["message_id"])
     assert answers(one(conversations.history(db, "assistant", conversation_id), "answering"))["seq"] == 1
+
+
+# A parent counts only inside the conversation of the reply that names it ---------------------------------
+# A send cannot make a reply point outside its own conversation, so this one row is written straight to the
+# table: it pins what the reader-side resolution answers on its own, without that check in front of it.
+
+
+def test_a_parent_named_from_another_conversation_reads_as_unavailable(db, config) -> None:
+    conversation_id = start(db, config)
+    elsewhere = conversations.create(db, config, actor="orchestrator", title="another thread",
+                                     participants=GROUP, request_id=rid("elsewhere-visible"))["conversation_id"]
+    parent = say(db, config, "orchestrator", elsewhere, HIDDEN)
+    say(db, config, "orchestrator", conversation_id, "answering")
+    db.execute("UPDATE messages SET reply_to = ? WHERE conversation_id = ? AND text = 'answering'",
+               (parent["message_id"], conversation_id))
+
+    page = conversations.history(db, "assistant", conversation_id)
+    assert answers(one(page, "answering")) == {"message_id": parent["message_id"], "seq": None}
+    assert HIDDEN not in json.dumps(page)
+    assert answers(one(conversations.history(db, "assistant", elsewhere), HIDDEN)) is None

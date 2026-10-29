@@ -146,20 +146,24 @@ def addressed_to(conn: sqlite3.Connection, recipient: str, seq: int) -> bool:
 
 
 def reply_references(conn: sqlite3.Connection, reader: str,
-                     rows: list[sqlite3.Row]) -> dict[str, dict[str, Any]]:
-    """What `reader` may be told about each parent the rows answer, keyed by that parent's message_id.
+                     rows: list[sqlite3.Row]) -> dict[tuple[str | None, str], dict[str, Any]]:
+    """What `reader` may be told about each parent the rows answer, keyed by (conversation, parent id).
 
     A reader may see a message it received or sent and retention has not taken. Where it may not, the
     reference keeps the id the sender put on the reply but gives `seq` as None, so a reader can say the
     parent is unavailable without learning its text or its author.
+
+    A parent counts only within the conversation of the reply that names it, so this answers correctly
+    on its own rather than on the strength of the check `conversations.send` makes.
     """
-    parents = {row["reply_to"] for row in rows if row["reply_to"]}
-    if not parents:
+    answered = {(row["conversation_id"], row["reply_to"]) for row in rows if row["reply_to"]}
+    if not answered:
         return {}
-    places = ", ".join("?" * len(parents))
-    visible = dict(conn.execute(f"SELECT id, conversation_seq FROM messages WHERE id IN ({places})"
-                                " AND (recipient = ? OR sender = ?)", (*parents, reader, reader)).fetchall())
-    return {parent: {"message_id": parent, "seq": visible.get(parent)} for parent in parents}
+    places = ", ".join("?" * len(answered))
+    visible = {(found["conversation_id"], found["id"]): found["conversation_seq"] for found in conn.execute(
+        f"SELECT id, conversation_id, conversation_seq FROM messages WHERE id IN ({places})"
+        " AND (recipient = ? OR sender = ?)", (*(parent for _, parent in answered), reader, reader))}
+    return {key: {"message_id": key[1], "seq": visible.get(key)} for key in answered}
 
 
 def check(text: str, relayed: Any) -> list[dict[str, str]] | None:
@@ -276,7 +280,7 @@ def as_page_for(conn: sqlite3.Connection, reader: str, rows: list[sqlite3.Row],
                 shape: Shape = as_dict) -> list[dict[str, Any]]:
     """A page of messages as `reader` sees them, with each reply's parent resolved in one query."""
     references = reply_references(conn, reader, rows)
-    return as_page(rows, lambda row: shape(row, references.get(row["reply_to"])))
+    return as_page(rows, lambda row: shape(row, references.get((row["conversation_id"], row["reply_to"]))))
 
 
 def as_page(rows: list[sqlite3.Row],

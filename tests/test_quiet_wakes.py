@@ -8,6 +8,7 @@ temporary data directory, and a recording stand-in for wake delivery.
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -280,6 +281,21 @@ def test_a_direct_message_addresses_its_recipient_so_it_always_wakes(tmp_path) -
     db = connect(config.db_path)
     messages.send(db, sender="orchestrator", recipient=QUIET, text="just for you")
     assert [(c["role"], c["first_unread_seq"]) for c in woken(config)] == [(QUIET, 1)]
+
+
+def test_a_message_retention_took_addresses_nobody(tmp_path) -> None:
+    """Once the copy is gone there is nothing left to look at, so its event must wake nobody."""
+    config = quiet_config(tmp_path, hooks=(QUIET,))
+    db = connect(config.db_path)
+    conversation_id = start(db, config)
+    say(db, config, "orchestrator", conversation_id, "your call", attention=[QUIET])
+    assert messages.addressed_to(db, QUIET, 1) is True
+
+    messages.read(db, QUIET)
+    stale = (datetime.now(UTC) - messages.READ_RETENTION - timedelta(days=1)).isoformat()
+    db.execute("UPDATE messages SET at = ? WHERE recipient = ? AND seq = 1", (stale, QUIET))
+    messages.sweep(db)
+    assert messages.addressed_to(db, QUIET, 1) is False
 
 
 def test_a_job_change_still_wakes_a_quiet_role(tmp_path) -> None:
