@@ -125,8 +125,9 @@ def only_in_a_conversation(**fields: Any) -> None:
     """Refuse the fields that only a conversation send carries, naming the ones that were passed."""
     named = sorted(name for name, value in fields.items() if value)
     if named:
-        raise InvalidRequest(f"{' and '.join(named)} belongs to a conversation send: pass a conversation_id, "
-                             "or leave it out. A direct message is already addressed to its recipient.")
+        raise InvalidRequest(f"{', '.join(named)}: only a conversation send carries that. Pass a "
+                             "conversation_id, or leave it out, since a direct message is already "
+                             "addressed to its recipient.")
 
 
 def addressed_to(conn: sqlite3.Connection, recipient: str, seq: int) -> bool:

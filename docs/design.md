@@ -216,6 +216,12 @@ unread seq, a message that addresses a role with a batch of quiet messages alrea
 it exactly once, and that one wake points at the first unread seq, so the role reads the whole batch.
 Coalescing and retries cannot turn that into two wakes: the key is the same either way.
 
+**Backpressure still applies to a quiet role**, and being quiet makes it likelier to bite: nothing nudges
+the role to read, so its unread messages accumulate until the mailbox limit refuses the conversation's
+next send with `conversation_full`, naming that role. That is the existing backpressure rather than
+anything this setting adds, and it is loss-free -- a read clears it. But an operator who makes a role
+quiet should give it something that reads on its own schedule, not only on a wake.
+
 **Job wakes** are keyed by the job and its event seq. A `conversation.rate_limited` event, the one event
 outside any job, gets one wake of its own: `{"reason": "conversation.rate_limited", "conversation_id": ...}`.
 

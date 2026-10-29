@@ -191,6 +191,10 @@ its hourly limit -- wakes it either way. A message that addresses it while quiet
 waiting still wakes it exactly once, pointing at its first unread message, so nothing is lost: it reads
 the whole batch.
 
+Give a quiet role something that reads on its own schedule as well. Nothing nudges it to read, so its
+unread messages build up, and at the mailbox limit the conversation's next send is refused with
+`conversation_full` naming that role until it reads.
+
 **Who said it.** `from_role` is always the sender's role, taken from its credential. A host notice, such as
 a participant being added, has `from_role: null`. When a sender passes on someone else's words, it puts
 them in `relayed`, a list of `{source, at, text}` entries kept apart from its own `text`. Relayed words are
