@@ -51,7 +51,7 @@ def test_the_page_never_scrolls_sideways_and_keeps_a_phone_viewport(tmp_path) ->
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
-        conversation = made(conn, config, LONG, MINE, "alpha")
+        conversation = made(conn, config, "y" * 190, MINE, "alpha")
         conversations.send(conn, config, sender="orchestrator", conversation_id=conversation, text=LONG,
                            attention=["operator"])
     finally:
