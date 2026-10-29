@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import fcntl
 import http.client
-import ipaddress
 import json
 import logging
 import os
@@ -295,15 +294,10 @@ def _address(value: Any) -> SplitResult | None:
     try:
         parts = urlsplit(value)
         port = parts.port
-    except ValueError:  # an unclosed IPv6 bracket, or a port that isn't a number from 0 to 65535
+    except ValueError:  # a bad IPv6 address or bracket, or a port that isn't a number from 0 to 65535
         return None
     if not parts.hostname or parts.username is not None or port == 0:
         return None
-    if parts.netloc.startswith("["):
-        try:
-            ipaddress.IPv6Address(parts.hostname)
-        except ValueError:
-            return None
     return parts
 
 
