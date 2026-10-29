@@ -124,19 +124,17 @@ def test_setting_a_topic_needs_the_permission_and_membership(db, config) -> None
     conversation_id = open_one(db, config, "t", topic="project")
     # A participant without the permission.
     refused("forbidden", conversations.set_topic, db, config, conversation_id, "other", actor="reviewer")
-    # A role with the permission that is not in this conversation.
-    elsewhere = conversations.create(db, config, actor="orchestrator", title="elsewhere",
-                                     participants=["orchestrator", "reviewer"], request_id=rid("elsewhere"))
-    conversations.remove(db, config, conversation_id, "assistant", actor="orchestrator")
+    # A role with the permission that is not in this conversation: the only managing role here is the
+    # creator, so it leaves the conversation first.
+    conversations.remove(db, config, conversation_id, "orchestrator", actor="orchestrator")
     refused("not_a_participant", conversations.set_topic, db, config, conversation_id, "other",
-            actor="assistant")
+            actor="orchestrator")
     refused("unknown_conversation", conversations.set_topic, db, config, "conv_nonexistent", "other",
             actor="orchestrator")
     refused("invalid_request", conversations.set_topic, db, config, conversation_id, "Bad",
             actor="orchestrator")
-    assert [item["topic"] for item in conversations.list_for(db, "orchestrator")
-            if item["conversation_id"] == conversation_id] == ["project"]  # nothing changed
-    assert elsewhere["created"] is True
+    [listed] = conversations.list_for(db, "reviewer")
+    assert (listed["conversation_id"], listed["topic"]) == (conversation_id, "project")  # nothing changed
 
 
 def test_a_topic_is_part_of_a_creates_retry_identity(db, config) -> None:

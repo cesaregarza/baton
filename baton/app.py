@@ -115,18 +115,38 @@ class Tools:
         with self._conn() as conn:
             return messages.read(conn, role, after_seq, limit)
 
-    def create_conversation(self, role: str, title: str, participants: list[str],
-                            request_id: str | None = None) -> dict[str, Any]:
+    def create_conversation(
+        self, role: str, title: str, participants: list[str],
+        topic: Annotated[str | None, Field(
+            description="An optional readable path of 1-2 lowercase slug segments, such as project or "
+                        "project/subtopic. A label for people, separate from the conversation's id.")] = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
         """Open a conversation among `participants`, yourself included. Pass a request_id to make a retry safe."""
         with self._conn() as conn:
             return conversations.create(conn, self._config, actor=role, title=title, participants=participants,
-                                        request_id=request_id)
+                                        topic=topic, request_id=request_id)
 
-    def list_conversations(self, role: str) -> list[dict[str, Any]]:
+    def list_conversations(
+        self, role: str,
+        topic: Annotated[str | None, Field(
+            description="Only the conversations on this topic or under it: project takes project and "
+                        "project/subtopic, never projectile. Omit it for all of them, untagged "
+                        "included.")] = None,
+    ) -> list[dict[str, Any]]:
         """The conversations you take part in, newest first, with their participants."""
         conversations.require_enabled(self._config)
         with self._conn() as conn:
-            return conversations.list_for(conn, role)
+            return conversations.list_for(conn, role, topic)
+
+    def set_topic(
+        self, role: str, conversation_id: str,
+        topic: Annotated[str | None, Field(
+            description="The new topic, 1-2 lowercase slug segments, or null to clear it.")] = None,
+    ) -> dict[str, Any]:
+        """Set, rename or clear a conversation's topic. Its id never changes, so nothing else moves."""
+        with self._conn() as conn:
+            return conversations.set_topic(conn, self._config, conversation_id, topic, actor=role)
 
     def read_history(
         self, role: str, conversation_id: str, after_seq: Annotated[int, Field(ge=0)] = 0,
@@ -220,9 +240,10 @@ CONVERSATION_TOOLS = (
     ("read_history", auth.SCOPE_READ, True),
     ("add_participant", auth.SCOPE_WRITE, False),
     ("remove_participant", auth.SCOPE_WRITE, False),
+    ("set_topic", auth.SCOPE_WRITE, False),
 )
-AUDITED_IDS = ("to", "conversation_id", "participant", "job_id", "reply_to", "request_id", "to_state",
-               "expected_revision")
+AUDITED_IDS = ("to", "conversation_id", "participant", "topic", "job_id", "reply_to", "request_id",
+               "to_state", "expected_revision")
 
 
 class Guard:

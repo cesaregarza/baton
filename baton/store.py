@@ -17,9 +17,9 @@ from pathlib import Path
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4)
+MIGRATES_FROM = (2, 3, 4, 5)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -60,7 +60,7 @@ _REBUILT = {
     "messages": "id, job_id, sender, recipient, seq, text, at",
     "message_requests": "request_id, request_digest, message_id, seq, created_at",
 }
-# What each version above 3 adds to `messages`, and the data each fixes up, keyed by the version that
+# What each version above 3 adds, by table, and the data each fixes up, keyed by the version that
 # introduced it. `_ensure_schema` applies every step above the database's own version, in order, so one
 # entry here is all a later version needs. SQLite adds columns in place, so no rebuild is involved.
 _ADDED_COLUMNS = {
@@ -68,9 +68,12 @@ _ADDED_COLUMNS = {
     # No release ever created a version-4 database: the work that added these columns reached a release
     # already combined with version 5's. The step stays so that a data directory left by a build of that
     # work on its own is upgraded rather than refused.
-    4: ("reply_to TEXT", "attention TEXT", "needs_decision INTEGER NOT NULL DEFAULT 0"),
+    4: {"messages": ("reply_to TEXT", "attention TEXT", "needs_decision INTEGER NOT NULL DEFAULT 0")},
     # Whether a human or an agent wrote it, fixed when it was sent.
-    5: ("author_kind TEXT",),
+    5: {"messages": ("author_kind TEXT",)},
+    # A conversation's optional readable topic. The first step to alter another table, which is why each
+    # one names its own.
+    6: {"conversations": ("topic TEXT",)},
 }
 _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
@@ -102,7 +105,8 @@ _SCHEMA = (
         created_by TEXT NOT NULL,
         created_at TEXT NOT NULL,
         last_seq INTEGER NOT NULL DEFAULT 0,
-        escalated_at TEXT
+        escalated_at TEXT,
+        topic TEXT
     )""",
     """CREATE TABLE IF NOT EXISTS participants (
         conversation_id TEXT NOT NULL REFERENCES conversations(id),
@@ -258,8 +262,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             if version is None or version >= step:
                 continue
             if not rebuilding:
-                for column in _ADDED_COLUMNS.get(step, ()):
-                    conn.execute(f"ALTER TABLE messages ADD COLUMN {column}")
+                for table, columns in _ADDED_COLUMNS.get(step, {}).items():
+                    for column in columns:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
             for statement in _BACKFILL.get(step, ()):
                 conn.execute(statement)
         if version is None:
