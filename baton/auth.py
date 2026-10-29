@@ -344,7 +344,13 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         self.store.sync()
         data = self.store.clients.get(client_id)
-        return OAuthClientInformationFull.model_validate(data) if data else None
+        if not data:
+            return None
+        # A client stored before callbacks with their own iss were refused is unusable: the host adds iss.
+        if any(carries_iss(str(uri)) for uri in data.get("redirect_uris") or []):
+            log.warning("stored client %s ignored: a redirect URI carries the reserved iss parameter", client_id)
+            return None
+        return OAuthClientInformationFull.model_validate(data)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         for uri in client_info.redirect_uris or []:
@@ -398,7 +404,7 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
             log.warning("login locked out for the rest of the hour")
             return None
         login = self.pending.get(login_id)
-        if login is None or role not in self.config.oauth.roles:
+        if login is None or role not in self.config.oauth.roles or carries_iss(str(login.params.redirect_uri)):
             return None
         if not check_passphrase(passphrase, self.config.oauth.passphrase_hash):
             self.login_failures.append(now)
@@ -573,12 +579,27 @@ class IssuerIdentification:
         await self._app(scope, receive, self._with_flag(send))
 
     def _with_iss(self, send: Send) -> Send:
+        refused = False
+
         async def wrapped(message: dict) -> None:
+            nonlocal refused
+            if refused:
+                return  # the original response's body, replaced below
             if message["type"] == "http.response.start" and message["status"] in (302, 303, 307):
                 headers = []
                 for name, value in message.get("headers", []):
                     location = value.decode("latin-1")
                     if name.lower() == b"location" and not self._provider.is_consent_redirect(location):
+                        if carries_iss(location):
+                            # Never send a client two issuers; the guards upstream should make this unreachable.
+                            refused = True
+                            log.warning("refused an /authorize redirect whose callback already carries iss")
+                            body = json.dumps({"error": "invalid_request"}).encode()
+                            await send({"type": "http.response.start", "status": 400,
+                                        "headers": [(b"content-type", b"application/json"),
+                                                    (b"content-length", str(len(body)).encode())]})
+                            await send({"type": "http.response.body", "body": body})
+                            return
                         value = construct_redirect_uri(location, iss=self._issuer).encode("latin-1")
                     headers.append((name, value))
                 message = {**message, "headers": headers}
