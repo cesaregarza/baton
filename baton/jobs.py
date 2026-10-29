@@ -100,14 +100,15 @@ def get(conn: sqlite3.Connection, job_id: str) -> dict[str, Any]:
 
 
 def list_jobs(conn: sqlite3.Connection, *, state: str | None = None, waiting_on: str | None = None,
-              limit: int = 50) -> list[dict[str, Any]]:
+              limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
     """Recent jobs, newest first, without their bodies."""
     query, params = "SELECT * FROM jobs WHERE 1 = 1", []
     for column, value in (("state", state), ("waiting_on", waiting_on)):
         if value is not None:
             query += f" AND {column} = ?"
             params.append(value)
-    rows = conn.execute(query + " ORDER BY created_at DESC LIMIT ?", (*params, max(1, min(limit, 200)))).fetchall()
+    rows = conn.execute(query + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                        (*params, max(1, min(limit, 200)), max(0, offset))).fetchall()
     return [{key: value for key, value in _as_dict(row).items() if key != "body"} for row in rows]
 
 

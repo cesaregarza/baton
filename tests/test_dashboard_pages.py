@@ -164,12 +164,12 @@ def needs_items(body: str) -> list[str]:
     return re.findall(r'<p class="text">([^<]*)</p>', body)
 
 
-def test_needs_lists_attention_to_the_viewer_and_decisions_newest_first(tmp_path) -> None:
+def test_needs_lists_attention_to_the_viewer_then_other_decisions_newest_first(tmp_path) -> None:
     config = page_config(tmp_path)
     needs_seeded(config)
     response = get(config, "/needs")
     assert response.status == 200
-    assert needs_items(text(response)) == ["beta needs operator", "pick option A or B", "operator, please look"]
+    assert needs_items(text(response)) == ["beta needs operator", "operator, please look", "pick option A or B"]
 
 
 def test_needs_excludes_unflagged_messages_other_roles_attention_and_at_mentions_in_text(tmp_path) -> None:
@@ -201,7 +201,8 @@ def test_needs_links_each_message_to_its_place_and_counts_both_blocks(tmp_path) 
     decision = next(m for m in history if m["text"] == "pick option A or B")
     body = text(get(config, "/needs"))
     assert f'/c/{ids["mine"]}?after_seq={decision["seq"] - 1}#m-{decision["seq"]}' in body
-    assert "3 messages asked for you or for a decision" in body and "1 job is waiting on you" in body
+    assert "2 messages asked for you" in body and "1 decision not addressed to you" in body
+    assert "1 job is waiting on you" in body
     target = re.search(rf'href="(/c/{ids["mine"]}\?after_seq={decision["seq"] - 1})#m-{decision["seq"]}"', body)
     assert f'id="m-{decision["seq"]}"' in text(get(config, target.group(1).replace("&amp;", "&")))
 
@@ -210,9 +211,9 @@ def test_needs_filters_by_topic_and_refuses_an_invalid_one(tmp_path) -> None:
     config = page_config(tmp_path, view_all=True)
     needs_seeded(config)
     alpha = needs_items(text(get(config, "/needs?topic=alpha")))
-    assert alpha == ["hidden decision", "pick option A or B", "operator, please look"]
+    assert alpha == ["operator, please look", "hidden decision", "pick option A or B"]
     assert needs_items(text(get(config, "/needs?topic=beta"))) == ["beta needs operator"]
-    assert needs_items(text(get(config, "/needs?topic=alpha/x"))) == ["pick option A or B", "operator, please look"]
+    assert needs_items(text(get(config, "/needs?topic=alpha/x"))) == ["operator, please look", "pick option A or B"]
     assert needs_items(text(get(config, "/needs?topic=alpha%2Fx"))) == needs_items(text(get(config,
                                                                                          "/needs?topic=alpha/x")))
     for bad in ("Alpha", "alpha/x/y", "", "al%20pha", "alpha%252Fx", "a" * 5000, "alpha&topic=beta",
@@ -225,7 +226,7 @@ def test_needs_filters_by_topic_and_refuses_an_invalid_one(tmp_path) -> None:
 def test_needs_says_so_when_nothing_needs_the_viewer(tmp_path) -> None:
     config = page_config(tmp_path)
     body = text(get(config, "/needs"))
-    assert "0 messages asked for you or for a decision" in body and "0 jobs are waiting on you" in body
+    assert "0 messages asked for you" in body and "0 jobs are waiting on you" in body
 
 
 def test_needs_labels_messages_as_retained_signals_not_unresolved_or_unread(tmp_path) -> None:
@@ -305,14 +306,14 @@ def test_the_total_is_counted_before_the_page_bound_and_shown_apart_from_what_is
         mine = made(conn, config, "Many asks", MINE)
         for index in range(7):
             conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"ask {index}",
-                               needs_decision=True)
+                               attention=["operator"])
             conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"noise {index}")
     finally:
         conn.close()
     monkeypatch.setattr(dashboard, "MAX_NEEDS", 3)
     body = text(get(config, "/needs"))
     assert needs_items(body) == ["ask 6", "ask 5", "ask 4"]
-    assert "7 messages asked for you or for a decision" in body and "showing the newest 3 of 7" in body
+    assert "7 messages asked for you" in body and "showing the newest 3 of 7" in body
 
 
 # 3. Needs you: jobs -----------------------------------------------------------------------------------------
@@ -498,7 +499,7 @@ def test_a_signal_in_the_oldest_of_many_conversations_is_never_dropped(tmp_path,
     for target in ("/needs", "/needs?topic=alpha"):
         body = text(get(config, target))
         assert needs_items(body) == ["in the oldest conversation"], target
-        assert "1 message asked for you or for a decision" in body, target
+        assert "1 message asked for you" in body, target
 
 
 def test_a_list_page_says_when_it_shows_only_the_newest_conversations(tmp_path, monkeypatch) -> None:
@@ -596,11 +597,11 @@ def test_messages_at_the_page_bound_plus_one_are_counted_and_shown_apart(tmp_pat
         mine = made(conn, config, "Bound", MINE)
         for index in range(dashboard.MAX_NEEDS + 1):
             conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"bound ask {index}",
-                               needs_decision=True)
+                               attention=["operator"])
     finally:
         conn.close()
     body = text(get(config, "/needs"))
     total = dashboard.MAX_NEEDS + 1
-    assert f"{total} messages asked for you or for a decision" in body
+    assert f"{total} messages asked for you" in body
     assert f"showing the newest {dashboard.MAX_NEEDS} of {total}" in body
     assert len(needs_items(body)) == dashboard.MAX_NEEDS

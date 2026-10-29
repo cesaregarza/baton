@@ -514,4 +514,4 @@ def test_a_reply_whose_parent_is_on_an_earlier_page_names_it(tmp_path) -> None:
     onward = re.search(r'<a href="(/c/[^"]+\?after_seq=\d+)">Later messages</a>', first_page).group(1)
     answer = item(text(get(config, onward)), "late answer")
     marker = re.search(r'<p class="reply-to">(.*?)</p>', answer)
-    assert marker and marker.group(1) == "in reply to #1"
+    assert marker and marker.group(1).startswith("in reply to ") and ">#1</a>" in marker.group(1)
