@@ -35,7 +35,7 @@ from baton.config import Config
 from baton.store import connect
 
 CONVERSATION_TOOLS = {"create_conversation", "list_conversations", "read_history", "add_participant",
-                      "remove_participant"}
+                      "remove_participant", "set_topic"}
 
 
 class GroupHost:

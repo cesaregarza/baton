@@ -16,6 +16,11 @@ conversation for a decision through `needs_decision`. Those three are what a
 reader and a quiet role's wake policy go on; none of them is an approval, and
 naming a role neither adds it to the conversation nor speaks for it.
 
+A conversation may carry an optional `topic`, a readable path of one or
+two lowercase slug segments. It is a label for people, kept apart from
+the conversation's id, so renaming it moves nothing; listing filters by
+it a whole segment at a time.
+
 The config says which roles may create conversations and manage
 participants. A message's author is always the sender, the role its
 credential is bound to. Words the sender passes on from someone else travel
@@ -27,6 +32,7 @@ a job.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -49,6 +55,52 @@ from baton.store import transaction
 MAX_TITLE = 200
 MIN_PARTICIPANTS = 2
 RATE_WINDOW = timedelta(hours=1)
+# A topic is one or two lowercase slug segments: `project` or `project/subtopic`. A segment is lowercase
+# ASCII letters, digits and inner hyphens, so it can never carry a SQL LIKE metacharacter and a prefix
+# filter is safe to match literally. It is a label for people, separate from the conversation's id.
+MAX_TOPIC_SEGMENT = 40
+MAX_TOPIC_SEGMENTS = 2
+TOPIC_SEGMENT = re.compile(rf"[a-z0-9](?:[a-z0-9-]{{0,{MAX_TOPIC_SEGMENT - 2}}}[a-z0-9])?")
+
+
+def check_topic(topic: Any, field: str = "topic") -> str | None:
+    """A topic as stored: one or two lowercase slug segments, or None for no topic at all.
+
+    None is how "no topic" arrives, and setting it clears one. Anything else must match the grammar
+    whole: a refusal names the field. Because a segment admits neither of SQL's LIKE metacharacters, a
+    validated topic is safe to match literally in a prefix filter.
+    """
+    if topic is None:
+        return None
+    if not isinstance(topic, str):
+        raise InvalidRequest(f"{field} must be a path of 1-{MAX_TOPIC_SEGMENTS} lowercase slug segments, "
+                             "such as project or project/subtopic, or left out")
+    segments = topic.split("/")
+    if not 1 <= len(segments) <= MAX_TOPIC_SEGMENTS or not all(TOPIC_SEGMENT.fullmatch(s) for s in segments):
+        raise InvalidRequest(f"{field} {topic!r} must be 1-{MAX_TOPIC_SEGMENTS} segments joined by /, each "
+                             f"1-{MAX_TOPIC_SEGMENT} characters of a-z, 0-9 and inner hyphens")
+    return topic
+
+
+def set_topic(conn: sqlite3.Connection, config: Config, conversation_id: str, topic: Any, *,
+              actor: str) -> dict[str, Any]:
+    """Set, rename or clear a conversation's topic. `None` clears it; the conversation's id never changes.
+
+    Takes the same permission as managing participants, and membership of this conversation: a label on
+    a conversation is the conversation's own business.
+    """
+    require_enabled(config)
+    if not config.roles[actor].can_manage_participants:
+        raise Forbidden(f"{actor} may not change a conversation's topic "
+                        f"(roles.{actor}.can_manage_participants)")
+    topic = check_topic(topic)
+    with transaction(conn):
+        before = _load(conn, conversation_id)["topic"]
+        if actor not in _participants(conn, conversation_id):
+            raise NotAParticipant(f"{actor} is not in {conversation_id}")
+        if topic != before:
+            conn.execute("UPDATE conversations SET topic = ? WHERE id = ?", (topic, conversation_id))
+    return {"conversation_id": conversation_id, "topic": topic, "changed": topic != before}
 
 
 def require_enabled(config: Config) -> Conversations:
@@ -58,7 +110,7 @@ def require_enabled(config: Config) -> Conversations:
 
 
 def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str, participants: list[str],
-           request_id: str | None = None) -> dict[str, Any]:
+           topic: Any = None, request_id: str | None = None) -> dict[str, Any]:
     """Open a conversation among `participants`, who must include `actor`. A retry with the same request_id replays."""
     settings = require_enabled(config)
     if not config.roles[actor].can_create_conversations:
@@ -66,38 +118,62 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str, 
     request_id = request_id or messages.new_request_id()
     if not 1 <= len(request_id) <= 200 or not 1 <= len(title) <= MAX_TITLE:
         raise InvalidRequest(f"request_id is 1-200 characters and title 1-{MAX_TITLE}")
+    topic = check_topic(topic)
     roles = _check_roles(config, participants)
     if not MIN_PARTICIPANTS <= len(roles) <= settings.max_participants:
         raise InvalidRequest(f"a conversation has {MIN_PARTICIPANTS}-{settings.max_participants} participants")
     if actor not in roles:
         raise InvalidRequest(f"the creator, {actor}, must be one of the participants")
     digest = events.request_digest("create_conversation", {"actor": actor, "title": title,
-                                                           "participants": sorted(roles)})
+                                                           "participants": sorted(roles),
+                                                           **({"topic": topic} if topic else {})})
     with transaction(conn):
         existing = events.replayed(conn, "conversations", request_id, digest)
         if existing is not None:
             return {**_summary(conn, existing), "request_id": request_id, "created": False}
         conversation_id = f"conv_{uuid.uuid4().hex[:16]}"
         stamp = events.now()
-        conn.execute("INSERT INTO conversations (id, request_id, request_digest, title, created_by, created_at)"
-                     " VALUES (?, ?, ?, ?, ?, ?)", (conversation_id, request_id, digest, title, actor, stamp))
+        conn.execute("INSERT INTO conversations (id, request_id, request_digest, title, created_by,"
+                     " created_at, topic) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (conversation_id, request_id, digest, title, actor, stamp, topic))
         conn.executemany("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
                          [(conversation_id, role, stamp) for role in roles])
         summary = _summary(conn, _load(conn, conversation_id))
     return {**summary, "request_id": request_id, "created": True}
 
 
-def list_for(conn: sqlite3.Connection, role: str) -> list[dict[str, Any]]:
-    """The conversations `role` takes part in, newest first, with their participants."""
+def list_for(conn: sqlite3.Connection, role: str, topic: Any = None) -> list[dict[str, Any]]:
+    """The conversations `role` takes part in, newest first, with their participants.
+
+    `topic` narrows them to that topic and anything under it. It never widens what the role may see: a
+    conversation it is not in stays out whether it has a topic or not.
+    """
+    where, values = _under(topic)
     rows = conn.execute("SELECT c.* FROM conversations c JOIN participants p ON p.conversation_id = c.id"
-                        " WHERE p.role = ? ORDER BY c.created_at DESC LIMIT 200", (role,)).fetchall()
+                        f" WHERE p.role = ?{where} ORDER BY c.created_at DESC LIMIT 200",
+                        (role, *values)).fetchall()
     return [_summary(conn, row) for row in rows]
 
 
-def list_all(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def list_all(conn: sqlite3.Connection, topic: Any = None) -> list[dict[str, Any]]:
     """Every conversation, newest first: only for a viewer the config lets see them all."""
-    rows = conn.execute("SELECT * FROM conversations ORDER BY created_at DESC LIMIT 200").fetchall()
+    where, values = _under(topic)
+    rows = conn.execute(f"SELECT * FROM conversations WHERE 1 = 1{where}"
+                        " ORDER BY created_at DESC LIMIT 200", values).fetchall()
     return [_summary(conn, row) for row in rows]
+
+
+def _under(topic: Any) -> tuple[str, tuple[str, ...]]:
+    """A filter for a topic and everything under it, matching whole segments only.
+
+    `project` takes `project` and `project/anything`, and never `projectile`, because the only other
+    match is on a full segment boundary. The topic is validated first, so it carries no LIKE
+    metacharacter and needs no escaping.
+    """
+    topic = check_topic(topic)
+    if topic is None:
+        return "", ()
+    return " AND (topic = ? OR topic LIKE ?)", (topic, f"{topic}/%")
 
 
 def add(conn: sqlite3.Connection, config: Config, conversation_id: str, participant: str, *,
@@ -360,5 +436,6 @@ def _history_entry(row: sqlite3.Row, reply_to: dict[str, Any] | None = None) -> 
 
 
 def _summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
-    return {"conversation_id": row["id"], "title": row["title"], "created_by": row["created_by"],
-            "created_at": row["created_at"], "participants": _participants(conn, row["id"])}
+    return {"conversation_id": row["id"], "title": row["title"], "topic": row["topic"],
+            "created_by": row["created_by"], "created_at": row["created_at"],
+            "participants": _participants(conn, row["id"])}
