@@ -118,6 +118,7 @@ def test_a_topic_route_is_decoded_once_per_segment(tmp_path) -> None:
     assert titles(text(get(config, "/t/%61lpha"))) == titles(text(get(config, "/t/alpha")))
     assert titles(text(get(config, "/t/alpha/%78"))) == ["Alpha x"]
     assert get(config, "/t/alpha%2Fx").status == 400
+    assert get(config, "/t/%2561lpha").status == 400  # decoded once it is "%61lpha"; only a second decode makes "alpha"
 
 
 def test_the_index_keeps_the_untagged_and_links_to_topics_and_needs(tmp_path) -> None:
