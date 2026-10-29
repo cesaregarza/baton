@@ -111,9 +111,9 @@ def test_a_path_of_unknown_shape_is_redacted(tmp_path: Path, caplog, path: str) 
     assert "https://client.example.test" in line and path not in line and "redacted" in line
 
 
-def test_an_ordinary_callback_path_is_still_shown() -> None:
+def test_even_an_ordinary_callback_path_is_not_shown() -> None:
     assert auth.loggable_uri("https://client.example.test/connector/oauth/abc_123-XYZ") == \
-        "https://client.example.test/connector/oauth/abc_123-XYZ"
+        "https://client.example.test [path redacted]"
 
 
 @pytest.mark.parametrize("uri", [

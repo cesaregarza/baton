@@ -164,7 +164,7 @@ def test_the_stable_callback_registers_when_listed_and_a_per_client_one_does_not
         refused = register(host, PER_CLIENT + "?code=secret-code&token=secret-token#frag")
     assert refused.status_code == 400
     [line] = [r.getMessage() for r in caplog.records if "redirect" in r.getMessage()]
-    assert PER_CLIENT in line  # the operator sees the exact path to list, if they choose to
+    assert "assistant.example.test" in line and "connector" not in line  # the host, never the path
     assert "secret-code" not in line and "secret-token" not in line and "frag" not in line
 
 
