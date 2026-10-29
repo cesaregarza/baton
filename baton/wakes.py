@@ -134,6 +134,9 @@ class Dispatcher:
             if first_unread is None:
                 return None
             key, payload = f"messages:{first_unread}", {"reason": "message", "first_unread_seq": first_unread}
+        elif event["job_id"] is None:  # a conversation over its hourly limit, the one event outside any job
+            key = f"event:{event['pos']}"
+            payload = {"reason": event["kind"], "conversation_id": json.loads(event["data"])["conversation_id"]}
         else:
             key, payload = (f"job:{event['job_id']}:{event['seq']}",
                             {"reason": event["kind"], "job_id": event["job_id"], "event_seq": event["seq"]})

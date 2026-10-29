@@ -17,38 +17,76 @@ from pathlib import Path
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+# The one older version `connect` upgrades in place; any other is refused.
+MIGRATES_FROM = 2
+
+# A message's retry identity outlives its text: retention may delete the
+# message, but a retry of its request still replays from here. A direct send
+# records its `seq`; a conversation send records each recipient's in `seqs`.
+_MESSAGE_REQUESTS = """CREATE TABLE IF NOT EXISTS message_requests (
+        request_id TEXT PRIMARY KEY,
+        request_digest TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        seq INTEGER,
+        seqs TEXT,
+        created_at TEXT NOT NULL
+    )"""
+# One row per copy: `seq` numbers each recipient's messages without gaps, and
+# a conversation message's copies share its `id` and its `conversation_seq`,
+# the conversation's own gap-free order. A host notice has no sender.
+_MESSAGES = """CREATE TABLE IF NOT EXISTS messages (
+        id TEXT NOT NULL,
+        job_id TEXT REFERENCES jobs(id),
+        conversation_id TEXT REFERENCES conversations(id),
+        conversation_seq INTEGER,
+        sender TEXT,
+        recipient TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        relayed TEXT,
+        notice TEXT,
+        at TEXT NOT NULL,
+        PRIMARY KEY (recipient, seq)
+    )"""
+
+# The version-2 tables a migration rebuilds, with the columns they keep.
+_REBUILT = {
+    "messages": "id, job_id, sender, recipient, seq, text, at",
+    "message_requests": "request_id, request_digest, message_id, seq, created_at",
+}
 
 # One statement per entry: executescript() would commit on its own, outside
 # the transaction that creates the schema.
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)",
-    # A message's retry identity outlives its text: retention may delete the
-    # message, but a retry of its request still replays from here.
-    """CREATE TABLE IF NOT EXISTS message_requests (
-        request_id TEXT PRIMARY KEY,
-        request_digest TEXT NOT NULL,
-        message_id TEXT NOT NULL,
-        seq INTEGER NOT NULL,
-        created_at TEXT NOT NULL
-    )""",
-    # `seq` numbers each recipient's messages without gaps.
-    """CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY,
-        job_id TEXT REFERENCES jobs(id),
-        sender TEXT NOT NULL,
-        recipient TEXT NOT NULL,
-        seq INTEGER NOT NULL,
-        text TEXT NOT NULL,
-        at TEXT NOT NULL,
-        UNIQUE (recipient, seq)
-    )""",
+    _MESSAGE_REQUESTS,
+    _MESSAGES,
+    "CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation_id, conversation_seq)",
     # `last_seq` is the last seq handed out, kept here so deleting old messages
     # never renumbers; `read_seq` is the last one delivered to the recipient.
     """CREATE TABLE IF NOT EXISTS mailboxes (
         recipient TEXT PRIMARY KEY,
         last_seq INTEGER NOT NULL,
         read_seq INTEGER NOT NULL
+    )""",
+    # `last_seq` is the last conversation_seq handed out; `escalated_at` is when
+    # the escalation role was last woken about the conversation's hourly limit.
+    """CREATE TABLE IF NOT EXISTS conversations (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        request_digest TEXT NOT NULL,
+        title TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_seq INTEGER NOT NULL DEFAULT 0,
+        escalated_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS participants (
+        conversation_id TEXT NOT NULL REFERENCES conversations(id),
+        role TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        PRIMARY KEY (conversation_id, role)
     )""",
     """CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY,
@@ -159,18 +197,31 @@ def _refuse_other_schema(conn: sqlite3.Connection) -> None:
     """Refuse a database made by another schema version before anything, even the journal mode, changes it."""
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").fetchone():
         row = conn.execute("SELECT version FROM schema_version").fetchone()
-        if row is not None and row["version"] != SCHEMA_VERSION:
+        if row is not None and row["version"] not in (SCHEMA_VERSION, MIGRATES_FROM):
             raise SchemaMismatch(f"the database's schema is version {row['version']}, and this baton needs "
-                                 f"version {SCHEMA_VERSION}. baton doesn't migrate: move the old database aside "
-                                 "to start fresh.")
+                                 f"version {SCHEMA_VERSION}. baton migrates only from version {MIGRATES_FROM}: "
+                                 "move the old database aside to start fresh.")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Create the schema, or upgrade a version-2 database, in one transaction: a crash leaves the old one intact."""
     with transaction(conn):
-        for statement in _SCHEMA:
-            conn.execute(statement)
+        conn.execute(_SCHEMA[0])
         row = conn.execute("SELECT version FROM schema_version").fetchone()
-        if row is None:
-            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
-        elif row["version"] != SCHEMA_VERSION:  # checked before any change; this is a second line of defence
+        migrating = row is not None and row["version"] == MIGRATES_FROM
+        if row is not None and not migrating and row["version"] != SCHEMA_VERSION:  # a second line of defence
             raise SchemaMismatch(f"schema version {row['version']}, expected {SCHEMA_VERSION}")
+        # Version 3 lets a conversation message's copies share one id and a send record several seqs, which
+        # SQLite can't change in place: the two tables are set aside, recreated, and every row copied back.
+        if migrating:
+            for table in _REBUILT:
+                conn.execute(f"ALTER TABLE {table} RENAME TO {table}_v2")
+        for statement in _SCHEMA[1:]:
+            conn.execute(statement)
+        if migrating:
+            for table, columns in _REBUILT.items():
+                conn.execute(f"INSERT INTO {table} ({columns}) SELECT {columns} FROM {table}_v2")
+                conn.execute(f"DROP TABLE {table}_v2")
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+        elif row is None:
+            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))

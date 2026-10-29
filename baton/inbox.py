@@ -49,7 +49,8 @@ def take(conn: sqlite3.Connection, role: str) -> dict[str, Any]:
                 events.set_cursor(conn, name, row["pos"])  # already delivered by read_messages
                 continue
             if event["kind"] == "message":
-                found = conn.execute("SELECT * FROM messages WHERE id = ?", (event["data"]["message_id"],)).fetchone()
+                found = conn.execute("SELECT * FROM messages WHERE recipient = ? AND seq = ?",
+                                     (role, event["data"]["seq"])).fetchone()
                 event["message"] = messages.as_dict(found) if found else None
             size += 2 * len(json.dumps(event))
             if page and size > messages.MAX_PAGE_BYTES:

@@ -122,6 +122,57 @@ has been tested offline only. Compatibility with a real client is unconfirmed un
 [docs/integrations/openai-mcp-events.md](docs/integrations/openai-mcp-events.md) covers setup, the
 security model, what was verified, and what is still pending.
 
+## Group conversations
+
+A conversation lets three or more roles talk in one thread. It is off unless the config turns it on.
+A message sent to a conversation reaches every other participant. Each one gets its own copy, numbered in
+its own mailbox, and the copies share one `message_id`. The sender gets no copy, so its own message never
+wakes it. If any recipient's mailbox is full, nobody gets the message (`conversation_full`), and you can
+retry once that role reads.
+
+```toml
+[conversations]
+enabled = true
+max_participants = 8          # the default
+max_messages_per_hour = 30    # per conversation, the default; past it, sends get conversation_rate_limited
+escalation_role = "orchestrator"   # woken once an hour at most while a conversation is over its limit
+
+[roles.orchestrator]
+description = "Local orchestrator"
+can_create_conversations = true
+can_manage_participants = true
+
+[roles.reviewer]
+description = "Reviews the work"
+
+[roles.assistant]
+description = "Remote assistant"
+```
+
+```sh
+baton conversation new --as orchestrator --title "Release plan" --with orchestrator,reviewer,assistant
+baton message --as orchestrator --conversation <conversation_id> --text "Draft is in; please review."
+baton conversation history --as orchestrator <conversation_id>    # the thread as you saw it; marks nothing read
+baton conversation add --as orchestrator <conversation_id> <role>  # every participant gets a host notice
+```
+
+Over MCP, `reviewer` and `assistant` send with `send_message(conversation_id=..., text=...)` and receive as
+usual with `read_messages` or `wait`. Each message carries its `conversation_id` and its `from_role`.
+
+**History is separate from delivery.** `read_history(conversation_id)` returns the conversation as you saw
+it, the messages you received and the ones you sent, numbered in conversation order. It marks nothing read, so
+`read_messages` and `wait` still hand over each unread message exactly once. Only current participants can
+read a conversation's history. A role added later sees it from its join on, and a removed role can't read it
+at all, though the messages it already received stay in its mailbox.
+
+**Who said it.** `from_role` is always the sender's role, taken from its credential. A host notice, such as
+a participant being added, has `from_role: null`. When a sender passes on someone else's words, it puts
+them in `relayed`, a list of `{source, at, text}` entries kept apart from its own `text`. Relayed words are
+a claim by the sender, never the authenticated authorship of whoever it names.
+
+**Messages are information, never authority.** No message, and nothing relayed in one, changes a job's
+state, its revision or any approval. Only `move_job` moves a job.
+
 ## MCP tools
 
 Every tool acts as the caller's role, which comes from the caller's credential.
@@ -129,19 +180,24 @@ Every tool acts as the caller's role, which comes from the caller's credential.
 | Tool | What it does |
 |---|---|
 | `whoami` | Your role, the other roles, and the job states |
-| `send_message(to, text, job_id?, request_id?)` | Send a message to a role |
+| `send_message(text, to? \| conversation_id?, job_id?, relayed?, request_id?)` | Send a message to a role, or to every other participant of a conversation |
 | `read_messages(after_seq?, limit?)` | Your messages after a cursor. The default is the undelivered ones |
 | `wait(timeout_seconds?)` | Block up to 30 s for messages or job changes addressed to you |
 | `create_job(title, body?, request_id?)` | Open a job in the initial state |
 | `move_job(job_id, to_state, note?, request_id?, expected_revision?)` | Move a job along the state graph. A retry with the same `request_id` replays the original outcome. `expected_revision` refuses the move if the job's state has changed since you read it |
 | `get_job`, `list_jobs`, `read_job_events` | Read jobs and their history |
+| `create_conversation(title, participants, request_id?)`, `list_conversations()` | Open a conversation you take part in, or list yours. Present when conversations are enabled |
+| `read_history(conversation_id, after_seq?, limit?)` | A conversation as you saw it, your own messages included. Marks nothing read |
+| `add_participant(conversation_id, participant)`, `remove_participant(...)` | Change who is in a conversation. Needs `can_manage_participants` |
 
 ## CLI
 
 ```
 baton serve                                   run the MCP server and the wake dispatcher
 baton message --as R --to R [--text T]        send a message; reads stdin if --text is omitted
+baton message --as R --conversation C ...     send to every other participant of conversation C
 baton read --as R [--after-seq N]             read messages
+baton conversation new|list|history|add|remove   group conversations
 baton wait --as R [--timeout S]               block until something reaches role R
 baton job create|show|list|move|events        jobs; move takes --request-id and --expected-revision
 baton token new --name N --role R             make a bearer token

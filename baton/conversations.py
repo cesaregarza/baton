@@ -1,0 +1,275 @@
+"""Group conversations: a titled thread whose every message reaches each other participant.
+
+A conversation send stores one copy per other participant, each as that
+recipient's next mailbox seq and all under one shared message_id, in one
+transaction: every recipient gets its copy or none does. Each copy keeps what
+a direct message guarantees: the reader's gap-free seq and cursors, coalesced
+wakes and retention. The sender gets no copy, so it is never woken by its own
+message.
+
+`history` is separate from that delivery: it returns the conversation as a
+participant has seen it, its own messages included, and moves no bookmark.
+
+The config says which roles may create conversations and manage
+participants. A message's author is always the sender, the role its
+credential is bound to. Words the sender passes on from someone else travel
+in `relayed`, apart from its own text, and are never their authenticated
+authorship. Messages are information, never authority: nothing here touches
+a job.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from baton import events, messages
+from baton.config import Config, Conversations
+from baton.errors import (
+    ConversationFull,
+    ConversationRateLimited,
+    ConversationsDisabled,
+    Forbidden,
+    InvalidRequest,
+    NotAParticipant,
+    UnknownConversation,
+    UnknownRole,
+)
+from baton.store import transaction
+
+MAX_TITLE = 200
+MIN_PARTICIPANTS = 2
+RATE_WINDOW = timedelta(hours=1)
+
+
+def require_enabled(config: Config) -> Conversations:
+    if not config.conversations.enabled:
+        raise ConversationsDisabled("this host has group conversations turned off ([conversations] enabled)")
+    return config.conversations
+
+
+def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str, participants: list[str],
+           request_id: str | None = None) -> dict[str, Any]:
+    """Open a conversation among `participants`, who must include `actor`. A retry with the same request_id replays."""
+    settings = require_enabled(config)
+    if not config.roles[actor].can_create_conversations:
+        raise Forbidden(f"{actor} may not create conversations (roles.{actor}.can_create_conversations)")
+    request_id = request_id or messages.new_request_id()
+    if not 1 <= len(request_id) <= 200 or not 1 <= len(title) <= MAX_TITLE:
+        raise InvalidRequest(f"request_id is 1-200 characters and title 1-{MAX_TITLE}")
+    roles = _check_roles(config, participants)
+    if not MIN_PARTICIPANTS <= len(roles) <= settings.max_participants:
+        raise InvalidRequest(f"a conversation has {MIN_PARTICIPANTS}-{settings.max_participants} participants")
+    if actor not in roles:
+        raise InvalidRequest(f"the creator, {actor}, must be one of the participants")
+    digest = events.request_digest("create_conversation", {"actor": actor, "title": title,
+                                                           "participants": sorted(roles)})
+    with transaction(conn):
+        existing = events.replayed(conn, "conversations", request_id, digest)
+        if existing is not None:
+            return {**_summary(conn, existing), "request_id": request_id, "created": False}
+        conversation_id = f"conv_{uuid.uuid4().hex[:16]}"
+        stamp = events.now()
+        conn.execute("INSERT INTO conversations (id, request_id, request_digest, title, created_by, created_at)"
+                     " VALUES (?, ?, ?, ?, ?, ?)", (conversation_id, request_id, digest, title, actor, stamp))
+        conn.executemany("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
+                         [(conversation_id, role, stamp) for role in roles])
+        summary = _summary(conn, _load(conn, conversation_id))
+    return {**summary, "request_id": request_id, "created": True}
+
+
+def list_for(conn: sqlite3.Connection, role: str) -> list[dict[str, Any]]:
+    """The conversations `role` takes part in, newest first, with their participants."""
+    rows = conn.execute("SELECT c.* FROM conversations c JOIN participants p ON p.conversation_id = c.id"
+                        " WHERE p.role = ? ORDER BY c.created_at DESC LIMIT 200", (role,)).fetchall()
+    return [_summary(conn, row) for row in rows]
+
+
+def add(conn: sqlite3.Connection, config: Config, conversation_id: str, participant: str, *,
+        actor: str) -> dict[str, Any]:
+    """Add a participant and tell every participant, the new one included. Adding a present one changes nothing."""
+    settings = _may_manage(config, actor, participant)
+    with transaction(conn):
+        _load(conn, conversation_id)
+        current = _participants(conn, conversation_id)
+        if participant not in current:
+            if len(current) >= settings.max_participants:
+                raise InvalidRequest(f"{conversation_id} already has the most participants allowed, "
+                                     f"{settings.max_participants}")
+            conn.execute("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
+                         (conversation_id, participant, events.now()))
+            _fan_out(conn, conversation_id, [*current, participant], sender=None, text=f"{actor} added {participant}",
+                     notice={"event": "participant_added", "participant": participant, "by": actor})
+        participants = _participants(conn, conversation_id)
+    return {"conversation_id": conversation_id, "participants": participants, "changed": participant not in current}
+
+
+def remove(conn: sqlite3.Connection, config: Config, conversation_id: str, participant: str, *,
+           actor: str) -> dict[str, Any]:
+    """Remove a participant and tell the ones who remain; it receives nothing from then on."""
+    _may_manage(config, actor, participant)
+    with transaction(conn):
+        _load(conn, conversation_id)
+        current = _participants(conn, conversation_id)
+        if participant in current:
+            if len(current) <= MIN_PARTICIPANTS:
+                raise InvalidRequest(f"a conversation keeps at least {MIN_PARTICIPANTS} participants")
+            conn.execute("DELETE FROM participants WHERE conversation_id = ? AND role = ?",
+                         (conversation_id, participant))
+            _fan_out(conn, conversation_id, [role for role in current if role != participant], sender=None,
+                     text=f"{actor} removed {participant}",
+                     notice={"event": "participant_removed", "participant": participant, "by": actor})
+        participants = _participants(conn, conversation_id)
+    return {"conversation_id": conversation_id, "participants": participants, "changed": participant in current}
+
+
+def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_id: str, text: str,
+         relayed: Any = None, request_id: str | None = None, job_id: str | None = None) -> dict[str, Any]:
+    """Send to every other participant at once; `seqs` gives each recipient's seq. A retry replays.
+
+    Refused whole, so no recipient gets a copy, when the sender isn't a
+    participant, a recipient's mailbox is full (`conversation_full`), or the
+    conversation is over its hourly limit (`conversation_rate_limited`, which
+    also wakes the escalation role, at most once an hour).
+    """
+    settings = require_enabled(config)
+    request_id = request_id or messages.new_request_id()
+    created_at = messages.request_time(request_id)
+    relayed = messages.check(text, relayed)
+    digest = events.request_digest("send", {"sender": sender, "conversation_id": conversation_id, "text": text,
+                                            "job_id": job_id, **({"relayed": relayed} if relayed else {})})
+    with transaction(conn):
+        existing = events.replayed(conn, "message_requests", request_id, digest)
+        if existing is not None:
+            return {"message_id": existing["message_id"], "conversation_id": conversation_id,
+                    "seqs": json.loads(existing["seqs"]), "request_id": request_id, "created": False}
+        conversation = _load(conn, conversation_id)
+        participants = _participants(conn, conversation_id)
+        if sender not in participants:
+            raise NotAParticipant(f"{sender} is not in {conversation_id}")
+        if job_id is not None:
+            from baton import jobs  # lazily: jobs imports messages, which this module imports
+
+            jobs.require_exists(conn, job_id)
+        limited = _sent_within_window(conn, conversation_id) >= settings.max_messages_per_hour
+        if limited:
+            _escalate(conn, settings, conversation, sender)
+        else:
+            message_id = messages.new_message_id()
+            seqs = _fan_out(conn, conversation_id, [role for role in participants if role != sender], sender=sender,
+                            text=text, relayed=relayed, job_id=job_id, message_id=message_id)
+            conn.execute("INSERT INTO message_requests (request_id, request_digest, message_id, seqs, created_at)"
+                         " VALUES (?, ?, ?, ?, ?)", (request_id, digest, message_id, json.dumps(seqs),
+                                                     created_at.isoformat()))
+    # Raised after the transaction commits, so the escalation it recorded stays.
+    if limited:
+        raise ConversationRateLimited(f"{conversation_id} has had {settings.max_messages_per_hour} messages in the "
+                                      "last hour; retry later")
+    return {"message_id": message_id, "conversation_id": conversation_id, "seqs": seqs, "request_id": request_id,
+            "created": True}
+
+
+def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq: int = 0,
+            limit: int = 50) -> dict[str, Any]:
+    """The conversation as `role` saw it, oldest first, after `after_seq`: what it received and what it sent.
+
+    That is exactly the messages sent while it was a participant, so a role
+    added later sees nothing from before its join. Only a current participant
+    may read it. `seq` here is the conversation's order, the same for every
+    participant. Separate from delivery: it marks nothing read and moves no
+    cursor, so `read_messages` and `wait` still hand over each unread message
+    once. A message is gone from history once retention deletes the reader's
+    copy.
+    """
+    if not 1 <= limit <= messages.MAX_PAGE_MESSAGES or after_seq < 0:
+        raise InvalidRequest(f"limit must be 1-{messages.MAX_PAGE_MESSAGES} and after_seq at least 0")
+    with transaction(conn):
+        _load(conn, conversation_id)
+        if role not in _participants(conn, conversation_id):
+            raise NotAParticipant(f"{role} is not in {conversation_id}")
+        # The reader's copy of each message to it, and one copy of each it sent, which it holds none of.
+        rows = conn.execute("SELECT * FROM messages WHERE conversation_id = ? AND conversation_seq > ?"
+                            " AND (recipient = ? OR sender = ?) GROUP BY conversation_seq"
+                            " ORDER BY conversation_seq LIMIT ?", (conversation_id, after_seq, role, role, limit)
+                            ).fetchall()
+    page = messages.as_page(rows, _history_entry)
+    return {"messages": page, "next_seq": page[-1]["seq"] if page else after_seq}
+
+
+def _fan_out(conn: sqlite3.Connection, conversation_id: str, recipients: list[str], *, sender: str | None,
+             text: str, relayed: list[dict] | None = None, notice: dict[str, str] | None = None,
+             job_id: str | None = None, message_id: str | None = None) -> dict[str, int]:
+    """Store one copy for each recipient under one message_id, or refuse before storing any."""
+    full = [role for role in recipients if messages.unread(conn, role) >= messages.MAX_UNREAD]
+    if full:
+        raise ConversationFull(f"{', '.join(full)} has {messages.MAX_UNREAD} unread messages, so no participant "
+                               "got this; retry after it reads")
+    message_id = message_id or messages.new_message_id()
+    conn.execute("UPDATE conversations SET last_seq = last_seq + 1 WHERE id = ?", (conversation_id,))
+    conversation_seq = _load(conn, conversation_id)["last_seq"]
+    return {role: messages.store_copy(conn, message_id=message_id, sender=sender, recipient=role, text=text,
+                                      job_id=job_id, conversation_id=conversation_id,
+                                      conversation_seq=conversation_seq, relayed=relayed, notice=notice)
+            for role in recipients}
+
+
+def _sent_within_window(conn: sqlite3.Connection, conversation_id: str) -> int:
+    """Messages participants sent to the conversation in the last hour; host notices don't count."""
+    since = (datetime.now(UTC) - RATE_WINDOW).isoformat()
+    return conn.execute("SELECT COUNT(DISTINCT id) FROM messages WHERE conversation_id = ? AND sender IS NOT NULL"
+                        " AND at > ?", (conversation_id, since)).fetchone()[0]
+
+
+def _escalate(conn: sqlite3.Connection, settings: Conversations, conversation: sqlite3.Row, sender: str) -> None:
+    """Address one content-free event to the escalation role, unless one already went out within the window."""
+    since = (datetime.now(UTC) - RATE_WINDOW).isoformat()
+    if settings.escalation_role is None or (conversation["escalated_at"] or "") > since:
+        return
+    conn.execute("UPDATE conversations SET escalated_at = ? WHERE id = ?", (events.now(), conversation["id"]))
+    events.append(conn, job_id=None, seq=0, actor=sender, audience=settings.escalation_role,
+                  kind="conversation.rate_limited", summary=f"{conversation['id']} is over its hourly message limit",
+                  data={"conversation_id": conversation["id"]})
+
+
+def _may_manage(config: Config, actor: str, participant: str) -> Conversations:
+    settings = require_enabled(config)
+    if not config.roles[actor].can_manage_participants:
+        raise Forbidden(f"{actor} may not manage participants (roles.{actor}.can_manage_participants)")
+    _check_roles(config, [participant])
+    return settings
+
+
+def _check_roles(config: Config, roles: Any) -> list[str]:
+    if not isinstance(roles, list) or not all(isinstance(role, str) for role in roles):
+        raise InvalidRequest("participants must be a list of role names")
+    unknown = [role for role in roles if role not in config.roles]
+    if unknown:
+        raise UnknownRole(f"no role {unknown[0]!r}; call whoami for the list")
+    if len(set(roles)) != len(roles):
+        raise InvalidRequest("participants lists a role twice")
+    return roles
+
+
+def _load(conn: sqlite3.Connection, conversation_id: str) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+    if row is None:
+        raise UnknownConversation(conversation_id)
+    return row
+
+
+def _participants(conn: sqlite3.Connection, conversation_id: str) -> list[str]:
+    rows = conn.execute("SELECT role FROM participants WHERE conversation_id = ? ORDER BY role", (conversation_id,))
+    return [row["role"] for row in rows]
+
+
+def _history_entry(row: sqlite3.Row) -> dict[str, Any]:
+    """A message as history shows it: numbered in the conversation, not in any one mailbox."""
+    return {**messages.as_dict(row), "seq": row["conversation_seq"]}
+
+
+def _summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    return {"conversation_id": row["id"], "title": row["title"], "created_by": row["created_by"],
+            "created_at": row["created_at"], "participants": _participants(conn, row["id"])}

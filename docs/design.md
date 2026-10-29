@@ -42,7 +42,7 @@ read the database.
 
 ## Messages
 
-`send_message(to, text, job_id?, request_id?)` stores the text as the recipient's next sequence number
+`send_message(to, text, job_id?, relayed?, request_id?)` stores the text as the recipient's next sequence number
 (`seq`). The numbers start at 1 and have no gaps. They are allocated under SQLite's write lock, and the
 last one is kept in a `mailboxes` row, so deleting old messages never renumbers.
 
@@ -67,6 +67,57 @@ without ever accepting a stale retry twice. When no id is given, the host makes 
 - A recipient with 500 unread messages makes senders get `mailbox_full` until it reads. That is
   backpressure, not loss.
 - Read messages are deleted 30 days after they were sent.
+
+**Relayed words.** A message may carry words its sender is passing on from someone else, in `relayed`: a
+list of `{source, at, text}` entries, kept apart from the sender's own `text`. A malformed entry is
+refused, and the refusal names the field. Relayed words are the sender's claim about what someone else
+said. They are stored and returned under the sender's `from_role`, and are never that person's
+authenticated authorship. They count toward the 64 KiB message limit.
+
+**Messages are information, never authority.** Nothing a message says, in its text or in what it relays,
+changes a job's state, revision or approvals. Only `move_job` moves a job.
+
+## Conversations
+
+A conversation is a titled thread among two or more roles, up to `max_participants` (default 8). It is off
+unless `[conversations] enabled = true`. A role may open one only with `can_create_conversations`, and
+must list itself among the participants. Adding or removing participants needs `can_manage_participants`.
+
+**Fan-out.** `send_message(conversation_id=...)` stores one copy for each other participant, in one
+transaction. Each copy is the recipient's next seq in its own mailbox, and the copies share one
+`message_id`. The result gives each recipient's seq in `seqs`. Every recipient gets its copy, or, if any
+recipient's mailbox is full, none does (`conversation_full`, naming the role). The sender gets no copy.
+From each recipient's side a conversation message is an ordinary message with a `conversation_id`, so
+cursors, `wait`, retention and wakes work exactly as for direct messages. In particular, each recipient is
+woken once per unread batch, and the sender is never woken by its own message.
+
+**Who may read and send.** Only current participants may send to a conversation or read its history
+(`not_a_participant`).
+
+**History.** `read_history(conversation_id, after_seq?)` is kept apart from delivery. It returns the
+conversation as the reader saw it, its own messages included, each with `from_role` and
+`message_id`. Its `seq` is the conversation's own gap-free order (`conversation_seq`), the same for every
+participant. It marks nothing read and moves no cursor, so `read_messages` and `wait` still hand over each
+unread message exactly once. Pages have the same count and size limits as `read_messages`. A reader's
+history is what it received and what it sent, which is exactly the messages sent while it was a
+participant: a role added later sees the conversation from the notice of its join on, and a role added
+back after a removal sees each stretch it was in. A message drops out of a reader's history once
+retention deletes the reader's copy. A removed role can't read the history at all, but the messages it
+already received stay in its mailbox.
+
+**Participants.** Adding a participant sends a host notice to every participant, the new one included.
+Removing one sends a notice to those who remain, and the removed role receives nothing from then on. A
+host notice has `from_role: null` and a `notice` object (`{"event", "participant", "by"}`). A conversation
+keeps at least two participants.
+
+**Limits.** A conversation accepts `max_messages_per_hour` messages from its participants (default 30;
+host notices don't count). Past that, sends are refused as `conversation_rate_limited`, and the host
+addresses one `conversation.rate_limited` event to `escalation_role`, if one is configured, at most once an
+hour per conversation. The event, and its wake, carry only the conversation's id.
+
+**Retries.** A conversation send is idempotent by `request_id`, exactly like a direct one. A retry
+returns the original `message_id` and `seqs` with `created: false`, and stores nothing.
+`create_conversation` takes a `request_id` too.
 
 ## Jobs
 
@@ -130,7 +181,8 @@ and changes nothing.
 the role once. The next wake comes only after the role has read. A read also supersedes a pending,
 undelivered wake.
 
-**Job wakes** are keyed by the job and its event seq.
+**Job wakes** are keyed by the job and its event seq. A `conversation.rate_limited` event, the one event
+outside any job, gets one wake of its own: `{"reason": "conversation.rate_limited", "conversation_id": ...}`.
 
 **Retries.** A failed delivery is retried with exponential backoff, from 1 minute up to 1 hour, for up to
 8 attempts, and is then marked `failed`. `baton wakes` shows recent outcomes. The webhook URL and the
@@ -158,20 +210,26 @@ All credentials resolve to a role.
   - `baton oauth revoke-all` ends every grant at once.
 
 Each tool call needs `baton.read` or `baton.write`, counts against an hourly limit per role and tool, and
-appends one line to `audit.jsonl`. The line records the time, role, tool, the ids involved (`to`, `job_id`,
-`request_id`, `to_state`) and the outcome, never any text.
+appends one line to `audit.jsonl`. The line records the time, role, tool, the ids involved (`to`,
+`conversation_id`, `participant`, `job_id`, `request_id`, `to_state`) and the outcome, never any text.
 
 ## Storage
 
-One SQLite database (`<data_dir>/baton.db`) in WAL mode, at schema version 2. A database from another
-version is refused, and baton doesn't migrate. Every operation is one `BEGIN IMMEDIATE`
-transaction, so the MCP server, the CLI and the dispatcher can all write safely. Its tables:
+One SQLite database (`<data_dir>/baton.db`) in WAL mode, at schema version 3. Every operation is one
+`BEGIN IMMEDIATE` transaction, so the MCP server, the CLI and the dispatcher can all write safely.
+
+**Migration.** A version-2 database is upgraded in place the first time version 3 opens it, in one
+transaction, so a crash leaves it at version 2. `messages` and `message_requests` are rebuilt, because a
+conversation message's copies share one id and a conversation send records several seqs; every row is
+copied, so no seq, cursor or retry identity changes. Any other version is refused before anything is
+written. Its tables:
 
 | Table | Holds |
 |---|---|
-| `messages` | message text, sender, recipient, seq, optional job |
+| `messages` | one row per copy: text, sender, recipient, seq, optional job, conversation, relayed words or host notice |
 | `mailboxes` | each recipient's last and read seq |
-| `message_requests` | retry identity of each send (digest only), for 31 days |
+| `message_requests` | retry identity of each send (digest only) and its seq or seqs, for 31 days |
+| `conversations`, `participants` | each conversation's title, creator, last `conversation_seq` and current participants |
 | `jobs` | title, body, state, waiting_on, revision, creator |
 | `job_moves` | retry identity (digest) and recorded outcome of each move, for 31 days |
 | `events` | the ordered log: kind, actor, audience, short summary, small JSON data (never message text) |
