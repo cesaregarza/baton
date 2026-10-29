@@ -377,20 +377,17 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
         return f"{self.config.public_url}/login?id={login_id}"
 
     def is_consent_redirect(self, location: str) -> bool:
-        """Whether `location` is exactly this host's redirect to its consent page for a login now in progress.
+        """Whether `location` is exactly the shape of this host's redirect to its consent page: one `id`, nothing else.
 
-        Compared whole, against a login id the host itself created, so a client
-        callback that merely looks like the consent page (same origin and path)
-        is never mistaken for it.
+        Compared whole, not by prefix. A redirect back to a client always adds
+        at least `error` or `code`, so a client callback that merely looks like
+        the consent page (same origin and path) is never mistaken for it.
         """
         try:
             pairs = parse_qsl(urlparse(location).query, keep_blank_values=True)
         except ValueError:
             return False
-        if len(pairs) != 1 or pairs[0][0] != "id":
-            return False
-        login_id = pairs[0][1]
-        return login_id in self.pending and location == self.consent_url(login_id)
+        return len(pairs) == 1 and pairs[0][0] == "id" and location == self.consent_url(pairs[0][1])
 
     def complete_login(self, login_id: str, passphrase: str, role: str) -> str | None:
         """The client's redirect URL on success; None for a wrong, expired or locked-out attempt."""
