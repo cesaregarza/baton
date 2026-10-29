@@ -46,6 +46,9 @@ HEADERS = {
 }
 READS = ("GET", "HEAD")
 CONVERSATION_PATH = re.compile(r"/c/([A-Za-z0-9_-]{1,64})")
+# A conversation seq: ASCII digits only (str.isdigit also takes superscripts), within SQLite's signed 64 bits.
+SEQ = re.compile(r"[0-9]{1,19}")
+MAX_SEQ = 2**63 - 1
 STYLE = """\
 body { font: 15px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 52rem; padding: 1rem; color: #1d1d1f; }
 a { color: #0b57d0; }
@@ -85,7 +88,10 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
     try:
         if match is None:
             return _page(200, "Conversations", _index(config, conn))
-        return _conversation(config, conn, match.group(1), parse_qs(url.query).get("after_seq", ["0"])[-1])
+        after = _after_seq(parse_qs(url.query, keep_blank_values=True).get("after_seq", ["0"])[-1])
+        if after is None:
+            return _page(400, "Bad request", "<p>after_seq must be a whole number of at most 19 digits.</p>")
+        return _conversation(config, conn, match.group(1), after)
     finally:
         conn.close()
 
@@ -129,23 +135,34 @@ def _index(config: Config, conn: Any) -> str:
             f'<ul>{items or "<li class=muted>None yet.</li>"}</ul>')
 
 
-def _conversation(config: Config, conn: Any, conversation_id: str, after: str) -> Response:
+def _after_seq(value: str) -> int | None:
+    if not SEQ.fullmatch(value) or int(value) > MAX_SEQ:
+        return None
+    return int(value)
+
+
+def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -> Response:
     viewer = config.dashboard.viewer_role
-    if not after.isdigit():
-        return _not_found()
+    if config.roles[viewer].can_view_all_conversations:
+        def read(after_seq: int, limit: int) -> dict[str, Any]:
+            return conversations.full_history(conn, conversation_id, after_seq, limit)
+        listed = conversations.list_all
+    else:
+        def read(after_seq: int, limit: int) -> dict[str, Any]:
+            return conversations.history(conn, viewer, conversation_id, after_seq, limit)
+        def listed(conn: Any) -> list[dict[str, Any]]:
+            return conversations.list_for(conn, viewer)
     try:
-        if config.roles[viewer].can_view_all_conversations:
-            page = conversations.full_history(conn, conversation_id, int(after), messages.MAX_PAGE_MESSAGES)
-            visible = {item["conversation_id"]: item for item in conversations.list_all(conn)}
-        else:
-            page = conversations.history(conn, viewer, conversation_id, int(after), messages.MAX_PAGE_MESSAGES)
-            visible = {item["conversation_id"]: item for item in conversations.list_for(conn, viewer)}
+        page = read(after, messages.MAX_PAGE_MESSAGES)
+        # A page ends at a byte budget as well as a row count, so ask whether anything follows it.
+        later = bool(page["messages"]) and bool(read(page["next_seq"], 1)["messages"])
     except BatonError:  # unknown, or one the viewer can't see: the same answer, so neither is revealed
         return _not_found()
+    visible = {item["conversation_id"]: item for item in listed(conn)}
     title = visible[conversation_id]["title"] if conversation_id in visible else conversation_id
     items = "".join(_message(item) for item in page["messages"])
     more = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
-            if len(page["messages"]) == messages.MAX_PAGE_MESSAGES else "")
+            if later else "")
     return _page(200, title, f'<p><a href="/">All conversations</a></p><h1>{_e(title)}</h1>'
                              f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{more}')
 
