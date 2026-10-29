@@ -52,6 +52,10 @@ def test_a_reply_over_mcp_carries_its_attention_and_resolves_its_parent_per_read
             # The three arguments belong to a conversation; a direct send has no thread to reply into.
             refused = payload(await assistant.call_tool("send_message", {
                 "to": "reviewer", "text": "x", "reply_to": question["message_id"]}))
+            # An empty one is still a field the caller supplied, so it is refused like any other.
+            empty = [payload(await assistant.call_tool("send_message", {"to": "reviewer", "text": "x", **field}))
+                     for field in ({"attention": []}, {"reply_to": ""})]
+            assert [page["error"] for page in empty] == ["invalid_request", "invalid_request"], empty
             outside = payload(await assistant.call_tool("send_message", {
                 "conversation_id": conversation_id, "text": "x", "attention": ["outsider"]}))
             unseen = payload(await assistant.call_tool("send_message", {

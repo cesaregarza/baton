@@ -240,6 +240,31 @@ def test_8_attention_and_needs_decision_belong_to_a_conversation(tmp_path) -> No
     assert count(db, "messages") == 0
 
 
+@pytest.mark.parametrize("extra", [{"attention": []}, {"reply_to": ""}])
+def test_8_an_empty_conversation_only_field_on_a_direct_send_is_refused_too(tmp_path, extra: Any) -> None:
+    """Supplying one of them at all is a mistake about the API, not an empty value to drop quietly."""
+    config = quiet_config(tmp_path, hooks=(QUIET,))
+    db = connect(config.db_path)
+    [field] = extra
+    detail = refused("invalid_request", messages.send, db, sender="orchestrator", recipient=QUIET, text="x",
+                     **extra)
+    assert detail.startswith(field) and "conversation" in detail, detail
+    assert (count(db, "messages"), count(db, "events"), count(db, "message_requests")) == (0, 0, 0)
+    assert woken(config) == []
+    assert queued(db, QUIET) == []
+
+
+def test_8_a_flag_left_unset_is_not_a_supplied_field(tmp_path) -> None:
+    """needs_decision is False when it is left out, so a direct send that passes nothing still goes."""
+    config = quiet_config(tmp_path, hooks=(QUIET,))
+    db = connect(config.db_path)
+    sent = messages.send(db, sender="orchestrator", recipient=QUIET, text="plain", reply_to=None,
+                         attention=None, needs_decision=False)
+    assert sent["created"] is True and count(db, "messages") == 1
+    assert [(m["reply_to"], m["attention"], m["needs_decision"]) for m in
+            messages.read(db, QUIET, after_seq=0)["messages"]] == [(None, None, False)]
+
+
 def test_8_attention_is_part_of_a_sends_retry_identity(tmp_path) -> None:
     config = quiet_config(tmp_path)
     db = connect(config.db_path)
