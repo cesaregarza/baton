@@ -132,7 +132,11 @@ def test_the_tools_carry_a_topic_and_filter_by_it(topic_host, capsys) -> None:
                     "forbidden": payload(await reviewer.call_tool("set_topic", {
                         "conversation_id": made["conversation_id"], "topic": "mine"})),
                     "malformed": payload(await operator.call_tool("set_topic", {
-                        "conversation_id": made["conversation_id"], "topic": "Bad"}))}
+                        "conversation_id": made["conversation_id"], "topic": "Bad"})),
+                    # Leaving the argument out is not a way to clear a topic: it has no default, so an
+                    # omission is a bad call rather than a quiet erasure.
+                    "omitted": (await operator.call_tool("set_topic", {
+                        "conversation_id": made["conversation_id"]})).is_error}
 
     seen = anyio.run(run)
     assert topics(seen["all"]) == [("a longer word", "projectile"), ("a subtopic", None),
@@ -140,6 +144,7 @@ def test_the_tools_carry_a_topic_and_filter_by_it(topic_host, capsys) -> None:
     assert topics(seen["filtered"]) == [("the project", "project/renamed")]
     assert seen["forbidden"]["error"] == "forbidden"
     assert seen["malformed"]["error"] == "invalid_request"
+    assert seen["omitted"] is True, "omitting the topic was accepted, which would clear it by accident"
 
 
 # The local CLI --------------------------------------------------------------------------------------------
@@ -209,6 +214,23 @@ def test_the_remote_command_carries_a_topic_as_far_as_the_local_one(topic_host, 
     code, forbidden = remote(host, capsys, monkeypatch, "conversation", "topic", sub["conversation_id"],
                              "--set", "mine", token=host.tokens["reviewer"])
     assert (code, forbidden["error"]) == (1, "forbidden")
+
+
+def test_the_host_judges_a_remote_caller_by_the_same_rules_as_a_local_one(topic_host, capsys,
+                                                                         monkeypatch) -> None:
+    """Opening a conversation remotely is still the host's decision: the permission and membership hold."""
+    host = topic_host
+    code, forbidden = remote(host, capsys, monkeypatch, "conversation", "new", "--title", "not mine to open",
+                             "--with", GROUP, "--topic", "project", token=host.tokens["reviewer"])
+    assert (code, forbidden["error"]) == (1, "forbidden"), forbidden
+    code, outside = remote(host, capsys, monkeypatch, "conversation", "new", "--title", "without me",
+                           "--with", "orchestrator,reviewer,assistant", "--topic", "project")
+    assert (code, outside["error"]) == (1, "invalid_request"), outside
+    db = connect(host.config.db_path)
+    try:
+        assert db.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+    finally:
+        db.close()
 
 
 # The dashboard --------------------------------------------------------------------------------------------

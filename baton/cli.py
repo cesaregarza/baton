@@ -307,7 +307,7 @@ def _remote(args: argparse.Namespace) -> Any:
     if command == "conversation list":
         return _call(args, "list_conversations", {"topic": args.topic})
     if command == "conversation topic":
-        # `--clear` means null, which _call would strip, so send it as the explicit argument it is.
+        # `--clear` means null, which _call strips, and set_topic requires the argument: send it directly.
         return remote.call(args.host, remote.token(), "set_topic",
                            {"conversation_id": args.conversation_id,
                             "topic": None if args.clear else args.topic})

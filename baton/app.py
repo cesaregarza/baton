@@ -142,9 +142,15 @@ class Tools:
     def set_topic(
         self, role: str, conversation_id: str,
         topic: Annotated[str | None, Field(
-            description="The new topic, 1-2 lowercase slug segments, or null to clear it.")] = None,
+            description="The new topic, 1-2 lowercase slug segments, or null to clear it. Required: say "
+                        "what the topic becomes, so that forgetting the argument cannot clear one.")],
     ) -> dict[str, Any]:
-        """Set, rename or clear a conversation's topic. Its id never changes, so nothing else moves."""
+        """Set, rename or clear a conversation's topic. Its id never changes, so nothing else moves.
+
+        `topic` has no default on purpose. A tool that cleared the topic when an argument was left out
+        would make an omission destructive, and it would let any caller that drops nulls clear one by
+        accident -- the remote command does drop them, which is why it sends this argument explicitly.
+        """
         with self._conn() as conn:
             return conversations.set_topic(conn, self._config, conversation_id, topic, actor=role)
 
