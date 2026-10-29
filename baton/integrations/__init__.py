@@ -8,7 +8,9 @@ only when its table enables it. A role uses one for its wakes with
 The core keeps everything it already owns: roles and credentials, the event
 log, wake coalescing, leases, backoff, attempts and `baton wakes`. An
 integration only adds MCP methods to the server and takes over the last step
-of delivering a content-free wake.
+of delivering a content-free wake. One that has work of its own, such as
+`decision_push`, may also define `run(stop)`: `baton serve` runs it on its own
+thread until the host stops.
 """
 
 from __future__ import annotations

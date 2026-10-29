@@ -377,7 +377,8 @@ and exits with status 1. A configuration problem exits with status 2.
 - [docs/exposing.md](docs/exposing.md): reaching the host from other machines.
 - [SECURITY.md](SECURITY.md): auth, the threat model, and what the host stores.
 - [baton.example.toml](baton.example.toml): every config option.
-- [docs/integrations/](docs/integrations/): optional integrations.
+- [docs/integrations/](docs/integrations/): optional integrations, including
+  [a content-free push when a decision is waiting](docs/integrations/decision-push.md).
 
 ## Development
 

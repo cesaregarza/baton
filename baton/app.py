@@ -373,6 +373,10 @@ def serve(config: Config) -> None:
     stop = threading.Event()
     dispatcher = Dispatcher(config, integrations=integrations)
     threading.Thread(target=dispatcher.run, args=(stop,), daemon=True, name="wakes").start()
+    for name, integration in integrations.items():
+        loop = getattr(integration, "run", None)
+        if loop is not None:  # an integration with work of its own runs it beside the server, until stop
+            threading.Thread(target=loop, args=(stop,), daemon=True, name=name).start()
     view = dashboard.start(config)
     try:
         uvicorn.run(app, host=config.listen_host, port=config.listen_port, log_level="info")
