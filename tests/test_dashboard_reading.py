@@ -277,9 +277,10 @@ def test_decisions_not_addressed_to_the_viewer_sit_in_a_collapsed_labelled_secti
     config = page_config(tmp_path)
     mixed(config)
     body = text(get(config, "/needs"))
-    match = re.search(r"<details>\s*<summary>([^<]*)</summary>(.*?)</details>", body, re.S)
+    match = re.search(r"<details[^>]*>\s*<summary>([^<]*)</summary>(.*?)</details>", body, re.S)
     assert match, "a collapsed section, closed by default"
-    assert "open" not in body[body.index("<details"):body.index("<details") + 12]
+    opening = body[body.index("<details"):body.index(">", body.index("<details")) + 1]
+    assert "open" not in opening, opening
     assert "Decisions not addressed to you (2)" in match.group(1)
     others = match.group(2)
     assert sorted(needs_items(others)) == ["anyone, A or B?", "reviewer, A or B?"]
@@ -341,3 +342,87 @@ def test_job_ids_are_shortened_on_narrow_screens_with_the_full_id_kept(tmp_path)
     narrow = re.search(r"@media \(max-width: 480px\) \{(.*?)\}\s*\}", dashboard.STYLE, re.S)
     assert narrow and ".id" in narrow.group(1) and "text-overflow: ellipsis" in narrow.group(1)
     assert ".id" in css
+
+
+def test_advancing_one_needs_list_keeps_the_others_where_they_are(tmp_path, monkeypatch) -> None:
+    config = page_config(tmp_path)
+    conn = connect(config.db_path)
+    try:
+        mine = made(conn, config, "Three lists", MINE, "alpha")
+        for index in range(5):
+            conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"for you {index}",
+                               attention=["operator"])
+            conversations.send(conn, config, sender="orchestrator", conversation_id=mine, text=f"other {index}",
+                               attention=["reviewer"], needs_decision=True)
+            jobs.create(conn, config.jobs, request_id=f"20261029T120000Z-three-{index}", actor="orchestrator",
+                        title=f"Job {index}")
+    finally:
+        conn.close()
+    for name in ("MAX_NEEDS", "MAX_NEEDS_JOBS"):
+        monkeypatch.setattr(dashboard, name, 2)
+    body = text(get(config, "/needs?page=2&others_page=2&jobs_page=2"))
+    hrefs = links(body)
+    names = ("page", "others_page", "jobs_page")
+    onward = {name: next(href for href in hrefs if f"{name}=3" in href) for name in names}
+    for name, href in onward.items():
+        for other in {"page", "others_page", "jobs_page"} - {name}:
+            assert f"{other}=2" in href, (name, href)
+    filtered = links(text(get(config, "/needs?topic=alpha&page=2&others_page=2")))
+    assert all("topic=alpha" in href for href in filtered if "page=" in href)
+    assert any("others_page=2" in href and "page=3" in href.replace("others_page", "") for href in filtered)
+
+
+
+def three_lists(config: Any) -> None:
+    """Five messages for the viewer, five decisions for someone else and five jobs, for small page caps."""
+    conn = connect(config.db_path)
+    try:
+        mine = made(conn, config, "Navigation", MINE, "alpha")
+        for index in range(5):
+            conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"for you {index}",
+                               attention=["operator"])
+            conversations.send(conn, config, sender="orchestrator", conversation_id=mine, text=f"other {index}",
+                               attention=["reviewer"], needs_decision=True)
+            jobs.create(conn, config.jobs, request_id=f"20261029T120000Z-nav-{index}", actor="orchestrator",
+                        title=f"Nav job {index}")
+    finally:
+        conn.close()
+
+
+def details_tag(body: str) -> str:
+    start = body.index("<details")
+    return body[start:body.index(">", start) + 1]
+
+
+def test_paging_the_collapsed_decisions_reloads_with_them_open(tmp_path, monkeypatch) -> None:
+    config = page_config(tmp_path)
+    three_lists(config)
+    monkeypatch.setattr(dashboard, "MAX_NEEDS", 2)
+    first = text(get(config, "/needs"))
+    assert "open" not in details_tag(first)
+    older = next(href for href in links(first) if "others_page=2" in href)
+    reloaded = text(get(config, older.split("#")[0]))
+    assert "open" in details_tag(reloaded)  # the section the reader asked for stays open
+    back = [href for href in links(reloaded) if href.endswith("#decisions") and "others_page" not in href]
+    assert back, "a way back to the first page of decisions, landing on them"
+
+
+def test_every_paging_link_lands_on_its_own_list(tmp_path, monkeypatch) -> None:
+    config = page_config(tmp_path)
+    three_lists(config)
+    for name in ("MAX_NEEDS", "MAX_NEEDS_JOBS"):
+        monkeypatch.setattr(dashboard, name, 2)
+    body = text(get(config, "/needs?page=2&others_page=2&jobs_page=2"))
+    for param, anchor in (("page", "#for-you"), ("others_page", "#decisions"), ("jobs_page", "#jobs")):
+        onward = [href for href in links(body) if re.search(rf"(\?|&){param}=3(&|#|$)", href)]
+        assert onward and all(href.endswith(anchor) for href in onward), (param, onward)
+    for anchor in ('id="for-you"', 'id="decisions"', 'id="jobs"'):
+        assert anchor in body, anchor
+
+
+def test_the_needs_page_offers_jumps_to_its_lists(tmp_path) -> None:
+    config = page_config(tmp_path)
+    three_lists(config)
+    body = text(get(config, "/needs"))
+    top = body[:body.index('id="for-you"')]
+    assert 'href="#for-you"' in top and 'href="#jobs"' in top
