@@ -118,7 +118,7 @@ class Tools:
         self, role: str, conversation_id: str, after_seq: Annotated[int, Field(ge=0)] = 0,
         limit: Annotated[int, Field(ge=1, le=messages.MAX_PAGE_MESSAGES)] = 50,
     ) -> dict[str, Any]:
-        """A conversation since you joined, your own messages included, numbered in conversation order.
+        """A conversation as you saw it, what you received and sent, numbered in conversation order.
 
         Separate from delivery: it marks nothing read, so read_messages and wait still return each
         unread message once.

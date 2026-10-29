@@ -8,8 +8,7 @@ wakes and retention. The sender gets no copy, so it is never woken by its own
 message.
 
 `history` is separate from that delivery: it returns the conversation as a
-participant has seen it since joining, its own messages included, and moves
-no bookmark.
+participant has seen it, its own messages included, and moves no bookmark.
 
 The config says which roles may create conversations and manage
 participants. A message's author is always the sender, the role its
@@ -76,7 +75,7 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str, 
         stamp = events.now()
         conn.execute("INSERT INTO conversations (id, request_id, request_digest, title, created_by, created_at)"
                      " VALUES (?, ?, ?, ?, ?, ?)", (conversation_id, request_id, digest, title, actor, stamp))
-        conn.executemany("INSERT INTO participants (conversation_id, role, joined_seq, added_at) VALUES (?, ?, 0, ?)",
+        conn.executemany("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
                          [(conversation_id, role, stamp) for role in roles])
         summary = _summary(conn, _load(conn, conversation_id))
     return {**summary, "request_id": request_id, "created": True}
@@ -85,30 +84,23 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str, 
 def list_for(conn: sqlite3.Connection, role: str) -> list[dict[str, Any]]:
     """The conversations `role` takes part in, newest first, with their participants."""
     rows = conn.execute("SELECT c.* FROM conversations c JOIN participants p ON p.conversation_id = c.id"
-                        " WHERE p.role = ? AND p.left_seq IS NULL ORDER BY c.created_at DESC LIMIT 200",
-                        (role,)).fetchall()
+                        " WHERE p.role = ? ORDER BY c.created_at DESC LIMIT 200", (role,)).fetchall()
     return [_summary(conn, row) for row in rows]
 
 
 def add(conn: sqlite3.Connection, config: Config, conversation_id: str, participant: str, *,
         actor: str) -> dict[str, Any]:
-    """Add a participant and tell every participant, the new one included. Adding a present one changes nothing.
-
-    The new participant's history starts at its join, with the notice of it.
-    A role added back after a removal starts afresh from the new join.
-    """
+    """Add a participant and tell every participant, the new one included. Adding a present one changes nothing."""
     settings = _may_manage(config, actor, participant)
     with transaction(conn):
-        conversation = _load(conn, conversation_id)
+        _load(conn, conversation_id)
         current = _participants(conn, conversation_id)
         if participant not in current:
             if len(current) >= settings.max_participants:
                 raise InvalidRequest(f"{conversation_id} already has the most participants allowed, "
                                      f"{settings.max_participants}")
-            conn.execute("INSERT INTO participants (conversation_id, role, joined_seq, added_at) VALUES (?, ?, ?, ?)"
-                         " ON CONFLICT (conversation_id, role) DO UPDATE SET joined_seq = excluded.joined_seq,"
-                         " left_seq = NULL, added_at = excluded.added_at",
-                         (conversation_id, participant, conversation["last_seq"], events.now()))
+            conn.execute("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
+                         (conversation_id, participant, events.now()))
             _fan_out(conn, conversation_id, [*current, participant], sender=None, text=f"{actor} added {participant}",
                      notice={"event": "participant_added", "participant": participant, "by": actor})
         participants = _participants(conn, conversation_id)
@@ -120,13 +112,13 @@ def remove(conn: sqlite3.Connection, config: Config, conversation_id: str, parti
     """Remove a participant and tell the ones who remain; it receives nothing from then on."""
     _may_manage(config, actor, participant)
     with transaction(conn):
-        conversation = _load(conn, conversation_id)
+        _load(conn, conversation_id)
         current = _participants(conn, conversation_id)
         if participant in current:
             if len(current) <= MIN_PARTICIPANTS:
                 raise InvalidRequest(f"a conversation keeps at least {MIN_PARTICIPANTS} participants")
-            conn.execute("UPDATE participants SET left_seq = ? WHERE conversation_id = ? AND role = ?",
-                         (conversation["last_seq"], conversation_id, participant))
+            conn.execute("DELETE FROM participants WHERE conversation_id = ? AND role = ?",
+                         (conversation_id, participant))
             _fan_out(conn, conversation_id, [role for role in current if role != participant], sender=None,
                      text=f"{actor} removed {participant}",
                      notice={"event": "participant_removed", "participant": participant, "by": actor})
@@ -182,26 +174,27 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
 
 def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq: int = 0,
             limit: int = 50) -> dict[str, Any]:
-    """The conversation since `role` joined, its own messages included, oldest first, after `after_seq`.
+    """The conversation as `role` saw it, oldest first, after `after_seq`: what it received and what it sent.
 
-    `seq` here is the conversation's order, the same for every participant.
-    Separate from delivery: it marks nothing read and moves no cursor, so
-    `read_messages` and `wait` still hand over each unread message once. A
-    message is gone from history once retention deletes the reader's copy.
+    That is exactly the messages sent while it was a participant, so a role
+    added later sees nothing from before its join. Only a current participant
+    may read it. `seq` here is the conversation's order, the same for every
+    participant. Separate from delivery: it marks nothing read and moves no
+    cursor, so `read_messages` and `wait` still hand over each unread message
+    once. A message is gone from history once retention deletes the reader's
+    copy.
     """
     if not 1 <= limit <= messages.MAX_PAGE_MESSAGES or after_seq < 0:
         raise InvalidRequest(f"limit must be 1-{messages.MAX_PAGE_MESSAGES} and after_seq at least 0")
     with transaction(conn):
         _load(conn, conversation_id)
-        member = conn.execute("SELECT joined_seq FROM participants WHERE conversation_id = ? AND role = ?"
-                              " AND left_seq IS NULL", (conversation_id, role)).fetchone()
-        if member is None:
+        if role not in _participants(conn, conversation_id):
             raise NotAParticipant(f"{role} is not in {conversation_id}")
         # The reader's copy of each message to it, and one copy of each it sent, which it holds none of.
         rows = conn.execute("SELECT * FROM messages WHERE conversation_id = ? AND conversation_seq > ?"
                             " AND (recipient = ? OR sender = ?) GROUP BY conversation_seq"
-                            " ORDER BY conversation_seq LIMIT ?",
-                            (conversation_id, max(after_seq, member["joined_seq"]), role, role, limit)).fetchall()
+                            " ORDER BY conversation_seq LIMIT ?", (conversation_id, after_seq, role, role, limit)
+                            ).fetchall()
     page = messages.as_page(rows, _history_entry)
     return {"messages": page, "next_seq": page[-1]["seq"] if page else after_seq}
 
@@ -268,8 +261,7 @@ def _load(conn: sqlite3.Connection, conversation_id: str) -> sqlite3.Row:
 
 
 def _participants(conn: sqlite3.Connection, conversation_id: str) -> list[str]:
-    rows = conn.execute("SELECT role FROM participants WHERE conversation_id = ? AND left_seq IS NULL ORDER BY role",
-                        (conversation_id,))
+    rows = conn.execute("SELECT role FROM participants WHERE conversation_id = ? ORDER BY role", (conversation_id,))
     return [row["role"] for row in rows]
 
 

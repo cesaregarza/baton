@@ -82,13 +82,9 @@ _SCHEMA = (
         last_seq INTEGER NOT NULL DEFAULT 0,
         escalated_at TEXT
     )""",
-    # A role's current membership: its history starts after `joined_seq`. A
-    # removed role keeps its row with `left_seq` set, and is no participant.
     """CREATE TABLE IF NOT EXISTS participants (
         conversation_id TEXT NOT NULL REFERENCES conversations(id),
         role TEXT NOT NULL,
-        joined_seq INTEGER NOT NULL,
-        left_seq INTEGER,
         added_at TEXT NOT NULL,
         PRIMARY KEY (conversation_id, role)
     )""",

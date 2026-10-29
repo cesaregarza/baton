@@ -151,7 +151,7 @@ def _add_conversation_commands(commands: Any) -> None:
     listing = _with_role(conversation.add_parser("list", help="the conversations your role takes part in"))
     listing.set_defaults(handler=_list_conversations)
 
-    history = _with_role(conversation.add_parser("history", help="a conversation since you joined; marks nothing read"))
+    history = _with_role(conversation.add_parser("history", help="a conversation as you saw it; marks nothing read"))
     history.add_argument("conversation_id")
     history.add_argument("--after-seq", type=int, default=0)
     history.add_argument("--limit", type=int, default=50)

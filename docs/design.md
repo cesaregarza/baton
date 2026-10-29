@@ -95,14 +95,15 @@ woken once per unread batch, and the sender is never woken by its own message.
 (`not_a_participant`).
 
 **History.** `read_history(conversation_id, after_seq?)` is kept apart from delivery. It returns the
-conversation since the reader joined, the reader's own messages included, each with `from_role` and
+conversation as the reader saw it, its own messages included, each with `from_role` and
 `message_id`. Its `seq` is the conversation's own gap-free order (`conversation_seq`), the same for every
 participant. It marks nothing read and moves no cursor, so `read_messages` and `wait` still hand over each
-unread message exactly once. Pages have the same count and size limits as `read_messages`. A message drops
-out of a reader's history once retention deletes the reader's copy. A participant's history covers only its
-current membership: a role added later sees the conversation from its join on, starting with the notice
-of it. A removed role can't read the history at all, but the messages it already received stay in its
-mailbox.
+unread message exactly once. Pages have the same count and size limits as `read_messages`. A reader's
+history is what it received and what it sent, which is exactly the messages sent while it was a
+participant: a role added later sees the conversation from the notice of its join on, and a role added
+back after a removal sees each stretch it was in. A message drops out of a reader's history once
+retention deletes the reader's copy. A removed role can't read the history at all, but the messages it
+already received stay in its mailbox.
 
 **Participants.** Adding a participant sends a host notice to every participant, the new one included.
 Removing one sends a notice to those who remain, and the removed role receives nothing from then on. A
@@ -228,7 +229,7 @@ written. Its tables:
 | `messages` | one row per copy: text, sender, recipient, seq, optional job, conversation, relayed words or host notice |
 | `mailboxes` | each recipient's last and read seq |
 | `message_requests` | retry identity of each send (digest only) and its seq or seqs, for 31 days |
-| `conversations`, `participants` | each conversation's title, creator, last `conversation_seq`, and each participant's membership (`joined_seq`, `left_seq`) |
+| `conversations`, `participants` | each conversation's title, creator, last `conversation_seq` and current participants |
 | `jobs` | title, body, state, waiting_on, revision, creator |
 | `job_moves` | retry identity (digest) and recorded outcome of each move, for 31 days |
 | `events` | the ordered log: kind, actor, audience, short summary, small JSON data (never message text) |

@@ -152,15 +152,15 @@ description = "Remote assistant"
 ```sh
 baton conversation new --as orchestrator --title "Release plan" --with orchestrator,reviewer,assistant
 baton message --as orchestrator --conversation <conversation_id> --text "Draft is in; please review."
-baton conversation history --as orchestrator <conversation_id>    # the thread since you joined; marks nothing read
+baton conversation history --as orchestrator <conversation_id>    # the thread as you saw it; marks nothing read
 baton conversation add --as orchestrator <conversation_id> <role>  # every participant gets a host notice
 ```
 
 Over MCP, `reviewer` and `assistant` send with `send_message(conversation_id=..., text=...)` and receive as
 usual with `read_messages` or `wait`. Each message carries its `conversation_id` and its `from_role`.
 
-**History is separate from delivery.** `read_history(conversation_id)` returns the conversation since you
-joined, your own messages included, numbered in conversation order. It marks nothing read, so
+**History is separate from delivery.** `read_history(conversation_id)` returns the conversation as you saw
+it, the messages you received and the ones you sent, numbered in conversation order. It marks nothing read, so
 `read_messages` and `wait` still hand over each unread message exactly once. Only current participants can
 read a conversation's history. A role added later sees it from its join on, and a removed role can't read it
 at all, though the messages it already received stay in its mailbox.
@@ -187,7 +187,7 @@ Every tool acts as the caller's role, which comes from the caller's credential.
 | `move_job(job_id, to_state, note?, request_id?, expected_revision?)` | Move a job along the state graph. A retry with the same `request_id` replays the original outcome. `expected_revision` refuses the move if the job's state has changed since you read it |
 | `get_job`, `list_jobs`, `read_job_events` | Read jobs and their history |
 | `create_conversation(title, participants, request_id?)`, `list_conversations()` | Open a conversation you take part in, or list yours. Present when conversations are enabled |
-| `read_history(conversation_id, after_seq?, limit?)` | A conversation since you joined, your own messages included. Marks nothing read |
+| `read_history(conversation_id, after_seq?, limit?)` | A conversation as you saw it, your own messages included. Marks nothing read |
 | `add_participant(conversation_id, participant)`, `remove_participant(...)` | Change who is in a conversation. Needs `can_manage_participants` |
 
 ## CLI
