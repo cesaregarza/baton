@@ -119,7 +119,9 @@ def test_a_backlog_from_before_it_was_enabled_is_not_pushed(tmp_path) -> None:
     cid = start(db, config)
     say(db, config, "orchestrator", cid, "an old decision", needs_decision=True)
     channel = Channel()
-    pusher(config, channel).poll_once()
+    push = pusher(config, channel)
+    push.poll_once()
+    push.poll_once()  # and not on a later pass either: the first pass starts after it
     assert channel.calls == []
 
 
@@ -315,7 +317,7 @@ def test_it_is_off_unless_enabled_and_serve_runs_it_when_it_is(tmp_path, monkeyp
     ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "token": "inline"},
      "integrations.decision_push.token"),
     ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "secret_env": "not a name"},
-     "integrations.decision_push.secret_env"),
+     "integrations.decision_push.secret_env must be the name of an environment variable"),
     ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "secret_env": "BATON_UNSET_PUSH_TOKEN"},
      "BATON_UNSET_PUSH_TOKEN"),
     ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "max_per_hour": 0},
