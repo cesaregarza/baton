@@ -54,6 +54,8 @@ class Role:
     name: str
     description: str = ""
     wake: Wake = field(default_factory=Wake)
+    can_create_conversations: bool = False
+    can_manage_participants: bool = False
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,17 @@ class Jobs:
 
 
 @dataclass(frozen=True)
+class Conversations:
+    """Group conversations, off unless enabled. The limits apply to each conversation."""
+
+    enabled: bool = False
+    max_participants: int = 8
+    max_messages_per_hour: int = 30
+    # Woken once an hour at most while a conversation is over its limit.
+    escalation_role: str | None = None
+
+
+@dataclass(frozen=True)
 class Config:
     public_url: str
     listen_host: str
@@ -104,6 +117,7 @@ class Config:
     allowed_origins: tuple[str, ...] = ()
     # Raw `[integrations.<name>]` tables; each integration validates its own (see baton.integrations).
     integrations: dict[str, dict[str, Any]] = field(default_factory=dict)
+    conversations: Conversations = field(default_factory=Conversations)
 
     @property
     def resource_url(self) -> str:
@@ -168,6 +182,7 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         jobs=_jobs(raw.get("jobs"), roles),
         allowed_origins=tuple(str(origin) for origin in host.get("allowed_origins", [])),
         integrations=integrations,
+        conversations=_conversations(raw.get("conversations", {}), roles),
     )
 
 
@@ -208,7 +223,22 @@ def _role(name: str, table: dict[str, Any]) -> Role:
     return Role(name, str(table.get("description", "")), Wake(
         webhook=webhook, secret_env=wake.get("secret_env"), command=tuple(command), integration=integration,
         timeout_seconds=_number(wake, "timeout_seconds", 10.0, f"roles.{name}.wake.timeout_seconds", 0.1, 300),
-    ))
+    ), _boolean(table, "can_create_conversations", False, f"roles.{name}.can_create_conversations"),
+        _boolean(table, "can_manage_participants", False, f"roles.{name}.can_manage_participants"))
+
+
+def _conversations(table: dict[str, Any], roles: dict[str, Role]) -> Conversations:
+    escalation_role = table.get("escalation_role")
+    if escalation_role is not None and escalation_role not in roles:
+        raise ConfigError(f"conversations.escalation_role names unknown role {escalation_role!r}")
+    return Conversations(
+        enabled=_boolean(table, "enabled", False, "conversations.enabled"),
+        max_participants=_number(table, "max_participants", 8, "conversations.max_participants", 2, 1000,
+                                 integer=True),
+        max_messages_per_hour=_number(table, "max_messages_per_hour", 30, "conversations.max_messages_per_hour",
+                                      1, 100_000, integer=True),
+        escalation_role=escalation_role,
+    )
 
 
 def _integrations(tables: dict[str, Any], roles: dict[str, Role]) -> dict[str, dict[str, Any]]:

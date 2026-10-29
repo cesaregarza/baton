@@ -41,3 +41,31 @@ class MailboxFull(BatonError):
 
 class RequestTooOld(BatonError):
     code = "request_too_old"
+
+
+class Forbidden(BatonError):
+    """The caller's role lacks the permission the config gives for this."""
+
+    code = "forbidden"
+
+
+class ConversationsDisabled(BatonError):
+    code = "conversations_disabled"
+
+
+class UnknownConversation(BatonError):
+    code = "unknown_conversation"
+
+
+class NotAParticipant(BatonError):
+    code = "not_a_participant"
+
+
+class ConversationFull(BatonError):
+    """A recipient's mailbox is full, so no participant got the message. Retry after that role reads."""
+
+    code = "conversation_full"
+
+
+class ConversationRateLimited(BatonError):
+    code = "conversation_rate_limited"

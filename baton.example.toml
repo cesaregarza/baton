@@ -17,6 +17,10 @@ description = "Breaks work into jobs and reviews results"
 [roles.worker]
 description = "Picks up jobs and reports back"
 
+# Optional, with [conversations] enabled: what a role may do in group conversations (both default to false).
+# can_create_conversations = true
+# can_manage_participants = true
+
 # Optional: wake a role when something is waiting for it. Use one of: a webhook, a command, an integration.
 # [roles.worker.wake]
 # webhook = "https://hooks.example.com/baton"
@@ -24,6 +28,13 @@ description = "Picks up jobs and reports back"
 # command = ["/usr/local/bin/notify-worker"]   # argv, no shell; the wake JSON arrives on stdin
 # integration = "<name>"                       # an enabled integration; see docs/integrations/
 # timeout_seconds = 10
+
+# Optional: group conversations among three or more roles. Off unless enabled.
+# [conversations]
+# enabled = true
+# max_participants = 8                        # per conversation, at least 2
+# max_messages_per_hour = 30                  # per conversation; past it, sends are refused
+# escalation_role = "planner"                 # woken at most once an hour while a conversation is over its limit
 
 # Bearer tokens: create with `baton token new --name <name> --role <role>` and paste the printed entry.
 # [[auth.tokens]]

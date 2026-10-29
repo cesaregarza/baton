@@ -18,9 +18,9 @@ import sys
 from typing import Any
 
 from baton import config as config_module
-from baton import datadir, inbox, jobs, messages, wakes
+from baton import conversations, datadir, inbox, jobs, messages, wakes
 from baton.config import Config, ConfigError
-from baton.errors import BatonError
+from baton.errors import BatonError, InvalidRequest
 from baton.store import connect
 
 
@@ -60,10 +60,14 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("serve", help="run the MCP server and the wake dispatcher")
 
-    message = _with_role(commands.add_parser("message", help="send a message to a role"))
-    message.add_argument("--to", required=True)
+    message = _with_role(commands.add_parser("message", help="send a message to a role or a conversation"))
+    target = message.add_mutually_exclusive_group()
+    target.add_argument("--to")
+    target.add_argument("--conversation", dest="conversation_id", help="every other participant of a conversation")
     message.add_argument("--text", help="the message; omit to read it from stdin")
     message.add_argument("--job", dest="job_id", help="the job it is about")
+    message.add_argument("--relayed-json", help="words passed on from someone else: a JSON list of "
+                                                "{source, at, text}, kept apart from --text")
     message.add_argument("--request-id", help="reuse a printed request_id to retry safely")
     message.set_defaults(handler=_message)
 
@@ -79,6 +83,7 @@ def _parser() -> argparse.ArgumentParser:
         conn, args.role, timeout_seconds=args.timeout)))
 
     _add_job_commands(commands)
+    _add_conversation_commands(commands)
 
     token = commands.add_parser("token", help="bearer tokens").add_subparsers(dest="token_command", required=True)
     new = token.add_parser("new", help="make a token for a role; prints it once, with the config entry")
@@ -132,6 +137,34 @@ def _add_job_commands(commands: Any) -> None:
         conn, args.job_id, args.after_seq)))
 
 
+def _add_conversation_commands(commands: Any) -> None:
+    conversation = commands.add_parser("conversation", help="group conversations").add_subparsers(
+        dest="conversation_command", required=True)
+    new = _with_role(conversation.add_parser("new", help="open a conversation; you must be a participant"))
+    new.add_argument("--title", required=True)
+    new.add_argument("--with", dest="participants", required=True, help="comma-separated roles, yourself included")
+    new.add_argument("--request-id")
+    new.set_defaults(handler=lambda config, args: _db(config, lambda conn: conversations.create(
+        conn, config, actor=args.role, title=args.title, participants=args.participants.split(","),
+        request_id=args.request_id)))
+
+    listing = _with_role(conversation.add_parser("list", help="the conversations your role takes part in"))
+    listing.set_defaults(handler=_list_conversations)
+
+    history = _with_role(conversation.add_parser("history", help="a conversation since you joined; marks nothing read"))
+    history.add_argument("conversation_id")
+    history.add_argument("--after-seq", type=int, default=0)
+    history.add_argument("--limit", type=int, default=50)
+    history.set_defaults(handler=_history)
+
+    for name, operation in (("add", conversations.add), ("remove", conversations.remove)):
+        change = _with_role(conversation.add_parser(name, help=f"{name} a participant"))
+        change.add_argument("conversation_id")
+        change.add_argument("participant")
+        change.set_defaults(handler=lambda config, args, operation=operation: _db(config, lambda conn: operation(
+            conn, config, args.conversation_id, args.participant, actor=args.role)))
+
+
 def _with_role(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--as", dest="role", default=os.environ.get("BATON_ROLE"),
                         help="the role to act as (default: $BATON_ROLE)")
@@ -147,10 +180,32 @@ def _db(config: Config, operation: Any) -> Any:
 
 
 def _message(config: Config, args: argparse.Namespace) -> dict[str, Any]:
-    config.require_role(args.to)
+    if args.to is None and args.conversation_id is None:
+        raise InvalidRequest("name a recipient with --to or a conversation with --conversation")
+    if args.to is not None:
+        config.require_role(args.to)
+    try:
+        relayed = json.loads(args.relayed_json) if args.relayed_json is not None else None
+    except json.JSONDecodeError:
+        raise InvalidRequest("--relayed-json must be JSON: a list of {source, at, text} entries") from None
     text = args.text if args.text is not None else sys.stdin.read()
+    if args.conversation_id is not None:
+        return _db(config, lambda conn: conversations.send(
+            conn, config, sender=args.role, conversation_id=args.conversation_id, text=text, relayed=relayed,
+            request_id=args.request_id, job_id=args.job_id))
     return _db(config, lambda conn: messages.send(conn, sender=args.role, recipient=args.to, text=text,
-                                                  request_id=args.request_id, job_id=args.job_id))
+                                                  request_id=args.request_id, job_id=args.job_id, relayed=relayed))
+
+
+def _list_conversations(config: Config, args: argparse.Namespace) -> list[dict[str, Any]]:
+    conversations.require_enabled(config)
+    return _db(config, lambda conn: conversations.list_for(conn, args.role))
+
+
+def _history(config: Config, args: argparse.Namespace) -> dict[str, Any]:
+    conversations.require_enabled(config)
+    return _db(config, lambda conn: conversations.history(conn, args.role, args.conversation_id, args.after_seq,
+                                                          args.limit))
 
 
 def _new_token(config: Config, args: argparse.Namespace) -> dict[str, Any]:

@@ -3,7 +3,8 @@
 Each recipient's messages carry a gap-free `seq`. A reader passes the last
 `seq` it has seen and gets what follows; the host also remembers the last seq
 it delivered (`read_seq`), so a reader that passes nothing gets only unread
-messages. A message may name a job it is about.
+messages. A message may name a job it is about, belong to a conversation (see
+baton.conversations), and carry words relayed from someone else.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import json
 import re
 import sqlite3
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -37,20 +39,25 @@ REQUEST_MAX_AGE = timedelta(days=30)
 REQUEST_MAX_SKEW = timedelta(minutes=5)
 IDENTITY_RETENTION = REQUEST_MAX_AGE + timedelta(days=1)
 
+# The actor a host notice's event names: not a valid role name, so no role can be mistaken for it.
+HOST_ACTOR = "@host"
+RELAYED_FIELDS = ("source", "at", "text")
+MAX_SOURCE = 200
+
 
 def new_request_id() -> str:
     return f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:12]}"
 
 
 def send(conn: sqlite3.Connection, *, sender: str, recipient: str, text: str, request_id: str | None = None,
-         job_id: str | None = None) -> dict[str, Any]:
+         job_id: str | None = None, relayed: Any = None) -> dict[str, Any]:
     """Store a message as the recipient's next seq. Retrying with the same request_id is safe."""
     request_id = request_id or new_request_id()
     created_at = request_time(request_id)
-    if wire_bytes(text) > MAX_MESSAGE_BYTES:
-        raise InvalidRequest(f"a message is at most {MAX_MESSAGE_BYTES} bytes once JSON-escaped")
+    relayed = check(text, relayed)
+    # `relayed` joins the digest only when present, so a request sent before it existed still replays.
     digest = events.request_digest("send", {"sender": sender, "recipient": recipient, "text": text,
-                                            "job_id": job_id})
+                                            "job_id": job_id, **({"relayed": relayed} if relayed else {})})
     with transaction(conn):
         existing = events.replayed(conn, "message_requests", request_id, digest)
         if existing is not None:
@@ -60,24 +67,88 @@ def send(conn: sqlite3.Connection, *, sender: str, recipient: str, text: str, re
             from baton import jobs  # lazily: jobs imports this module
 
             jobs.require_exists(conn, job_id)
-        last_seq, read_seq = _mailbox(conn, recipient)
-        if last_seq - read_seq >= MAX_UNREAD:
+        if unread(conn, recipient) >= MAX_UNREAD:
             raise MailboxFull(f"{recipient} has {MAX_UNREAD} unread messages; retry after it reads")
-        seq = last_seq + 1
-        message_id = f"msg_{uuid.uuid4().hex[:16]}"
-        conn.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)"
-                     " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq", (recipient, seq))
-        conn.execute("INSERT INTO messages (id, job_id, sender, recipient, seq, text, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                     (message_id, job_id, sender, recipient, seq, text, events.now()))
+        message_id = new_message_id()
+        seq = store_copy(conn, message_id=message_id, sender=sender, recipient=recipient, text=text, job_id=job_id,
+                         relayed=relayed)
         conn.execute("INSERT INTO message_requests (request_id, request_digest, message_id, seq, created_at)"
                      " VALUES (?, ?, ?, ?, ?)", (request_id, digest, message_id, seq, created_at.isoformat()))
-        # The event carries no text, so retention deleting the message leaves no copy behind.
-        # A job-less event uses the message's seq as its own.
-        events.append(conn, job_id=job_id, seq=None if job_id else seq, actor=sender, audience=recipient,
-                      kind="message", summary=f"message {seq} from {sender}",
-                      data={"message_id": message_id, "seq": seq})
-        _forget_old(conn, recipient, read_seq)
     return {"message_id": message_id, "seq": seq, "request_id": request_id, "created": True}
+
+
+def store_copy(conn: sqlite3.Connection, *, message_id: str, sender: str | None, recipient: str, text: str,
+               job_id: str | None = None, conversation_id: str | None = None, conversation_seq: int | None = None,
+               relayed: list[dict] | None = None, notice: dict[str, str] | None = None) -> int:
+    """Store one copy as the recipient's next seq, with its event; the caller holds the write lock and checked room."""
+    last_seq, read_seq = _mailbox(conn, recipient)
+    seq = last_seq + 1
+    conn.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)"
+                 " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq", (recipient, seq))
+    conn.execute("INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, recipient, seq, text,"
+                 " relayed, notice, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (message_id, job_id, conversation_id, conversation_seq, sender, recipient, seq, text,
+                  json.dumps(relayed) if relayed else None, json.dumps(notice) if notice else None, events.now()))
+    # The event carries no text, so retention deleting the message leaves no copy behind.
+    # A job-less event uses the message's seq as its own.
+    events.append(conn, job_id=job_id, seq=None if job_id else seq, actor=sender or HOST_ACTOR,
+                  audience=recipient, kind="message", summary=f"message {seq} from {sender or 'the host'}",
+                  data={"message_id": message_id, "seq": seq})
+    _forget_old(conn, recipient, read_seq)
+    return seq
+
+
+def new_message_id() -> str:
+    return f"msg_{uuid.uuid4().hex[:16]}"
+
+
+def unread(conn: sqlite3.Connection, recipient: str) -> int:
+    last_seq, read_seq = _mailbox(conn, recipient)
+    return last_seq - read_seq
+
+
+def check(text: str, relayed: Any) -> list[dict[str, str]] | None:
+    """Refuse an oversized message or a malformed relayed entry; return the entries as stored."""
+    relayed = check_relayed(relayed)
+    if wire_bytes(text) + (len(json.dumps(relayed)) if relayed else 0) > MAX_MESSAGE_BYTES:
+        raise InvalidRequest(f"a message, with any relayed entries, is at most {MAX_MESSAGE_BYTES} bytes "
+                             "once JSON-escaped")
+    return relayed
+
+
+def check_relayed(relayed: Any) -> list[dict[str, str]] | None:
+    """Words the sender passes on from someone else: each entry's source, the time they said it, and the words.
+
+    They are stored apart from the sender's own text and are never anyone's
+    authenticated authorship: the message's author is still the sender. A
+    refusal names the field at fault.
+    """
+    if relayed is None:
+        return None
+    if not isinstance(relayed, list) or not relayed:
+        raise InvalidRequest("relayed must be a non-empty list of {source, at, text} entries, or left out")
+    for index, entry in enumerate(relayed):
+        where = f"relayed[{index}]"
+        if not isinstance(entry, dict):
+            raise InvalidRequest(f"{where} must be an object with source, at and text")
+        for key in entry:
+            if key not in RELAYED_FIELDS:
+                raise InvalidRequest(f"{where}.{key} is not a field; an entry has only source, at and text")
+        if not isinstance(entry.get("source"), str) or not 1 <= len(entry["source"]) <= MAX_SOURCE:
+            raise InvalidRequest(f"{where}.source must name who said it, in 1-{MAX_SOURCE} characters")
+        if not isinstance(entry.get("at"), str) or not _zoned_time(entry["at"]):
+            raise InvalidRequest(f"{where}.at must be an ISO 8601 time with its UTC offset, such as "
+                                 "2026-10-29T07:00:00Z")
+        if not isinstance(entry.get("text"), str) or not entry["text"]:
+            raise InvalidRequest(f"{where}.text must be the relayed words")
+    return [{key: entry[key] for key in RELAYED_FIELDS} for entry in relayed]
+
+
+def _zoned_time(value: str) -> bool:
+    try:
+        return datetime.fromisoformat(value).tzinfo is not None
+    except ValueError:
+        return False
 
 
 def read(conn: sqlite3.Connection, recipient: str, after_seq: int | None = None, limit: int = 50) -> dict[str, Any]:
@@ -95,7 +166,7 @@ def read(conn: sqlite3.Connection, recipient: str, after_seq: int | None = None,
         rows = conn.execute("SELECT * FROM messages WHERE recipient = ? AND seq > ? ORDER BY seq LIMIT ?",
                             (recipient, start, limit)).fetchall()
         oldest = conn.execute("SELECT MIN(seq) FROM messages WHERE recipient = ?", (recipient,)).fetchone()[0]
-        page = _page(rows)
+        page = as_page(rows)
         if page:
             mark_read(conn, recipient, page[-1]["seq"])
         unread = last_seq - _mailbox(conn, recipient)[1]
@@ -133,15 +204,19 @@ def wire_bytes(text: str) -> int:
 
 
 def as_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {"seq": row["seq"], "message_id": row["id"], "sender": row["sender"], "job_id": row["job_id"],
-            "text": row["text"], "at": row["at"]}
+    """A message as readers see it. `from_role` is the sender's credential role, or None for a host notice."""
+    return {"seq": row["seq"], "message_id": row["id"], "sender": row["sender"], "from_role": row["sender"],
+            "conversation_id": row["conversation_id"], "job_id": row["job_id"], "text": row["text"],
+            "relayed": json.loads(row["relayed"]) if row["relayed"] else None,
+            "notice": json.loads(row["notice"]) if row["notice"] else None, "at": row["at"]}
 
 
-def _page(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+def as_page(rows: list[sqlite3.Row],
+            shape: Callable[[sqlite3.Row], dict[str, Any]] = as_dict) -> list[dict[str, Any]]:
     page: list[dict[str, Any]] = []
     size = 0
     for row in rows:
-        message = as_dict(row)
+        message = shape(row)
         size += 2 * len(json.dumps(message))
         # Always return at least one message: admission keeps any single message far below the page budget.
         if page and size > MAX_PAGE_BYTES:

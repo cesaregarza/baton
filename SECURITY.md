@@ -95,7 +95,9 @@ needs a live test.
 | Threat | Mitigation |
 |---|---|
 | Someone on the network calls the MCP endpoint | A token or an OAuth grant is required; scopes and an hourly limit apply to every tool |
-| One client impersonates another role | The role comes from the credential, never from arguments |
+| One client impersonates another role | The role comes from the credential, never from arguments. A message's `from_role` is always its sender's credential role |
+| A message, or words relayed in one, taken as an approval | Messages are information, never authority: no message changes a job's state, revision or approvals. Relayed words are typed apart from the sender's text and are never anyone's authenticated authorship |
+| A role reading or posting in a conversation it isn't in | Only current participants can send or read (`not_a_participant`); creating conversations and managing participants each need a config permission |
 | A stolen access token | Expires in 1 hour; revoke with `baton oauth revoke-all`, or by removing the bearer token |
 | Guessing the consent passphrase | scrypt hash, 5 failures per hour, then lockout |
 | An open registration endpoint used to fill memory or disk | Size and rate limits, a cap on clients, and unused registrations expire after 24 h |
@@ -103,7 +105,7 @@ needs a live test.
 | DNS rebinding against a local host | `Host` and `Origin` checks |
 | The host made to fetch internal URLs (SSRF) | The core never fetches a client-given URL: its wake targets come only from the operator's config. The optional MCP Events integration accepts client callbacks only under an operator allowlist, with the defences below |
 | A forged or replayed wake | A wake carries no content; the agent reads with its own credential. Webhooks can be signed (Standard Webhooks) |
-| A message flood | Per-recipient unread cap (`mailbox_full`), message size cap, per-role tool rate limits |
+| A message flood | Per-recipient unread cap (`mailbox_full`, or `conversation_full` with no copy stored), message size cap, per-role tool rate limits, and an hourly cap per conversation that wakes an escalation role |
 | Retried writes duplicating messages or jobs | Idempotent `request_id`s; a conflicting retry is refused |
 
 Out of scope:
@@ -117,8 +119,10 @@ Out of scope:
 All of it is under `data_dir`:
 
 - `baton.db` (SQLite):
-  - **message text** with sender, recipient and time. Read messages are deleted 30 days after they were
-    sent; unread ones are kept until they are read;
+  - **message text** with sender, recipient and time, and any relayed words with their stated source and
+    time. A conversation message is stored once per recipient. Read messages are deleted 30 days after
+    they were sent; unread ones are kept until they are read;
+  - **conversation titles and participants**. Kept until you delete the database;
   - **job titles, bodies and state history**, including the short notes given with `move_job`. Kept until
     you delete the database;
   - SHA-256 digests of message requests, and of job moves with each move's recorded outcome, for 31 days;
