@@ -21,8 +21,9 @@ repository, not in a public issue.
     registration is logged as the callback's scheme and host only, with a `[path redacted]` marker. No
     character of its path, nor its userinfo, port, query or fragment, is ever logged. Control characters are
     removed, and the whole value is capped at 200 characters.
-  - Issuer identification (RFC 9207): `public_url` is the issuer, so it must be canonical: a lower-case host,
-    no default port, and a plain ASCII path with no percent-encoding. The metadata advertises
+  - Issuer identification (RFC 9207): `public_url` is the issuer, so it must be written exactly as the OAuth
+    metadata publishes it, with a plain ASCII path. The config refuses any other form and names the one to
+    write. The metadata advertises
     `authorization_response_iss_parameter_supported`,
     and every authorization response redirected to a client, success or error, carries `iss` equal to the
     metadata's `issuer`. A client that checks it can't be tricked into sending a code to the wrong server
