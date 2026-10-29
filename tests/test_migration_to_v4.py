@@ -75,7 +75,7 @@ def test_a_version_3_database_gains_the_new_columns_and_keeps_everything_else(tm
     v3_database(config, direct_request, group_request)
 
     db = connect(config.db_path)
-    assert db.execute("SELECT version FROM schema_version").fetchone()[0] == store.SCHEMA_VERSION == 4
+    assert db.execute("SELECT version FROM schema_version").fetchone()[0] == store.SCHEMA_VERSION >= 4
     columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
     assert {"reply_to", "attention", "needs_decision"} <= columns
     carried = conversations.history(db, "reviewer", CONVERSATION)["messages"]

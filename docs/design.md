@@ -121,8 +121,10 @@ conversation order and does not limit how deep replies go.
 
 **Attention.** A conversation message may name the participants it asks to look, in `attention`, a list
 of roles, and may ask the conversation for a decision with `needs_decision`. Both only draw attention.
-`attention` is structured, never parsed from `@name` text, and is checked against the conversation's
-current participants: naming a role that is not in the conversation is refused (`not_a_participant` for
+None of the three is carried by a direct message, and supplying one on a `to=` send is refused as
+`invalid_request` rather than ignored -- an empty `attention` or `reply_to` included, since a field that
+was supplied at all was supplied on purpose. `attention` is structured, never parsed from `@name` text,
+and is checked against the conversation's current participants: naming a role that is not in the conversation is refused (`not_a_participant` for
 a configured role, `unknown_role` for one the config does not have), and naming a role never adds it or
 speaks for it. `needs_decision` is a label and nothing more: like any message it leaves every job's
 state, revision and approvals alone. baton still has no approval message type.

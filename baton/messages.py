@@ -122,8 +122,14 @@ def unread(conn: sqlite3.Connection, recipient: str) -> int:
 
 
 def only_in_a_conversation(**fields: Any) -> None:
-    """Refuse the fields that only a conversation send carries, naming the ones that were passed."""
-    named = sorted(name for name, value in fields.items() if value)
+    """Refuse the fields that only a conversation send carries, naming the ones that were supplied.
+
+    Supplied, not merely non-empty: `None` is how each of these arrives when it was left out, so an
+    empty `attention` or an empty `reply_to` is refused like any other value. A direct message does not
+    carry them at all, which makes naming one a mistake about the API rather than an empty value to drop.
+    A flag is the exception, because `False` is how its absence arrives and there is no emptier value.
+    """
+    named = sorted(name for name, value in fields.items() if value is not None and value is not False)
     if named:
         raise InvalidRequest(f"{', '.join(named)}: only a conversation send carries that. Pass a "
                              "conversation_id, or leave it out, since a direct message is already "
