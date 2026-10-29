@@ -88,6 +88,12 @@ def list_for(conn: sqlite3.Connection, role: str) -> list[dict[str, Any]]:
     return [_summary(conn, row) for row in rows]
 
 
+def list_all(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every conversation, newest first: only for a viewer the config lets see them all."""
+    rows = conn.execute("SELECT * FROM conversations ORDER BY created_at DESC LIMIT 200").fetchall()
+    return [_summary(conn, row) for row in rows]
+
+
 def add(conn: sqlite3.Connection, config: Config, conversation_id: str, participant: str, *,
         actor: str) -> dict[str, Any]:
     """Add a participant and tell every participant, the new one included. Adding a present one changes nothing."""
@@ -195,6 +201,25 @@ def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq
                             " AND (recipient = ? OR sender = ?) GROUP BY conversation_seq"
                             " ORDER BY conversation_seq LIMIT ?", (conversation_id, after_seq, role, role, limit)
                             ).fetchall()
+    page = messages.as_page(rows, _history_entry)
+    return {"messages": page, "next_seq": page[-1]["seq"] if page else after_seq}
+
+
+def full_history(conn: sqlite3.Connection, conversation_id: str, after_seq: int = 0,
+                 limit: int = 50) -> dict[str, Any]:
+    """Every message in the conversation, oldest first, after `after_seq`, as `history` shapes them.
+
+    Only for a viewer the config lets see every conversation. Like `history`
+    it marks nothing read and moves no cursor. A message is gone once
+    retention has deleted every copy of it.
+    """
+    if not 1 <= limit <= messages.MAX_PAGE_MESSAGES or after_seq < 0:
+        raise InvalidRequest(f"limit must be 1-{messages.MAX_PAGE_MESSAGES} and after_seq at least 0")
+    with transaction(conn):
+        _load(conn, conversation_id)
+        rows = conn.execute("SELECT * FROM messages WHERE conversation_id = ? AND conversation_seq > ?"
+                            " GROUP BY conversation_seq ORDER BY conversation_seq LIMIT ?",
+                            (conversation_id, after_seq, limit)).fetchall()
     page = messages.as_page(rows, _history_entry)
     return {"messages": page, "next_seq": page[-1]["seq"] if page else after_seq}
 

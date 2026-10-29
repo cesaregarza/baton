@@ -20,6 +20,7 @@ description = "Picks up jobs and reports back"
 # Optional, with [conversations] enabled: what a role may do in group conversations (both default to false).
 # can_create_conversations = true
 # can_manage_participants = true
+# can_view_all_conversations = true   # lets the dashboard, viewing as this role, show every conversation
 
 # Optional: wake a role when something is waiting for it. Use one of: a webhook, a command, an integration.
 # [roles.worker.wake]
@@ -35,6 +36,14 @@ description = "Picks up jobs and reports back"
 # max_participants = 8                        # per conversation, at least 2
 # max_messages_per_hour = 30                  # per conversation; past it, sends are refused
 # escalation_role = "planner"                 # woken at most once an hour while a conversation is over its limit
+
+# Optional: a read-only web view of conversations, served by the host on loopback only. Off unless enabled.
+# It has no login: anyone or any process on this machine that can reach the port can read it.
+# [dashboard]
+# enabled = true                              # needs [conversations] enabled
+# viewer_role = "planner"                     # shows what this role may see
+# listen_host = "127.0.0.1"                   # 127.0.0.1 or ::1 only
+# listen_port = 8766
 
 # Bearer tokens: create with `baton token new --name <name> --role <role>` and paste the printed entry.
 # [[auth.tokens]]

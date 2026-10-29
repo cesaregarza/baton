@@ -31,7 +31,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 from starlette.types import ASGIApp
 
-from baton import __version__, auth, conversations, datadir, inbox, jobs, messages
+from baton import __version__, auth, conversations, dashboard, datadir, inbox, jobs, messages
 from baton.config import Config
 from baton.errors import BatonError, InvalidRequest, UnknownRole
 from baton.integrations import Integration, load_enabled
@@ -305,14 +305,18 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
 
 
 def serve(config: Config) -> None:
-    """Run the MCP server and, beside it, the wake dispatcher, until interrupted."""
+    """Run the MCP server and, beside it, the wake dispatcher and any enabled dashboard, until interrupted."""
     os.umask(0o077)
     integrations = load_enabled(config)
     app = create_app(config, integrations)
     stop = threading.Event()
     dispatcher = Dispatcher(config, integrations=integrations)
     threading.Thread(target=dispatcher.run, args=(stop,), daemon=True, name="wakes").start()
+    view = dashboard.start(config)
     try:
         uvicorn.run(app, host=config.listen_host, port=config.listen_port, log_level="info")
     finally:
         stop.set()
+        if view is not None:
+            view.shutdown()
+            view.server_close()
