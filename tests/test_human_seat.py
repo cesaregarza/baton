@@ -465,3 +465,42 @@ def test_the_remote_cli_keeps_the_hosts_refusal_codes(seat_host, capsys, monkeyp
     assert (code, refused["error"]) == (1, "unauthorized")
     code, refused = remote(host, capsys, monkeypatch, "job", "list")
     assert code == 2 and "host only" in refused["detail"]
+
+
+# Token names identify exactly one token, so a revocation can't leave a twin alive --------------------------
+
+
+def test_a_config_with_two_tokens_of_the_same_name_is_refused(tmp_path: Path) -> None:
+    path = seat_config(tmp_path, 8765, {"operator": new_token()[1], "assistant": new_token()[1]})
+    path.write_text(path.read_text().replace('name = "assistant-token"', 'name = "operator-token"'))
+    with pytest.raises(ConfigError, match=r"auth\.tokens.*operator-token"):
+        config_module.load(path)
+
+
+def test_minting_a_token_under_a_name_in_use_is_refused(seat_host, capsys) -> None:
+    host = seat_host
+    code, refused = run_cli(capsys, "--config", str(host.path), "token", "new", "--name", "operator-token",
+                            "--role", "operator")
+    assert code != 0 and "operator-token" in refused["detail"] and "token" not in refused
+
+
+def test_revoking_a_name_leaves_no_token_of_that_name_valid(seat_host, capsys) -> None:
+    import dataclasses
+
+    from baton.auth import revoke_token, static_token
+
+    host = seat_host
+    twin_token, twin_digest = new_token()
+    twin = dataclasses.replace(host.config.tokens[0], sha256=twin_digest)
+    assert twin.name == "operator-token"
+    # A config built in code, past the loader's check: revoking an ambiguous name must not report success.
+    twins = dataclasses.replace(host.config, tokens=(*host.config.tokens, twin))
+    with pytest.raises(Exception, match="operator-token"):
+        revoke_token(twins, "operator-token")
+    assert static_token(twins, host.tokens["operator"]) is not None  # refused whole: nothing was revoked
+
+    code, revoked = run_cli(capsys, "--config", str(host.path), "token", "revoke", "operator-token")
+    assert code == 0 and revoked["revoked"] == "operator-token"
+    assert static_token(host.config, host.tokens["operator"]) is None  # the one token of that name
+    code, unknown = run_cli(capsys, "--config", str(host.path), "token", "revoke", "never-issued")
+    assert code == 1 and unknown["error"] == "unknown_token"
