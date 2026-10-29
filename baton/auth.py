@@ -5,7 +5,8 @@ token's `claims["role"]`; tools act as that role and nothing else.
 
 * **Bearer tokens** are listed in the config by SHA-256 digest
   (`baton token new` prints a token and its digest). Simple and enough for
-  local agents and scripts.
+  local agents and scripts, and the only credential a human role can hold.
+  `baton token revoke` ends one at once, without a restart.
 * **OAuth** follows the MCP authorization spec: protected-resource and
   authorization-server metadata, dynamic client registration, PKCE, refresh
   token rotation and revocation. Consent is a page on the host where the
@@ -56,7 +57,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from baton import datadir
-from baton.config import Config
+from baton.config import Config, ConfigError
 
 log = logging.getLogger("baton.auth")
 
@@ -105,9 +106,62 @@ def static_token(config: Config, token: str) -> AccessToken | None:
     digest = token_digest(token)
     for entry in config.tokens:
         if hmac.compare_digest(entry.sha256, digest):
+            if entry.sha256 in revoked_digests(config):
+                return None
             return AccessToken(token=token, client_id=f"token:{entry.name}", scopes=ALL_SCOPES,
                                resource=config.resource_url, subject=entry.role, claims={"role": entry.role})
     return None
+
+
+# The revocation list as last read, by path: (inode, mtime, size) and its digests.
+_revoked_cache: dict[Path, tuple[tuple[int, int, int], frozenset[str]]] = {}
+
+
+def revoked_digests(config: Config) -> frozenset[str]:
+    """Digests of bearer tokens ended by `baton token revoke`, so a revocation needs no restart.
+
+    Checked on every call: a cheap stat notices any change, and only then is the
+    file read through the checked data directory. With no revocations there is
+    nothing to read.
+    """
+    path = config.revoked_tokens_path
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return frozenset()
+    signature = (info.st_ino, info.st_mtime_ns, info.st_size)
+    cached = _revoked_cache.get(path)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    with datadir.opened(config.data_dir) as dir_fd:
+        found = datadir.read_file(dir_fd, path.name, directory=config.data_dir)
+    if found is None:
+        return frozenset()
+    digests = frozenset(json.loads(found[1])["revoked"])
+    _revoked_cache[path] = ((found[0].st_ino, found[0].st_mtime_ns, found[0].st_size), digests)
+    return digests
+
+
+def revoke_token(config: Config, name: str) -> dict:
+    """End the bearer token configured as `name` from its next call on. Remove its config entry when convenient."""
+    entry = next((entry for entry in config.tokens if entry.name == name), None)
+    if entry is None:
+        raise ConfigError(f"no auth.tokens entry is named {name!r}")
+    directory = config.data_dir
+    with datadir.opened(directory) as dir_fd:
+        lock = datadir.open_file(dir_fd, config.revoked_tokens_path.stem + ".lock", os.O_RDWR | os.O_CREAT,
+                                 directory=directory)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            found = datadir.read_file(dir_fd, config.revoked_tokens_path.name, directory=directory)
+            state = json.loads(found[1]) if found else {"revoked": {}}
+            state["revoked"][entry.sha256] = {"name": name, "role": entry.role,
+                                              "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            datadir.replace_file(dir_fd, config.revoked_tokens_path.name, json.dumps(state).encode())
+        finally:
+            os.close(lock)
+    log.info("revoked bearer token %s (role %s)", name, entry.role)
+    return {"revoked": name, "role": entry.role}
 
 
 def credential_authority(token: AccessToken) -> dict:
@@ -135,8 +189,9 @@ def authority_live(config: Config, authority: dict) -> bool:
     ends the grant, the second keeps it.
     """
     if authority.get("kind") == "token":
-        return any((entry.name, entry.sha256, entry.role) == (authority["name"], authority["sha256"], authority["role"])
-                   for entry in config.tokens)
+        return authority["sha256"] not in revoked_digests(config) and any(
+            (entry.name, entry.sha256, entry.role) == (authority["name"], authority["sha256"], authority["role"])
+            for entry in config.tokens)
     if (authority.get("kind") != "oauth" or not config.oauth.enabled or authority.get("grant") is None
             or authority["role"] not in config.oauth.roles or authority["resource"] != config.resource_url):
         return False

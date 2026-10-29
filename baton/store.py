@@ -17,9 +17,9 @@ from pathlib import Path
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 3
-# The one older version `connect` upgrades in place; any other is refused.
-MIGRATES_FROM = 2
+SCHEMA_VERSION = 5
+# The older versions `connect` upgrades in place; any other is refused.
+MIGRATES_FROM = (2, 3)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -34,13 +34,15 @@ _MESSAGE_REQUESTS = """CREATE TABLE IF NOT EXISTS message_requests (
     )"""
 # One row per copy: `seq` numbers each recipient's messages without gaps, and
 # a conversation message's copies share its `id` and its `conversation_seq`,
-# the conversation's own gap-free order. A host notice has no sender.
+# the conversation's own gap-free order. A host notice has no sender. `author_kind` (`human` or
+# `agent`, NULL for a host notice) is fixed when the message is sent, from the sender role's config.
 _MESSAGES = """CREATE TABLE IF NOT EXISTS messages (
         id TEXT NOT NULL,
         job_id TEXT REFERENCES jobs(id),
         conversation_id TEXT REFERENCES conversations(id),
         conversation_seq INTEGER,
         sender TEXT,
+        author_kind TEXT,
         recipient TEXT NOT NULL,
         seq INTEGER NOT NULL,
         text TEXT NOT NULL,
@@ -197,31 +199,37 @@ def _refuse_other_schema(conn: sqlite3.Connection) -> None:
     """Refuse a database made by another schema version before anything, even the journal mode, changes it."""
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").fetchone():
         row = conn.execute("SELECT version FROM schema_version").fetchone()
-        if row is not None and row["version"] not in (SCHEMA_VERSION, MIGRATES_FROM):
+        if row is not None and row["version"] not in (SCHEMA_VERSION, *MIGRATES_FROM):
             raise SchemaMismatch(f"the database's schema is version {row['version']}, and this baton needs "
-                                 f"version {SCHEMA_VERSION}. baton migrates only from version {MIGRATES_FROM}: "
+                                 f"version {SCHEMA_VERSION}. baton migrates only from versions "
+                                 f"{', '.join(map(str, MIGRATES_FROM))}: "
                                  "move the old database aside to start fresh.")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the schema, or upgrade a version-2 database, in one transaction: a crash leaves the old one intact."""
+    """Create the schema, or upgrade an older database, in one transaction: a crash leaves the old one intact."""
     with transaction(conn):
         conn.execute(_SCHEMA[0])
         row = conn.execute("SELECT version FROM schema_version").fetchone()
-        migrating = row is not None and row["version"] == MIGRATES_FROM
-        if row is not None and not migrating and row["version"] != SCHEMA_VERSION:  # a second line of defence
+        old = row["version"] if row is not None and row["version"] in MIGRATES_FROM else None
+        if row is not None and old is None and row["version"] != SCHEMA_VERSION:  # a second line of defence
             raise SchemaMismatch(f"schema version {row['version']}, expected {SCHEMA_VERSION}")
         # Version 3 lets a conversation message's copies share one id and a send record several seqs, which
         # SQLite can't change in place: the two tables are set aside, recreated, and every row copied back.
-        if migrating:
+        if old == 2:
             for table in _REBUILT:
                 conn.execute(f"ALTER TABLE {table} RENAME TO {table}_v2")
+        elif old == 3:
+            conn.execute("ALTER TABLE messages ADD COLUMN author_kind TEXT")
         for statement in _SCHEMA[1:]:
             conn.execute(statement)
-        if migrating:
+        if old == 2:
             for table, columns in _REBUILT.items():
                 conn.execute(f"INSERT INTO {table} ({columns}) SELECT {columns} FROM {table}_v2")
                 conn.execute(f"DROP TABLE {table}_v2")
+        if old is not None:
+            # Before version 5 no role could be human, so every message a role sent was an agent's.
+            conn.execute("UPDATE messages SET author_kind = 'agent' WHERE sender IS NOT NULL")
             conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
         elif row is None:
             conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))

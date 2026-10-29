@@ -42,6 +42,9 @@ IDENTITY_RETENTION = REQUEST_MAX_AGE + timedelta(days=1)
 # The actor a host notice's event names: not a valid role name, so no role can be mistaken for it.
 HOST_ACTOR = "@host"
 RELAYED_FIELDS = ("source", "at", "text")
+# Arguments that would claim who wrote a message. The author is always the credential's role, so a request
+# carrying any of these is refused outright (`forbidden_field`) rather than silently ignored.
+AUTHOR_FIELDS = ("from_role", "author_kind", "author", "sender", "from", "role", "on_behalf_of")
 MAX_SOURCE = 200
 
 
@@ -50,8 +53,12 @@ def new_request_id() -> str:
 
 
 def send(conn: sqlite3.Connection, *, sender: str, recipient: str, text: str, request_id: str | None = None,
-         job_id: str | None = None, relayed: Any = None) -> dict[str, Any]:
-    """Store a message as the recipient's next seq. Retrying with the same request_id is safe."""
+         job_id: str | None = None, relayed: Any = None, author_kind: str = "agent") -> dict[str, Any]:
+    """Store a message as the recipient's next seq. Retrying with the same request_id is safe.
+
+    `author_kind` is recorded with the message (see `Config.author_kind`), so a later change to the
+    sender role's config never changes how a message already sent reads.
+    """
     request_id = request_id or new_request_id()
     created_at = request_time(request_id)
     relayed = check(text, relayed)
@@ -71,7 +78,7 @@ def send(conn: sqlite3.Connection, *, sender: str, recipient: str, text: str, re
             raise MailboxFull(f"{recipient} has {MAX_UNREAD} unread messages; retry after it reads")
         message_id = new_message_id()
         seq = store_copy(conn, message_id=message_id, sender=sender, recipient=recipient, text=text, job_id=job_id,
-                         relayed=relayed)
+                         relayed=relayed, author_kind=author_kind)
         conn.execute("INSERT INTO message_requests (request_id, request_digest, message_id, seq, created_at)"
                      " VALUES (?, ?, ?, ?, ?)", (request_id, digest, message_id, seq, created_at.isoformat()))
     return {"message_id": message_id, "seq": seq, "request_id": request_id, "created": True}
@@ -79,16 +86,18 @@ def send(conn: sqlite3.Connection, *, sender: str, recipient: str, text: str, re
 
 def store_copy(conn: sqlite3.Connection, *, message_id: str, sender: str | None, recipient: str, text: str,
                job_id: str | None = None, conversation_id: str | None = None, conversation_seq: int | None = None,
-               relayed: list[dict] | None = None, notice: dict[str, str] | None = None) -> int:
+               relayed: list[dict] | None = None, notice: dict[str, str] | None = None,
+               author_kind: str | None = None) -> int:
     """Store one copy as the recipient's next seq, with its event; the caller holds the write lock and checked room."""
     last_seq, read_seq = _mailbox(conn, recipient)
     seq = last_seq + 1
     conn.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)"
                  " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq", (recipient, seq))
-    conn.execute("INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, recipient, seq, text,"
-                 " relayed, notice, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                 (message_id, job_id, conversation_id, conversation_seq, sender, recipient, seq, text,
-                  json.dumps(relayed) if relayed else None, json.dumps(notice) if notice else None, events.now()))
+    conn.execute("INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, author_kind, recipient,"
+                 " seq, text, relayed, notice, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (message_id, job_id, conversation_id, conversation_seq, sender, author_kind if sender else None,
+                  recipient, seq, text, json.dumps(relayed) if relayed else None,
+                  json.dumps(notice) if notice else None, events.now()))
     # The event carries no text, so retention deleting the message leaves no copy behind.
     # A job-less event uses the message's seq as its own.
     events.append(conn, job_id=job_id, seq=None if job_id else seq, actor=sender or HOST_ACTOR,
@@ -204,8 +213,12 @@ def wire_bytes(text: str) -> int:
 
 
 def as_dict(row: sqlite3.Row) -> dict[str, Any]:
-    """A message as readers see it. `from_role` is the sender's credential role, or None for a host notice."""
+    """A message as readers see it. `from_role` is the sender's credential role, or None for a host notice.
+
+    `author_kind` is `human` or `agent`, recorded when the message was sent; None for a host notice.
+    """
     return {"seq": row["seq"], "message_id": row["id"], "sender": row["sender"], "from_role": row["sender"],
+            "author_kind": row["author_kind"],
             "conversation_id": row["conversation_id"], "job_id": row["job_id"], "text": row["text"],
             "relayed": json.loads(row["relayed"]) if row["relayed"] else None,
             "notice": json.loads(row["notice"]) if row["notice"] else None, "at": row["at"]}
