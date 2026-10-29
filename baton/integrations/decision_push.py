@@ -51,6 +51,7 @@ from mcp.server.mcpserver import MCPServer
 
 from baton import datadir
 from baton.config import Config, ConfigError
+from baton.integrations import IntegrationUnavailable
 from baton.store import connect
 
 NAME = "decision_push"
@@ -271,17 +272,32 @@ class DecisionPush:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 found = datadir.read_file(dir_fd, STATE_FILE, directory=directory)
-                state = _shape(json.loads(found[1]) if found else {})
+                state = _shape(found[1]) if found else _shape(b"{}")
                 yield state
                 datadir.replace_file(dir_fd, STATE_FILE, json.dumps(state).encode())
             finally:
                 os.close(lock)
 
 
-def _shape(raw: dict[str, Any]) -> dict[str, Any]:
-    counts = raw.get("counts") or {}
-    return {"after_seq": raw.get("after_seq"), "window": list(raw.get("window") or []),
-            "counts": {key: int(counts.get(key, 0)) for key in ("sent", "failed", "capped")}}
+def _shape(data: bytes) -> dict[str, Any]:
+    """The state as stored, checked whole. One that can't be read is refused, never reset: starting over
+    could skip a decision still to push or repeat one already sent. The refusal names only the file."""
+    unreadable = IntegrationUnavailable(f"{STATE_FILE} in the data directory can't be read; move it aside to "
+                                        "start the push afresh")
+    try:
+        raw = json.loads(data)
+    except ValueError:
+        raise unreadable from None
+    if not isinstance(raw, dict):
+        raise unreadable
+    after_seq, window, counts = raw.get("after_seq"), raw.get("window", []), raw.get("counts", {})
+    whole = (after_seq is None or (type(after_seq) is int and after_seq >= 0)) and isinstance(window, list) \
+        and all(type(at) in (int, float) for at in window) and isinstance(counts, dict) \
+        and all(type(counts.get(key, 0)) is int for key in ("sent", "failed", "capped"))
+    if not whole:
+        raise unreadable
+    return {"after_seq": after_seq, "window": list(window),
+            "counts": {key: counts.get(key, 0) for key in ("sent", "failed", "capped")}}
 
 
 def _address(value: Any) -> SplitResult | None:

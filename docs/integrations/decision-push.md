@@ -61,3 +61,8 @@ conversation is. The dashboard shows it only to someone who can reach it.
   are at most once.
 - Its state, `decision_push.json` in the data directory, holds only a position in the mailbox, the
   times of recent pushes and three counts.
+- **An unreadable state never stops the host.** If `decision_push.json` can't be read or isn't in its
+  expected shape, the push is off for that run and the host serves without it. One line is logged, naming
+  the file and never its contents. The file is left as found rather than reset, since starting over could
+  skip a decision still to push or repeat one already sent. Move it aside and restart to begin afresh from
+  the end of the mailbox.
