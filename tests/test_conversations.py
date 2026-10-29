@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from test_messages import rid
 from test_wakes import Recorder
 
 from baton import config as config_module
-from baton import jobs, messages, wakes
+from baton import inbox, jobs, messages, wakes
 from baton.config import Config, ConfigError
 from baton.errors import BatonError
 from baton.store import connect
@@ -171,7 +172,7 @@ def test_3_a_non_participant_can_neither_send_nor_read(db, config) -> None:
     before = (count(db, "messages"), count(db, "events"), count(db, "message_requests"))
 
     refused("not_a_participant", say, db, config, "outsider", conversation_id, "let me in")
-    refused("not_a_participant", conversations.read, db, "outsider", conversation_id)
+    refused("not_a_participant", conversations.history, db, "outsider", conversation_id)
     assert (count(db, "messages"), count(db, "events"), count(db, "message_requests")) == before
     assert woken(config) == []
     refused("unknown_conversation", say, db, config, "reviewer", "conv_nonexistent", "hello")
@@ -185,7 +186,7 @@ def test_4_the_stored_from_role_is_the_sender_the_caller_is_bound_to(db, config)
     with pytest.raises(TypeError):
         say(db, config, "assistant", conversation_id, "hi", from_role="orchestrator")  # not a parameter
     say(db, config, "assistant", conversation_id, "hi")
-    [copy] = conversations.read(db, "reviewer", conversation_id)["messages"]
+    [copy] = conversations.history(db, "reviewer", conversation_id)["messages"]
     assert (copy["from_role"], copy["sender"]) == ("assistant", "assistant")
 
 
@@ -220,20 +221,20 @@ def test_6_one_participant_reading_leaves_the_others_cursors_alone(db, config) -
     say(db, config, "orchestrator", conversation_id, "two")
 
     assert len(messages.read(db, "reviewer")["messages"]) == 2
-    assert conversations.read(db, "reviewer", conversation_id)["messages"][0]["text"] == "one"
+    assert conversations.history(db, "reviewer", conversation_id)["messages"][0]["text"] == "one"
     assert (messages.read_seq(db, "assistant"), messages.first_unread_seq(db, "assistant")) == (0, 1)
     page = messages.read(db, "assistant", limit=1)
     assert (page["messages"][0]["text"], page["unread"]) == ("one", 1)
     assert messages.read_seq(db, "reviewer") == 2
 
 
-def test_6_reading_one_conversation_does_not_mark_anything_read(db, config) -> None:
+def test_6_reading_a_conversations_history_does_not_mark_anything_read(db, config) -> None:
     conversation_id = start(db, config)
     say(db, config, "orchestrator", conversation_id, "one")
-    history = conversations.read(db, "assistant", conversation_id)
+    history = conversations.history(db, "assistant", conversation_id)
     assert [m["text"] for m in history["messages"]] == ["one"] and history["next_seq"] == 1
     assert messages.read_seq(db, "assistant") == 0
-    assert conversations.read(db, "assistant", conversation_id, after_seq=1)["messages"] == []
+    assert conversations.history(db, "assistant", conversation_id, after_seq=1)["messages"] == []
 
 
 # 7 -------------------------------------------------------------------------------------------------------
@@ -301,7 +302,7 @@ def test_9_managing_participants_needs_permission_and_tells_every_participant(db
     for role in [*GROUP, "outsider"]:
         [notice] = mailbox(db, role)
         assert (notice["sender"], notice["conversation_id"]) == (None, conversation_id)
-    [shown] = conversations.read(db, "reviewer", conversation_id)["messages"]
+    [shown] = conversations.history(db, "reviewer", conversation_id)["messages"]
     assert shown["from_role"] is None
     assert shown["notice"] == {"event": "participant_added", "participant": "outsider", "by": "orchestrator"}
     assert conversations.add(db, config, conversation_id, "outsider", actor="orchestrator")["changed"] is False
@@ -315,7 +316,7 @@ def test_9_managing_participants_needs_permission_and_tells_every_participant(db
     say(db, config, "reviewer", conversation_id, "after the removal")
     assert len(mailbox(db, "assistant")) == assistant_has  # nothing after it
     refused("not_a_participant", say, db, config, "assistant", conversation_id, "still here?")
-    refused("not_a_participant", conversations.read, db, "assistant", conversation_id)
+    refused("not_a_participant", conversations.history, db, "assistant", conversation_id)
     assert [c["conversation_id"] for c in conversations.list_for(db, "assistant")] == []
 
 
@@ -368,7 +369,7 @@ def test_13_relayed_entries_come_back_typed_and_apart_from_the_senders_text(db, 
     conversation_id = start(db, config)
 
     sent = say(db, config, "assistant", conversation_id, "Passing this on; I suggest we wait.", relayed=RELAYED)
-    [copy] = conversations.read(db, "reviewer", conversation_id)["messages"]
+    [copy] = conversations.history(db, "reviewer", conversation_id)["messages"]
     assert copy["text"] == "Passing this on; I suggest we wait."
     assert copy["relayed"] == RELAYED
     assert copy["from_role"] == "assistant" and copy["message_id"] == sent["message_id"]
@@ -376,7 +377,7 @@ def test_13_relayed_entries_come_back_typed_and_apart_from_the_senders_text(db, 
 
     direct = messages.send(db, sender="assistant", recipient="orchestrator", text="fyi", relayed=RELAYED[:1],
                            job_id=job["job_id"])
-    [message] = messages.read(db, "orchestrator")["messages"]
+    [message] = [m for m in messages.read(db, "orchestrator")["messages"] if m["conversation_id"] is None]
     assert (message["message_id"], message["relayed"], message["from_role"]) == \
         (direct["message_id"], RELAYED[:1], "assistant")
     assert job_states(db) == before
@@ -408,6 +409,102 @@ def test_13_relayed_words_count_toward_the_message_size_limit(db, config) -> Non
     conversation_id = start(db, config)
     big = [{"source": "operator", "at": "2026-10-29T07:00:00Z", "text": "x" * messages.MAX_MESSAGE_BYTES}]
     refused("invalid_request", say, db, config, "assistant", conversation_id, "short", relayed=big)
+
+
+# 14-17: the history read, kept apart from unread delivery -------------------------------------------------
+
+
+def history(db: sqlite3.Connection, role: str, conversation_id: str, **kwargs: Any) -> list[tuple[Any, str]]:
+    return [(m["from_role"], m["text"]) for m in conversations.history(db, role, conversation_id, **kwargs)["messages"]]
+
+
+def bookmarks(db: sqlite3.Connection) -> tuple[list[tuple], list[tuple]]:
+    """Every mailbox's last and delivered seq, and every cursor: what a read could move."""
+    return ([tuple(row) for row in db.execute("SELECT * FROM mailboxes ORDER BY recipient")],
+            [tuple(row) for row in db.execute("SELECT * FROM cursors ORDER BY name")])
+
+
+def test_14_a_history_read_moves_no_bookmark_and_unread_delivery_still_returns_each_message_once(db, config) -> None:
+    conversation_id = start(db, config)
+    say(db, config, "orchestrator", conversation_id, "one")
+    say(db, config, "reviewer", conversation_id, "two")
+    messages.read(db, "reviewer")  # one role has read, the others haven't
+    say(db, config, "orchestrator", conversation_id, "three")
+    inbox.take(db, "assistant")
+    say(db, config, "assistant", conversation_id, "four")
+    before = bookmarks(db)
+
+    for role in GROUP:
+        assert history(db, role, conversation_id) == history(db, role, conversation_id)
+        assert len(history(db, role, conversation_id)) == 4
+    assert bookmarks(db) == before
+
+    assert [m["text"] for m in messages.read(db, "orchestrator")["messages"]] == ["two", "four"]
+    assert [m["text"] for m in messages.read(db, "reviewer")["messages"]] == ["three", "four"]
+    assert [m["text"] for m in messages.read(db, "assistant")["messages"]] == []
+    for role in GROUP:
+        assert messages.read(db, role)["messages"] == []  # once each
+    assert [e["message"]["text"] for e in inbox.take(db, "assistant")["events"]] == []
+
+
+def test_14_history_respects_retention_and_page_limits(db, config) -> None:
+    conversation_id = start(db, config)
+    for index in range(5):
+        say(db, config, "orchestrator", conversation_id, f"m{index}")
+    first = conversations.history(db, "assistant", conversation_id, limit=2)
+    rest = conversations.history(db, "assistant", conversation_id, after_seq=first["next_seq"], limit=10)
+    assert [m["text"] for m in first["messages"] + rest["messages"]] == [f"m{index}" for index in range(5)]
+    refused("invalid_request", conversations.history, db, "assistant", conversation_id,
+            limit=messages.MAX_PAGE_MESSAGES + 1)
+
+    messages.read(db, "assistant", limit=1)
+    stale = (datetime.now(UTC) - messages.READ_RETENTION - timedelta(days=1)).isoformat()
+    db.execute("UPDATE messages SET at = ? WHERE recipient = 'assistant' AND seq = 1", (stale,))
+    messages.sweep(db)
+    assert [text for _, text in history(db, "assistant", conversation_id)] == ["m1", "m2", "m3", "m4"]
+
+
+def test_15_the_readers_own_messages_are_in_its_history_in_order_and_never_in_its_mailbox(db, config) -> None:
+    conversation_id = start(db, config)
+    sent = [say(db, config, sender, conversation_id, text) for sender, text in
+            (("reviewer", "r1"), ("orchestrator", "o1"), ("reviewer", "r2"), ("assistant", "a1"))]
+
+    page = conversations.history(db, "reviewer", conversation_id)
+    assert [(m["from_role"], m["text"]) for m in page["messages"]] == \
+        [("reviewer", "r1"), ("orchestrator", "o1"), ("reviewer", "r2"), ("assistant", "a1")]
+    assert [m["message_id"] for m in page["messages"]] == [result["message_id"] for result in sent]
+    seqs = [m["seq"] for m in page["messages"]]
+    assert seqs == sorted(seqs) and len(set(seqs)) == 4
+    assert [m["text"] for m in messages.read(db, "reviewer", after_seq=0)["messages"]] == ["o1", "a1"]
+    assert all(row["sender"] != "reviewer" for row in mailbox(db, "reviewer"))
+
+
+def test_16_a_non_participant_or_a_removed_one_gets_no_history(db, config) -> None:
+    conversation_id = start(db, config)
+    say(db, config, "orchestrator", conversation_id, "private to the participants")
+    refused("not_a_participant", conversations.history, db, "outsider", conversation_id)
+    conversations.remove(db, config, conversation_id, "assistant", actor="orchestrator")
+    refused("not_a_participant", conversations.history, db, "assistant", conversation_id)
+    refused("unknown_conversation", conversations.history, db, "assistant", "conv_nonexistent")
+
+
+def test_17_a_late_joiner_sees_history_from_its_join_and_keeps_its_delivery_after_removal(db, config) -> None:
+    conversation_id = start(db, config, ["orchestrator", "reviewer"])
+    say(db, config, "orchestrator", conversation_id, "before the join")
+    conversations.add(db, config, conversation_id, "assistant", actor="orchestrator")
+    say(db, config, "reviewer", conversation_id, "after the join")
+    assert history(db, "assistant", conversation_id) == [(None, "orchestrator added assistant"),
+                                                         ("reviewer", "after the join")]
+    say(db, config, "assistant", conversation_id, "from the late joiner")
+    assert history(db, "assistant", conversation_id)[-1] == ("assistant", "from the late joiner")
+    assert ("orchestrator", "before the join") in history(db, "reviewer", conversation_id)
+
+    conversations.remove(db, config, conversation_id, "assistant", actor="orchestrator")
+    say(db, config, "reviewer", conversation_id, "after the removal")
+    refused("not_a_participant", conversations.history, db, "assistant", conversation_id)
+    assert [m["text"] for m in messages.read(db, "assistant")["messages"]] == \
+        ["orchestrator added assistant", "after the join"]
+    assert ("assistant", "from the late joiner") in history(db, "reviewer", conversation_id)
 
 
 # 11 -------------------------------------------------------------------------------------------------------

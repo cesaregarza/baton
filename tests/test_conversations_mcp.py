@@ -34,7 +34,8 @@ from baton.auth import hash_passphrase, new_token
 from baton.config import Config
 from baton.store import connect
 
-CONVERSATION_TOOLS = {"create_conversation", "list_conversations", "add_participant", "remove_participant"}
+CONVERSATION_TOOLS = {"create_conversation", "list_conversations", "read_history", "add_participant",
+                      "remove_participant"}
 
 
 class GroupHost:
@@ -155,8 +156,10 @@ def test_12_two_oauth_clients_and_a_cli_agent_hold_one_conversation(group_host, 
 
             seen = {"reviewer": payload(await reviewer.call_tool("read_messages", {})),
                     "assistant": payload(await assistant.call_tool("wait", {"timeout_seconds": 5}))}
-            history = payload(await reviewer.call_tool("read_messages", {"conversation_id": conversation_id}))
-            assert texts(history) == texts(seen["reviewer"])
+            history = payload(await reviewer.call_tool("read_history", {"conversation_id": conversation_id}))
+            assert texts(history) == [("orchestrator", "1 from cli"), ("reviewer", "2 from reviewer"),
+                                      ("assistant", "3 from assistant")]  # its own message too, in order
+            assert payload(await reviewer.call_tool("read_messages", {}))["messages"] == []  # history marked nothing
             return seen
 
     seen = anyio.run(run)
@@ -215,7 +218,7 @@ def test_refusals_over_mcp_carry_the_stable_codes_and_the_audit_names_the_conver
                                                                            "participant": "outsider"}))
             assert managed["error"] == "forbidden"
             for tool, arguments in (("send_message", {"conversation_id": conversation_id, "text": "hi"}),
-                                    ("read_messages", {"conversation_id": conversation_id})):
+                                    ("read_history", {"conversation_id": conversation_id})):
                 assert payload(await outsider.call_tool(tool, arguments))["error"] == "not_a_participant"
             both = payload(await reviewer.call_tool("send_message", {"to": "assistant", "text": "x",
                                                                      "conversation_id": conversation_id}))
