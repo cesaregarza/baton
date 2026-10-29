@@ -34,7 +34,7 @@ from starlette.types import ASGIApp
 from baton import __version__, auth, conversations, dashboard, datadir, inbox, jobs, messages
 from baton.config import Config
 from baton.errors import BatonError, InvalidRequest, UnknownRole
-from baton.integrations import Integration, load_enabled
+from baton.integrations import Integration, IntegrationUnavailable, load_enabled
 from baton.store import connect
 from baton.wakes import Dispatcher
 
@@ -365,14 +365,41 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
     return app
 
 
+def _prepared(name: str, integration: Integration) -> bool:
+    """Run the integration's `prepare()`, if it has one. False when it failed: it is off until the next start.
+
+    Only an `IntegrationUnavailable` message is logged, since the integration wrote it to be safe to log;
+    any other failure is logged by its type alone, so nothing it read ever reaches the log.
+    """
+    prepare = getattr(integration, "prepare", None)
+    if prepare is None:
+        return True
+    try:
+        prepare()
+    except IntegrationUnavailable as error:
+        log.error("integration %s is off for this run: %s", name, error)
+        return False
+    except Exception as error:  # noqa: BLE001 - an optional integration must never stop the host
+        log.error("integration %s is off for this run: prepare failed (%s)", name, type(error).__name__)
+        return False
+    return True
+
+
 def serve(config: Config) -> None:
     """Run the MCP server and, beside it, the wake dispatcher and any enabled dashboard, until interrupted."""
     os.umask(0o077)
     integrations = load_enabled(config)
     app = create_app(config, integrations)
+    # Every integration prepares before any worker thread starts or the server accepts anything, and one
+    # that can't is switched off for this run: an optional integration never keeps the host from serving.
+    integrations = {name: integration for name, integration in integrations.items() if _prepared(name, integration)}
     stop = threading.Event()
     dispatcher = Dispatcher(config, integrations=integrations)
     threading.Thread(target=dispatcher.run, args=(stop,), daemon=True, name="wakes").start()
+    for name, integration in integrations.items():
+        loop = getattr(integration, "run", None)
+        if loop is not None:  # an integration with work of its own runs it beside the server, until stop
+            threading.Thread(target=loop, args=(stop,), daemon=True, name=name).start()
     view = dashboard.start(config)
     try:
         uvicorn.run(app, host=config.listen_host, port=config.listen_port, log_level="info")

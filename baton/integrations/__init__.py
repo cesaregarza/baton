@@ -8,7 +8,13 @@ only when its table enables it. A role uses one for its wakes with
 The core keeps everything it already owns: roles and credentials, the event
 log, wake coalescing, leases, backoff, attempts and `baton wakes`. An
 integration only adds MCP methods to the server and takes over the last step
-of delivering a content-free wake.
+of delivering a content-free wake. One that has work of its own, such as
+`decision_push`, may also define `prepare()`, which `baton serve` calls before
+it starts any worker thread or accepts any request, and `run(stop)`, which it
+runs on its own thread until the host stops. An integration whose `prepare()`
+fails is off for that run, and the host serves without it: it raises
+`IntegrationUnavailable` with a message that is safe to log, and any other
+failure is logged by its type alone.
 """
 
 from __future__ import annotations
@@ -20,6 +26,10 @@ from typing import Any, Protocol
 from mcp.server.mcpserver import MCPServer
 
 from baton.config import Config, ConfigError
+
+
+class IntegrationUnavailable(Exception):
+    """Raised by an integration's `prepare()` to switch it off for this run; the message is logged as written."""
 
 
 class Integration(Protocol):

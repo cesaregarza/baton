@@ -68,6 +68,16 @@ description = "Picks up jobs and reports back"
 # allow_loopback_redirects = true              # http://127.0.0.1:<any port>/... for desktop clients
 
 # Job states. Omit this table for the default: open -> working -> done | failed | cancelled.
+# Optional: push a content-free notice when a decision is waiting for one role. See
+# docs/integrations/decision-push.md.
+# [integrations.decision_push]
+# enabled = true
+# role = "planner"
+# url = "https://push.example.com/decisions"
+# secret_env = "BATON_PUSH_TOKEN"            # optional: a bearer token, read from the environment
+# link_base = "https://dash.example.com"     # optional: link each push to the dashboard item
+# max_per_hour = 10
+
 [jobs]
 initial = "open"
 
