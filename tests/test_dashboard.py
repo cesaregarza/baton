@@ -492,3 +492,26 @@ def test_the_badge_follows_the_stored_author_kind_and_a_notice_shows_none(tmp_pa
     assert '<span class="badge agent">agent</span>' in agent and "badge human" not in agent
     notice = re.search(r'<li class="notice">(.*?)</li>', body, re.S).group(1)
     assert "badge" not in notice
+
+
+def test_a_reply_whose_parent_is_on_an_earlier_page_names_it(tmp_path) -> None:
+    config = view_config(tmp_path)
+    conn = connect(config.db_path)
+    try:
+        cid = conversations.create(conn, config, actor="orchestrator", title="Long thread",
+                                   participants=GROUP)["conversation_id"]
+        first = conversations.send(conn, config, sender="orchestrator", conversation_id=cid,
+                                   text="first " + "x" * 60_000)["message_id"]
+        for number in range(2, 6):
+            conversations.send(conn, config, sender="orchestrator", conversation_id=cid,
+                               text=f"filler {number} " + "x" * 60_000)
+        conversations.send(conn, config, sender="reviewer", conversation_id=cid, text="late answer",
+                           reply_to=first)
+    finally:
+        conn.close()
+    first_page = text(get(config, f"/c/{cid}"))
+    assert "late answer" not in first_page
+    onward = re.search(r'<a href="(/c/[^"]+\?after_seq=\d+)">Later messages</a>', first_page).group(1)
+    answer = item(text(get(config, onward)), "late answer")
+    marker = re.search(r'<p class="reply-to">(.*?)</p>', answer)
+    assert marker and marker.group(1) == "in reply to #1"
