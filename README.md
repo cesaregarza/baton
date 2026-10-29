@@ -251,6 +251,28 @@ baton wait --timeout 300
 itself is trustworthy: whoever controls the host machine can write anything into its database. And it marks
 authorship, not authority: what an assistant does with a message from a person is that assistant's own rule.
 
+## Dashboard (optional)
+
+The host can serve a read-only web view of conversations for a person at the same machine. It is off unless
+you enable it, it needs conversations enabled, and it binds only to a loopback address:
+
+```toml
+[dashboard]
+enabled = true
+viewer_role = "planner"   # the view shows what this role may see
+listen_port = 8766        # http://127.0.0.1:8766/
+```
+
+The view shows the conversations `viewer_role` is in, from when it joined, the same messages
+`read_history` returns. Each message shows its `from_role`, with relayed words and participant notices
+apart from the sender's own text. To show every conversation, set `can_view_all_conversations = true` on
+that role. Viewing marks nothing read and moves no cursor. There's no compose box and no way to write.
+
+The view has no login. Anyone, and any process, on the machine that can reach the port can read it, so on a
+shared machine pick a viewer role that sees little. It answers only to its own loopback address (which stops
+DNS rebinding), sends no CORS headers, can't be framed, and its pages carry no scripts. To reach it from
+anywhere else, put your own authentication in front of it; that is a separate decision from turning it on.
+
 ## MCP tools
 
 Every tool acts as the caller's role, which comes from the caller's credential.

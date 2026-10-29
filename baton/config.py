@@ -62,6 +62,8 @@ class Role:
     wake: Wake = field(default_factory=Wake)
     can_create_conversations: bool = False
     can_manage_participants: bool = False
+    # Lets the dashboard's viewer see every conversation, not only the ones this role is in.
+    can_view_all_conversations: bool = False
     # A person, not an agent: acts only with its own bearer token, never through OAuth or `--as`.
     human: bool = False
 
@@ -112,6 +114,20 @@ class Conversations:
     escalation_role: str | None = None
 
 
+# The dashboard binds only here: it has no login, so anyone who can reach its port can read it.
+LOOPBACK_HOSTS = ("127.0.0.1", "::1")
+
+
+@dataclass(frozen=True)
+class Dashboard:
+    """The optional read-only view of conversations, off unless enabled. It shows what `viewer_role` may see."""
+
+    enabled: bool = False
+    viewer_role: str | None = None
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 8766
+
+
 @dataclass(frozen=True)
 class Config:
     public_url: str
@@ -126,6 +142,7 @@ class Config:
     # Raw `[integrations.<name>]` tables; each integration validates its own (see baton.integrations).
     integrations: dict[str, dict[str, Any]] = field(default_factory=dict)
     conversations: Conversations = field(default_factory=Conversations)
+    dashboard: Dashboard = field(default_factory=Dashboard)
 
     @property
     def resource_url(self) -> str:
@@ -197,6 +214,7 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
     if twice:
         raise ConfigError(f"auth.tokens has more than one entry named {twice[0]!r}: a token's name must be unique, "
                           "so that revoking it ends exactly that token")
+    conversations = _conversations(raw.get("conversations", {}), roles)
     return Config(
         public_url=public_url,
         listen_host=str(host.get("listen_host", "127.0.0.1")),
@@ -208,7 +226,8 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         jobs=_jobs(raw.get("jobs"), roles),
         allowed_origins=tuple(str(origin) for origin in host.get("allowed_origins", [])),
         integrations=integrations,
-        conversations=_conversations(raw.get("conversations", {}), roles),
+        conversations=conversations,
+        dashboard=_dashboard(raw.get("dashboard", {}), roles, conversations),
     )
 
 
@@ -253,6 +272,7 @@ def _role(name: str, table: dict[str, Any]) -> Role:
                                      f"roles.{name}.wake.only_when_addressed"),
     ), _boolean(table, "can_create_conversations", False, f"roles.{name}.can_create_conversations"),
         _boolean(table, "can_manage_participants", False, f"roles.{name}.can_manage_participants"),
+        _boolean(table, "can_view_all_conversations", False, f"roles.{name}.can_view_all_conversations"),
         _boolean(table, "human", False, f"roles.{name}.human"))
 
 
@@ -268,6 +288,22 @@ def _conversations(table: dict[str, Any], roles: dict[str, Role]) -> Conversatio
                                       1, 100_000, integer=True),
         escalation_role=escalation_role,
     )
+
+
+def _dashboard(table: dict[str, Any], roles: dict[str, Role], conversations: Conversations) -> Dashboard:
+    if not _boolean(table, "enabled", False, "dashboard.enabled"):
+        return Dashboard()
+    viewer_role = table.get("viewer_role")
+    if viewer_role not in roles:
+        raise ConfigError(f"dashboard.viewer_role must name a configured role; got {viewer_role!r}")
+    if not conversations.enabled:
+        raise ConfigError("the dashboard shows conversations: set conversations.enabled = true to enable it")
+    listen_host = table.get("listen_host", "127.0.0.1")
+    if listen_host not in LOOPBACK_HOSTS:
+        raise ConfigError(f"dashboard.listen_host must be a loopback address ({' or '.join(LOOPBACK_HOSTS)}): the "
+                          "view has no login, so reaching it from elsewhere needs its own auth in front of it")
+    return Dashboard(True, viewer_role, listen_host,
+                     _number(table, "listen_port", 8766, "dashboard.listen_port", 1, 65535, integer=True))
 
 
 def _integrations(tables: dict[str, Any], roles: dict[str, Role]) -> dict[str, dict[str, Any]]:

@@ -305,6 +305,37 @@ delivering a wake. Coalescing, leases, backoff, attempts and `baton wakes` stay 
 through the same data-directory checks as everything else. The integrations available, and what each
 one verifies, are documented in `docs/integrations/`.
 
+## Dashboard
+
+An optional module, `baton/dashboard.py`, off unless `[dashboard] enabled = true`. It serves a read-only view
+of conversations from the host's own store, on a standard-library HTTP server beside the MCP server. It has
+no dependencies, no scripts and no token: the host reads its own database.
+
+**What it shows.** What one configured `viewer_role` may see: the conversations that role is in, each from
+its join point, exactly as `read_history` returns them. A role sees every conversation only when its config
+sets `can_view_all_conversations`, which defaults to false. Each message shows `from_role` and a badge;
+relayed entries render in their own block, apart from the sender's text, and participant notices render as
+notices.
+
+**Read-only and bookmark-neutral.** It serves only GET and HEAD; anything else gets `405`. Viewing reads the
+way `read_history` does, so it marks nothing read, moves no cursor and changes no unread count.
+
+**Threat model: the machine it runs on.** The view has no login, so any person or process that can reach
+the port can read what the viewer role sees; on a shared machine, choose a viewer role that sees little.
+The config refuses any `listen_host` but `127.0.0.1` or `::1`. Against other sites open in a browser on the
+same machine:
+
+- It answers only when the `Host` header is its own loopback address and port, and refuses anything else
+  with `421`, so a site that rebinds its own name to loopback reads nothing.
+- It sends no CORS headers, so another origin can't read a response.
+- Every response carries `Content-Security-Policy: default-src 'none'; style-src 'self'; base-uri 'none';
+  form-action 'none'; frame-ancestors 'none'`, with `X-Frame-Options: DENY` and `X-Content-Type-Options:
+  nosniff`. Pages are rendered on the server with every value escaped, and contain no scripts.
+- It has no write endpoints, so there is nothing for a cross-site request to change.
+
+Reaching the view from anywhere but the machine itself needs its own authentication in front of it, and
+is the operator's separate decision.
+
 ## What was deliberately left out
 
 - **Agent runners and approval gates.** Launching, sandboxing and approving an agent's actions belongs in
@@ -316,4 +347,6 @@ one verifies, are documented in `docs/integrations/`.
   signed challenge, resolves the name once per request and connects only to global addresses, follows no
   redirects, signs every event, and keeps role isolation.
 - **Push to phones or chat.** Point a wake webhook at whatever notification service you use.
-- **A web dashboard.** `baton job list`, `baton wakes` and the database itself are the views.
+- **A web dashboard in the core.** `baton job list`, `baton wakes` and the database itself are the core's
+  views. An optional, read-only dashboard module is allowed (see [Dashboard](#dashboard)): it is off unless
+  the config enables it and changes nothing when it is on.
