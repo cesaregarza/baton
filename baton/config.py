@@ -36,13 +36,19 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class Wake:
-    """How a role is told something is waiting for it: at most one of a webhook, a command or an integration."""
+    """How a role is told something is waiting for it: at most one of a webhook, a command or an integration.
+
+    `only_when_addressed` narrows *when*: the role still receives every message, but a conversation
+    message wakes it only if it singles the role out for attention or asks for a decision. Anything else
+    addressed to the role alone -- a direct message, a job change, an escalation -- wakes it either way.
+    """
 
     webhook: str | None = None
     secret_env: str | None = None
     command: tuple[str, ...] = ()
     integration: str | None = None
     timeout_seconds: float = 10.0
+    only_when_addressed: bool = False
 
     @property
     def enabled(self) -> bool:
@@ -58,6 +64,8 @@ class Role:
     can_manage_participants: bool = False
     # Lets the dashboard's viewer see every conversation, not only the ones this role is in.
     can_view_all_conversations: bool = False
+    # A person, not an agent: acts only with its own bearer token, never through OAuth or `--as`.
+    human: bool = False
 
 
 @dataclass(frozen=True)
@@ -152,6 +160,19 @@ class Config:
     def audit_path(self) -> Path:
         return self.data_dir / "audit.jsonl"
 
+    @property
+    def revoked_tokens_path(self) -> Path:
+        return self.data_dir / "revoked_tokens.json"
+
+    @property
+    def human_roles(self) -> frozenset[str]:
+        return frozenset(name for name, role in self.roles.items() if role.human)
+
+    def author_kind(self, role: str) -> str:
+        """What a message from `role` is recorded as when sent: `human` for a human role, otherwise `agent`."""
+        entry = self.roles.get(role)
+        return "human" if entry is not None and entry.human else "agent"
+
     def require_role(self, name: str) -> Role:
         role = self.roles.get(name)
         if role is None:
@@ -188,6 +209,11 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
     tokens = tuple(_token(index, table, roles) for index, table in enumerate(auth.get("tokens", [])))
     if len({token.sha256 for token in tokens}) != len(tokens):
         raise ConfigError("two auth.tokens entries share a digest")
+    names = [token.name for token in tokens]
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        raise ConfigError(f"auth.tokens has more than one entry named {twice[0]!r}: a token's name must be unique, "
+                          "so that revoking it ends exactly that token")
     conversations = _conversations(raw.get("conversations", {}), roles)
     return Config(
         public_url=public_url,
@@ -242,9 +268,12 @@ def _role(name: str, table: dict[str, Any]) -> Role:
     return Role(name, str(table.get("description", "")), Wake(
         webhook=webhook, secret_env=wake.get("secret_env"), command=tuple(command), integration=integration,
         timeout_seconds=_number(wake, "timeout_seconds", 10.0, f"roles.{name}.wake.timeout_seconds", 0.1, 300),
+        only_when_addressed=_boolean(wake, "only_when_addressed", False,
+                                     f"roles.{name}.wake.only_when_addressed"),
     ), _boolean(table, "can_create_conversations", False, f"roles.{name}.can_create_conversations"),
         _boolean(table, "can_manage_participants", False, f"roles.{name}.can_manage_participants"),
-        _boolean(table, "can_view_all_conversations", False, f"roles.{name}.can_view_all_conversations"))
+        _boolean(table, "can_view_all_conversations", False, f"roles.{name}.can_view_all_conversations"),
+        _boolean(table, "human", False, f"roles.{name}.human"))
 
 
 def _conversations(table: dict[str, Any], roles: dict[str, Role]) -> Conversations:
@@ -312,6 +341,10 @@ def _oauth(table: dict[str, Any], roles: dict[str, Role]) -> OAuth:
     oauth_roles = tuple(table.get("roles", []))
     if not oauth_roles or any(role not in roles for role in oauth_roles):
         raise ConfigError("auth.oauth.roles must list one or more configured roles an OAuth client may act as")
+    humans = [role for role in oauth_roles if roles[role].human]
+    if humans:
+        raise ConfigError(f"auth.oauth.roles lists the human role {humans[0]!r}: a human role signs in only with "
+                          "its own token from `baton token new`, never through the consent page")
     return OAuth(True, str(passphrase_hash), oauth_roles, tuple(table.get("redirect_uris", [])),
                  _boolean(table, "allow_loopback_redirects", True, "auth.oauth.allow_loopback_redirects"))
 

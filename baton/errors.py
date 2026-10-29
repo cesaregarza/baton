@@ -23,6 +23,12 @@ class UnknownRole(BatonError):
     code = "unknown_role"
 
 
+class UnknownToken(BatonError):
+    """No configured bearer token has that name."""
+
+    code = "unknown_token"
+
+
 class IllegalTransition(BatonError):
     code = "illegal_transition"
 

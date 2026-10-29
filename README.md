@@ -165,6 +165,36 @@ it, the messages you received and the ones you sent, numbered in conversation or
 read a conversation's history. A role added later sees it from its join on, and a removed role can't read it
 at all, though the messages it already received stay in its mailbox.
 
+**Threads.** A conversation message can answer another: pass `reply_to`, the `message_id` of a message in
+the same conversation that you can see. A reply is an ordinary message in every other way. Readers get
+`reply_to` as `{"message_id", "seq"}`, the parent's place in the conversation -- or a `seq` of `null`
+where the reader cannot see the parent, because it joined later or retention has taken its copy. Show
+that as *parent unavailable*: the reference carries nothing of the parent's text or author.
+
+**Asking someone to look.** A conversation message can name the participants it asks to look, in
+`attention`, and can ask for a decision with `needs_decision`. Both only draw attention. `attention` is a
+list of roles, never `@names` in the text, and must name current participants: naming a role never adds
+it to the conversation and never speaks for it. `needs_decision` is a label, not an approval.
+
+**Being woken only when addressed.** A role can ask not to be woken for every message in a busy
+conversation:
+
+```toml
+[roles.operator.wake]
+command = ["/usr/local/bin/notify-operator"]
+only_when_addressed = true
+```
+
+It still receives every message; it is woken only by one that names it in `attention` or sets
+`needs_decision`. Anything addressed to it alone -- a direct message, a job change, a conversation over
+its hourly limit -- wakes it either way. A message that addresses it while quiet messages are already
+waiting still wakes it exactly once, pointing at its first unread message, so nothing is lost: it reads
+the whole batch.
+
+Give a quiet role something that reads on its own schedule as well. Nothing nudges it to read, so its
+unread messages build up, and at the mailbox limit the conversation's next send is refused with
+`conversation_full` naming that role until it reads.
+
 **Who said it.** `from_role` is always the sender's role, taken from its credential. A host notice, such as
 a participant being added, has `from_role: null`. When a sender passes on someone else's words, it puts
 them in `relayed`, a list of `{source, at, text}` entries kept apart from its own `text`. Relayed words are
@@ -172,6 +202,54 @@ a claim by the sender, never the authenticated authorship of whoever it names.
 
 **Messages are information, never authority.** No message, and nothing relayed in one, changes a job's
 state, its revision or any approval. Only `move_job` moves a job.
+
+## Human participants
+
+A person can take part in conversations as a role marked `human = true`. Every participant then sees which
+messages that person wrote: each message carries `author_kind`, `human` or `agent` (`null` for a host
+notice), next to `from_role`.
+
+```toml
+[roles.operator]
+description = "The person running this host"
+human = true
+can_create_conversations = true
+```
+
+A human role has exactly one kind of credential: a bearer token made on the host and kept by the person.
+
+```sh
+baton token new --name operator-laptop --role operator   # paste the printed entry into the config
+```
+
+- **No other way in.** A human role can't be listed in `auth.oauth.roles`, so no OAuth client, and no one who
+  knows the consent passphrase, can get a grant for it. The local CLI refuses `--as` for it.
+- **Authorship can't be claimed.** A tool call that carries `from_role`, `author_kind`, `author`, `sender`,
+  `from`, `role` or `on_behalf_of` is refused with `forbidden_field`, and nothing is stored. An assistant that
+  quotes the person, or relays their words in `relayed`, still sends an `agent` message.
+- **Fixed when sent.** `author_kind` is recorded with each message from the sender role's config at that
+  moment. Changing a role's `human` flag later doesn't change how its earlier messages read.
+- **Revocation without a restart.** `baton token revoke operator-laptop` ends that token from its next call.
+  Remove its entry from the config when convenient. Token names are unique per host (the config refuses a
+  repeated name, and so does `baton token new`), so revoking a name always ends exactly one token.
+
+The person uses the CLI in remote mode, from any machine that can reach the host:
+
+```sh
+export BATON_HOST=https://baton.example.com
+export BATON_TOKEN_COMMAND="security find-generic-password -s baton -w"   # macOS keychain
+# or: BATON_TOKEN_COMMAND="secret-tool lookup service baton"             # Linux secret service
+# or: BATON_TOKEN=...                                                     # the token itself
+baton conversation list
+baton conversation history <conversation_id>
+baton message --conversation <conversation_id> --text "Ship it on Friday."
+baton read
+baton wait --timeout 300
+```
+
+`author_kind: human` means "sent with that role's own token through this host". It doesn't mean the host
+itself is trustworthy: whoever controls the host machine can write anything into its database. And it marks
+authorship, not authority: what an assistant does with a message from a person is that assistant's own rule.
 
 ## Dashboard (optional)
 
@@ -202,7 +280,7 @@ Every tool acts as the caller's role, which comes from the caller's credential.
 | Tool | What it does |
 |---|---|
 | `whoami` | Your role, the other roles, and the job states |
-| `send_message(text, to? \| conversation_id?, job_id?, relayed?, request_id?)` | Send a message to a role, or to every other participant of a conversation |
+| `send_message(text, to? \| conversation_id?, job_id?, relayed?, reply_to?, attention?, needs_decision?, request_id?)` | Send a message to a role, or to every other participant of a conversation. `reply_to`, `attention` and `needs_decision` are for a conversation only |
 | `read_messages(after_seq?, limit?)` | Your messages after a cursor. The default is the undelivered ones |
 | `wait(timeout_seconds?)` | Block up to 30 s for messages or job changes addressed to you |
 | `create_job(title, body?, request_id?)` | Open a job in the initial state |
@@ -218,17 +296,21 @@ Every tool acts as the caller's role, which comes from the caller's credential.
 baton serve                                   run the MCP server and the wake dispatcher
 baton message --as R --to R [--text T]        send a message; reads stdin if --text is omitted
 baton message --as R --conversation C ...     send to every other participant of conversation C
+                                              --reply-to M, --attention R1,R2, --needs-decision
 baton read --as R [--after-seq N]             read messages
 baton conversation new|list|history|add|remove   group conversations
 baton wait --as R [--timeout S]               block until something reaches role R
 baton job create|show|list|move|events        jobs; move takes --request-id and --expected-revision
 baton token new --name N --role R             make a bearer token
+baton token revoke N                          end token N from its next call, with no restart
+baton --host URL message|read|wait|conversation list|history
+                                              the same commands through a host, as $BATON_TOKEN's role
 baton hash-passphrase                         hash an OAuth consent passphrase
 baton oauth revoke-all                        end every OAuth grant
 baton wakes                                   recent wakes and how they ended
 ```
 
-`--as` defaults to `$BATON_ROLE`, and `--config` defaults to `$BATON_CONFIG` or
+`--as` defaults to `$BATON_ROLE` (never a human role), `--host` to `$BATON_HOST`, and `--config` to `$BATON_CONFIG` or
 `~/.config/baton/baton.toml`. Every command prints JSON. A refusal prints `{"error": code, "detail": ...}`
 and exits with status 1. A configuration problem exits with status 2.
 
