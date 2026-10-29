@@ -378,3 +378,24 @@ def test_7_the_humans_remote_cli_and_two_assistant_clients_share_one_conversatio
                                               ("assistant", "agent", "3 from assistant")]
     code, refused = remote(host, capsys, monkeypatch, "read", "--as", "assistant")
     assert code == 2 and "token" in refused["detail"]  # the token decides the role, not --as
+
+
+# Authorship is fixed when a message is sent --------------------------------------------------------------
+
+
+def test_changing_a_roles_human_flag_later_does_not_relabel_messages_already_sent(tmp_path: Path) -> None:
+    from baton.app import Tools
+
+    path = seat_config(tmp_path, 8765, {"operator": new_token()[1]})
+    sent_under = Tools(config_module.load(path))
+    sent_under.send_message("operator", text="from the person", to="reviewer")
+    sent_under.send_message("assistant", text="from an agent", to="reviewer")
+
+    # Later the host flips both flags: the person's role is no longer human, and the agent's role now is.
+    flipped = path.read_text().replace("human = true\n", "").replace(
+        'description = "Another assistant"', 'description = "Another assistant"\nhuman = true').replace(
+        'roles = ["reviewer", "assistant"]', 'roles = ["reviewer"]')
+    path.write_text(flipped)
+    read_under = Tools(config_module.load(path))
+    assert authors(read_under.read_messages("reviewer", after_seq=0)) == [
+        ("operator", "human", "from the person"), ("assistant", "agent", "from an agent")]
