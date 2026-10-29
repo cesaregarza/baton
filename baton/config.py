@@ -233,29 +233,41 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
     )
 
 
-def _require_canonical(public_url: str) -> None:
-    """Refuse a public_url that URL handling would rewrite, since it is also the OAuth issuer.
+def canonical_issuer(public_url: str) -> str:
+    """`public_url` exactly as the OAuth metadata will publish it as the issuer.
 
-    The issuer must read exactly the same in the metadata (which the MCP SDK
-    normalizes) and in every `iss` the host sends, so the config has to be in
-    that normal form already: a lower-case host, no default port, and an ASCII
-    path with no percent-encoding.
+    The MCP SDK holds the issuer as a pydantic `AnyHttpUrl` (keeping an empty
+    path empty) and serializes that. This builds the same value, without
+    importing the SDK, which is slow to load for a one-shot CLI command; a
+    test checks it against the SDK's own result.
     """
-    parsed = urlparse(public_url)
+    from pydantic import AnyHttpUrl, BaseModel, ConfigDict, ValidationError
+
+    class Issuer(BaseModel):
+        model_config = ConfigDict(url_preserve_empty_path=True)
+        url: AnyHttpUrl
+
     try:
-        port = parsed.port
-    except ValueError:
-        raise ConfigError(f"host.public_url {public_url!r} has an invalid port") from None
-    problem = None
-    if parsed.netloc != parsed.netloc.lower():
-        problem = "its host must be lower case"
-    elif port == {"https": 443, "http": 80}[parsed.scheme]:
-        problem = f"leave out the default port {port}"
-    elif not parsed.path.isascii() or "%" in parsed.path:
-        problem = "its path must be plain ASCII, with no percent-encoding"
-    if problem:
-        raise ConfigError(f"host.public_url {public_url!r} is not in canonical form: {problem}. It is the OAuth "
-                          "issuer, which clients compare character for character")
+        return str(Issuer(url=public_url).url)
+    except ValidationError:
+        raise ConfigError(f"host.public_url {public_url!r} is not a valid URL") from None
+
+
+def _require_canonical(public_url: str) -> None:
+    """Refuse a public_url the metadata would publish differently, since every `iss` must equal the published issuer.
+
+    A percent-encoded path is refused as well, though published as written:
+    the protected-resource metadata route is registered under that encoded
+    path, which the router compares against the decoded one, so it can't be
+    reached.
+    """
+    canonical = canonical_issuer(public_url)
+    if "%" in urlparse(canonical).path:
+        raise ConfigError(f"host.public_url {public_url!r} has a percent-encoded (or non-ASCII) path, under which the "
+                          "OAuth metadata routes can't be reached; use a plain ASCII path")
+    if canonical != public_url:
+        raise ConfigError(f"host.public_url must be written exactly as the OAuth metadata publishes it, since clients "
+                          f"compare the issuer character for character: write public_url = {canonical!r}")
 
 
 def _boolean(table: dict[str, Any], key: str, default: bool, where: str) -> bool:
