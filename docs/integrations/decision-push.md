@@ -19,7 +19,9 @@ timeout_seconds = 10
 A conversation message the configured role received that carries `needs_decision`. Nothing else pushes:
 not attention, not a direct message, not a job change, and not a role's own question. Each message pushes
 at most once. A retried send stores nothing new, and a restarted host keeps its place. Turning the
-integration on sends nothing for decisions already waiting; it starts from the end of the role's mailbox.
+integration on sends nothing for decisions already waiting: `baton serve` takes its starting point, the end
+of the role's mailbox, before the server accepts any send, so a decision sent just after startup is still
+pushed.
 
 ## What a push carries
 
@@ -28,20 +30,21 @@ A plain POST:
 ```
 POST <url>
 Title: A decision is waiting in Baton
-Click: <link_base>/c/<conversation_id>#m-<seq>
+Click: <link_base>/c/<conversation_id>?after_seq=<seq - 1>#m-<seq>
 Authorization: Bearer <token>                 (only with secret_env)
 Content-Type: text/plain; charset=utf-8
 
-A decision is waiting in Baton.
-<link_base>/c/<conversation_id>#m-<seq>
+Waiting for your decision. Open it: <link_base>/c/<conversation_id>?after_seq=<seq - 1>#m-<seq>
 ```
 
 `Title` and `Click` are headers some push services read as the notification's title and tap target; another
 webhook can read the body and ignore them. Without
-`link_base` there is no `Click` and no link. A push never carries the message's words, relayed words, the
+`link_base` there is no `Click` and no link, and the body reads "Waiting for your decision. Open Baton to
+see it." A push never carries the message's words, relayed words, the
 conversation's title or who sent it, because a push passes through someone else's servers. The link
-names only the conversation's id and the message's number, and opens the item in the dashboard, which
-shows it only to someone who can reach the dashboard.
+names only the conversation's id and the message's number. It opens the dashboard page that starts at
+that message, the same link the dashboard's own Needs you page uses, so it works however deep the
+conversation is. The dashboard shows it only to someone who can reach it.
 
 ## Failures and limits
 
@@ -52,6 +55,9 @@ shows it only to someone who can reach the dashboard.
   content, and counted. The decision still shows on the dashboard's Needs you page.
 - **At most `max_per_hour` pushes in any hour.** What the cap holds back is counted, not sent later.
 - The URL and the token come only from the config and the environment. Neither is ever logged. The
-  config refuses a URL with credentials in it and a token written into the config itself.
+  config refuses, when it loads, a `url` or `link_base` that names no host, has a port that isn't 1 to
+  65535, has a malformed IPv6 address or carries credentials, and a token written into the config itself.
+- A push lost to a crash or shutdown between claiming a decision and sending it is not sent later: pushes
+  are at most once.
 - Its state, `decision_push.json` in the data directory, holds only a position in the mailbox, the
   times of recent pushes and three counts.

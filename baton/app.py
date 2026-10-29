@@ -374,6 +374,9 @@ def serve(config: Config) -> None:
     dispatcher = Dispatcher(config, integrations=integrations)
     threading.Thread(target=dispatcher.run, args=(stop,), daemon=True, name="wakes").start()
     for name, integration in integrations.items():
+        prepare = getattr(integration, "prepare", None)
+        if prepare is not None:  # before the server accepts anything, so nothing slips in ahead of it
+            prepare()
         loop = getattr(integration, "run", None)
         if loop is not None:  # an integration with work of its own runs it beside the server, until stop
             threading.Thread(target=loop, args=(stop,), daemon=True, name=name).start()

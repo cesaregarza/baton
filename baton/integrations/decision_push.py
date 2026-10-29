@@ -12,8 +12,8 @@ Enabled by `[integrations.decision_push]`:
 
 A message pushes when the configured role received it and it carries
 `needs_decision`; nothing else pushes. The request is a plain POST: its body is
-a fixed notice and, when `link_base` is set, the link to the message on the
-dashboard; its `Title` and `Click` headers are what some push services read,
+a fixed notice and, when `link_base` is set, a link to the dashboard page that
+holds the message; its `Title` and `Click` headers are what some push services read,
 and any other webhook may ignore them. It never carries the message's words, its relayed
 words, its conversation's title or who sent it, because a push passes through
 someone else's servers. The URL and the token come only from the operator's
@@ -27,13 +27,15 @@ attempted, so a retried send (which stores nothing new), a restart or a failed
 push never pushes it again. A failure is logged and counted, without content.
 At most `max_per_hour` pushes go out in any hour; what the cap holds back is
 counted, not sent later. Enabling it sends nothing for decisions already
-waiting: the first pass starts at the end of the mailbox.
+waiting: `baton serve` takes its starting point, the end of the role's
+mailbox, before the server accepts any send.
 """
 
 from __future__ import annotations
 
 import fcntl
 import http.client
+import ipaddress
 import json
 import logging
 import os
@@ -44,7 +46,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import SplitResult, quote, urlsplit
 
 from mcp.server.mcpserver import MCPServer
 
@@ -54,6 +56,7 @@ from baton.store import connect
 
 NAME = "decision_push"
 TITLE = "A decision is waiting in Baton"
+BODY = "Waiting for your decision."
 STATE_FILE = "decision_push.json"
 LOCK_FILE = "decision_push.lock"
 HOUR = 3600.0
@@ -88,8 +91,9 @@ def parse_settings(config: Config, table: dict[str, Any]) -> Settings:
     if role not in config.roles:
         raise ConfigError(f"{where}.role must name a configured role")
     url = table.get("url")
-    if not _http_url(url) or _has_credentials(url):
-        raise ConfigError(f"{where}.url must be an http(s) URL with no credentials in it")
+    if _address(url) is None:
+        raise ConfigError(f"{where}.url must be an http(s) URL naming a host, with a valid port if any, and no "
+                          "credentials in it")
     secret_env = table.get("secret_env")
     if secret_env is not None:
         if not isinstance(secret_env, str) or not ENV_NAME.fullmatch(secret_env):
@@ -99,10 +103,10 @@ def parse_settings(config: Config, table: dict[str, Any]) -> Settings:
             raise ConfigError(f"the environment variable {secret_env}, named by {where}.secret_env, is not set")
     link_base = table.get("link_base")
     if link_base is not None:
-        parts = urlsplit(link_base) if isinstance(link_base, str) else None
-        if not _http_url(link_base) or parts.query or parts.fragment or _has_credentials(link_base):
-            raise ConfigError(f"{where}.link_base must be the dashboard's http(s) address, with no query, "
-                              "fragment or credentials")
+        parts = _address(link_base)
+        if parts is None or parts.query or parts.fragment:
+            raise ConfigError(f"{where}.link_base must be the dashboard's http(s) address, naming a host, with a "
+                              "valid port if any, and no query, fragment or credentials")
         link_base = link_base.rstrip("/")
     return Settings(role, url, secret_env, link_base,
                     _bounded(table, "max_per_hour", 10, 1, 1000, f"{where}.max_per_hour", integer=True),
@@ -156,6 +160,16 @@ class DecisionPush:
     def deliver(self, role: str, wake_id: str, body: bytes) -> bool:
         return False
 
+    def prepare(self) -> None:
+        """Take the starting point now, before the host accepts a send, so no decision falls before it.
+
+        `baton serve` calls this before it starts the server. Without it, the first pass would start from
+        wherever the mailbox had got to by then, and skip a decision sent in between.
+        """
+        with self._state() as state:
+            if state["after_seq"] is None:
+                state["after_seq"] = self._mailbox_end()
+
     def run(self, stop: threading.Event, poll_seconds: float = 2.0) -> None:
         """Push until `stop` is set. A pass that fails is logged by its kind alone and the next one runs."""
         while True:
@@ -191,8 +205,7 @@ class DecisionPush:
         role, now = self.settings.role, self._clock()
         conn = connect(self.config.db_path)
         try:
-            row = conn.execute("SELECT last_seq FROM mailboxes WHERE recipient = ?", (role,)).fetchone()
-            last = row["last_seq"] if row else 0
+            last = self._mailbox_end(conn)
             if state["after_seq"] is None:
                 state["after_seq"] = last
                 return []
@@ -214,10 +227,24 @@ class DecisionPush:
             due.append(self._link(found["conversation_id"], found["conversation_seq"]))
         return due
 
+    def _mailbox_end(self, conn: Any = None) -> int:
+        """The role's newest mailbox seq, or 0 before it has received anything."""
+        own = conn is None
+        conn = conn or connect(self.config.db_path)
+        try:
+            row = conn.execute("SELECT last_seq FROM mailboxes WHERE recipient = ?", (self.settings.role,)).fetchone()
+            return row["last_seq"] if row else 0
+        finally:
+            if own:
+                conn.close()
+
     def _link(self, conversation_id: str | None, conversation_seq: int | None) -> str | None:
         if self.settings.link_base is None or conversation_id is None or conversation_seq is None:
             return None
-        return f"{self.settings.link_base}/c/{quote(conversation_id, safe='')}#m-{int(conversation_seq)}"
+        # The page that starts at the message, as the dashboard's own Needs you links it: past the first page
+        # a bare anchor would land on a page that doesn't hold it.
+        seq = int(conversation_seq)
+        return f"{self.settings.link_base}/c/{quote(conversation_id, safe='')}?after_seq={seq - 1}#m-{seq}"
 
     def _push(self, link: str | None) -> bool:
         headers = {"Title": TITLE, "Content-Type": "text/plain; charset=utf-8"}
@@ -225,7 +252,7 @@ class DecisionPush:
             headers["Click"] = link
         if self.settings.secret_env:
             headers["Authorization"] = f"Bearer {os.environ.get(self.settings.secret_env, '')}"
-        body = f"{TITLE}." + (f"\n{link}" if link else "")
+        body = f"{BODY} Open it: {link}" if link else f"{BODY} Open Baton to see it."
         try:
             status = self._post(self.settings.url, headers, body.encode())
         except Exception as error:  # noqa: BLE001 - any failure is a failed push, logged without content
@@ -258,13 +285,26 @@ def _shape(raw: dict[str, Any]) -> dict[str, Any]:
             "counts": {key: int(counts.get(key, 0)) for key in ("sent", "failed", "capped")}}
 
 
-def _has_credentials(url: str) -> bool:
-    """Whether the URL names a user (and perhaps a password) before its host."""
-    return urlsplit(url).username is not None
+def _address(value: Any) -> SplitResult | None:
+    """The URL's parts when it is http(s), names a host, has a valid port if any and no credentials; else None.
 
-
-def _http_url(value: Any) -> bool:
-    return isinstance(value, str) and re.fullmatch(r"https?://[^\s/?#]+(/[^\s]*)?", value) is not None
+    Everything is checked here, when the config loads, so a bad address never reaches a push.
+    """
+    if not isinstance(value, str) or re.fullmatch(r"https?://[^\s/?#]+(/[^\s]*)?", value) is None:
+        return None
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:  # an unclosed IPv6 bracket, or a port that isn't a number from 0 to 65535
+        return None
+    if not parts.hostname or parts.username is not None or port == 0:
+        return None
+    if parts.netloc.startswith("["):
+        try:
+            ipaddress.IPv6Address(parts.hostname)
+        except ValueError:
+            return None
+    return parts
 
 
 def _bounded(table: dict[str, Any], key: str, default: float, low: float, high: float, where: str, *,

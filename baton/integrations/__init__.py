@@ -9,8 +9,9 @@ The core keeps everything it already owns: roles and credentials, the event
 log, wake coalescing, leases, backoff, attempts and `baton wakes`. An
 integration only adds MCP methods to the server and takes over the last step
 of delivering a content-free wake. One that has work of its own, such as
-`decision_push`, may also define `run(stop)`: `baton serve` runs it on its own
-thread until the host stops.
+`decision_push`, may also define `prepare()`, which `baton serve` calls before
+the server accepts any request, and `run(stop)`, which it runs on its own thread
+until the host stops.
 """
 
 from __future__ import annotations
