@@ -443,3 +443,78 @@ def test_a_link_past_the_first_page_opens_the_page_holding_the_message(tmp_path)
     assert page.status == 200
     body = page.body.decode()
     assert 'id="m-105"' in body and "the late decision" in body
+
+
+# An unreadable push state never stops Baton (reviewer finding on eb9bd0f1) -----------------------------------
+
+
+def corrupt_state(config: Config, content: str) -> None:
+    connect(config.db_path).close()  # the checked data directory, as serve would have it
+    path = config.data_dir / "decision_push.json"
+    path.write_text(content)
+    path.chmod(0o600)
+
+
+def live(name: str) -> int:
+    return sum(1 for thread in threading.enumerate() if thread.name == name and thread.is_alive())
+
+
+@pytest.mark.parametrize("content", [f"not json {SECRET_SHAPED}",
+                                     json.dumps({"after_seq": f"x{SECRET_SHAPED}", "window": [], "counts": {}})])
+def test_an_unreadable_push_state_switches_the_push_off_and_baton_still_serves(tmp_path, monkeypatch, caplog,
+                                                                               content) -> None:
+    config = push_config(tmp_path)
+    corrupt_state(config, content)
+    wakes_before = live("wakes")
+    seen: dict[str, Any] = {}
+
+    def serving(app: Any, **kwargs: Any) -> None:
+        seen["served"] = True
+        seen["push threads"] = live("decision_push")
+
+    monkeypatch.setattr(app_module.uvicorn, "run", serving)
+    caplog.set_level(logging.INFO)
+    app_module.serve(config)  # must not raise
+    assert seen == {"served": True, "push threads": 0}
+    deadline = time.monotonic() + 5
+    while live("wakes") > wakes_before and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert live("wakes") == wakes_before and live("decision_push") == 0, "a thread was left behind"
+    logged = caplog.text
+    assert "decision_push" in logged and "decision_push.json" in logged
+    assert SECRET_SHAPED not in logged and "not json" not in logged
+    # The state is left as found: nothing resets the watermark behind the operator's back.
+    assert (config.data_dir / "decision_push.json").read_text() == content
+
+
+def test_prepare_refuses_an_unreadable_state_by_naming_the_file_only(tmp_path) -> None:
+    config = push_config(tmp_path)
+    corrupt_state(config, f"{{broken {SECRET_SHAPED}")
+    from baton.integrations import IntegrationUnavailable
+
+    with pytest.raises(IntegrationUnavailable) as raised:
+        decision_push.load(config, config.integrations["decision_push"]).prepare()
+    assert "decision_push.json" in str(raised.value) and SECRET_SHAPED not in str(raised.value)
+
+
+def test_serve_prepares_every_integration_before_any_worker_thread_starts(tmp_path, monkeypatch) -> None:
+    started: list[str] = []
+    real_start = threading.Thread.start
+
+    def recording_start(self: threading.Thread) -> None:
+        started.append(self.name)
+        real_start(self)
+
+    order: list[str] = []
+    real_prepare = decision_push.DecisionPush.prepare
+
+    def recording_prepare(self: Any) -> None:
+        order.append(f"prepare after {len(started)} threads")
+        real_prepare(self)
+
+    monkeypatch.setattr(threading.Thread, "start", recording_start)
+    monkeypatch.setattr(decision_push.DecisionPush, "prepare", recording_prepare)
+    monkeypatch.setattr(app_module.uvicorn, "run", lambda *a, **k: None)
+    app_module.serve(push_config(tmp_path))
+    assert order == ["prepare after 0 threads"]
+    assert "wakes" in started and "decision_push" in started
