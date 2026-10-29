@@ -4,6 +4,9 @@ Both lanes that raised the schema version add columns to `messages`, and one of 
 `author_kind`. A database three versions behind has to pick up every step, in order, not just the one
 matching its own version. Each fixture is the schema that version really created, generated from the
 head that created it, not hand-edited.
+
+From the version that introduced `author_kind` the column already holds values, a person's own message
+among them, so these also pin that an upgrade never relabels one as an agent's.
 """
 
 from __future__ import annotations
@@ -72,6 +75,15 @@ def old_database(config: Config, version: int, request_id: str) -> None:
             for recipient, last in (("orchestrator", 1), ("reviewer", 2)):
                 raw.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)",
                             (recipient, last))
+        if version >= 5:
+            # `author_kind` exists from this version, so a real database of it already holds values, a
+            # person's own message among them. The backfill comes last so it covers every row above, and
+            # the person's message goes to a mailbox nothing else here uses.
+            raw.execute("UPDATE messages SET author_kind = 'agent' WHERE sender IS NOT NULL")
+            raw.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES ('outsider', 1, 0)")
+            raw.execute("INSERT INTO messages (id, job_id, sender, author_kind, recipient, seq, text, at)"
+                        " VALUES ('msg_human', NULL, 'orchestrator', 'human', 'outsider', 1,"
+                        " 'from the person', ?)", (stamp,))
     raw.close()
     os.chmod(config.db_path, 0o600)
 
@@ -99,7 +111,15 @@ def test_every_older_schema_there_is_a_fixture_for_reaches_the_current_one_whole
     # Every row is still there, and every message a role sent now reads as an agent's.
     kinds = {(row["sender"] is None, row["author_kind"]) for row in db.execute("SELECT sender, author_kind"
                                                                               " FROM messages")}
-    assert kinds == ({(False, "agent"), (True, None)} if version >= 3 else {(False, "agent")}), kinds
+    expected = {(False, "agent")}
+    if version >= 3:
+        expected.add((True, None))  # a host notice has no author at all
+    if version >= 5:
+        expected.add((False, "human"))  # and a person's own message is still the person's
+    assert kinds == expected, kinds
+    if version >= 5:
+        assert db.execute("SELECT author_kind FROM messages WHERE id = 'msg_human'").fetchone()[0] == "human", \
+            "an upgrade relabelled a person's message as an agent's"
     if carried is not None:
         assert rows(db) == carried
 

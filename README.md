@@ -202,6 +202,28 @@ Give a quiet role something that reads on its own schedule as well. Nothing nudg
 unread messages build up, and at the mailbox limit the conversation's next send is refused with
 `conversation_full` naming that role until it reads.
 
+**Topics.** A conversation may carry an optional `topic`, a readable path of one or two lowercase slug
+segments, such as `release` or `release/notes`. It is a label for people, separate from the stable
+`conversation_id`, so renaming one moves nothing:
+
+```sh
+baton conversation new --as orchestrator --title "Release plan" --with orchestrator,reviewer \
+    --topic release/notes
+baton conversation list --as reviewer --topic release      # release and everything under it
+baton conversation topic --as orchestrator <conversation_id> --set release/plan
+baton conversation topic --as orchestrator <conversation_id> --clear
+```
+
+A segment is 1-40 characters of `a-z`, `0-9` and inner hyphens, and there are at most two of them.
+Anything else is refused when it is written, so a topic is always readable and always safe to match.
+Setting it to nothing clears it. Changing one needs the same `can_manage_participants` as changing the
+participants, and membership of that conversation.
+
+Filtering matches whole segments: `release` takes `release` and `release/notes`, never `releases`. An
+unfiltered list still shows the conversations with no topic at all, and the dashboard gives them a group
+of their own, so a topic organises things without becoming a requirement. Filtering never widens what you
+can see: a conversation you are not in stays invisible whether it has a topic or not.
+
 **Who said it.** `from_role` is always the sender's role, taken from its credential. A host notice, such as
 a participant being added, has `from_role: null`. When a sender passes on someone else's words, it puts
 them in `relayed`, a list of `{source, at, text}` entries kept apart from its own `text`. Relayed words are
@@ -293,8 +315,9 @@ Every tool acts as the caller's role, which comes from the caller's credential.
 | `create_job(title, body?, request_id?)` | Open a job in the initial state |
 | `move_job(job_id, to_state, note?, request_id?, expected_revision?)` | Move a job along the state graph. A retry with the same `request_id` replays the original outcome. `expected_revision` refuses the move if the job's state has changed since you read it |
 | `get_job`, `list_jobs`, `read_job_events` | Read jobs and their history |
-| `create_conversation(title, participants, request_id?)`, `list_conversations()` | Open a conversation you take part in, or list yours. Present when conversations are enabled |
+| `create_conversation(title, participants, topic?, request_id?)`, `list_conversations(topic?)` | Open a conversation you take part in, or list yours, optionally only those on a topic. Present when conversations are enabled |
 | `read_history(conversation_id, after_seq?, limit?)` | A conversation as you saw it, your own messages included. Marks nothing read |
+| `set_topic(conversation_id, topic?)` | Set, rename or clear a conversation's topic. Needs `can_manage_participants` and membership |
 | `add_participant(conversation_id, participant)`, `remove_participant(...)` | Change who is in a conversation. Needs `can_manage_participants` |
 
 ## CLI
@@ -306,6 +329,7 @@ baton message --as R --conversation C ...     send to every other participant of
                                               --reply-to M, --attention R1,R2, --needs-decision
 baton read --as R [--after-seq N]             read messages
 baton conversation new|list|history|add|remove   group conversations
+                                              new and list take --topic; topic C --set T|--clear
 baton wait --as R [--timeout S]               block until something reaches role R
 baton job create|show|list|move|events        jobs; move takes --request-id and --expected-revision
 baton token new --name N --role R             make a bearer token

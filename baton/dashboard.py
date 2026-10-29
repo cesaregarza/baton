@@ -4,6 +4,9 @@ Off unless `[dashboard] enabled = true`. It is served from the host's own
 store by a small standard-library HTTP server beside the MCP server, on a
 loopback address only, and it never sees a token.
 
+Conversations are grouped by their topic, with the untagged in a group of
+their own, so a topic organises the view without becoming a requirement.
+
 What it shows is what one configured `viewer_role` may see: the
 conversations that role is in, from its join point, exactly as
 `read_history` returns them. A role sees every conversation only when its
@@ -56,6 +59,7 @@ ul { list-style: none; padding: 0; }
 li { border-bottom: 1px solid #e3e3e3; padding: .6rem 0; }
 .meta, .notice, .source, .muted { color: #5f6368; font-size: .85rem; }
 .role { font-weight: 600; color: #1d1d1f; }
+h2 { font-size: 1rem; margin: 1.2rem 0 .2rem; color: #5f6368; font-weight: 600; }
 .badge { border: 1px solid #c4c7c5; border-radius: .6rem; padding: 0 .4rem; margin-left: .3rem; }
 .text { white-space: pre-wrap; margin: .3rem 0; }
 .relayed { border-left: 3px solid #c4c7c5; margin: .4rem 0 .4rem .6rem; padding-left: .6rem; }
@@ -129,12 +133,33 @@ def _index(config: Config, conn: Any) -> str:
         listed, scope = conversations.list_all(conn), "every conversation"
     else:
         listed, scope = conversations.list_for(conn, viewer), f"the conversations {viewer} is in"
-    items = "".join(
-        f'<li><a href="/c/{_e(item["conversation_id"])}">{_e(item["title"])}</a>'
-        f'<div class="meta">{_e(", ".join(item["participants"]))} · started {_e(item["created_at"])}</div></li>'
-        for item in listed)
+    if not listed:
+        return (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}.</p>'
+                '<ul><li class=muted>None yet.</li></ul>')
+    groups = "".join(f'<h2>{_e(topic) if topic else "No topic"}</h2><ul>'
+                     + "".join(_listing(item) for item in items) + "</ul>"
+                     for topic, items in _by_topic(listed))
     return (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}.</p>'
-            f'<ul>{items or "<li class=muted>None yet.</li>"}</ul>')
+            f'{groups}')
+
+
+def _by_topic(listed: list[dict[str, Any]]) -> list[tuple[str | None, list[dict[str, Any]]]]:
+    """The conversations under each topic, topics in order, and the untagged in a group of their own last.
+
+    Untagged conversations are shown rather than dropped: a view that hid them would make a topic a
+    requirement instead of a label.
+    """
+    groups: dict[str | None, list[dict[str, Any]]] = {}
+    for item in listed:
+        groups.setdefault(item["topic"], []).append(item)
+    tagged = sorted(topic for topic in groups if topic is not None)
+    return [(topic, groups[topic]) for topic in tagged] + ([(None, groups[None])] if None in groups else [])
+
+
+def _listing(item: dict[str, Any]) -> str:
+    return (f'<li><a href="/c/{_e(item["conversation_id"])}">{_e(item["title"])}</a>'
+            f'<div class="meta">{_e(", ".join(item["participants"]))} · started '
+            f'{_e(item["created_at"])}</div></li>')
 
 
 def _after_seq(value: str) -> int | None:

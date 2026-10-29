@@ -164,13 +164,23 @@ def _add_conversation_commands(commands: Any) -> None:
     new = _with_role(conversation.add_parser("new", help="open a conversation; you must be a participant"))
     new.add_argument("--title", required=True)
     new.add_argument("--with", dest="participants", required=True, help="comma-separated roles, yourself included")
+    new.add_argument("--topic", help="an optional readable path, such as project or project/subtopic")
     new.add_argument("--request-id")
     new.set_defaults(handler=lambda config, args: _db(config, lambda conn: conversations.create(
         conn, config, actor=args.role, title=args.title, participants=args.participants.split(","),
-        request_id=args.request_id)))
+        topic=args.topic, request_id=args.request_id)))
 
     listing = _with_role(conversation.add_parser("list", help="the conversations your role takes part in"))
+    listing.add_argument("--topic", help="only this topic and what is under it")
     listing.set_defaults(handler=_list_conversations)
+
+    topic = _with_role(conversation.add_parser("topic", help="set, rename or clear a conversation's topic"))
+    topic.add_argument("conversation_id")
+    change = topic.add_mutually_exclusive_group(required=True)
+    change.add_argument("--set", dest="topic", help="the new topic, 1-2 lowercase slug segments")
+    change.add_argument("--clear", action="store_true", help="remove the topic")
+    topic.set_defaults(handler=lambda config, args: _db(config, lambda conn: conversations.set_topic(
+        conn, config, args.conversation_id, None if args.clear else args.topic, actor=args.role)))
 
     history = _with_role(conversation.add_parser("history", help="a conversation as you saw it; marks nothing read"))
     history.add_argument("conversation_id")
@@ -229,7 +239,7 @@ def _message(config: Config, args: argparse.Namespace) -> dict[str, Any]:
 
 def _list_conversations(config: Config, args: argparse.Namespace) -> list[dict[str, Any]]:
     conversations.require_enabled(config)
-    return _db(config, lambda conn: conversations.list_for(conn, args.role))
+    return _db(config, lambda conn: conversations.list_for(conn, args.role, args.topic))
 
 
 def _history(config: Config, args: argparse.Namespace) -> dict[str, Any]:
@@ -290,13 +300,22 @@ def _remote(args: argparse.Namespace) -> Any:
         return _call(args, "read_messages", {"after_seq": args.after_seq, "limit": args.limit})
     if command == "wait":
         return _remote_wait(args)
+    if command == "conversation new":
+        return _call(args, "create_conversation", {"title": args.title,
+                                                   "participants": args.participants.split(","),
+                                                   "topic": args.topic, "request_id": args.request_id})
     if command == "conversation list":
-        return _call(args, "list_conversations", {})
+        return _call(args, "list_conversations", {"topic": args.topic})
+    if command == "conversation topic":
+        # `--clear` means null, which _call strips, and set_topic requires the argument: send it directly.
+        return remote.call(args.host, remote.token(), "set_topic",
+                           {"conversation_id": args.conversation_id,
+                            "topic": None if args.clear else args.topic})
     if command == "conversation history":
         return _call(args, "read_history", {"conversation_id": args.conversation_id, "after_seq": args.after_seq,
                                             "limit": args.limit})
     raise ConfigError(f"`baton {command}` runs on the host only; with --host use message, read, wait, "
-                      "conversation list or conversation history")
+                      "conversation new, conversation list, conversation topic or conversation history")
 
 
 def _remote_wait(args: argparse.Namespace) -> Any:

@@ -138,6 +138,24 @@ Removing one sends a notice to those who remain, and the removed role receives n
 host notice has `from_role: null` and a `notice` object (`{"event", "participant", "by"}`). A conversation
 keeps at least two participants.
 
+**Topics.** A conversation may carry an optional `topic`: one or two lowercase slug segments, `project`
+or `project/subtopic`. A segment is 1-40 characters of `a-z`, `0-9` and inner hyphens, which means a
+stored topic can carry neither of SQL's `LIKE` metacharacters, so a prefix filter matches it literally
+with nothing to escape. `null` is how no topic arrives and how one is cleared. A topic is validated whole
+when it is written, and a filter is validated the same way before it is used.
+
+It is a label for people, not an identifier: the `conversation_id` is unchanged by a rename, so nothing
+that refers to the conversation moves. Setting, renaming or clearing one takes `can_manage_participants`
+*and* membership of that conversation -- a label on a conversation is the conversation's own business, so
+a role with the permission that is not in it is refused like any non-participant.
+
+Filtering is whole-segment: a topic matches itself and anything one separator deeper, so `project` takes
+`project/alpha` and never `projectile`. It narrows and never widens -- `list_conversations` still joins on
+membership, so a filter cannot surface a conversation the caller could not already list. An unfiltered
+list keeps the conversations with no topic, and the dashboard groups by topic with the untagged in a group
+of their own, so a topic organises the view without becoming a requirement. Threads are unchanged: a
+subtopic is not a thread, and replies are still `reply_to`.
+
 **Limits.** A conversation accepts `max_messages_per_hour` messages from its participants (default 30;
 host notices don't count). Past that, sends are refused as `conversation_rate_limited`, and the host
 addresses one `conversation.rate_limited` event to `escalation_role`, if one is configured, at most once an
