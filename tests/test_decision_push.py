@@ -33,6 +33,7 @@ except ImportError:  # written before the module: each test then fails on its ow
 
 ROLE = "assistant"
 TITLE = "A decision is waiting in Baton"
+BODY = "Waiting for your decision."
 # Built at run time so no secret scanner mistakes this file for a leak; it only has to look like a token.
 # The URL with credentials below is assembled the same way.
 SECRET_SHAPED = "ghp_" + "Zq7" * 12
@@ -143,11 +144,11 @@ def test_the_push_carries_a_fixed_notice_and_a_link_and_nothing_of_the_message(t
     sent = everything_sent(channel)
     for words in (SECRET_SHAPED, "ship it", "relayed", "someone", "Release plan", "orchestrator"):
         assert words not in sent
-    link = f"https://dash.example.test/c/{cid}#m-1"
+    link = f"https://dash.example.test/c/{cid}?after_seq=0#m-1"
     assert call["url"] == "https://push.example.test/decisions"
     assert call["headers"]["Title"] == TITLE
     assert call["headers"]["Click"] == link
-    assert call["body"].decode() == f"{TITLE}.\n{link}"
+    assert call["body"].decode() == f"{BODY} Open it: {link}"
     state = (config.data_dir / "decision_push.json").read_text()
     assert SECRET_SHAPED not in state and "ship it" not in state
 
@@ -161,7 +162,7 @@ def test_without_a_link_base_it_sends_the_notice_alone(tmp_path) -> None:
     say(db, config, "orchestrator", start(db, config), "decide", needs_decision=True)
     push.poll_once()
     [call] = channel.calls
-    assert "Click" not in call["headers"] and call["body"].decode() == f"{TITLE}."
+    assert "Click" not in call["headers"] and call["body"].decode() == f"{BODY} Open Baton to see it."
 
 
 def test_the_token_comes_only_from_the_named_environment_variable(tmp_path, monkeypatch) -> None:
@@ -326,6 +327,19 @@ def test_it_is_off_unless_enabled_and_serve_runs_it_when_it_is(tmp_path, monkeyp
      "integrations.decision_push.max_per_hour"),
     ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "dash.example.test"},
      "integrations.decision_push.link_base"),
+    ({"enabled": True, "role": ROLE, "url": "https:///d"}, "integrations.decision_push.url"),
+    ({"enabled": True, "role": ROLE, "url": "https://:443/d"}, "integrations.decision_push.url"),
+    ({"enabled": True, "role": ROLE, "url": "https://push.example.test:99999/d"}, "integrations.decision_push.url"),
+    ({"enabled": True, "role": ROLE, "url": "https://push.example.test:0/d"}, "integrations.decision_push.url"),
+    ({"enabled": True, "role": ROLE, "url": "https://push.example.test:http/d"}, "integrations.decision_push.url"),
+    ({"enabled": True, "role": ROLE, "url": "https://[::1/d"}, "integrations.decision_push.url"),
+    ({"enabled": True, "role": ROLE, "url": "https://[not-an-address]/d"}, "integrations.decision_push.url"),
+    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://:8443"},
+     "integrations.decision_push.link_base"),
+    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://d.test:70000"},
+     "integrations.decision_push.link_base"),
+    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://[fe80::1"},
+     "integrations.decision_push.link_base"),
     ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://d.test/?x=1"},
      "integrations.decision_push.link_base"),
 ])
@@ -353,3 +367,79 @@ def test_the_url_and_token_never_appear_in_a_config_error(tmp_path, monkeypatch)
         load_enabled(config)
     assert "integrations.decision_push.role" in str(raised.value)
     assert "secret-host" not in str(raised.value) and TOKEN_VALUE not in str(raised.value)
+
+
+def test_valid_hosts_ports_and_addresses_load(tmp_path) -> None:
+    for url in ("https://push.example.test/d", "http://127.0.0.1:8080/d", "https://[::1]:8443/d"):
+        config = push_config(tmp_path, table={"enabled": True, "role": ROLE, "url": url,
+                                              "link_base": "https://[2001:db8::1]:8443"})
+        assert "decision_push" in load_enabled(config)
+
+
+# A decision sent as soon as the host is up is not missed (reviewer finding on 19b9e6f5) ---------------------
+
+
+def test_a_decision_sent_before_the_workers_first_pass_is_still_pushed(tmp_path, monkeypatch) -> None:
+    """serve takes the starting point before the server accepts a send, not on the worker's first pass."""
+    channel = Channel()
+    monkeypatch.setattr(decision_push, "post", lambda timeout: channel)
+    released = threading.Event()
+    real_load_enabled = app_module.load_enabled
+
+    def held_back(config: Config) -> dict[str, Any]:
+        loaded = real_load_enabled(config)
+        push = loaded["decision_push"]
+        original = push.run
+
+        def run_after_release(stop: threading.Event, **kwargs: Any) -> None:
+            released.wait(10)
+            original(stop, poll_seconds=0.05)
+        push.run = run_after_release
+        return loaded
+
+    def serving(app: Any, **kwargs: Any) -> None:
+        db = connect(config.db_path)
+        say(db, config, "orchestrator", start(db, config), "decide right away", needs_decision=True)
+        released.set()
+        deadline = time.monotonic() + 10
+        while not channel.calls and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    config = push_config(tmp_path)
+    monkeypatch.setattr(app_module, "load_enabled", held_back)
+    monkeypatch.setattr(app_module.uvicorn, "run", serving)
+    app_module.serve(config)
+    assert len(channel.calls) == 1
+
+
+# The link opens the page that holds the message (reviewer finding on 19b9e6f5) ------------------------------
+
+
+def test_a_link_past_the_first_page_opens_the_page_holding_the_message(tmp_path) -> None:
+    from baton import dashboard
+
+    config = config_module.parse({
+        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+        "roles": {"orchestrator": {"can_create_conversations": True}, "reviewer": {}, "assistant": {}},
+        "conversations": {"enabled": True, "max_messages_per_hour": 1000},
+        "dashboard": {"enabled": True, "viewer_role": ROLE, "listen_port": 8766},
+        "integrations": {"decision_push": {"enabled": True, "role": ROLE, "url": "https://push.example.test/d",
+                                           "link_base": "http://127.0.0.1:8766"}},
+    })
+    db = connect(config.db_path)
+    channel = Channel()
+    push = pusher(config, channel)
+    push.poll_once()
+    cid = start(db, config)
+    for number in range(1, 105):
+        say(db, config, "orchestrator", cid, f"context {number}")
+    say(db, config, "orchestrator", cid, "the late decision", needs_decision=True)
+    push.poll_once()
+    [call] = channel.calls
+    link = call["headers"]["Click"]
+    assert link == f"http://127.0.0.1:8766/c/{cid}?after_seq=104#m-105"
+    target = link.removeprefix("http://127.0.0.1:8766").split("#")[0]
+    page = dashboard.respond(config, "GET", target, "127.0.0.1:8766")
+    assert page.status == 200
+    body = page.body.decode()
+    assert 'id="m-105"' in body and "the late decision" in body
