@@ -362,7 +362,10 @@ encoded slash can't act as a separator. An invalid topic gets `400`.
 every conversation. It lists each message once, however many copies it has, when its `attention` names
 the viewer or it asks for a decision, and the viewer didn't send it. `needs_decision` asks the
 conversation for a decision; it isn't addressed to one role, so it shows for every participant who reads
-it. These are **retained signals**: no message has a resolved state, so the page never says whether one
+it. Its label is honest about whom it asks: "asks for you" appears only when `attention` names the viewer,
+and a decision whose `attention` names other roles reads "a decision is needed (asked of reviewer)".
+Attention alone to another role isn't listed. Every visible conversation is read, page by page, so none
+is left out; counts are totals, and when a page shows fewer it says "showing N of M". These are **retained signals**: no message has a resolved state, so the page never says whether one
 was answered, and viewing changes nothing. It never reads a message's words. The page counts every match
 before it shows the newest ones, and each links to a conversation page that starts with that message.
 Below come the jobs whose `waiting_on` is the viewer. Jobs have no topic, so under `?topic=` none are

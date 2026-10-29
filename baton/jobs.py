@@ -111,6 +111,16 @@ def list_jobs(conn: sqlite3.Connection, *, state: str | None = None, waiting_on:
     return [{key: value for key, value in _as_dict(row).items() if key != "body"} for row in rows]
 
 
+def count_jobs(conn: sqlite3.Connection, *, state: str | None = None, waiting_on: str | None = None) -> int:
+    """How many jobs `list_jobs` would match with no limit."""
+    query, params = "SELECT COUNT(*) FROM jobs WHERE 1 = 1", []
+    for column, value in (("state", state), ("waiting_on", waiting_on)):
+        if value is not None:
+            query += f" AND {column} = ?"
+            params.append(value)
+    return conn.execute(query, params).fetchone()[0]
+
+
 def read_events(conn: sqlite3.Connection, job_id: str, after_seq: int = 0, limit: int = 50) -> dict[str, Any]:
     """A job's events after `after_seq`, oldest first, with `next_seq` to continue from."""
     _load(conn, job_id)

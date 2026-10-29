@@ -58,6 +58,8 @@ RATE_WINDOW = timedelta(hours=1)
 # A topic is one or two lowercase slug segments: `project` or `project/subtopic`. A segment is lowercase
 # ASCII letters, digits and inner hyphens, so it can never carry a SQL LIKE metacharacter and a prefix
 # filter is safe to match literally. It is a label for people, separate from the conversation's id.
+# The most conversations one list_for or list_all call returns.
+MAX_LISTED = 200
 MAX_TOPIC_SEGMENT = 40
 MAX_TOPIC_SEGMENTS = 2
 TOPIC_SEGMENT = re.compile(rf"[a-z0-9](?:[a-z0-9-]{{0,{MAX_TOPIC_SEGMENT - 2}}}[a-z0-9])?")
@@ -142,25 +144,47 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str, 
     return {**summary, "request_id": request_id, "created": True}
 
 
-def list_for(conn: sqlite3.Connection, role: str, topic: Any = None) -> list[dict[str, Any]]:
+def list_for(conn: sqlite3.Connection, role: str, topic: Any = None, *, limit: int = MAX_LISTED,
+             before: tuple[str, str] | None = None) -> list[dict[str, Any]]:
     """The conversations `role` takes part in, newest first, with their participants.
 
     `topic` narrows them to that topic and anything under it. It never widens what the role may see: a
-    conversation it is not in stays out whether it has a topic or not.
+    conversation it is not in stays out whether it has a topic or not. One call returns at most `limit`;
+    to read on, pass the last one's `page_cursor(...)` as `before`.
     """
     where, values = _under(topic)
+    after, cursor = _before(before, "c.")
     rows = conn.execute("SELECT c.* FROM conversations c JOIN participants p ON p.conversation_id = c.id"
-                        f" WHERE p.role = ?{where} ORDER BY c.created_at DESC LIMIT 200",
-                        (role, *values)).fetchall()
+                        f" WHERE p.role = ?{where}{after} ORDER BY c.created_at DESC, c.id DESC LIMIT ?",
+                        (role, *values, *cursor, _limit(limit))).fetchall()
     return [_summary(conn, row) for row in rows]
 
 
-def list_all(conn: sqlite3.Connection, topic: Any = None) -> list[dict[str, Any]]:
-    """Every conversation, newest first: only for a viewer the config lets see them all."""
+def list_all(conn: sqlite3.Connection, topic: Any = None, *, limit: int = MAX_LISTED,
+             before: tuple[str, str] | None = None) -> list[dict[str, Any]]:
+    """Every conversation, newest first, paged like `list_for`: only for a viewer the config lets see them all."""
     where, values = _under(topic)
-    rows = conn.execute(f"SELECT * FROM conversations WHERE 1 = 1{where}"
-                        " ORDER BY created_at DESC LIMIT 200", values).fetchall()
+    after, cursor = _before(before, "")
+    rows = conn.execute(f"SELECT * FROM conversations WHERE 1 = 1{where}{after}"
+                        " ORDER BY created_at DESC, id DESC LIMIT ?", (*values, *cursor, _limit(limit))).fetchall()
     return [_summary(conn, row) for row in rows]
+
+
+def page_cursor(summary: dict[str, Any]) -> tuple[str, str]:
+    """Where the next page of `list_for` or `list_all` starts: after this conversation."""
+    return summary["created_at"], summary["conversation_id"]
+
+
+def _before(before: tuple[str, str] | None, alias: str) -> tuple[str, tuple[str, ...]]:
+    if before is None:
+        return "", ()
+    return f" AND ({alias}created_at, {alias}id) < (?, ?)", (str(before[0]), str(before[1]))
+
+
+def _limit(limit: int) -> int:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_LISTED:
+        raise InvalidRequest(f"limit must be 1-{MAX_LISTED}")
+    return limit
 
 
 def _under(topic: Any) -> tuple[str, tuple[str, ...]]:

@@ -64,6 +64,8 @@ MAX_SEQ = 2**63 - 1
 # How many matching messages /needs shows, newest first; the page still counts all of them first.
 MAX_NEEDS = messages.MAX_PAGE_MESSAGES
 MAX_NEEDS_JOBS = 50
+# How many conversations a list page shows, newest first; it says so when there are more.
+MAX_LISTED = conversations.MAX_LISTED
 STYLE = """\
 body { font: 15px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 52rem; padding: 1rem; color: #1d1d1f; }
 a { color: #0b57d0; }
@@ -181,12 +183,19 @@ def _needs_topic(query: str) -> str | None | bool:
 
 
 def _visible(config: Config, conn: Any, topic: str | None = None) -> tuple[list[dict[str, Any]], str, bool]:
-    """The conversations the viewer may see, optionally under one topic, a phrase saying which, and whether
-    that is every conversation. A filter only ever narrows this list."""
+    """Every conversation the viewer may see, newest first and optionally under one topic, read page by page so
+    none is left out; a phrase saying which; and whether that is every conversation. A filter only narrows."""
     viewer = config.dashboard.viewer_role
-    if config.roles[viewer].can_view_all_conversations:
-        return conversations.list_all(conn, topic), "every conversation", True
-    return conversations.list_for(conn, viewer, topic), f"the conversations {viewer} is in", False
+    every = config.roles[viewer].can_view_all_conversations
+    found: list[dict[str, Any]] = []
+    while True:
+        before = conversations.page_cursor(found[-1]) if found else None
+        page = (conversations.list_all(conn, topic, before=before) if every
+                else conversations.list_for(conn, viewer, topic, before=before))
+        found += page
+        if len(page) < conversations.MAX_LISTED:
+            break
+    return found, "every conversation" if every else f"the conversations {viewer} is in", every
 
 
 def _index(config: Config, conn: Any, topic: str | None = None) -> str:
@@ -200,9 +209,12 @@ def _index(config: Config, conn: Any, topic: str | None = None) -> str:
                    f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">Needs you here</a></p>')
     if not listed:
         return heading + f'<ul><li class=muted>{"None yet." if topic is None else "None under this topic."}</li></ul>'
+    shown = listed[:MAX_LISTED]
+    more = (f'<p class="muted">More than one page holds: showing the newest {len(shown)} of {len(listed)} '
+            'conversations.</p>' if len(shown) < len(listed) else "")
     groups = "".join(f'<h2>{_topic_link(group)}</h2><ul>' + "".join(_listing(item) for item in items) + "</ul>"
-                     for group, items in _by_topic(listed))
-    return heading + groups
+                     for group, items in _by_topic(shown))
+    return heading + more + groups
 
 
 def _topic_link(topic: str | None) -> str:
@@ -215,18 +227,18 @@ def _needs(config: Config, conn: Any, topic: str | None) -> str:
     found = _asking(config, conn, topic)
     shown = found[:MAX_NEEDS]
     count = (f'{len(found)} message{"" if len(found) == 1 else "s"} asked for you or for a decision'
-             + (f", showing the newest {len(shown)}" if len(shown) < len(found) else ""))
+             + (f", showing the newest {len(shown)} of {len(found)}" if len(shown) < len(found) else ""))
     where = f" under {_e(topic)}" if topic else ""
-    items = "".join(_signal(conversation, item) for conversation, item in shown)
+    items = "".join(_signal(viewer, conversation, item) for conversation, item in shown)
     if topic is not None:
         job_count, job_block = "", ('<h2>Jobs</h2><p class="muted">Jobs have no topic, so none are shown under a '
                                     'topic filter. <a href="/needs">See every job waiting on you</a>.</p>')
     else:
-        waiting = jobs.list_jobs(conn, waiting_on=viewer, limit=200)
-        total = "200 or more jobs are" if len(waiting) == 200 else \
-            f'{len(waiting)} job{" is" if len(waiting) == 1 else "s are"}'
-        job_count = f" · {total} waiting on you"
-        job_block = ('<h2>Jobs waiting on you</h2><ul>' + ("".join(_job(job) for job in waiting[:MAX_NEEDS_JOBS])
+        total = jobs.count_jobs(conn, waiting_on=viewer)
+        waiting = jobs.list_jobs(conn, waiting_on=viewer, limit=MAX_NEEDS_JOBS)
+        job_count = (f' · {total} job{" is" if total == 1 else "s are"} waiting on you'
+                     + (f", showing {len(waiting)} of {total}" if len(waiting) < total else ""))
+        job_block = ('<h2>Jobs waiting on you</h2><ul>' + ("".join(_job(job) for job in waiting)
                                                            or "<li class=muted>None.</li>") + "</ul>")
     crumbs = '<p><a href="/">All conversations</a>' + (' · <a href="/needs">Needs you</a>' if topic else "") + "</p>"
     return (f'{crumbs}<h1>Needs you{where}</h1><p class="muted">As {_e(viewer)}. {count}{job_count}.</p>'
@@ -261,11 +273,20 @@ def _asking(config: Config, conn: Any, topic: str | None) -> list[tuple[dict[str
     return sorted(found, key=lambda pair: (pair[1]["at"], pair[1]["seq"]), reverse=True)
 
 
-def _signal(conversation: dict[str, Any], item: dict[str, Any]) -> str:
-    """One message on /needs, linked to its place: the page that starts with it, so it is always on it."""
+def _signal(viewer: str, conversation: dict[str, Any], item: dict[str, Any]) -> str:
+    """One message on /needs, linked to its place: the page that starts with it, so it is always on it.
+
+    "asks for you" only when `attention` names the viewer. A decision request asks the conversation, so it
+    shows for every reader; when its `attention` names other roles, the label says whom it was asked of.
+    """
     seq = int(item["seq"])
-    why = " · ".join(label for label, on in (("asks for you", bool(item.get("attention"))),
-                                             ("asks for a decision", bool(item.get("needs_decision")))) if on)
+    attention = item.get("attention") or []
+    labels = ["asks for you"] if viewer in attention else []
+    if item.get("needs_decision"):
+        others = [role for role in attention if role != viewer]
+        labels.append(f"a decision is needed (asked of {', '.join(others)})" if others and viewer not in attention
+                      else "a decision is needed")
+    why = " · ".join(labels)
     return (f'<li><div class="meta"><a href="/c/{_e(conversation["conversation_id"])}?after_seq={seq - 1}#m-{seq}">'
             f'{_e(conversation["title"])}</a> · <span class="role">{_e(item["from_role"])}</span> · '
             f'{_e(item["at"])} · #{seq} · {why}</div><p class="text">{_e(item["text"])}</p></li>')
@@ -306,19 +327,16 @@ def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -
     if config.roles[viewer].can_view_all_conversations:
         def read(after_seq: int, limit: int) -> dict[str, Any]:
             return conversations.full_history(conn, conversation_id, after_seq, limit)
-        listed = conversations.list_all
     else:
         def read(after_seq: int, limit: int) -> dict[str, Any]:
             return conversations.history(conn, viewer, conversation_id, after_seq, limit)
-        def listed(conn: Any) -> list[dict[str, Any]]:
-            return conversations.list_for(conn, viewer)
     try:
         page = read(after, messages.MAX_PAGE_MESSAGES)
         # A page ends at a byte budget as well as a row count, so ask whether anything follows it.
         later = bool(page["messages"]) and bool(read(page["next_seq"], 1)["messages"])
     except BatonError:  # unknown, or one the viewer can't see: the same answer, so neither is revealed
         return _not_found()
-    visible = {item["conversation_id"]: item for item in listed(conn)}
+    visible = {item["conversation_id"]: item for item in _visible(config, conn)[0]}
     title = visible[conversation_id]["title"] if conversation_id in visible else conversation_id
     items = _thread(page["messages"])
     more = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'

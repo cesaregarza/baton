@@ -305,7 +305,9 @@ anywhere else, put your own authentication in front of it; that is a separate de
   `attention` names it, or that ask for a decision, newest first, plus the jobs waiting on it. These are
   retained signals: nothing records whether one was answered, and viewing changes nothing. It never reads a
   message's words, so an `@role` in the text doesn't count, and a message the viewer sent itself isn't
-  listed. Jobs have no topic, so a topic filter shows none.
+  listed. A decision asked of another role shows, labelled with whom it was asked of; only `attention`
+  naming the viewer reads "asks for you". Counts are totals, with "showing N of M" when a page shows
+  fewer. Jobs have no topic, so a topic filter shows none.
 
 **Behind a proxy (`proxy_host`, off by default).** The view only answers to its own loopback address, so a
 proxy in front of it, such as tailnet-only `tailscale serve`, gets `421`. Setting `proxy_host` to that
