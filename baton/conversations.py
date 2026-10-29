@@ -234,7 +234,9 @@ def full_history(conn: sqlite3.Connection, conversation_id: str, after_seq: int 
 
     Only for a viewer the config lets see every conversation. Like `history`
     it marks nothing read and moves no cursor. A message is gone once
-    retention has deleted every copy of it.
+    retention has deleted every copy of it; a reply to such a message
+    gives its parent's `seq` as None, as `history` does for a parent its
+    reader can't see.
     """
     if not 1 <= limit <= messages.MAX_PAGE_MESSAGES or after_seq < 0:
         raise InvalidRequest(f"limit must be 1-{messages.MAX_PAGE_MESSAGES} and after_seq at least 0")
@@ -243,7 +245,12 @@ def full_history(conn: sqlite3.Connection, conversation_id: str, after_seq: int 
         rows = conn.execute("SELECT * FROM messages WHERE conversation_id = ? AND conversation_seq > ?"
                             " GROUP BY conversation_seq ORDER BY conversation_seq LIMIT ?",
                             (conversation_id, after_seq, limit)).fetchall()
-    page = messages.as_page(rows, _history_entry)
+        parents = {row["reply_to"] for row in rows if row["reply_to"]}
+        kept = {found["id"]: found["conversation_seq"] for found in conn.execute(
+            f"SELECT id, conversation_seq FROM messages WHERE conversation_id = ? AND id IN"
+            f" ({', '.join('?' * len(parents))})", (conversation_id, *parents))} if parents else {}
+    references = {parent: {"message_id": parent, "seq": kept.get(parent)} for parent in parents}
+    page = messages.as_page(rows, lambda row: _history_entry(row, references.get(row["reply_to"])))
     return {"messages": page, "next_seq": page[-1]["seq"] if page else after_seq}
 
 

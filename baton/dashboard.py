@@ -61,6 +61,8 @@ li { border-bottom: 1px solid #e3e3e3; padding: .6rem 0; }
 .relayed { border-left: 3px solid #c4c7c5; margin: .4rem 0 .4rem .6rem; padding-left: .6rem; }
 .relayed-text { white-space: pre-wrap; margin: .2rem 0; }
 .notice { font-style: italic; }
+.replies { margin: .4rem 0 0 1.2rem; border-left: 2px solid #e3e3e3; padding-left: .6rem; }
+.reply-to { color: #5f6368; font-size: .85rem; margin: .2rem 0; }
 """
 
 
@@ -160,25 +162,61 @@ def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -
         return _not_found()
     visible = {item["conversation_id"]: item for item in listed(conn)}
     title = visible[conversation_id]["title"] if conversation_id in visible else conversation_id
-    items = "".join(_message(item) for item in page["messages"])
+    items = _thread(page["messages"])
     more = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
             if later else "")
     return _page(200, title, f'<p><a href="/">All conversations</a></p><h1>{_e(title)}</h1>'
                              f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{more}')
 
 
-def _message(item: dict[str, Any]) -> str:
+def _thread(items: list[dict[str, Any]]) -> str:
+    """The page's messages with each reply nested under its parent when the parent is on this page."""
+    on_page = {item["seq"] for item in items}
+    replies: dict[int, list[dict[str, Any]]] = {}
+    top = []
+    for item in items:
+        parent = (item.get("reply_to") or {}).get("seq")
+        if parent in on_page and parent < item["seq"]:
+            replies.setdefault(parent, []).append(item)
+        else:
+            top.append(item)
+
+    def render(item: dict[str, Any]) -> str:
+        nested = replies.get(item["seq"])
+        inner = f'<ul class="replies">{"".join(render(reply) for reply in nested)}</ul>' if nested else ""
+        return _message(item, inner, on_page)
+
+    return "".join(render(item) for item in top)
+
+
+def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | set[int] = frozenset()) -> str:
     notice = item.get("notice")
     if notice:
         verb = "added" if notice["event"] == "participant_added" else "removed"
         return (f'<li class="notice">{_e(notice["participant"])} was {verb} by {_e(notice["by"])}'
-                f' · {_e(item["at"])}</li>')
+                f' · {_e(item["at"])}{replies}</li>')
     relayed = "".join(
         f'<blockquote class="relayed"><p class="source">relayed from {_e(entry["source"])} at {_e(entry["at"])}'
         f'</p><p class="relayed-text">{_e(entry["text"])}</p></blockquote>' for entry in item.get("relayed") or [])
-    return (f'<li class="message"><div class="meta"><span class="role">{_e(item["from_role"])}</span>'
-            f'<span class="badge agent">agent</span> · {_e(item["at"])} · #{item["seq"]}</div>'
-            f'<p class="text">{_e(item["text"])}</p>{relayed}</li>')
+    kind = item.get("author_kind")
+    badge = f'<span class="badge {kind}">{kind}</span>' if kind in ("human", "agent") else ""
+    return (f'<li class="message" id="m-{item["seq"]}"><div class="meta"><span class="role">'
+            f'{_e(item["from_role"])}</span>{badge} · {_e(item["at"])} · #{item["seq"]}</div>'
+            f'{_reply_marker(item.get("reply_to"), on_page)}<p class="text">{_e(item["text"])}</p>{relayed}'
+            f'{replies}</li>')
+
+
+def _reply_marker(reply_to: dict[str, Any] | None, on_page: frozenset[int] | set[int]) -> str:
+    """Where a reply's parent is: nothing when it's nested here, a number when it's on another page, or
+    'parent unavailable' when the viewer can't see it, without its words or author."""
+    if not reply_to:
+        return ""
+    if reply_to.get("seq") is None:
+        return '<p class="reply-to unavailable">parent unavailable</p>'
+    if reply_to["seq"] in on_page:
+        return ""
+    return f'<p class="reply-to">in reply to #{int(reply_to["seq"])}</p>'
+
 
 
 def _page(status: int, title: str, body: str) -> Response:
