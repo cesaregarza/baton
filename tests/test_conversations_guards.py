@@ -10,7 +10,7 @@ import pytest
 from test_conversations import group_config, refused, say, start
 from test_messages import rid
 
-from baton import conversations, inbox, messages
+from baton import conversations, inbox, messages, store
 from baton.store import SchemaMismatch, connect
 
 
@@ -77,10 +77,12 @@ def test_a_newer_schema_is_refused_before_anything_changes_even_the_journal_mode
     config = group_config(tmp_path)
     config.data_dir.mkdir(mode=0o700)
     raw = sqlite3.connect(config.db_path)
-    raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (4);")
+    newer = store.SCHEMA_VERSION + 1  # newer than this baton knows, whatever its version
+    raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL);"
+                      f" INSERT INTO schema_version VALUES ({newer});")
     raw.close()
     os.chmod(config.db_path, 0o600)
-    with pytest.raises(SchemaMismatch, match="version 4"):
+    with pytest.raises(SchemaMismatch, match=f"version {newer}"):
         connect(config.db_path)
     raw = sqlite3.connect(config.db_path)
     assert raw.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
