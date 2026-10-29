@@ -142,3 +142,8 @@ def test_the_docs_say_how_to_forward_the_path_form_metadata_route() -> None:
     docs = (Path(__file__).parent.parent / "docs" / "exposing.md").read_text()
     assert "/.well-known/oauth-authorization-server<path>" in docs
 
+
+
+def test_control_characters_in_the_host_are_not_logged() -> None:
+    shown = auth.loggable_uri("https://client\x1b\x07\x00.example.test/cb")
+    assert not any(ord(ch) < 32 or ord(ch) == 127 for ch in shown) and shown.startswith("https://client")
