@@ -427,3 +427,14 @@ def test_a_version_3_database_is_migrated_and_its_messages_read_as_agents(tmp_pa
         ("assistant", "agent", "before the upgrade"), (None, None, "a notice"), ("operator", "human", "after")]
     db.close()
     connect(config.db_path).close()  # a second open changes nothing
+
+
+def test_a_revoked_token_no_longer_counts_as_live_authority(seat_host, capsys) -> None:
+    from baton.auth import authority_live
+
+    host = seat_host
+    authority = {"kind": "token", "name": "operator-token", "sha256": host.config.tokens[0].sha256,
+                 "role": "operator"}
+    assert host.config.tokens[0].name == "operator-token" and authority_live(host.config, authority)
+    assert run_cli(capsys, "--config", str(host.path), "token", "revoke", "operator-token")[0] == 0
+    assert not authority_live(host.config, authority)
