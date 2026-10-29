@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from baton import conversations, jobs, messages
 from baton.config import Config
@@ -409,7 +409,7 @@ def _signal(viewer: str, conversation: dict[str, Any], item: dict[str, Any], rep
     if item["message_id"] in replied:
         labels.append("you replied")
     why = " · ".join(labels)
-    return (f'<li><div class="meta"><a href="/c/{_e(conversation["conversation_id"])}?after_seq={seq - 1}#m-{seq}">'
+    return (f'<li><div class="meta"><a href="{_e(message_path(conversation["conversation_id"], seq))}">'
             f'{_e(conversation["title"])}</a> · <span class="role">{_e(item["from_role"])}</span> · '
             f'{_time(item["at"])} · #{seq} · {why}</div><p class="text">{_e(item["text"])}</p></li>')
 
@@ -532,7 +532,7 @@ def _reply_marker(reply_to: dict[str, Any] | None, on_page: frozenset[int] | set
     seq = int(reply_to["seq"])
     if seq in on_page:
         return ""
-    link = (f'<a href="/c/{_e(conversation_id)}?after_seq={seq - 1}#m-{seq}">#{seq}</a>' if conversation_id
+    link = (f'<a href="{_e(message_path(conversation_id, seq))}">#{seq}</a>' if conversation_id
             else f"#{seq}")
     parent = (parents or {}).get(seq)
     quote = ""
@@ -586,3 +586,12 @@ class _Server(ThreadingHTTPServer):
 
 class _V6Server(_Server):
     address_family = socket.AF_INET6
+
+
+def message_path(conversation_id: str, seq: int) -> str:
+    """The path that opens a conversation at one message: the page that starts there, anchored on it.
+
+    Every link to a message uses it: the Needs you page, a reply's link to a parent on another page, and
+    the decision push. A page that starts at the message holds it however deep in the conversation it is.
+    """
+    return f"/c/{quote(conversation_id, safe='')}?after_seq={seq - 1}#m-{seq}"
