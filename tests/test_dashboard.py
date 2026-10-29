@@ -340,3 +340,57 @@ def test_a_real_loopback_server_serves_the_pages(tmp_path) -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+# Paging and query input (reviewer findings on d4823b47) ---------------------------------------------------
+
+
+def test_a_byte_limited_page_still_links_onward_and_the_links_reach_every_message_once(tmp_path) -> None:
+    """History pages end at a byte budget as well as a row count: six large messages need more than one page."""
+    config = view_config(tmp_path)
+    conn = connect(config.db_path)
+    try:
+        cid = conversations.create(conn, config, actor="orchestrator", title="Large messages",
+                                   participants=GROUP)["conversation_id"]
+        for number in range(1, 7):
+            conversations.send(conn, config, sender="orchestrator", conversation_id=cid,
+                               text=f"message {number} " + "x" * 60_000)
+    finally:
+        conn.close()
+    seen: list[int] = []
+    target, pages = f"/c/{cid}", 0
+    while target is not None:
+        pages += 1
+        assert pages <= 6, "the links never stop"
+        body = text(get(config, target))
+        seen += [int(seq) for seq in re.findall(r"· #(\d+)</div>", body)]
+        onward = re.search(r'<a href="(/c/[^"]+\?after_seq=\d+)">Later messages</a>', body)
+        target = onward.group(1) if onward else None
+    assert pages > 1
+    assert seen == [1, 2, 3, 4, 5, 6]
+
+
+def test_the_last_page_has_no_onward_link(tmp_path) -> None:
+    config = view_config(tmp_path)
+    mine, _ = seeded(config)
+    assert "Later messages" not in text(get(config, f"/c/{mine}"))
+
+
+@pytest.mark.parametrize("value", ["%C2%B2", "9223372036854775808", "-1", "", "abc", "1e3", "%201", "0x10",
+                                   "%EF%BC%91"])
+def test_after_seq_must_be_an_ascii_decimal_within_64_bits(tmp_path, value) -> None:
+    config = view_config(tmp_path)
+    mine, _ = seeded(config)
+    response = get(config, f"/c/{mine}?after_seq={value}")
+    assert response.status == 400
+    assert response.headers["Content-Security-Policy"].startswith("default-src 'none'")
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert "Traceback" not in text(response) and "Error" not in text(response)
+
+
+def test_after_seq_accepts_the_largest_64_bit_value(tmp_path) -> None:
+    config = view_config(tmp_path)
+    mine, _ = seeded(config)
+    response = get(config, f"/c/{mine}?after_seq=9223372036854775807")
+    assert response.status == 200
+    assert "plan is drafted" not in text(response)
