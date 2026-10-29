@@ -370,7 +370,26 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
         scopes = [scope for scope in (params.scopes or ALL_SCOPES) if scope in ALL_SCOPES]
         login_id = secrets.token_urlsafe(32)
         self.pending[login_id] = PendingLogin(client.client_id, params, scopes, time.time() + LOGIN_TTL)
+        return self.consent_url(login_id)
+
+    def consent_url(self, login_id: str) -> str:
         return f"{self.config.public_url}/login?id={login_id}"
+
+    def is_consent_redirect(self, location: str) -> bool:
+        """Whether `location` is exactly this host's redirect to its consent page for a login now in progress.
+
+        Compared whole, against a login id the host itself created, so a client
+        callback that merely looks like the consent page (same origin and path)
+        is never mistaken for it.
+        """
+        try:
+            pairs = parse_qsl(urlparse(location).query, keep_blank_values=True)
+        except ValueError:
+            return False
+        if len(pairs) != 1 or pairs[0][0] != "id":
+            return False
+        login_id = pairs[0][1]
+        return login_id in self.pending and location == self.consent_url(login_id)
 
     def complete_login(self, login_id: str, passphrase: str, role: str) -> str | None:
         """The client's redirect URL on success; None for a wrong, expired or locked-out attempt."""
@@ -535,8 +554,9 @@ class IssuerIdentification:
     The SDK serves the authorization-server metadata and sends `/authorize`
     errors back to the client itself, without `iss`. This adds the metadata
     flag, and `iss` to every `/authorize` redirect that goes back to a client.
-    The redirect to the host's own consent page is left alone; the consent
-    page adds `iss` to its success redirect itself (`complete_login`).
+    Only the host's own redirect to its consent page, recognized exactly
+    (`is_consent_redirect`), is left alone; the consent page adds `iss` to its
+    success redirect itself (`complete_login`).
     """
 
     METADATA_PATH = "/.well-known/oauth-authorization-server"
@@ -544,7 +564,7 @@ class IssuerIdentification:
     def __init__(self, app: ASGIApp, provider: PassphraseProvider) -> None:
         self._app = app
         self._issuer = provider.issuer
-        self._consent_page = provider.config.public_url + "/login?"
+        self._provider = provider
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         path = scope.get("path", "")
@@ -560,7 +580,7 @@ class IssuerIdentification:
                 headers = []
                 for name, value in message.get("headers", []):
                     location = value.decode("latin-1")
-                    if name.lower() == b"location" and not location.startswith(self._consent_page):
+                    if name.lower() == b"location" and not self._provider.is_consent_redirect(location):
                         value = construct_redirect_uri(location, iss=self._issuer).encode("latin-1")
                     headers.append((name, value))
                 message = {**message, "headers": headers}
