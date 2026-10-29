@@ -351,8 +351,34 @@ same machine:
   nosniff`. Pages are rendered on the server with every value escaped, and contain no scripts.
 - It has no write endpoints, so there is nothing for a cross-site request to change.
 
+**Topic pages.** `/t/<project>` and `/t/<project>/<subtopic>` list the viewer's conversations under one
+topic and everything below it, through the same `list_for` and `list_all` filter as
+`list_conversations(topic=)`, so they match whole segments and only narrow the viewer's own list. Each
+path segment is percent-decoded exactly once and the topic is checked with the core's validator, so an
+encoded slash can't act as a separator. An invalid topic gets `400`.
+
+**Needs you.** `/needs` reads each conversation the viewer may see through the same path as its page:
+`history` from the viewer's join point and within retention, or `full_history` for a viewer that sees
+every conversation. It lists each message once, however many copies it has, when its `attention` names
+the viewer or it asks for a decision, and the viewer didn't send it. `needs_decision` asks the
+conversation for a decision; it isn't addressed to one role, so it shows for every participant who reads
+it. These are **retained signals**: no message has a resolved state, so the page never says whether one
+was answered, and viewing changes nothing. It never reads a message's words. The page counts every match
+before it shows the newest ones, and each links to a conversation page that starts with that message.
+Below come the jobs whose `waiting_on` is the viewer. Jobs have no topic, so under `?topic=` none are
+shown. A `topic` argument given twice, or an invalid one, gets `400`.
+
 Reaching the view from anywhere but the machine itself needs its own authentication in front of it, and
 is the operator's separate decision.
+
+**`proxy_host`, off by default.** For that case the config can name one more exact Host value, `name` or
+`name:port`. The view then answers to it as well as to its loopback address. It is compared as a whole
+string: lowercase DNS labels only, no wildcard, scheme, path or userinfo, and `X-Forwarded-*` and
+`Forwarded` are never read. The listener still binds to loopback only. This is Host validation, not
+authentication: any local process can send that Host, so the local machine's users stay trusted, as
+before. `proxy_host` therefore requires an **authenticating proxy** in front, one that admits only people
+entitled to everything the viewer role sees, every conversation with `can_view_all_conversations`. Tailnet
+membership alone isn't that permission. Turning it on is an exposure decision of its own.
 
 ## What was deliberately left out
 

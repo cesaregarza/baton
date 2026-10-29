@@ -6,6 +6,15 @@ loopback address only, and it never sees a token.
 
 Conversations are grouped by their topic, with the untagged in a group of
 their own, so a topic organises the view without becoming a requirement.
+`/t/<project>` and `/t/<project>/<subtopic>` show one topic and everything
+under it, by whole segments, with the same filter as `list_conversations`.
+
+`/needs` collects the retained signals that single the viewer out: messages
+it could read whose `attention` names it or that ask for a decision, newest
+first, and the jobs waiting on it. It reads only structured fields, never a
+message's words, and no message has a resolved state, so nothing here says
+whether a signal was answered. `?topic=` narrows the messages; jobs carry no
+topic, so a filter shows none of them.
 
 What it shows is what one configured `viewer_role` may see: the
 conversations that role is in, from its join point, exactly as
@@ -32,9 +41,9 @@ import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
-from baton import conversations, messages
+from baton import conversations, jobs, messages
 from baton.config import Config
 from baton.errors import BatonError
 from baton.store import connect
@@ -52,6 +61,9 @@ CONVERSATION_PATH = re.compile(r"/c/([A-Za-z0-9_-]{1,64})")
 # A conversation seq: ASCII digits only (str.isdigit also takes superscripts), within SQLite's signed 64 bits.
 SEQ = re.compile(r"[0-9]{1,19}")
 MAX_SEQ = 2**63 - 1
+# How many matching messages /needs shows, newest first; the page still counts all of them first.
+MAX_NEEDS = messages.MAX_PAGE_MESSAGES
+MAX_NEEDS_JOBS = 50
 STYLE = """\
 body { font: 15px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 52rem; padding: 1rem; color: #1d1d1f; }
 a { color: #0b57d0; }
@@ -67,6 +79,7 @@ h2 { font-size: 1rem; margin: 1.2rem 0 .2rem; color: #5f6368; font-weight: 600; 
 .notice { font-style: italic; }
 .replies { margin: .4rem 0 0 1.2rem; border-left: 2px solid #e3e3e3; padding-left: .6rem; }
 .reply-to { color: #5f6368; font-size: .85rem; margin: .2rem 0; }
+h2 a { color: inherit; }
 """
 
 
@@ -88,10 +101,18 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
     if url.path == "/style.css":
         return Response(200, STYLE.encode(), {**HEADERS, "Content-Type": "text/css; charset=utf-8"})
     match = CONVERSATION_PATH.fullmatch(url.path)
-    if url.path != "/" and not match:
+    topic = _topic_route(url.path) if url.path.startswith("/t/") else None
+    if (url.path.startswith("/t/") and topic is None) or (url.path == "/needs" and _needs_topic(url.query) is False):
+        return _page(400, "Bad request", "<p>A topic is one or two lowercase slug segments, such as project or "
+                                         "project/subtopic, given once.</p>")
+    if url.path not in ("/", "/needs") and not match and topic is None:
         return _not_found()
     conn = connect(config.db_path)
     try:
+        if url.path == "/needs":
+            return _page(200, "Needs you", _needs(config, conn, _needs_topic(url.query)))
+        if topic is not None:
+            return _page(200, topic, _index(config, conn, topic))
         if match is None:
             return _page(200, "Conversations", _index(config, conn))
         after = _after_seq(parse_qs(url.query, keep_blank_values=True).get("after_seq", ["0"])[-1])
@@ -122,25 +143,137 @@ def start(config: Config) -> ThreadingHTTPServer | None:
 
 
 def _own_hosts(config: Config) -> set[str]:
+    """The Host values the view answers to, compared whole. X-Forwarded-* and Forwarded are never read."""
     settings = config.dashboard
     address = f"[{settings.listen_host}]" if ":" in settings.listen_host else settings.listen_host
-    return {f"{address}:{settings.listen_port}", f"localhost:{settings.listen_port}"}
+    hosts = {f"{address}:{settings.listen_port}", f"localhost:{settings.listen_port}"}
+    return hosts | ({settings.proxy_host} if settings.proxy_host else set())
 
 
-def _index(config: Config, conn: Any) -> str:
+def _topic_route(path: str) -> str | None:
+    """The topic a `/t/...` path names, each segment percent-decoded exactly once, or None if it isn't valid.
+
+    An encoded slash stays inside its segment, so it makes the topic invalid instead of acting as a separator.
+    """
+    try:
+        segments = [unquote(segment, errors="strict") for segment in path[len("/t/"):].split("/")]
+    except UnicodeDecodeError:
+        return None
+    if any("/" in segment for segment in segments):
+        return None
+    try:
+        return conversations.check_topic("/".join(segments))
+    except BatonError:
+        return None
+
+
+def _needs_topic(query: str) -> str | None | bool:
+    """`/needs`'s topic filter: None for none, the topic, or False when it is invalid or given more than once."""
+    values = parse_qs(query, keep_blank_values=True).get("topic")
+    if values is None:
+        return None
+    if len(values) != 1:
+        return False
+    try:
+        return conversations.check_topic(values[0])
+    except BatonError:
+        return False
+
+
+def _visible(config: Config, conn: Any, topic: str | None = None) -> tuple[list[dict[str, Any]], str, bool]:
+    """The conversations the viewer may see, optionally under one topic, a phrase saying which, and whether
+    that is every conversation. A filter only ever narrows this list."""
     viewer = config.dashboard.viewer_role
     if config.roles[viewer].can_view_all_conversations:
-        listed, scope = conversations.list_all(conn), "every conversation"
-    else:
-        listed, scope = conversations.list_for(conn, viewer), f"the conversations {viewer} is in"
+        return conversations.list_all(conn, topic), "every conversation", True
+    return conversations.list_for(conn, viewer, topic), f"the conversations {viewer} is in", False
+
+
+def _index(config: Config, conn: Any, topic: str | None = None) -> str:
+    viewer = config.dashboard.viewer_role
+    listed, scope, _ = _visible(config, conn, topic)
+    heading = (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}. '
+               '<a href="/needs">Needs you</a></p>')
+    if topic is not None:
+        heading = (f'<p><a href="/">All conversations</a> · {_e(" › ".join(topic.split("/")))}</p>'
+                   f'<h1>{_e(topic)}</h1><p class="muted">Read-only. Showing {_e(scope)} under this topic, as '
+                   f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">Needs you here</a></p>')
     if not listed:
-        return (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}.</p>'
-                '<ul><li class=muted>None yet.</li></ul>')
-    groups = "".join(f'<h2>{_e(topic) if topic else "No topic"}</h2><ul>'
-                     + "".join(_listing(item) for item in items) + "</ul>"
-                     for topic, items in _by_topic(listed))
-    return (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}.</p>'
-            f'{groups}')
+        return heading + f'<ul><li class=muted>{"None yet." if topic is None else "None under this topic."}</li></ul>'
+    groups = "".join(f'<h2>{_topic_link(group)}</h2><ul>' + "".join(_listing(item) for item in items) + "</ul>"
+                     for group, items in _by_topic(listed))
+    return heading + groups
+
+
+def _topic_link(topic: str | None) -> str:
+    return f'<a href="/t/{_e(topic)}">{_e(topic)}</a>' if topic else "No topic"
+
+
+def _needs(config: Config, conn: Any, topic: str | None) -> str:
+    """The retained signals that single out the viewer, from what it could read, then the jobs waiting on it."""
+    viewer = config.dashboard.viewer_role
+    found = _asking(config, conn, topic)
+    shown = found[:MAX_NEEDS]
+    count = (f'{len(found)} message{"" if len(found) == 1 else "s"} asked for you or for a decision'
+             + (f", showing the newest {len(shown)}" if len(shown) < len(found) else ""))
+    where = f" under {_e(topic)}" if topic else ""
+    items = "".join(_signal(conversation, item) for conversation, item in shown)
+    if topic is not None:
+        job_count, job_block = "", ('<h2>Jobs</h2><p class="muted">Jobs have no topic, so none are shown under a '
+                                    'topic filter. <a href="/needs">See every job waiting on you</a>.</p>')
+    else:
+        waiting = jobs.list_jobs(conn, waiting_on=viewer, limit=200)
+        total = "200 or more jobs are" if len(waiting) == 200 else \
+            f'{len(waiting)} job{" is" if len(waiting) == 1 else "s are"}'
+        job_count = f" · {total} waiting on you"
+        job_block = ('<h2>Jobs waiting on you</h2><ul>' + ("".join(_job(job) for job in waiting[:MAX_NEEDS_JOBS])
+                                                           or "<li class=muted>None.</li>") + "</ul>")
+    crumbs = '<p><a href="/">All conversations</a>' + (' · <a href="/needs">Needs you</a>' if topic else "") + "</p>"
+    return (f'{crumbs}<h1>Needs you{where}</h1><p class="muted">As {_e(viewer)}. {count}{job_count}.</p>'
+            '<p class="muted">Each message is a retained signal: it asked for you, or for a decision, when it was '
+            'sent. Nothing records whether it was answered, and viewing changes nothing.</p>'
+            f'<h2>Messages</h2><ul>{items or "<li class=muted>None.</li>"}</ul>{job_block}')
+
+
+def _asking(config: Config, conn: Any, topic: str | None) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Every message the viewer could read that names it in `attention` or asks for a decision, newest first.
+
+    It reads each visible conversation through the same path as its page: `history` from the viewer's join
+    point and within retention, or `full_history` for a viewer that sees every conversation. Each message
+    comes once however many copies it has, and one the viewer sent itself isn't waiting on it.
+    """
+    viewer = config.dashboard.viewer_role
+    listed, _, every = _visible(config, conn, topic)
+    found = []
+    for conversation in listed:
+        after = 0
+        while True:
+            if every:
+                page = conversations.full_history(conn, conversation["conversation_id"], after, MAX_NEEDS)
+            else:
+                page = conversations.history(conn, viewer, conversation["conversation_id"], after, MAX_NEEDS)
+            if not page["messages"]:
+                break
+            found += [(conversation, item) for item in page["messages"]
+                      if item["from_role"] not in (None, viewer)
+                      and (item.get("needs_decision") or viewer in (item.get("attention") or []))]
+            after = page["next_seq"]
+    return sorted(found, key=lambda pair: (pair[1]["at"], pair[1]["seq"]), reverse=True)
+
+
+def _signal(conversation: dict[str, Any], item: dict[str, Any]) -> str:
+    """One message on /needs, linked to its place: the page that starts with it, so it is always on it."""
+    seq = int(item["seq"])
+    why = " · ".join(label for label, on in (("asks for you", bool(item.get("attention"))),
+                                             ("asks for a decision", bool(item.get("needs_decision")))) if on)
+    return (f'<li><div class="meta"><a href="/c/{_e(conversation["conversation_id"])}?after_seq={seq - 1}#m-{seq}">'
+            f'{_e(conversation["title"])}</a> · <span class="role">{_e(item["from_role"])}</span> · '
+            f'{_e(item["at"])} · #{seq} · {why}</div><p class="text">{_e(item["text"])}</p></li>')
+
+
+def _job(job: dict[str, Any]) -> str:
+    return (f'<li>{_e(job["title"])}<div class="meta">{_e(job["id"])} · {_e(job["state"])} · '
+            f'updated {_e(job["updated_at"])}</div></li>')
 
 
 def _by_topic(listed: list[dict[str, Any]]) -> list[tuple[str | None, list[dict[str, Any]]]]:

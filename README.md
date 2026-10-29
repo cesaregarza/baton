@@ -283,6 +283,7 @@ you enable it, it needs conversations enabled, and it binds only to a loopback a
 enabled = true
 viewer_role = "planner"   # the view shows what this role may see
 listen_port = 8766        # http://127.0.0.1:8766/
+# proxy_host = "dash.example.com:8443"   # optional; only behind an authenticating proxy, see below
 ```
 
 The view shows the conversations `viewer_role` is in, from when it joined, the same messages
@@ -294,6 +295,27 @@ The view has no login. Anyone, and any process, on the machine that can reach th
 shared machine pick a viewer role that sees little. It answers only to its own loopback address (which stops
 DNS rebinding), sends no CORS headers, can't be framed, and its pages carry no scripts. To reach it from
 anywhere else, put your own authentication in front of it; that is a separate decision from turning it on.
+
+**Pages.**
+
+- `/`: the conversations, grouped by topic, with the untagged in a group of their own.
+- `/t/<project>` and `/t/<project>/<subtopic>`: one topic and everything under it, matched by whole segments
+  (`alpha` takes `alpha/x`, never `alphabet`). A topic page only narrows what the viewer already sees.
+- `/needs`, and `/needs?topic=<topic>`: what singles the viewer out. Messages it could read whose
+  `attention` names it, or that ask for a decision, newest first, plus the jobs waiting on it. These are
+  retained signals: nothing records whether one was answered, and viewing changes nothing. It never reads a
+  message's words, so an `@role` in the text doesn't count, and a message the viewer sent itself isn't
+  listed. Jobs have no topic, so a topic filter shows none.
+
+**Behind a proxy (`proxy_host`, off by default).** The view only answers to its own loopback address, so a
+proxy in front of it, such as tailnet-only `tailscale serve`, gets `421`. Setting `proxy_host` to that
+proxy's exact Host value, for example `"dash.example.com"` or `"dash.example.com:8443"`, makes the view
+answer to that one name as well. It never accepts a wildcard or a lookalike, and it never reads
+`X-Forwarded-*` or `Forwarded`. The listener still binds to loopback only. This is Host validation, not
+authentication: any local process can send that Host. So `proxy_host` requires an **authenticating proxy**
+in front, one that admits only people entitled to everything the viewer role sees, and with
+`can_view_all_conversations` that is every conversation. Being on the same tailnet isn't, on its own,
+that permission.
 
 ## MCP tools
 
