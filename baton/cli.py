@@ -199,6 +199,11 @@ def _db(config: Config, operation: Any) -> Any:
         conn.close()
 
 
+def _attention(args: argparse.Namespace) -> list[str] | None:
+    """`--attention a,b` as the list the host expects, or None when it was left out."""
+    return args.attention.split(",") if args.attention is not None else None
+
+
 def _message(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     if args.to is None and args.conversation_id is None:
         raise InvalidRequest("name a recipient with --to or a conversation with --conversation")
@@ -209,7 +214,7 @@ def _message(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     except json.JSONDecodeError:
         raise InvalidRequest("--relayed-json must be JSON: a list of {source, at, text} entries") from None
     text = args.text if args.text is not None else sys.stdin.read()
-    attention = args.attention.split(",") if args.attention is not None else None
+    attention = _attention(args)
     if args.conversation_id is not None:
         return _db(config, lambda conn: conversations.send(
             conn, config, sender=args.role, conversation_id=args.conversation_id, text=text, relayed=relayed,
@@ -276,8 +281,10 @@ def _remote(args: argparse.Namespace) -> Any:
         except json.JSONDecodeError:
             raise InvalidRequest("--relayed-json must be JSON: a list of {source, at, text} entries") from None
         text = args.text if args.text is not None else sys.stdin.read()
+        # Every argument the local command takes, or the field is accepted here and never sent.
         arguments = {"text": text, "to": args.to, "conversation_id": args.conversation_id, "job_id": args.job_id,
-                     "relayed": relayed, "request_id": args.request_id}
+                     "relayed": relayed, "request_id": args.request_id, "reply_to": args.reply_to,
+                     "attention": _attention(args), "needs_decision": True if args.needs_decision else None}
         return _call(args, "send_message", arguments)
     if command == "read":
         return _call(args, "read_messages", {"after_seq": args.after_seq, "limit": args.limit})
