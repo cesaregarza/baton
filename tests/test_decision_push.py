@@ -518,3 +518,17 @@ def test_serve_prepares_every_integration_before_any_worker_thread_starts(tmp_pa
     app_module.serve(push_config(tmp_path))
     assert order == ["prepare after 0 threads"]
     assert "wakes" in started and "decision_push" in started
+
+
+def test_any_other_prepare_failure_is_contained_and_logged_by_type_alone(tmp_path, monkeypatch, caplog) -> None:
+    def failing(self: Any) -> None:
+        raise RuntimeError(f"something it read: {SECRET_SHAPED}")
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(decision_push.DecisionPush, "prepare", failing)
+    monkeypatch.setattr(app_module.uvicorn, "run", lambda *a, **k: seen.update(served=live("decision_push")))
+    caplog.set_level(logging.INFO)
+    app_module.serve(push_config(tmp_path))  # must not raise
+    assert seen == {"served": 0}
+    assert "decision_push" in caplog.text and "RuntimeError" in caplog.text
+    assert SECRET_SHAPED not in caplog.text and "something it read" not in caplog.text
