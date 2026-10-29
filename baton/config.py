@@ -186,6 +186,11 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
     tokens = tuple(_token(index, table, roles) for index, table in enumerate(auth.get("tokens", [])))
     if len({token.sha256 for token in tokens}) != len(tokens):
         raise ConfigError("two auth.tokens entries share a digest")
+    names = [token.name for token in tokens]
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        raise ConfigError(f"auth.tokens has more than one entry named {twice[0]!r}: a token's name must be unique, "
+                          "so that revoking it ends exactly that token")
     return Config(
         public_url=public_url,
         listen_host=str(host.get("listen_host", "127.0.0.1")),

@@ -58,6 +58,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from baton import datadir
 from baton.config import Config, ConfigError
+from baton.errors import UnknownToken
 
 log = logging.getLogger("baton.auth")
 
@@ -144,9 +145,12 @@ def revoked_digests(config: Config) -> frozenset[str]:
 
 def revoke_token(config: Config, name: str) -> dict:
     """End the bearer token configured as `name` from its next call on. Remove its config entry when convenient."""
-    entry = next((entry for entry in config.tokens if entry.name == name), None)
-    if entry is None:
-        raise ConfigError(f"no auth.tokens entry is named {name!r}")
+    matches = [entry for entry in config.tokens if entry.name == name]
+    if not matches:
+        raise UnknownToken(f"no auth.tokens entry is named {name!r}; nothing was revoked")
+    if len(matches) > 1:  # the loader refuses this; a config built another way must not half-revoke
+        raise ConfigError(f"auth.tokens has more than one entry named {name!r}; nothing was revoked")
+    entry = matches[0]
     directory = config.data_dir
     with datadir.opened(directory) as dir_fd:
         lock = datadir.open_file(dir_fd, config.revoked_tokens_path.stem + ".lock", os.O_RDWR | os.O_CREAT,

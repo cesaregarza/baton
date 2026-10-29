@@ -229,6 +229,9 @@ def _new_token(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     from baton.auth import new_token
 
     config.require_role(args.token_role)
+    if any(entry.name == args.name for entry in config.tokens):
+        raise ConfigError(f"a token named {args.name!r} is already configured; token names must be unique, so "
+                          "pick another name (or revoke and remove the old one first)")
     token, digest = new_token()
     entry = f'[[auth.tokens]]\nname = "{args.name}"\nrole = "{args.token_role}"\nsha256 = "{digest}"'
     return {"token": token, "config_entry": entry,
