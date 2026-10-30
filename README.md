@@ -13,7 +13,8 @@ through the bundled `baton` CLI when they run on the host machine.
 - The host can also **wake** the recipient, if it is set up for that:
   - a remote client that supports MCP Events gets a signed event through its subscription (an optional
     integration, see below);
-  - any role can instead have a webhook or local command, configured by the operator;
+  - any role can instead have a webhook or local command, configured by the operator. A webhook URL must
+    be http(s) with a host and a valid port, or the config is refused without repeating the URL;
   - a local agent blocked in `baton wait` simply returns.
 
   With none of these, the recipient sees the message the next time it reads.
@@ -203,6 +204,26 @@ the whole batch.
 Give a quiet role something that reads on its own schedule as well. Nothing nudges it to read, so its
 unread messages build up, and at the mailbox limit the conversation's next send is refused with
 `conversation_full` naming that role until it reads.
+
+### If a wake arrives and the read fails
+
+One wake covers a whole unread batch, so a role whose read fails just after being woken would hear
+nothing more until it happened to read on its own -- an outage during that window is enough. A
+delivered message wake therefore schedules two reminders for the same batch, five and twenty minutes
+after it was delivered. They carry exactly what the original carried, and `baton wakes` shows each
+under the batch's key with `:r1` or `:r2`.
+
+A reminder is sent only while the role still has not read the batch, and a read retires any that have
+not gone out. There are never more than two per batch, and never more than six for one role in a
+rolling hour; past that a reminder waits for the window to move rather than disappearing, shown as
+`capped`. If the host was down past both times, only the second is sent and the first is marked
+`skipped`.
+
+**What this does not cover.** A read means the host handed the messages over and moved the role's
+read position; it is not proof that the agent received or acted on them. `read_messages` advances
+that position before its caller gets the response, so a response lost on the way back still counts as
+a read and cancels the reminders, as does abandoning a page part-way through a batch. `read_history`
+reads nothing in this sense: it moves no position and cancels nothing.
 
 **Topics.** A conversation may carry an optional `topic`, a readable path of one or two lowercase slug
 segments, such as `release` or `release/notes`. It is a label for people, separate from the stable
