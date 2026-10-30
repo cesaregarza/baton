@@ -175,7 +175,9 @@ def test_the_upgrade_steps_cover_every_version_there_is_a_fixture_for() -> None:
 
 # The tables each step adds whole, written out so a step's declared list can't quietly stand in for them.
 WHOLE_TABLES = {8: {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"},  # the browser seat
-                9: {"change_log", "log_meta"}}  # the conversation change log
+                9: {"change_log", "log_meta"},  # the conversation change log
+                10: {"generations", "batches", "batch_pages", "artifact_versions", "artifact_inputs",
+                     "artifact_depends_on", "commit_requests"}}  # the local indexing writer's derived data
 
 
 @pytest.mark.parametrize("version", FIXTURE_VERSIONS)
