@@ -9,7 +9,9 @@ Everything here uses a fake clock. No test sleeps, and none depends on wall-cloc
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -912,3 +914,46 @@ def test_a_read_leaves_reminders_for_a_batch_it_has_not_reached(tmp_path: Path, 
     assert rows(conn)["messages:1:r1"] == "superseded", "the read left its own batch's reminder live"
     assert rows(conn)["messages:6:r1"] == "scheduled", \
         "the read retired a reminder for a batch it had not reached"
+
+
+def test_a_failing_reminder_send_logs_the_type_and_not_the_message(tmp_path: Path, clock,
+                                                                   caplog) -> None:
+    """A reminder whose send raises is logged by exception type, with nothing of its message.
+
+    The catch-all that does this lives in `run`, not in `pass_once`, so this goes through `run`.
+    Calling `pass_once` directly would let the exception escape and prove nothing about the handler.
+
+    `run` checks the stop event before each pass, so the event cannot be set beforehand -- the loop
+    body would never execute and the test would pass on an empty log. The deliverer sets it as it is
+    called, which is during the pass, so exactly one pass runs and then the loop ends.
+
+    The sentinel stands in for what a real exception would carry, a webhook URL with a token in its
+    query, and must not appear anywhere in the log.
+    """
+    sentinel = "https://hook.invalid/t/sentinel-must-not-be-logged"
+    stop = threading.Event()
+
+    def raising(wake: Wake, wake_id: str, body: bytes) -> bool:
+        stop.set()                               # during the pass, so this is the only one
+        raise RuntimeError(f"connection to {sentinel} failed")
+
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    conn = connect(host.config.db_path)
+    messages.send(conn, sender="planner", recipient="worker", text="the one it must read")
+    # The original wake is delivered by a recorder that works, so a reminder gets scheduled. The
+    # reminder is what the raising deliverer then meets.
+    wakes.Dispatcher(host.config, Recorder()).pass_once()
+    clock.advance(FIVE_MINUTES)
+    assert rows(conn)["messages:1:r1"] == "scheduled", "this case needs a reminder waiting to go"
+
+    with caplog.at_level(logging.ERROR, logger="baton.wakes"):
+        wakes.Dispatcher(host.config, raising).run(stop, poll_seconds=0.0)
+
+    assert stop.is_set(), "the deliverer was never reached, so nothing was logged either way"
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "RuntimeError" in logged, "the failure was not logged by its type"
+    assert sentinel not in logged, "the exception message reached the log"
+    assert "sentinel-must-not-be-logged" not in logged, "part of the message reached the log"
+    for record in caplog.records:
+        assert record.exc_info is None, \
+            "the record carries the traceback, which puts the message into any formatter showing it"
