@@ -419,3 +419,28 @@ def test_the_search_tool_takes_a_query_vector_and_a_model() -> None:
     from baton import app
     parameters = inspect.signature(app.Tools.search).parameters
     assert {"query_vector", "model"} <= set(parameters)
+
+
+@pytest.mark.parametrize(("distance", "first"), [("cosine", "aligned"), ("inner_product", "long")])
+def test_the_profile_distance_decides_the_order(db, config, distance: str, first: str) -> None:
+    """Unnormalized vectors, where the two distances disagree: cosine ranks by direction alone, inner product by
+    the raw product, so a long vector at an angle beats a short aligned one only under inner product."""
+    conversation_id, _ = converse(db, config, 0)
+    aligned = say(db, config, conversation_id, "plover plover plover")
+    long = say(db, config, conversation_id, "plover once")
+    profile = {"embedding": {"model": "toy-embed", "dim": 3, "normalization": "none", "distance": distance}}
+    generation = derived.generation_create(db, config, "alpha", profile)["generation"]
+    manifest = begin(db, config, conversation_id, generation, kinds=derived.KINDS)
+    commit(db, config, manifest, payload(manifest, vectors={**every_kind(), ("message_id", aligned): [0.1, 0.01, 0.0],
+                                                            ("message_id", long): [5.0, 5.0, 0.0]}))
+    derived.generation_activate(db, config, "alpha", generation)
+    hits = search.search(db, config, "assistant", "plover", query_vector=[1.0, 0.0, 0.0], model="toy-embed")["hits"]
+    order = [hit["message_id"] for hit in hits if hit.get("message_id") in (aligned, long)]
+    assert order[0] == {"aligned": aligned, "long": long}[first]
+    similarity = {hit["message_id"]: hit["similarity"] for hit in hits if hit.get("message_id") in (aligned, long)}
+    close = {"rel_tol": 1e-6}  # vectors are stored as float32
+    if distance == "cosine":
+        assert math.isclose(similarity[aligned], 0.1 / math.hypot(0.1, 0.01), **close) and \
+            math.isclose(similarity[long], 1 / math.sqrt(2), **close)
+    else:
+        assert math.isclose(similarity[aligned], 0.1, **close) and math.isclose(similarity[long], 5.0, **close)
