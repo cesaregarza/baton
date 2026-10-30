@@ -536,3 +536,75 @@ def test_a_second_claim_keeps_the_first_claim_time_so_the_cap_is_charged_once(tm
     assert claim(dispatcher, conn, "worker", "messages:1:r1", 1, 0) is True
     again = conn.execute("SELECT claimed_at FROM wakes WHERE key = 'messages:1:r1'").fetchone()[0]
     assert again == charged_at, "reclaiming moved the charge, so the cap window would restart"
+
+
+# ------------------------------------------- races a green suite does not reach
+
+BOTH_WAKE = WORKER_WAKE + '[roles.planner.wake]\ncommand = ["true"]\n'
+
+
+def test_a_first_reminder_is_not_retried_once_the_second_is_due(tmp_path: Path, clock,
+                                                                monkeypatch) -> None:
+    """Once the later ordinal is due, the earlier one is ineligible for any further send.
+
+    Retries of still-pending work run before the due scan in the same pass, so a first reminder
+    whose lease had run out could be sent again at the very moment the second became due -- after
+    the point the design says it stops.
+    """
+    monkeypatch.setattr(wakes, "LEASE_SECONDS", 0.0)
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder(True, False))
+    first = wakes.wake_id("worker", "messages:1:r1")
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()
+    assert [c["id"] for c in recorder.calls][1:] == [first], "the first reminder was not sent and left pending"
+
+    clock.advance(TWENTY_MINUTES - FIVE_MINUTES)
+    dispatcher.pass_once()
+    after = [c["id"] for c in recorder.calls][2:]
+    assert first not in after, "the first reminder was retried after the second fell due"
+    assert after == [wakes.wake_id("worker", "messages:1:r2")]
+
+
+def test_a_live_lease_stops_a_second_worker_sending_the_same_reminder(tmp_path: Path, clock,
+                                                                      monkeypatch) -> None:
+    """The lease has to be taken by the send, not only written after it.
+
+    Two workers that both saw the row as pending before either wrote would otherwise both send:
+    the attempt checks the status but never the lease, so a live lease stops nobody.
+    """
+    monkeypatch.setattr(wakes, "LEASE_SECONDS", 600.0)
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder(True, False))
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()                       # claimed, sent, failed: the lease is now live
+    assert rows(conn)["messages:1:r1"] == "pending"
+    sent = len(recorder.calls)
+
+    dispatcher._attempt(conn, "worker", "messages:1:r1")   # a second worker, stale snapshot in hand
+    assert len(recorder.calls) == sent, "a second send went out inside a live lease"
+
+
+def test_the_latest_due_ordinal_is_chosen_before_the_page_limit(tmp_path: Path, clock,
+                                                                monkeypatch) -> None:
+    """Grouping by batch has to happen before the page limit, not after.
+
+    With more due rows than one page holds, a batch can have its first reminder inside the page and
+    its second outside it. Grouping afterwards then picks the first as that batch's latest and sends
+    it, although the second is already due. Reproduced here with a small page rather than the
+    hundred-row default and fifty-one batches: it is the same arithmetic, and far cheaper to run.
+    """
+    monkeypatch.setattr(wakes, "PAGE", 3)
+    host = make_config(tmp_path, extra=BOTH_WAKE)
+    recorder = Recorder()
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    conn = connect(host.config.db_path)
+    messages.send(conn, sender="planner", recipient="worker", text="for the worker")
+    messages.send(conn, sender="worker", recipient="planner", text="for the planner")
+    dispatcher.pass_once()
+    assert len(recorder.calls) == 2, "both roles need a delivered wake for this to page"
+
+    clock.advance(TWENTY_MINUTES + 1)            # four due reminders, one page of three
+    dispatcher.pass_once()
+    sent = [c["id"] for c in recorder.calls][2:]
+    for role, seq in (("worker", 1), ("planner", 1)):
+        assert wakes.wake_id(role, f"messages:{seq}:r1") not in sent, \
+            f"{role}'s first reminder went out although its second was due"
