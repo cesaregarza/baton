@@ -246,6 +246,33 @@ def test_the_read_only_connection_refuses_writes(config) -> None:
     conn.close()
 
 
+def test_the_read_only_connection_is_opened_read_only_not_only_asked_to_be(config) -> None:
+    """query_only can be switched off on the connection; the file opened mode=ro still refuses the write."""
+    connect(config.db_path).close()
+    conn = store.connect_read_only(config.db_path)
+    conn.execute("PRAGMA query_only = OFF")
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        conn.execute("UPDATE conversations SET title = 'x'")
+    conn.close()
+
+
+def test_the_index_commands_read_through_the_read_only_connection(db, config, tmp_path, capsys,
+                                                                  monkeypatch) -> None:
+    path = config_file(config, tmp_path)
+    seen = []
+    original = changes.read
+
+    def spy(conn, scope, **kwargs):
+        seen.append(conn.execute("PRAGMA query_only").fetchone()[0])
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("UPDATE log_meta SET value = value WHERE key = 'log_epoch'")
+        return original(conn, scope, **kwargs)
+
+    monkeypatch.setattr(changes, "read", spy)
+    code, _ = run(capsys, "--config", str(path), "index", "changes")
+    assert code == 0 and seen == [1]
+
+
 def test_the_read_only_connection_refuses_a_database_that_needs_migrating(tmp_path: Path) -> None:
     config = search_config(tmp_path)
     config.data_dir.mkdir(mode=0o700)
