@@ -19,9 +19,9 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -88,7 +88,7 @@ _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
     5: ("UPDATE messages SET author_kind = 'agent' WHERE sender IS NOT NULL",),
     # Revisions start at 0 for every existing conversation; activity is the newest message still held.
-    7: ("UPDATE conversations SET last_activity_at = COALESCE((SELECT MAX(at) FROM messages m"
+    8: ("UPDATE conversations SET last_activity_at = COALESCE((SELECT MAX(at) FROM messages m"
         " WHERE m.conversation_id = conversations.id), created_at)",),
 }
 _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys()))
