@@ -281,11 +281,19 @@ class Dispatcher:
             " AND NOT EXISTS (SELECT 1 FROM wakes AS later WHERE later.role = w.role"
             "                 AND later.baseline_seq = w.baseline_seq AND later.ordinal > w.ordinal"
             "                 AND later.status IN ('scheduled', 'capped') AND later.due_at <= ?)"
-            # Deferred work sorts last. A `capped` row keeps its original due time, so ordering by
-            # due time alone puts it at the front of every pass, where it is offered and refused
-            # again; enough of them fill the page and a role whose reminder has just come due with
-            # cap to spare is never reached. Work that can be served goes first.
-            " ORDER BY w.status = 'capped', w.due_at LIMIT ?", (_now(), _now(), PAGE)).fetchall()
+            # Work that can be served comes first, and "can be served" is decided by the row's own
+            # role having cap left, not by its status or its due time. A row waiting on its cap keeps
+            # its original due time, so ordering on due time alone put it at the front of every pass
+            # -- offered, refused, and back again next time -- which filled the page and tied every
+            # other role's recovery to a cap window that had nothing to do with it. A row already
+            # charged is servable, as it is at the claim. Rows that cannot be served are still
+            # offered with whatever room is left, which is how they come to be marked `capped`; the
+            # claim counts the cap again and remains the authority, since it must hold against a
+            # racing claim. Here the count only decides what to put in front.
+            " ORDER BY (w.claimed_at IS NULL AND (SELECT COUNT(*) FROM wakes AS c"
+            "           WHERE c.role = w.role AND c.ordinal IS NOT NULL AND c.claimed_at IS NOT NULL"
+            "           AND c.claimed_at > ?) >= ?), w.due_at LIMIT ?",
+            (_now(), _now(), _now() - REMINDER_WINDOW_SECONDS, REMINDER_CAP, PAGE)).fetchall()
         for row in due:
             if self._claim_reminder(conn, row["role"], row["key"], row["ordinal"], row["baseline_seq"]):
                 tried += self._attempt(conn, row["role"], row["key"])
@@ -320,6 +328,19 @@ class Dispatcher:
         """
         batch = key.rsplit(":r", 1)[0]
         with transaction(conn):
+            if ordinal == max(range(1, len(REMINDER_OFFSETS) + 1)):
+                # The last ordinal has come due, so anything earlier has had its turn. This is about
+                # the chain reaching its end, not about this reminder going out, so it happens before
+                # anything that can refuse the send: a host down past both deadlines that comes back
+                # with the hook gone would otherwise leave the earlier ordinal scheduled and overdue,
+                # and send it once the hook returned. Unsent work is skipped and work still retrying
+                # is retired, but a delivered record is left alone.
+                conn.execute("UPDATE wakes SET status = 'skipped', finished_at = ? WHERE role = ?"
+                             " AND key LIKE ? AND key != ? AND status IN ('scheduled', 'capped')",
+                             (events.now(), role, f"{batch}:r%", key))
+                conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ?"
+                             " AND key LIKE ? AND key != ? AND status = 'pending'",
+                             (events.now(), role, f"{batch}:r%", key))
             configured = self._config.roles.get(role)
             if configured is None or not configured.wake.enabled:
                 # The hook can be taken away after the original was delivered. There is nothing to
@@ -335,15 +356,6 @@ class Dispatcher:
                              " WHERE role = ? AND key = ? AND status IN ('scheduled', 'capped')",
                              (events.now(), role, key))
                 return False
-            if ordinal == max(range(1, len(REMINDER_OFFSETS) + 1)):
-                # The last ordinal is due, so anything earlier has had its turn. Unsent work is
-                # skipped and work still retrying is retired, but a delivered record is left alone.
-                conn.execute("UPDATE wakes SET status = 'skipped', finished_at = ? WHERE role = ?"
-                             " AND key LIKE ? AND key != ? AND status IN ('scheduled', 'capped')",
-                             (events.now(), role, f"{batch}:r%", key))
-                conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ?"
-                             " AND key LIKE ? AND key != ? AND status = 'pending'",
-                             (events.now(), role, f"{batch}:r%", key))
             charged = conn.execute(
                 "SELECT COUNT(*) FROM wakes WHERE role = ? AND ordinal IS NOT NULL"
                 " AND claimed_at IS NOT NULL AND claimed_at > ?",
