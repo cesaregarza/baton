@@ -178,13 +178,17 @@ class Tools:
 
     def search(
         self, role: str,
-        query: Annotated[str, Field(description="Words to find; every word must appear. Plain words only.")],
+        query: Annotated[str, Field(description=(
+            f"Words to find; every word must appear. Plain words only, at most {search_module.MAX_TERMS} words and "
+            f"{search_module.MAX_QUERY} characters: a longer query is refused, never shortened."))],
         conversation_id: str | None = None,
         topic: str | None = None,
         kinds: Annotated[list[str] | None, Field(
             description="Only [\"message\"] exists so far; any other kind is refused.")] = None,
         limit: Annotated[int, Field(ge=1, le=search_module.MAX_HITS)] = 20,
-        before: Annotated[str | None, Field(description="Only messages sent before this ISO 8601 time.")] = None,
+        before: Annotated[str | None, Field(description=(
+            "Only messages sent before this ISO 8601 time. It must carry its UTC offset (Z or +hh:mm), and is "
+            "compared as an instant."))] = None,
     ) -> dict[str, Any]:
         """Messages you can read that match every word of `query`, best first, one hit per message.
 

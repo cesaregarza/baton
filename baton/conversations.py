@@ -156,7 +156,7 @@ def list_for(conn: sqlite3.Connection, role: str, topic: Any = None, *, limit: i
     where, values = _under(topic)
     after, cursor = _before(before, "c.")
     since, moment = ("", ()) if changed_since is None else (" AND COALESCE(c.last_activity_at, c.created_at) > ?",
-                                                            (_iso(changed_since),))
+                                                            (utc_iso(changed_since, "changed_since"),))
     rows = conn.execute("SELECT c.* FROM conversations c JOIN participants p ON p.conversation_id = c.id"
                         f" WHERE p.role = ?{where}{after}{since} ORDER BY c.created_at DESC, c.id DESC LIMIT ?",
                         (role, *values, *cursor, *moment, _limit(limit))).fetchall()
@@ -483,12 +483,17 @@ def _summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
             "last_seq": row["last_seq"], "last_activity_at": row["last_activity_at"] or row["created_at"]}
 
 
-def _iso(moment: str) -> str:
-    """A time compared with stored ISO times: refused unless it parses, and kept in UTC like them."""
+def utc_iso(moment: str, name: str) -> str:
+    """A time to compare with stored times, in the form they are stored in: UTC `isoformat()`.
+
+    Stored times all come from `datetime.now(UTC).isoformat()`, so once a given time is converted to UTC and
+    written the same way, comparing the strings compares the instants. One in another offset is converted;
+    one without an offset, or that doesn't parse, is refused.
+    """
     try:
         parsed = datetime.fromisoformat(str(moment))
     except ValueError:
-        raise InvalidRequest("changed_since must be an ISO 8601 time with its UTC offset") from None
+        raise InvalidRequest(f"{name} must be an ISO 8601 time with its UTC offset") from None
     if parsed.tzinfo is None:
-        raise InvalidRequest("changed_since must carry its UTC offset")
+        raise InvalidRequest(f"{name} must carry its UTC offset")
     return parsed.astimezone(UTC).isoformat()

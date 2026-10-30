@@ -410,7 +410,7 @@ Every tool acts as the caller's role, which comes from the caller's credential.
 | `read_history(conversation_id, after_seq?, before_seq?, limit?)` | A conversation as you saw it, your own messages included. `before_seq` pages backwards. Marks nothing read |
 | `set_topic(conversation_id, topic?)` | Set, rename or clear a conversation's topic. Needs `can_manage_participants` and membership |
 | `add_participant(conversation_id, participant)`, `remove_participant(...)` | Change who is in a conversation. Needs `can_manage_participants` |
-| `search(query, conversation_id?, topic?, kinds?, limit?, before?)` | Messages you can read that contain every word of `query`, best first, one hit per message. Uses SQLite FTS5 when available, otherwise a slower scan; `keyword_index` says which. Present when `[search] enabled = true` |
+| `search(query, conversation_id?, topic?, kinds?, limit?, before?)` | Messages you can read that contain every word of `query` (at most 8 words and 200 characters; a longer query is refused, not shortened), best first, one hit per message. `before` is an ISO 8601 time with its UTC offset. Uses SQLite FTS5 when available, otherwise a slower scan; `keyword_index` says which. Present when `[search] enabled = true` |
 | `get_message(message_id)` | One message you can read. Present when search is enabled |
 
 Search and `get_message` read only what `read_history` would show you, and filter before ranking, so a match

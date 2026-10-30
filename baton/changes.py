@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
@@ -64,12 +66,13 @@ def read(conn: sqlite3.Connection, scope: Scope, *, cursor: str | None = None, l
     _require(scope)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_LIMIT:
         raise InvalidRequest(f"limit must be 1-{MAX_LIMIT}")
-    after = _position(conn, cursor)
-    rows = conn.execute(f"SELECT {', '.join(FIELDS)} FROM change_log WHERE change_seq > ? ORDER BY change_seq"
-                        " LIMIT ?", (after, min(limit, MAX_SCAN))).fetchall()
-    entries = [{field: row[field] for field in FIELDS} for row in rows]
-    last = entries[-1]["change_seq"] if entries else after
-    return {"entries": entries, "next_cursor": f"{epoch(conn)}:{last}"}
+    with _snapshot(conn):  # a prune between checking the cursor and scanning would skip rows silently
+        after = _position(conn, cursor)
+        rows = conn.execute(f"SELECT {', '.join(FIELDS)} FROM change_log WHERE change_seq > ? ORDER BY change_seq"
+                            " LIMIT ?", (after, min(limit, MAX_SCAN))).fetchall()
+        entries = [{field: row[field] for field in FIELDS} for row in rows]
+        last = entries[-1]["change_seq"] if entries else after
+        return {"entries": entries, "next_cursor": f"{epoch(conn)}:{last}"}
 
 
 def wait(conn: sqlite3.Connection, scope: Scope, *, cursor: str, timeout_seconds: float,
@@ -78,13 +81,27 @@ def wait(conn: sqlite3.Connection, scope: Scope, *, cursor: str, timeout_seconds
     _require(scope)
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     while True:
-        after = _position(conn, cursor)
-        row = conn.execute("SELECT MIN(change_seq) FROM change_log WHERE change_seq > ?", (after,)).fetchone()
+        with _snapshot(conn):
+            after = _position(conn, cursor)
+            row = conn.execute("SELECT MIN(change_seq) FROM change_log WHERE change_seq > ?", (after,)).fetchone()
         if row[0] is not None:
             return {"change_seq": row[0]}
         if time.monotonic() >= deadline:
             return {"timed_out": True}
         time.sleep(poll_seconds)
+
+
+@contextmanager
+def _snapshot(conn: sqlite3.Connection) -> Iterator[None]:
+    """One read transaction, so every statement inside sees the same state of the log."""
+    if conn.in_transaction:  # the caller's transaction is already one snapshot
+        yield
+        return
+    conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        conn.execute("COMMIT")
 
 
 def _require(scope: Scope) -> None:

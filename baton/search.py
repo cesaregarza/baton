@@ -21,6 +21,7 @@ from typing import Any
 
 from baton import messages
 from baton.config import Config
+from baton.conversations import utc_iso
 from baton.errors import InvalidRequest, UnknownMessage, UnsupportedKind
 
 MAX_HITS = 50
@@ -67,9 +68,14 @@ def search(conn: sqlite3.Connection, config: Config, role: str, query: str, *, c
                               "questions) aren't searchable yet")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_HITS:
         raise InvalidRequest(f"limit must be 1-{MAX_HITS}")
-    terms = re.findall(r"\w+", str(query)[:MAX_QUERY])[:MAX_TERMS]
+    # Every word must appear, so a query is refused whole rather than shortened to fit.
+    if len(str(query)) > MAX_QUERY:
+        raise InvalidRequest(f"a query is at most {MAX_QUERY} characters")
+    terms = re.findall(r"\w+", str(query))
     if not terms:
         raise InvalidRequest("give at least one word to search for")
+    if len(terms) > MAX_TERMS:
+        raise InvalidRequest(f"a query is at most {MAX_TERMS} words, and this one has {len(terms)}")
     condition, values = readable(config, role)
     filters, extra = _filters(conversation_id, topic, before)
     values |= extra
@@ -117,7 +123,7 @@ def _filters(conversation_id: str | None, topic: str | None, before: str | None)
         values["topic"] = str(topic)
     if before is not None:
         sql += " AND m.at < :before"
-        values["before"] = str(before)
+        values["before"] = utc_iso(before, "before")
     return sql, values
 
 
