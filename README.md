@@ -445,6 +445,7 @@ baton index dirty --producer P                     what producer P has no curren
 baton index begin-batch --producer P --conversation C --kinds K1,K2   a manifest of the messages to read
 baton index read-batch B --page N --producer P     one page of batch B's messages
 baton index commit-batch B --file F --producer P   write a version of each kind from batch B
+baton index generation create|activate|drop       a producer's generations (see below)
 ```
 
 `--as` defaults to `$BATON_ROLE` (never a human role), `--host` to `$BATON_HOST`, and `--config` to `$BATON_CONFIG` or
@@ -463,6 +464,13 @@ from. A version becomes invalid as soon as one of those messages is gone from ev
 batch for that kind rebuilds it from the start. Retrying a commit with the same `request_id` and an identical
 payload (the same digest) returns its receipt and writes nothing; the same `request_id` with anything changed
 is refused as `idempotency_conflict`. Roles read the result through `read_artifacts` and `search`.
+
+A producer can rebuild everything without readers seeing a half-built index. `generation create` starts a new,
+inactive generation; `begin-batch --generation G` and `dirty --generation G` fill it while the active one
+keeps serving; `generation activate G` switches readers to it in one step, but only once every conversation
+with a message left is covered through its latest message, and otherwise says which conversations are
+incomplete or changed since. `generation drop G` discards an inactive generation and frees its place at once
+(a producer holds at most `[indexer] max_generations`, 3 by default).
 
 ## Documentation
 

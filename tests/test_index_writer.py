@@ -740,8 +740,8 @@ def test_dirty_requires_its_producer_selector(db, config, tmp_path, capsys) -> N
 # Schema ---------------------------------------------------------------------------------------------------
 
 
-def test_the_derived_tables_are_the_current_step_and_carry_scope_all(db, config) -> None:
-    assert set(store._ADDED_TABLES[store.SCHEMA_VERSION]) == {
+def test_the_derived_tables_are_step_10_and_carry_scope_all(db, config) -> None:
+    assert set(store._ADDED_TABLES[10]) == {  # named by its own step, so a later step doesn't break it
         "generations", "batches", "batch_pages", "artifact_versions", "artifact_inputs", "artifact_depends_on",
         "commit_requests"}
     conversation_id, _ = converse(db, config, 2)

@@ -244,4 +244,4 @@ def test_the_topic_step_names_the_table_it_alters() -> None:
     # does not read as a failure of the topic step. The set below is still exact: a step that alters
     # a new table has to be added here deliberately, which is the point of the assertion.
     assert {table for step in store._ADDED_COLUMNS.values() for table in step} \
-        == {"messages", "conversations", "wakes"}
+        == {"messages", "conversations", "wakes", "generations"}

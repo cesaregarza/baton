@@ -379,15 +379,17 @@ def _add_index_commands(commands: Any) -> None:
         conn, changes.Scope.ALL, cursor=args.after, timeout_seconds=args.timeout)))
     dirty_parser = index.add_parser("dirty", help="what a producer has no current version of; read-only")
     dirty_parser.add_argument("--producer", required=True, help="whose set to list; not checked against the config")
+    dirty_parser.add_argument("--generation", help="which of its generations; default: the active one")
     dirty_parser.set_defaults(handler=lambda config, args: _index(config, lambda conn: derived.dirty(
-        conn, config, args.producer)))
+        conn, config, args.producer, generation=args.generation)))
     begin = index.add_parser("begin-batch", help="issue a manifest of the messages a batch reads")
     begin.add_argument("--producer", required=True)
     begin.add_argument("--conversation", required=True)
     begin.add_argument("--kinds", required=True, help=f"comma-separated, from {', '.join(derived.KINDS)}; or "
                        f"{derived.RECENT} alone, when [search] rolling_window_messages is set")
+    begin.add_argument("--generation", help="the generation to fill; default: the active one")
     begin.set_defaults(handler=lambda config, args: _write(config, lambda conn: derived.begin_batch(
-        conn, config, args.producer, args.conversation, args.kinds.split(","))))
+        conn, config, args.producer, args.conversation, args.kinds.split(","), generation=args.generation)))
     read = index.add_parser("read-batch", help="one page of a batch's messages, recorded as delivered")
     read.add_argument("batch")
     read.add_argument("--page", type=int, required=True)
@@ -400,6 +402,23 @@ def _add_index_commands(commands: Any) -> None:
     commit.add_argument("--producer", required=True)
     commit.set_defaults(handler=lambda config, args: _write(config, lambda conn: derived.commit_batch(
         conn, config, args.producer, args.batch, _json_file(args.file))))
+    generation = index.add_parser("generation", help="make, switch to, or drop a producer's generations"
+                                  ).add_subparsers(dest="generation_command", required=True)
+    create = generation.add_parser("create", help="a new, inactive generation to fill")
+    create.add_argument("--producer", required=True)
+    create.add_argument("--profile", help="its profile as JSON (summarizer, embedding); - for stdin")
+    create.set_defaults(handler=lambda config, args: _write(config, lambda conn: derived.generation_create(
+        conn, config, args.producer, _json_file(args.profile, "--profile") if args.profile else None)))
+    activate = generation.add_parser("activate", help="switch readers to a generation, if it is complete")
+    activate.add_argument("generation")
+    activate.add_argument("--producer", required=True)
+    activate.set_defaults(handler=lambda config, args: _write(config, lambda conn: derived.generation_activate(
+        conn, config, args.producer, args.generation)))
+    drop = generation.add_parser("drop", help="drop an inactive generation and free its slot")
+    drop.add_argument("generation")
+    drop.add_argument("--producer", required=True)
+    drop.set_defaults(handler=lambda config, args: _write(config, lambda conn: derived.generation_drop(
+        conn, config, args.producer, args.generation)))
 
 
 def _write(config: Config, operation: Any) -> Any:
@@ -410,11 +429,11 @@ def _write(config: Config, operation: Any) -> Any:
         conn.close()
 
 
-def _json_file(path: str) -> Any:
+def _json_file(path: str, flag: str = "--file") -> Any:
     try:
         return json.loads(sys.stdin.read() if path == "-" else Path(path).read_text())
     except (OSError, ValueError) as error:
-        raise InvalidRequest(f"--file must name readable JSON: {type(error).__name__}") from None
+        raise InvalidRequest(f"{flag} must name readable JSON: {type(error).__name__}") from None
 
 
 def _index(config: Config, operation: Any) -> Any:

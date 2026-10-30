@@ -134,6 +134,8 @@ class Search:
     enabled: bool = False
     # Off at 0. Otherwise a producer may also write `summary_recent`, over at most this many latest messages.
     rolling_window_messages: int = 0
+    # The largest vector a generation's embedding profile may declare.
+    max_vector_dim: int = 1024
 
 
 @dataclass(frozen=True)
@@ -153,13 +155,18 @@ class Indexer:
     max_commits_per_hour: int = 60
     receipt_retention_days: int = 30
     cleanup_batch: int = 100
+    max_generations: int = 3
+    generation_retention_days: int = 30
+    max_activation_reconcile: int = 10000
 
 
 # Each limit and its accepted range; the defaults are the dataclass's.
 INDEXER_LIMITS = {"max_artifact_bytes": (1, 1 << 20), "max_citations": (1, 1000), "max_manifest_items": (1, 10000),
                   "max_manifest_segments": (1, 1000), "page_items": (1, 1000), "max_open_batches": (1, 100),
                   "batch_ttl_seconds": (60, 86400), "max_input_segments": (1, 10000),
-                  "max_commits_per_hour": (1, 10000), "receipt_retention_days": (1, 365), "cleanup_batch": (1, 10000)}
+                  "max_commits_per_hour": (1, 10000), "receipt_retention_days": (1, 365), "cleanup_batch": (1, 10000),
+                  "max_generations": (1, 100), "generation_retention_days": (1, 365),
+                  "max_activation_reconcile": (1, 100000)}
 
 
 # The dashboard binds only here: it has no login, so anyone who can reach its port can read it.
@@ -302,7 +309,9 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
     search_table = raw.get("search", {})
     search = Search(enabled=_boolean(search_table, "enabled", False, "search.enabled"),
                     rolling_window_messages=_number(search_table, "rolling_window_messages", 0,
-                                                    "search.rolling_window_messages", 0, 10000, integer=True))
+                                                    "search.rolling_window_messages", 0, 10000, integer=True),
+                    max_vector_dim=_number(search_table, "max_vector_dim", 1024, "search.max_vector_dim", 1, 16384,
+                                           integer=True))
     indexer = _indexer(raw.get("indexer", {}), roles)
     if search.rolling_window_messages > indexer.max_manifest_items:
         raise ConfigError("search.rolling_window_messages must be at most indexer.max_manifest_items: a recent "
