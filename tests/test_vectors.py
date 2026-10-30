@@ -446,28 +446,6 @@ def test_the_profile_distance_decides_the_order(db, config, distance: str, first
         assert math.isclose(similarity[aligned], 0.1, **close) and math.isclose(similarity[long], 5.0, **close)
 
 
-def test_a_query_vector_against_mixed_profiles_names_the_one_that_conflicts(db, config) -> None:
-    """Two producers embed with one model in different dimensions: every active profile for the model must fit,
-    and the refusal names the generation, producer and dimension that doesn't, never another profile's."""
-    conversation_id, _ = converse(db, config, 1)
-    three = embedding_generation(db, config, "alpha")
-    fill(db, config, conversation_id, three)
-    derived.generation_activate(db, config, "alpha", three)
-    profile = {"embedding": {"model": "toy-embed", "dim": 2, "normalization": "unit", "distance": "cosine"}}
-    two = derived.generation_create(db, config, "beta", profile)["generation"]
-    manifest = begin(db, config, conversation_id, two, kinds=derived.KINDS, producer="beta")
-    flat = {**{("kind", kind): [1.0, 0.0] for kind in manifest["kinds"]},
-            **{("message_id", message_id): [0.0, 1.0] for message_id in items(manifest)}}
-    commit(db, config, manifest, payload(manifest, vectors=flat), producer="beta")
-    derived.generation_activate(db, config, "beta", two)
-    for query, generation, producer, dim in ((UNIT["x"], two, "beta", 2), ([1.0, 0.0], three, "alpha", 3)):
-        error = refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=query,
-                        model="toy-embed")
-        message = str(error)
-        assert generation in message and producer in message and f"{dim} dimensions" in message, message
-        assert f"the query has {len(query)}" in message, message
-
-
 FLOAT32_MAX = 3.4028234663852886e38
 UNNORMALIZED = {"embedding": {"model": "toy-embed", "dim": 3, "normalization": "none", "distance": "inner_product"}}
 
@@ -504,3 +482,99 @@ def test_a_query_vector_that_float32_cannot_hold_is_refused(db, config, bad) -> 
     fill(db, config, conversation_id, generation)
     derived.generation_activate(db, config, "alpha", generation)
     refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=bad, model="toy-embed")
+
+
+
+# One model, one embedding signature across every active generation (Lane D's ruling on mixed profiles) --------
+
+
+def embedded(db, config, producer: str, conversation_id: str, *, model: str = "toy-embed", dim: int = 3,
+             normalization: str = "unit", distance: str = "cosine") -> str:
+    """A filled generation for `producer` that embeds with the given signature, ready to activate."""
+    profile = {"embedding": {"model": model, "dim": dim, "normalization": normalization, "distance": distance}}
+    generation = derived.generation_create(db, config, producer, profile)["generation"]
+    manifest = begin(db, config, conversation_id, generation, kinds=derived.KINDS, producer=producer)
+    axis = [[1.0 if i == n else 0.0 for i in range(dim)] for n in range(min(dim, 2))]
+    vectors = {**{("kind", kind): axis[0] for kind in manifest["kinds"]},
+               **{("message_id", message_id): axis[-1] for message_id in items(manifest)}}
+    commit(db, config, manifest, payload(manifest, request_id=generation, vectors=vectors), producer=producer)
+    return generation
+
+
+def active(db, producer: str) -> str | None:
+    row = db.execute("SELECT id FROM generations WHERE producer = ? AND active = 1", (producer,)).fetchone()
+    return row[0] if row else None
+
+
+@pytest.mark.parametrize("change", [{"dim": 2}, {"normalization": "none"}, {"distance": "inner_product"}])
+def test_activating_a_second_signature_for_a_model_is_refused_and_nothing_switches(db, config, change) -> None:
+    conversation_id, _ = converse(db, config, 1)
+    alpha = embedded(db, config, "alpha", conversation_id)
+    derived.generation_activate(db, config, "alpha", alpha)
+    beta = embedded(db, config, "beta", conversation_id, **change)
+    error = refused("embedding_profile_conflict", derived.generation_activate, db, config, "beta", beta)
+    message = str(error)
+    assert "toy-embed" in message and "alpha" in message and alpha in message, message
+    assert (active(db, "alpha"), active(db, "beta")) == (alpha, None)  # the earlier state keeps serving
+    other = error.extra["other"]
+    assert (other["producer"], other["generation"]) == ("alpha", alpha)
+    assert error.extra["signature"] != other["signature"] and error.extra["model"] == "toy-embed"
+
+
+def test_a_producer_may_change_its_own_signature(db, config) -> None:
+    conversation_id, _ = converse(db, config, 1)
+    three = embedded(db, config, "alpha", conversation_id)
+    derived.generation_activate(db, config, "alpha", three)
+    two = embedded(db, config, "alpha", conversation_id, dim=2)
+    derived.generation_activate(db, config, "alpha", two)  # the generation it replaces doesn't count against it
+    assert active(db, "alpha") == two
+
+
+def test_a_blocked_signature_activates_once_the_conflicting_one_is_replaced(db, config) -> None:
+    conversation_id, _ = converse(db, config, 1)
+    alpha = embedded(db, config, "alpha", conversation_id)
+    derived.generation_activate(db, config, "alpha", alpha)
+    beta = embedded(db, config, "beta", conversation_id, dim=2)
+    refused("embedding_profile_conflict", derived.generation_activate, db, config, "beta", beta)
+    plain = derived.generation_create(db, config, "alpha", {"summarizer": "toy"})["generation"]
+    manifest = begin(db, config, conversation_id, plain, kinds=derived.KINDS)
+    commit(db, config, manifest, payload(manifest, request_id="plain-fill", vectors={}))
+    derived.generation_activate(db, config, "alpha", plain)  # alpha no longer embeds with toy-embed
+    derived.generation_activate(db, config, "beta", beta)
+    assert active(db, "beta") == beta
+
+
+def test_different_model_names_with_different_signatures_coexist(db, config) -> None:
+    conversation_id, _ = converse(db, config, 1)
+    alpha = embedded(db, config, "alpha", conversation_id)
+    derived.generation_activate(db, config, "alpha", alpha)
+    beta = embedded(db, config, "beta", conversation_id, model="toy-embed@2", dim=2)
+    derived.generation_activate(db, config, "beta", beta)
+    assert search.search(db, config, "assistant", "note", query_vector=UNIT["x"], model="toy-embed")["hits"]
+    assert search.search(db, config, "assistant", "note", query_vector=[1.0, 0.0], model="toy-embed@2")["hits"]
+
+
+def test_a_scoped_query_on_the_one_active_signature_succeeds_after_a_conflict_was_refused(db, config) -> None:
+    """The reviewer's reproduction, inverted: beta's 2-D activation is refused, so alpha's 3-D query works."""
+    conversation_id, _ = converse(db, config, 1)
+    alpha = embedded(db, config, "alpha", conversation_id)
+    derived.generation_activate(db, config, "alpha", alpha)
+    beta = embedded(db, config, "beta", conversation_id, dim=2)
+    refused("embedding_profile_conflict", derived.generation_activate, db, config, "beta", beta)
+    hits = search.search(db, config, "assistant", "summary", kinds=["summary"], producer="alpha",
+                         query_vector=UNIT["x"], model="toy-embed")["hits"]
+    assert hits and all(hit["producer"] == "alpha" for hit in hits)
+
+
+def test_two_active_signatures_for_one_model_make_search_refuse_not_score(db, config) -> None:
+    """A database that holds two anyway (crafted here, past the activation check) fails closed, accurately."""
+    conversation_id, _ = converse(db, config, 1)
+    alpha = embedded(db, config, "alpha", conversation_id)
+    derived.generation_activate(db, config, "alpha", alpha)
+    beta = embedded(db, config, "beta", conversation_id, dim=2)
+    db.execute("UPDATE generations SET active = 1 WHERE id = ?", (beta,))
+    for query in (UNIT["x"], [1.0, 0.0]):
+        error = refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=query,
+                        model="toy-embed")
+        message = str(error)
+        assert alpha in message and beta in message and "toy-embed" in message, message
