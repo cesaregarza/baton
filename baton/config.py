@@ -323,8 +323,9 @@ def _role(name: str, table: dict[str, Any]) -> Role:
     if sum(bool(wake.get(key)) for key in ("webhook", "command", "integration")) > 1:
         raise ConfigError(f"roles.{name}.wake may use only one of webhook, command and integration, not both")
     webhook = wake.get("webhook")
-    if webhook is not None and not str(webhook).startswith(("https://", "http://")):
-        raise ConfigError(f"roles.{name}.wake.webhook must be an http(s) URL")
+    if webhook is not None and not _valid_webhook(str(webhook)):
+        # The URL may carry a token, so the message names the field and never repeats it.
+        raise ConfigError(f"roles.{name}.wake.webhook must be an http(s) URL with a host and a valid port")
     command = wake.get("command", [])
     if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
         raise ConfigError(f"roles.{name}.wake.command must be a list of strings (argv, no shell)")
@@ -340,6 +341,15 @@ def _role(name: str, table: dict[str, Any]) -> Role:
         _boolean(table, "can_manage_participants", False, f"roles.{name}.can_manage_participants"),
         _boolean(table, "can_view_all_conversations", False, f"roles.{name}.can_view_all_conversations"),
         _boolean(table, "human", False, f"roles.{name}.human"))
+
+
+def _valid_webhook(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        parsed.port  # noqa: B018 - raises ValueError for a port that doesn't parse or is out of range
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.hostname)
 
 
 def _conversations(table: dict[str, Any], roles: dict[str, Role]) -> Conversations:

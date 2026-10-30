@@ -258,11 +258,22 @@ def read_seq(conn: sqlite3.Connection, recipient: str) -> int:
 
 
 def mark_read(conn: sqlite3.Connection, recipient: str, seq: int) -> None:
-    """Advance the delivered position; a pending wake for messages now read would only replay them."""
+    """Advance the delivered position, and retire every wake the read has answered.
+
+    A wake for messages now read would only replay them, and that holds for a batch's reminders as
+    well: scheduled, deferred over the cap, or already leased by a worker. Every state that is not
+    terminal goes, in this transaction, so a send that completes afterwards cannot revive one.
+
+    The two are matched differently on purpose. An original wake is found by the seq in its key, as
+    it always was. A reminder is found by the read position its batch had when it was scheduled, so
+    nothing here has to parse `messages:9:r2` or rely on how SQLite casts the text after the seq.
+    """
     conn.execute("UPDATE mailboxes SET read_seq = MAX(read_seq, ?) WHERE recipient = ?", (seq, recipient))
-    conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ? AND status = 'pending'"
-                 " AND key LIKE 'messages:%' AND CAST(substr(key, 10) AS INTEGER) <= ?",
-                 (events.now(), recipient, seq))
+    conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ?"
+                 " AND status IN ('pending', 'scheduled', 'capped') AND ("
+                 "   (ordinal IS NULL AND key LIKE 'messages:%' AND CAST(substr(key, 10) AS INTEGER) <= ?)"
+                 "   OR (ordinal IS NOT NULL AND baseline_seq < ?))",
+                 (events.now(), recipient, seq, seq))
 
 
 def sweep(conn: sqlite3.Connection) -> None:

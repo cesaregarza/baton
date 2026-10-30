@@ -237,5 +237,11 @@ def test_every_older_database_gains_a_null_topic(tmp_path: Path, version: int) -
 def test_the_topic_step_names_the_table_it_alters() -> None:
     """The steps alter more than one table now, so each has to say which; a step that named none would
     silently alter `messages` and leave `conversations` without its column."""
-    assert store._ADDED_COLUMNS[6] == {"conversations": ("topic TEXT",)}  # the topic step is 6
-    assert {table for step in store._ADDED_COLUMNS.values() for table in step} == {"messages", "conversations"}
+    topic_step = 6
+    assert topic_step <= SCHEMA_VERSION, "the topic step is not in the schema"
+    assert store._ADDED_COLUMNS[topic_step] == {"conversations": ("topic TEXT",)}
+    # Named by its own version, not by the current one, so a later step adding a column elsewhere
+    # does not read as a failure of the topic step. The set below is still exact: a step that alters
+    # a new table has to be added here deliberately, which is the point of the assertion.
+    assert {table for step in store._ADDED_COLUMNS.values() for table in step} \
+        == {"messages", "conversations", "wakes"}
