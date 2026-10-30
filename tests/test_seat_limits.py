@@ -158,3 +158,29 @@ def test_a_huge_cursor_is_refused_before_any_query(room) -> None:
     host, cid, cookies = room
     headers = [("Host", SEAT_HOST), ("Cookie", f"{SESSION_COOKIE}={cookies[SESSION_COOKIE]}")]
     assert seat.respond(host.config, "GET", f"/seat/c/{cid}?after_seq={2**64}", headers, b"").status == 400
+
+
+def test_pages_keep_the_origin_on_same_origin_form_posts(room) -> None:
+    """Under `no-referrer` Chromium sends `Origin: null` on a form post, which the exact Origin check refuses."""
+    host, cid, cookies = room
+    for page in (get(host.config, "/seat/login"), get(host.config, f"/seat/c/{cid}", cookies=cookies)):
+        assert page.headers["Referrer-Policy"] == "same-origin"
+
+
+@pytest.mark.parametrize("origin", ["null", "https://elsewhere.example.test"])
+def test_a_null_or_foreign_origin_is_still_refused(room, origin: str) -> None:
+    host, cid, cookies = room
+    fields = _form(host, cid, cookies) | {"text": "hi"}
+    assert post(host.config, f"/seat/c/{cid}/send", fields, cookies=cookies, origin=origin).status == 403
+    assert stored_by_seat(host) == []
+
+
+def test_each_inbox_item_names_its_conversation(room) -> None:
+    host, cid, cookies = room
+    other = conversation(host, title="Weekly notes")
+    agent_says(host, cid, "from the first")
+    agent_says(host, other, "from the second")
+    body = get(host.config, "/seat/inbox", cookies=cookies).body.decode()
+    first, second = body.index("from the first"), body.index("from the second")
+    assert body.rfind("Example", 0, first) > body.rfind("</li>", 0, first)
+    assert body.rfind("Weekly notes", 0, second) > body.rfind("</li>", 0, second)
