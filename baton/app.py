@@ -32,6 +32,7 @@ from pydantic import Field
 from starlette.types import ASGIApp
 
 from baton import __version__, auth, conversations, dashboard, datadir, inbox, jobs, messages
+from baton import search as search_module
 from baton.config import Config
 from baton.errors import BatonError, InvalidRequest, UnknownRole
 from baton.integrations import Integration, IntegrationUnavailable, load_enabled
@@ -63,6 +64,8 @@ class Tools:
             "job_states": {name: {"waiting_on": state.waiting_on, "next": sorted(state.next)}
                            for name, state in self._config.jobs.states.items()},
             "initial_job_state": self._config.jobs.initial,
+            **({"search": {"enabled": True, "keyword_index": self._keyword_mode()}}
+               if self._config.search.enabled else {}),
         }
 
     def send_message(
@@ -133,11 +136,14 @@ class Tools:
             description="Only the conversations on this topic or under it: project takes project and "
                         "project/subtopic, never projectile. Omit it for all of them, untagged "
                         "included.")] = None,
+        changed_since: Annotated[str | None, Field(
+            description="Only conversations with a message after this ISO 8601 time (with its offset). A "
+                        "discovery aid: revision and last_seq are what tell you exactly what changed.")] = None,
     ) -> list[dict[str, Any]]:
-        """The conversations you take part in, newest first, with their participants."""
+        """The conversations you take part in, newest first, with participants, revision, last_seq and activity."""
         conversations.require_enabled(self._config)
         with self._conn() as conn:
-            return conversations.list_for(conn, role, topic)
+            return conversations.list_for(conn, role, topic, changed_since=changed_since)
 
     def set_topic(
         self, role: str, conversation_id: str,
@@ -157,6 +163,9 @@ class Tools:
     def read_history(
         self, role: str, conversation_id: str, after_seq: Annotated[int, Field(ge=0)] = 0,
         limit: Annotated[int, Field(ge=1, le=messages.MAX_PAGE_MESSAGES)] = 50,
+        before_seq: Annotated[int | None, Field(
+            ge=1, description="Read backwards: the messages just before this seq, still oldest first. Continue "
+                              "from the result's prev_seq.")] = None,
     ) -> dict[str, Any]:
         """A conversation as you saw it, what you received and sent, numbered in conversation order.
 
@@ -165,7 +174,36 @@ class Tools:
         """
         conversations.require_enabled(self._config)
         with self._conn() as conn:
-            return conversations.history(conn, role, conversation_id, after_seq, limit)
+            return conversations.history(conn, role, conversation_id, after_seq, limit, before_seq=before_seq)
+
+    def search(
+        self, role: str,
+        query: Annotated[str, Field(description="Words to find; every word must appear. Plain words only.")],
+        conversation_id: str | None = None,
+        topic: str | None = None,
+        kinds: Annotated[list[str] | None, Field(
+            description="Only [\"message\"] exists so far; any other kind is refused.")] = None,
+        limit: Annotated[int, Field(ge=1, le=search_module.MAX_HITS)] = 20,
+        before: Annotated[str | None, Field(description="Only messages sent before this ISO 8601 time.")] = None,
+    ) -> dict[str, Any]:
+        """Messages you can read that match every word of `query`, best first, one hit per message.
+
+        Searching marks nothing read and moves nothing. Hits never include a message you couldn't read
+        with read_history or get_message.
+        """
+        with self._conn() as conn:
+            return search_module.search(conn, self._config, role, query, conversation_id=conversation_id,
+                                        topic=topic, kinds=kinds, limit=limit, before=before)
+
+    def get_message(self, role: str, message_id: str) -> dict[str, Any]:
+        """One message by its id, if you can read it: one you sent or hold, or any conversation message if
+        your role may view them all. Unknown and not permitted give the same refusal."""
+        with self._conn() as conn:
+            return search_module.get_message(conn, self._config, role, message_id)
+
+    def _keyword_mode(self) -> str:
+        with self._conn() as conn:
+            return search_module.keyword_mode(conn)
 
     def add_participant(self, role: str, conversation_id: str, participant: str) -> dict[str, Any]:
         """Add a role to a conversation; every participant gets a host notice. Adding one already in changes nothing."""
@@ -248,6 +286,11 @@ CONVERSATION_TOOLS = (
     ("remove_participant", auth.SCOPE_WRITE, False),
     ("set_topic", auth.SCOPE_WRITE, False),
 )
+# Present only when the config enables search.
+SEARCH_TOOLS = (
+    ("search", auth.SCOPE_READ, True),
+    ("get_message", auth.SCOPE_READ, True),
+)
 AUDITED_IDS = ("to", "conversation_id", "participant", "topic", "job_id", "reply_to", "request_id",
                "to_state", "expected_revision")
 
@@ -272,7 +315,7 @@ class Guard:
             try:
                 result = body(role, **kwargs)
             except BatonError as error:
-                return self._refuse(name, role, kwargs, error.code, str(error))
+                return {**self._refuse(name, role, kwargs, error.code, str(error)), **error.extra}
             self._audit(name, role, kwargs, "ok")
             return result
 
@@ -348,7 +391,8 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
         auth.register_login_routes(server, provider)
     else:
         server = MCPServer(token_verifier=auth.StaticTokenVerifier(config), **common)
-    for name, scope, read_only in TOOLS + (CONVERSATION_TOOLS if config.conversations.enabled else ()):
+    for name, scope, read_only in (TOOLS + (CONVERSATION_TOOLS if config.conversations.enabled else ())
+                                   + (SEARCH_TOOLS if config.search.enabled else ())):
         server.add_tool(guard.wrap(name, scope, getattr(tools, name)), name=name,
                         annotations=ToolAnnotations(readOnlyHint=read_only, destructiveHint=False,
                                                     openWorldHint=False))

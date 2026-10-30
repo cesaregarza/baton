@@ -118,6 +118,13 @@ class Conversations:
     escalation_role: str | None = None
 
 
+@dataclass(frozen=True)
+class Search:
+    """Keyword search over messages for roles, off unless enabled. Each role finds only what it may read."""
+
+    enabled: bool = False
+
+
 # The dashboard binds only here: it has no login, so anyone who can reach its port can read it.
 LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 
@@ -149,6 +156,7 @@ class Config:
     integrations: dict[str, dict[str, Any]] = field(default_factory=dict)
     conversations: Conversations = field(default_factory=Conversations)
     dashboard: Dashboard = field(default_factory=Dashboard)
+    search: Search = field(default_factory=Search)
 
     @property
     def resource_url(self) -> str:
@@ -235,6 +243,7 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         integrations=integrations,
         conversations=conversations,
         dashboard=_dashboard(raw.get("dashboard", {}), roles, conversations),
+        search=Search(enabled=_boolean(raw.get("search", {}), "enabled", False, "search.enabled")),
     )
 
 

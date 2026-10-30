@@ -341,10 +341,15 @@ Every tool acts as the caller's role, which comes from the caller's credential.
 | `create_job(title, body?, request_id?)` | Open a job in the initial state |
 | `move_job(job_id, to_state, note?, request_id?, expected_revision?)` | Move a job along the state graph. A retry with the same `request_id` replays the original outcome. `expected_revision` refuses the move if the job's state has changed since you read it |
 | `get_job`, `list_jobs`, `read_job_events` | Read jobs and their history |
-| `create_conversation(title, participants, topic?, request_id?)`, `list_conversations(topic?)` | Open a conversation you take part in, or list yours, optionally only those on a topic. Present when conversations are enabled |
-| `read_history(conversation_id, after_seq?, limit?)` | A conversation as you saw it, your own messages included. Marks nothing read |
+| `create_conversation(title, participants, topic?, request_id?)`, `list_conversations(topic?, changed_since?)` | Open a conversation you take part in, or list yours, optionally only those on a topic or active since a time. Each entry carries its `revision`, `last_seq` and `last_activity_at`. Present when conversations are enabled |
+| `read_history(conversation_id, after_seq?, before_seq?, limit?)` | A conversation as you saw it, your own messages included. `before_seq` pages backwards. Marks nothing read |
 | `set_topic(conversation_id, topic?)` | Set, rename or clear a conversation's topic. Needs `can_manage_participants` and membership |
 | `add_participant(conversation_id, participant)`, `remove_participant(...)` | Change who is in a conversation. Needs `can_manage_participants` |
+| `search(query, conversation_id?, topic?, kinds?, limit?, before?)` | Messages you can read that contain every word of `query`, best first, one hit per message. Uses SQLite FTS5 when available, otherwise a slower scan; `keyword_index` says which. Present when `[search] enabled = true` |
+| `get_message(message_id)` | One message you can read. Present when search is enabled |
+
+Search and `get_message` read only what `read_history` would show you, and filter before ranking, so a match
+you can't read never appears or displaces one you can. Neither marks anything read.
 
 ## CLI
 
@@ -365,11 +370,18 @@ baton --host URL message|read|wait|conversation list|history
 baton hash-passphrase                         hash an OAuth consent passphrase
 baton oauth revoke-all                        end every OAuth grant
 baton wakes                                   recent wakes and how they ended
+baton index changes [--after CURSOR] [--limit N]   conversation changes after a cursor (metadata only)
+baton index wait --after CURSOR [--timeout S]      block until a change is logged after CURSOR
 ```
 
 `--as` defaults to `$BATON_ROLE` (never a human role), `--host` to `$BATON_HOST`, and `--config` to `$BATON_CONFIG` or
 `~/.config/baton/baton.toml`. Every command prints JSON. A refusal prints `{"error": code, "detail": ...}`
 and exits with status 1. A configuration problem exits with status 2.
+
+`baton index` opens the database read-only and is meant for a local indexer on the host. Every new message,
+expired copy and participant change in a conversation bumps that conversation's `revision` and appends to a
+change log kept for 30 days. A cursor from before that, or from a different database, is refused as
+`cursor_expired` with a `reset_cursor` to rebuild from.
 
 ## Documentation
 
