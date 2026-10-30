@@ -338,7 +338,8 @@ def test_a_message_wakes_the_subscribed_role_with_a_signed_content_free_event(ev
     assert (body["name"], body["cursor"]) == (EVENT, None)
     assert body["data"] == {"role": "worker", "reason": "message", "first_unread_seq": 1}
     assert b"private message" not in event["body"]
-    assert [w["status"] for w in wakes.recent(connect(host.config.db_path))] == ["delivered"]
+    assert sorted(w["status"] for w in wakes.recent(connect(host.config.db_path))) \
+        == ["delivered", "scheduled", "scheduled"]  # the wake, and the two reminders it sets
 
 
 def test_pinning_the_http_client_never_resolves_the_callback_name(events_host, receiver, monkeypatch) -> None:

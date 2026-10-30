@@ -170,7 +170,7 @@ def test_a_mixed_outcome_retries_only_the_failed_destination(events_host, receiv
     dispatch(host)
     # The 204 destination got the event once; only the 503 one was tried again.
     assert sorted(r["path"] for r in receiver.events()) == ["/hooks/flaky", "/hooks/flaky", "/hooks/ok"]
-    assert wake_statuses(host) == ["delivered"]
+    assert sorted(wake_statuses(host)) == ["delivered", "scheduled", "scheduled"]  # the wake, and its two reminders
 
 
 @pytest.mark.parametrize("final", [410, 413])
