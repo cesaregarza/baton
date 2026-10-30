@@ -339,6 +339,7 @@ def test_a_dropped_generation_takes_no_batch_and_its_open_batches_close(db, conf
     manifest = derived.begin_batch(db, config, "alpha", conversation_id, ["summary"], generation=new)
     read_all(db, config, manifest)
     derived.generation_drop(db, config, "alpha", new)
+    assert db.execute("SELECT state FROM batches WHERE id = ?", (manifest["batch_id"],)).fetchone()[0] == "discarded"
     refused("batch_closed", commit, db, config, manifest)
     refused("generation_dropped", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"],
             generation=new)
