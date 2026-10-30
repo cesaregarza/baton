@@ -13,7 +13,8 @@ through the bundled `baton` CLI when they run on the host machine.
 - The host can also **wake** the recipient, if it is set up for that:
   - a remote client that supports MCP Events gets a signed event through its subscription (an optional
     integration, see below);
-  - any role can instead have a webhook or local command, configured by the operator;
+  - any role can instead have a webhook or local command, configured by the operator. A webhook URL must
+    be http(s) with a host and a valid port, or the config is refused without repeating the URL;
   - a local agent blocked in `baton wait` simply returns.
 
   With none of these, the recipient sees the message the next time it reads.
