@@ -578,3 +578,27 @@ def test_two_active_signatures_for_one_model_make_search_refuse_not_score(db, co
                         model="toy-embed")
         message = str(error)
         assert alpha in message and beta in message and "toy-embed" in message, message
+
+
+@pytest.mark.parametrize("huge", [10**400, -(10**400)])
+def test_an_integer_component_too_large_for_any_float_is_refused_not_raised(db, config, huge) -> None:
+    """A JSON integer can be any size, so turning it into a float overflows: that is a labelled refusal in a
+    commit and in a query, never an overflow, and the same request id commits once corrected."""
+    conversation_id, _ = converse(db, config, 1)
+    generation = derived.generation_create(db, config, "alpha", UNNORMALIZED)["generation"]
+    manifest = begin(db, config, conversation_id, generation, kinds=derived.KINDS)
+    body = payload(manifest)
+    body["vectors"][0]["vector"] = [huge, 0, 0]
+    refused("invalid_request", commit, db, config, manifest, body)
+    assert vector_rows(db, generation) == {}
+    assert commit(db, config, manifest, payload(manifest))["created"] is True
+
+
+@pytest.mark.parametrize("huge", [10**400, -(10**400)])
+def test_a_query_integer_too_large_for_any_float_is_refused_not_raised(db, config, huge) -> None:
+    conversation_id, _ = converse(db, config, 1)
+    generation = derived.generation_create(db, config, "alpha", UNNORMALIZED)["generation"]
+    fill(db, config, conversation_id, generation)
+    derived.generation_activate(db, config, "alpha", generation)
+    refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=[huge, 0, 0],
+            model="toy-embed")
