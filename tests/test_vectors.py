@@ -444,3 +444,25 @@ def test_the_profile_distance_decides_the_order(db, config, distance: str, first
             math.isclose(similarity[long], 1 / math.sqrt(2), **close)
     else:
         assert math.isclose(similarity[aligned], 0.1, **close) and math.isclose(similarity[long], 5.0, **close)
+
+
+def test_a_query_vector_against_mixed_profiles_names_the_one_that_conflicts(db, config) -> None:
+    """Two producers embed with one model in different dimensions: every active profile for the model must fit,
+    and the refusal names the generation, producer and dimension that doesn't, never another profile's."""
+    conversation_id, _ = converse(db, config, 1)
+    three = embedding_generation(db, config, "alpha")
+    fill(db, config, conversation_id, three)
+    derived.generation_activate(db, config, "alpha", three)
+    profile = {"embedding": {"model": "toy-embed", "dim": 2, "normalization": "unit", "distance": "cosine"}}
+    two = derived.generation_create(db, config, "beta", profile)["generation"]
+    manifest = begin(db, config, conversation_id, two, kinds=derived.KINDS, producer="beta")
+    flat = {**{("kind", kind): [1.0, 0.0] for kind in manifest["kinds"]},
+            **{("message_id", message_id): [0.0, 1.0] for message_id in items(manifest)}}
+    commit(db, config, manifest, payload(manifest, vectors=flat), producer="beta")
+    derived.generation_activate(db, config, "beta", two)
+    for query, generation, producer, dim in ((UNIT["x"], two, "beta", 2), ([1.0, 0.0], three, "alpha", 3)):
+        error = refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=query,
+                        model="toy-embed")
+        message = str(error)
+        assert generation in message and producer in message and f"{dim} dimensions" in message, message
+        assert f"the query has {len(query)}" in message, message
