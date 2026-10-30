@@ -431,3 +431,16 @@ def test_a_drop_frees_the_slot_before_its_rows_are_gone(tmp_path: Path) -> None:
     create(db, config)  # the slot is free at once, though the dropped rows are still being swept
     assert db.execute("SELECT COUNT(*) FROM artifact_versions WHERE generation = ?", (full,)).fetchone()[0] > 0
     db.close()
+
+
+def test_a_real_participant_change_posts_a_notice_that_must_be_covered(db, config) -> None:
+    """Through conversations.add a participant change also posts a host notice, a message of its own: the rule
+    for the change itself is covered above; the notice is covered like any other message."""
+    from baton import conversations
+    conversation_id, _ = converse(db, config, 2)
+    new = create(db, config)
+    fill(db, config, conversation_id, generation=new)
+    conversations.add(db, config, actor="orchestrator", conversation_id=conversation_id, participant="late")
+    refused("generation_behind", activate, db, config, new)  # the notice is a new message after the watermark
+    fill(db, config, conversation_id, generation=new)
+    assert activate(db, config, new)["generation"] == new
