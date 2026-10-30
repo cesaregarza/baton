@@ -99,9 +99,15 @@ FIELDS = {"/seat/login": ({"token", "pre"}, {"token", "pre"}), "/seat/logout": (
 # One column, the phone's own type, 16px so iOS never zooms into a field. The one loud thing is a decision asked
 # of the seat; everything else stays quiet. Buttons are at least 44px tall.
 STYLE = """\
-:root { --ink: #1d2125; --muted: #5d6670; --rule: #e3e5e8; --action: #0d5c63; --ask: #c98a14; --ask-bg: #fdf3dc; }
+:root { color-scheme: light dark; --ink: #1d2125; --muted: #5d6670; --rule: #e3e5e8; --paper: #fff;
+        --action: #0d5c63; --on-action: #fff; --ask: #c98a14; --ask-bg: #fdf3dc; --target: #eef6f6; --box: #f3f4f6;
+        --field: #b9bec4; }
+@media (prefers-color-scheme: dark) {
+  :root { --ink: #e4e7ea; --muted: #9ba4ae; --rule: #2d3237; --paper: #15181b; --action: #6cc5cc; --on-action: #0c1416;
+          --ask: #d9a441; --ask-bg: #2b2414; --target: #12292b; --box: #22262a; --field: #4b525a; }
+}
 body { font: 16px/1.5 system-ui, -apple-system, sans-serif; margin: 0 auto; max-width: 40rem; padding: .75rem 1rem 6rem;
-       color: var(--ink); background: #fff; }
+       color: var(--ink); background: var(--paper); }
 a { color: var(--action); }
 a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible {
   outline: 2px solid var(--action); outline-offset: 2px; }
@@ -126,21 +132,21 @@ li.ask { border-left: 4px solid var(--ask); background: var(--ask-bg); padding-l
 .ask-label { font-weight: 600; font-size: .875rem; margin: 0 0 .2rem; }
 .placeholder { color: var(--muted); font-style: italic; }
 .sent { display: none; font-weight: 600; color: var(--action); margin: 0 0 .2rem; }
-li:target { background: #eef6f6; padding-left: .5rem; padding-right: .5rem; }
+li:target { background: var(--target); padding-left: .5rem; padding-right: .5rem; }
 li:target .sent { display: block; }
 .banner { border-left: 4px solid var(--ask); background: var(--ask-bg); padding: .6rem .8rem; margin: .8rem 0; }
-.bar { position: sticky; bottom: 0; background: #fff; border-top: 1px solid var(--rule); padding: .6rem 0; }
+.bar { position: sticky; bottom: 0; background: var(--paper); border-top: 1px solid var(--rule); padding: .6rem 0; }
 button { font: inherit; font-weight: 600; min-height: 44px; padding: .5rem 1.1rem; border: 0; border-radius: .5rem;
-         background: var(--action); color: #fff; }
+         background: var(--action); color: var(--on-action); }
 button.quiet { background: none; color: var(--action); border: 1px solid var(--rule); }
 .bar button, form.login button, form.compose button { width: 100%; }
 label { display: block; font-weight: 600; margin: .8rem 0 .3rem; }
-input, textarea { font: inherit; width: 100%; box-sizing: border-box; border: 1px solid #b9bec4; border-radius: .5rem;
-                  padding: .6rem .7rem; }
+input, textarea { font: inherit; width: 100%; box-sizing: border-box; border: 1px solid var(--field);
+                  border-radius: .5rem; padding: .6rem .7rem; color: var(--ink); background: var(--paper); }
 textarea { min-height: 7rem; resize: vertical; }
 form.inline { display: inline; }
 nav button.quiet { min-height: 0; padding: .2rem .6rem; font-weight: 400; font-size: .9rem; }
-.notice-box { border-left: 4px solid var(--muted); padding: .5rem .8rem; margin: .8rem 0; background: #f3f4f6; }
+.notice-box { border-left: 4px solid var(--muted); padding: .5rem .8rem; margin: .8rem 0; background: var(--box); }
 """
 
 _failures: dict[str, deque[float]] = {}
