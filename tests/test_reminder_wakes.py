@@ -1,0 +1,482 @@
+"""Reminder wakes: a delivered message wake that is never read is tried again, twice, then stops.
+
+The host wakes a role once per unread batch, so a role whose read fails after a delivered wake
+stays asleep until it happens to read on its own. These cover the reminders that recover from
+that, and the bounds that keep them from becoming noise.
+
+Everything here uses a fake clock. No test sleeps, and none depends on wall-clock timing.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+from conftest import make_config
+
+from baton import messages, wakes
+from baton.config import Wake
+from baton.store import connect
+
+WORKER_WAKE = '[roles.worker.wake]\ncommand = ["true"]\n'
+FIVE_MINUTES, TWENTY_MINUTES = 300.0, 1200.0
+
+
+class Recorder:
+    """A stand-in deliverer: records each wake and answers with the next scripted outcome."""
+
+    def __init__(self, *outcomes: bool) -> None:
+        self.outcomes = list(outcomes)
+        self.calls: list[dict] = []
+
+    def __call__(self, wake: Wake, wake_id: str, body: bytes) -> bool:
+        self.calls.append({"id": wake_id, **json.loads(body)})
+        return self.outcomes.pop(0) if self.outcomes else True
+
+
+class Clock:
+    """A clock the test moves by hand, so a five-minute wait costs nothing."""
+
+    def __init__(self, start: float = 1_000_000.0) -> None:
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch) -> Clock:
+    """Move the dispatcher's clock by hand.
+
+    Patched with `raising=False` on purpose. Before the seam exists these tests must fail on what
+    they assert -- "the reminder never went out" -- rather than erroring in setup, which would hide
+    every behavioural assertion behind one missing attribute. `test_the_clock_has_one_seam` is what
+    catches the seam being renamed, loudly and in one place.
+    """
+    moved = Clock()
+    monkeypatch.setattr(wakes, "_now", moved, raising=False)
+    return moved
+
+
+def setcap(monkeypatch, value: int) -> None:
+    """Patch the cap, tolerating its absence so these fail on behaviour rather than in setup."""
+    monkeypatch.setattr(wakes, "REMINDER_CAP", value, raising=False)
+
+
+def test_the_policy_numbers_are_the_ones_the_design_chose() -> None:
+    """The offsets, the cap and its window are the designer's decisions; pin them in one visible place."""
+    assert wakes.REMINDER_OFFSETS == (FIVE_MINUTES, TWENTY_MINUTES)
+    assert wakes.REMINDER_CAP == 6
+    assert wakes.REMINDER_WINDOW_SECONDS == 3600.0
+
+
+def test_the_clock_has_one_seam() -> None:
+    """Every due time and lease is measured by one function, so a test can move time without sleeping."""
+    assert callable(getattr(wakes, "_now", None)), "wakes._now is missing: the tests cannot control time"
+    assert isinstance(wakes._now(), float)
+
+
+def rows(conn: sqlite3.Connection, role: str = "worker") -> dict[str, str]:
+    """Every wake for the role, as key -> status."""
+    return {r["key"]: r["status"]
+            for r in conn.execute("SELECT key, status FROM wakes WHERE role = ?", (role,))}
+
+
+def woken_batch(tmp_path: Path, recorder: Recorder, extra: str = WORKER_WAKE):
+    """A host whose worker has one delivered message wake for seq 1, and has not read it."""
+    host = make_config(tmp_path, extra=extra)
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    conn = connect(host.config.db_path)
+    messages.send(conn, sender="planner", recipient="worker", text="the one it must read")
+    dispatcher.pass_once()
+    return host, dispatcher, conn
+
+
+# --------------------------------------------------------------------- timing
+
+def test_the_first_reminder_waits_the_whole_five_minutes(tmp_path: Path, clock) -> None:
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
+    assert len(recorder.calls) == 1
+
+    clock.advance(FIVE_MINUTES - 1)
+    dispatcher.pass_once()
+    assert len(recorder.calls) == 1, "a reminder went out a second early"
+
+    clock.advance(1)
+    dispatcher.pass_once()
+    assert [c["id"] for c in recorder.calls][1:] == [wakes.wake_id("worker", "messages:1:r1")]
+
+
+def test_the_second_reminder_waits_twenty_minutes_and_there_is_never_a_third(tmp_path: Path, clock) -> None:
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()
+    clock.advance(TWENTY_MINUTES - FIVE_MINUTES - 1)
+    dispatcher.pass_once()
+    assert len(recorder.calls) == 2, "the second reminder went out early"
+
+    clock.advance(1)
+    dispatcher.pass_once()
+    assert [c["id"] for c in recorder.calls][1:] == [wakes.wake_id("worker", "messages:1:r1"),
+                                                     wakes.wake_id("worker", "messages:1:r2")]
+
+    for _ in range(3):
+        clock.advance(TWENTY_MINUTES)
+        dispatcher.pass_once()
+    assert len(recorder.calls) == 3, "a third reminder exists"
+
+
+def test_reminders_need_no_new_message_and_repeated_passes_do_not_repeat_them(tmp_path: Path, clock) -> None:
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
+    clock.advance(FIVE_MINUTES)
+    for _ in range(5):
+        dispatcher.pass_once()          # no new mail arrives at any point
+    assert len(recorder.calls) == 2, "one due reminder was sent more than once"
+
+
+def test_a_later_message_in_the_same_batch_does_not_restart_the_clock(tmp_path: Path, clock) -> None:
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
+    clock.advance(FIVE_MINUTES - 60)
+    messages.send(conn, sender="planner", recipient="worker", text="joins the same unread batch")
+    dispatcher.pass_once()
+    assert len(recorder.calls) == 1, "a new message in the batch sent a wake of its own"
+
+    clock.advance(60)
+    dispatcher.pass_once()
+    assert len(recorder.calls) == 2, "the reminder was pushed back by the later message"
+
+
+# ---------------------------------------------------------------- the read
+
+def test_a_read_before_the_first_due_time_cancels_both_reminders(tmp_path: Path, clock) -> None:
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
+    messages.read(conn, "worker")
+    clock.advance(TWENTY_MINUTES * 2)
+    dispatcher.pass_once()
+    assert len(recorder.calls) == 1, "a reminder went out after the role had read"
+    # Both reminders must exist and be cancelled. Asserting only that nothing was sent would pass
+    # just as well if reminders had never been built at all.
+    assert rows(conn) == {"messages:1": "delivered",
+                          "messages:1:r1": "superseded",
+                          "messages:1:r2": "superseded"}
+
+
+def test_a_read_between_the_reminders_cancels_the_second(tmp_path: Path, clock) -> None:
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()
+    assert len(recorder.calls) == 2
+
+    messages.read(conn, "worker")
+    clock.advance(TWENTY_MINUTES)
+    dispatcher.pass_once()
+    assert len(recorder.calls) == 2, "the second reminder went out after the read"
+    assert rows(conn)["messages:1:r2"] == "superseded"
+    assert rows(conn)["messages:1:r1"] == "delivered", "a delivered reminder was rewritten by the read"
+
+
+def test_a_partial_page_counts_as_a_read(tmp_path: Path, clock) -> None:
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    recorder = Recorder()
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    conn = connect(host.config.db_path)
+    for text in ("a", "b", "c"):
+        messages.send(conn, sender="planner", recipient="worker", text=text)
+    dispatcher.pass_once()
+
+    page = messages.read(conn, "worker", limit=1)
+    assert len(page["messages"]) == 1, "this case needs a page that leaves messages unread"
+    clock.advance(TWENTY_MINUTES * 2)
+    dispatcher.pass_once()
+    assert len(recorder.calls) == 1, "a partial page did not cancel the batch's reminders"
+    assert [status for key, status in rows(conn).items() if key.endswith((":r1", ":r2"))] \
+        == ["superseded", "superseded"], "there were no reminders for the partial page to cancel"
+
+
+def test_reading_the_history_does_not_cancel_reminders(tmp_path: Path, clock) -> None:
+    """`read_history` is explicitly bookmark-neutral, so it must not look like a read here."""
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    recorder = Recorder()
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    conn = connect(host.config.db_path)
+    messages.send(conn, sender="planner", recipient="worker", text="still unread")
+    dispatcher.pass_once()
+
+    before = messages.read_seq(conn, "worker")
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()
+    assert messages.read_seq(conn, "worker") == before
+    assert len(recorder.calls) == 2, "the reminder did not fire for a batch nobody has read"
+
+
+# ------------------------------------------------- restart, overlap, identity
+
+def test_when_both_are_overdue_only_the_second_goes_out(tmp_path: Path, clock) -> None:
+    """The host was down past both deadlines; catching up must not send two wakes at once."""
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
+    clock.advance(TWENTY_MINUTES + 1)
+    dispatcher.pass_once()
+    assert [c["id"] for c in recorder.calls][1:] == [wakes.wake_id("worker", "messages:1:r2")]
+    assert rows(conn)["messages:1:r1"] == "skipped"
+
+
+def test_a_delivered_first_reminder_is_never_rewritten_as_skipped(tmp_path: Path, clock) -> None:
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1:r1"] == "delivered"
+
+    clock.advance(TWENTY_MINUTES)
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1:r1"] == "delivered", "delivered history was rewritten"
+    assert rows(conn)["messages:1:r2"] == "delivered"
+
+
+def test_the_second_reminder_supersedes_a_first_that_is_still_retrying(tmp_path: Path, clock,
+                                                                       monkeypatch) -> None:
+    monkeypatch.setattr(wakes, "LEASE_SECONDS", 0.0)
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder(True, False, False))
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()                      # r1 is claimed and fails, so it stays pending
+    assert rows(conn)["messages:1:r1"] == "pending"
+
+    clock.advance(TWENTY_MINUTES - FIVE_MINUTES)
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1:r1"] == "superseded", "the first reminder kept its retry chain"
+    assert rows(conn)["messages:1:r2"] in {"pending", "delivered"}
+
+
+def test_an_id_is_stable_across_retries_and_distinct_across_ordinals(tmp_path: Path, clock,
+                                                                     monkeypatch) -> None:
+    monkeypatch.setattr(wakes, "LEASE_SECONDS", 0.0)
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder(True, False, True))
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()
+    dispatcher.pass_once()
+    first = [c["id"] for c in recorder.calls[1:]]
+    assert len(first) == 2 and len(set(first)) == 1, "a retry changed the id"
+
+    clock.advance(TWENTY_MINUTES)
+    dispatcher.pass_once()
+    assert recorder.calls[-1]["id"] != first[0], "both ordinals share one id"
+    assert recorder.calls[-1]["id"] == wakes.wake_id("worker", "messages:1:r2")
+
+
+# ------------------------------------------------------------------ the cap
+
+def test_the_cap_defers_rather_than_drops_and_frees_when_the_window_moves(tmp_path: Path, clock,
+                                                                          monkeypatch) -> None:
+    setcap(monkeypatch, 1)
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    recorder = Recorder()
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    conn = connect(host.config.db_path)
+    messages.send(conn, sender="planner", recipient="worker", text="one")
+    dispatcher.pass_once()
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()                       # r1 charges the only slot
+
+    clock.advance(TWENTY_MINUTES - FIVE_MINUTES)
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1:r2"] == "capped", "over the cap, a reminder was not deferred"
+    assert len(recorder.calls) == 2
+
+    clock.advance(wakes.REMINDER_WINDOW_SECONDS)
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1:r2"] == "delivered", "a deferred reminder never came back"
+    assert len(recorder.calls) == 3
+
+
+def test_a_read_cancels_a_capped_reminder(tmp_path: Path, clock, monkeypatch) -> None:
+    setcap(monkeypatch, 1)
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()
+    clock.advance(TWENTY_MINUTES - FIVE_MINUTES)
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1:r2"] == "capped"
+
+    messages.read(conn, "worker")
+    clock.advance(wakes.REMINDER_WINDOW_SECONDS)
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1:r2"] == "superseded", "a read left a capped reminder to fire later"
+    assert len(recorder.calls) == 2
+
+
+def test_the_cap_counts_logical_reminders_not_attempts(tmp_path: Path, clock, monkeypatch) -> None:
+    monkeypatch.setattr(wakes, "LEASE_SECONDS", 0.0)
+    setcap(monkeypatch, 1)
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder(True, False, False, True))
+    clock.advance(FIVE_MINUTES)
+    for _ in range(3):
+        dispatcher.pass_once()                   # r1 fails twice then succeeds: three attempts, one reminder
+    assert rows(conn)["messages:1:r1"] == "delivered"
+
+    clock.advance(TWENTY_MINUTES - FIVE_MINUTES)
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1:r2"] == "capped", "retries were charged against the cap"
+
+
+def test_original_message_and_job_wakes_never_charge_the_cap(tmp_path: Path, clock, monkeypatch) -> None:
+    setcap(monkeypatch, 1)
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    recorder = Recorder()
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    conn = connect(host.config.db_path)
+    for text in ("one", "two", "three"):
+        messages.send(conn, sender="planner", recipient="worker", text=text)
+        dispatcher.pass_once()
+        messages.read(conn, "worker")            # each becomes its own delivered batch
+    assert len(recorder.calls) == 3
+
+    messages.send(conn, sender="planner", recipient="worker", text="unread")
+    dispatcher.pass_once()
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()
+    assert rows(conn)["messages:4:r1"] == "delivered", "original wakes used up the reminder cap"
+
+
+# --------------------------------------------------- when there is nothing to remind
+
+def test_no_reminders_when_the_original_wake_was_never_delivered(tmp_path: Path, clock,
+                                                                 monkeypatch) -> None:
+    monkeypatch.setattr(wakes, "LEASE_SECONDS", 0.0)
+    monkeypatch.setattr(wakes, "MAX_ATTEMPTS", 1)
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    recorder = Recorder(False)
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    conn = connect(host.config.db_path)
+    messages.send(conn, sender="planner", recipient="worker", text="never got through")
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1"] == "failed"
+
+    clock.advance(TWENTY_MINUTES * 2)
+    dispatcher.pass_once()
+    assert not [k for k in rows(conn) if k.endswith(("r1", "r2"))], "an undelivered wake scheduled reminders"
+
+
+def test_no_reminders_for_a_role_with_no_hook(tmp_path: Path, clock) -> None:
+    host = make_config(tmp_path)                 # worker has no [roles.worker.wake]
+    recorder = Recorder()
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    conn = connect(host.config.db_path)
+    messages.send(conn, sender="planner", recipient="worker", text="nobody to tell")
+    dispatcher.pass_once()
+    clock.advance(TWENTY_MINUTES * 2)
+    dispatcher.pass_once()
+    assert recorder.calls == []
+    assert rows(conn) == {}
+
+
+# ------------------------------------------------------------- the payload
+
+def test_a_reminder_carries_no_more_than_the_original(tmp_path: Path, clock) -> None:
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()
+    original, reminder = recorder.calls[0], recorder.calls[1]
+    assert set(reminder) == set(original), "a reminder added a payload field"
+    assert set(reminder) == {"id", "type", "role", "host", "reason", "first_unread_seq"}
+    assert reminder["first_unread_seq"] == original["first_unread_seq"]
+    assert "text" not in json.dumps(reminder)
+
+
+# ------------------------------------------------- one worker, one send, one charge
+
+def test_a_second_worker_does_not_send_the_same_reminder_again(tmp_path: Path, clock) -> None:
+    """Two dispatchers over one database: the claim is exclusive, so only one of them sends.
+
+    They run one after another rather than truly at once, so this pins that a worker meeting a row
+    another has already claimed stands down. It does not prove anything about simultaneous writers;
+    SQLite's own write locking is what carries that, and a race here would be flaky to assert.
+    """
+    host, first, conn = woken_batch(tmp_path, recorder := Recorder())
+    second = wakes.Dispatcher(host.config, recorder)
+    clock.advance(FIVE_MINUTES)
+    first.pass_once()
+    second.pass_once()
+    assert [c["id"] for c in recorder.calls][1:] == [wakes.wake_id("worker", "messages:1:r1")]
+
+
+def test_a_restart_does_not_charge_the_cap_twice(tmp_path: Path, clock, monkeypatch) -> None:
+    monkeypatch.setattr(wakes, "LEASE_SECONDS", 0.0)
+    setcap(monkeypatch, 2)
+    host, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder(True, False))
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()                       # r1 claimed, charged once, and failed
+    assert rows(conn)["messages:1:r1"] == "pending"
+
+    restarted = wakes.Dispatcher(host.config, recorder)   # a fresh process over the same database
+    restarted.pass_once()
+    clock.advance(TWENTY_MINUTES - FIVE_MINUTES)
+    restarted.pass_once()
+    assert rows(conn)["messages:1:r2"] != "capped", "the restart charged the cap a second time"
+
+
+def test_a_read_cancels_a_reminder_that_is_already_leased(tmp_path: Path, clock, monkeypatch) -> None:
+    monkeypatch.setattr(wakes, "LEASE_SECONDS", 600.0)
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder(True, False))
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()                       # r1 holds a live lease after failing
+    assert rows(conn)["messages:1:r1"] == "pending"
+
+    messages.read(conn, "worker")
+    clock.advance(TWENTY_MINUTES)
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1:r1"] == "superseded", "a read left leased work to retry"
+    assert len(recorder.calls) == 2
+
+
+# ----------------------------------------------------- the original wakes keep their cadence
+
+def test_the_dispatcher_still_polls_every_second_and_sends_originals_in_the_same_pass(
+        tmp_path: Path, clock) -> None:
+    """A due scan on every pass must not slow the original wakes or defer them to a later pass."""
+    import inspect
+
+    assert inspect.signature(wakes.Dispatcher.run).parameters["poll_seconds"].default == 1.0
+
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    recorder = Recorder()
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    conn = connect(host.config.db_path)
+    messages.send(conn, sender="planner", recipient="worker", text="first batch")
+    dispatcher.pass_once()
+    messages.read(conn, "worker")
+    clock.advance(FIVE_MINUTES)                  # a reminder would be due had it not been read
+    messages.send(conn, sender="planner", recipient="worker", text="second batch")
+    assert dispatcher.pass_once() >= 1
+    assert [c["first_unread_seq"] for c in recorder.calls] == [1, 2], "an original wake waited a pass"
+
+
+# ------------------------------------------------------------------ migration
+
+def test_upgrading_a_version_six_database_keeps_every_wake_row(tmp_path: Path) -> None:
+    """The step that makes room for reminders is additive: existing wakes must come through untouched."""
+    from baton.store import SCHEMA_VERSION
+
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    raw = sqlite3.connect(data / "baton.db")
+    raw.executescript((Path(__file__).parent / "fixtures" / "schema_v6.sql").read_text())
+    before = [("worker", "messages:1", '{"type":"baton.wake"}', "delivered", 0.0, 1, "t0", "t1"),
+              ("worker", "messages:9", '{"type":"baton.wake"}', "pending", 12.5, 3, "t2", None),
+              ("planner", "job:j:1", '{"type":"baton.wake"}', "failed", 0.0, 8, "t3", "t4")]
+    raw.executemany("INSERT INTO wakes (role, key, payload, status, lease_until, attempts, created_at,"
+                    " finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", before)
+    raw.commit()
+    raw.close()
+
+    conn = connect(data / "baton.db")
+    assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+    after = conn.execute("SELECT role, key, payload, status, lease_until, attempts, created_at,"
+                         " finished_at FROM wakes ORDER BY role, key").fetchall()
+    assert [tuple(row) for row in after] == sorted(before), "the upgrade changed an existing wake"
+    added = conn.execute("SELECT due_at, baseline_seq, ordinal, claimed_at FROM wakes").fetchall()
+    assert all(all(value is None for value in row) for row in added), \
+        "the upgrade gave an existing wake a reminder's columns"
+    conn.close()
