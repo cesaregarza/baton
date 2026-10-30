@@ -273,9 +273,12 @@ def generation_activate(conn: sqlite3.Connection, config: Config, producer: str,
 
     A pair is counted for every kind of every conversation with a copy left, and current when its latest version
     in the generation is valid and covers through the conversation's last seq (Delta r4.1). A pair that isn't
-    current is `generation_behind` if its conversation changed after the watermark, else `generation_incomplete`.
-    When the log no longer holds every change after the watermark (pruned, or another epoch), the same check
-    runs from state and any shortfall is `generation_behind`, or `reconcile_required` over its bound.
+    current is `generation_incomplete` if its conversation already owed it at the watermark (it had a copy
+    then) and the pair didn't meet that; otherwise, when only messages or expiries after the watermark are
+    uncovered, or the obligation itself arose after it, `generation_behind`. Participant changes count for
+    neither. When the log no longer holds every change after the watermark (pruned, or another epoch), the same
+    check runs from state and any shortfall is `generation_behind`. Over `max_activation_reconcile` pairs, on
+    either path, it is `reconcile_required`.
     """
     _require_producer(config, producer)
     with transaction(conn):
@@ -304,6 +307,9 @@ def generation_activate(conn: sqlite3.Connection, config: Config, producer: str,
                 pair = {"conversation_id": conversation["id"], "kind": kind}
                 if reconcile:
                     behind.append(pair)
+                elif not _owed_at_watermark(conn, conversation, added.get(conversation["id"], 0),
+                                            target["watermark_seq"]):
+                    behind.append(pair)  # nothing was owed at the watermark: the whole obligation came after
                 elif _met_at_watermark(version, conversation, added.get(conversation["id"], 0),
                                        conversation["id"] in expired):
                     behind.append(pair)  # it met what the watermark asked; a change after it is uncovered
@@ -374,6 +380,27 @@ def _after_watermark(conn: sqlite3.Connection, watermark: int) -> tuple[dict[str
         "SELECT DISTINCT conversation_id FROM change_log WHERE change_seq > ? AND kind = 'message_expired'",
         (watermark,))}
     return added, expired
+
+
+def _owed_at_watermark(conn: sqlite3.Connection, conversation: sqlite3.Row, added_after: int,
+                       watermark: int) -> bool:
+    """Whether the conversation owed a version at the watermark: it had messages then, and a copy of one.
+
+    A copy existed at the watermark if a message from then still has one, or if one of them lost its last copy
+    after the watermark (an expiry whose message wasn't itself added after it). A conversation created after
+    the watermark, or empty at it and refilled later, owed nothing then.
+    """
+    then = conversation["last_seq"] - added_after
+    if then < 1:
+        return False
+    if conn.execute("SELECT 1 FROM messages WHERE conversation_id = ? AND conversation_seq <= ? LIMIT 1",
+                    (conversation["id"], then)).fetchone():
+        return True
+    return conn.execute(
+        "SELECT 1 FROM change_log WHERE change_seq > ? AND conversation_id = ? AND kind = 'message_expired'"
+        " AND message_id NOT IN (SELECT message_id FROM change_log WHERE change_seq > ? AND conversation_id = ?"
+        " AND kind = 'message_added') LIMIT 1",
+        (watermark, conversation["id"], watermark, conversation["id"])).fetchone() is not None
 
 
 def _met_at_watermark(version: sqlite3.Row | None, conversation: sqlite3.Row, added_after: int,
