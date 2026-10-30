@@ -73,9 +73,10 @@ def search(conn: sqlite3.Connection, config: Config, role: str, query: str, *, c
     caller may read, best first: one hit per message, and per artifact version.
 
     With `query_vector`, ranking stays keyword-first: the same authorized keyword matches, a wider pool of
-    them, are re-ordered by cosine similarity to the vectors producers stored for `model`; matches without a
+    them (POOL_FACTOR times the limit of each kind searched), are re-ordered by similarity to the vectors
+    producers stored for `model`, by the profile's distance (cosine or inner product); matches without a
     vector follow in keyword order. Nothing the caller can't read is ever a candidate, so none can be lifted
-    in or ahead by its vector.
+    in or ahead by its vector. Every active profile for `model` must have the query's dimension.
     """
     if kinds is None:
         kinds = ["message"]
@@ -113,7 +114,9 @@ def search(conn: sqlite3.Connection, config: Config, role: str, query: str, *, c
     return {"hits": hits[:limit], "keyword_index": mode}
 
 
-POOL_FACTOR = 4  # with a query vector, re-rank this many times the limit of keyword matches
+# With a query vector, each kind of keyword match searched (messages, and derived artifacts) is fetched up to this
+# many times the limit before the re-rank, so the pool is at most 4x the limit of each: 8x with both.
+POOL_FACTOR = 4
 
 
 def _query_profiles(conn: sqlite3.Connection, config: Config, query_vector: Any, model: Any) -> dict[str, dict]:
@@ -125,16 +128,19 @@ def _query_profiles(conn: sqlite3.Connection, config: Config, query_vector: Any,
     if not isinstance(query_vector, list) or not query_vector or not all(
             isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x) for x in query_vector):
         raise InvalidRequest("query_vector is a list of finite numbers")
-    profiles = {}
-    for generation, profile in conn.execute("SELECT id, profile FROM generations WHERE active = 1"):
+    profiles, producers = {}, {}
+    for generation, producer, profile in conn.execute(
+            "SELECT id, producer, profile FROM generations WHERE active = 1 ORDER BY producer, id"):
         embedding = json.loads(profile).get("embedding")
         if embedding and embedding["model"] == model:
-            profiles[generation] = embedding
+            profiles[generation], producers[generation] = embedding, producer
     if not profiles:
         raise InvalidRequest(f"no active generation embeds with {model}")
-    if any(embedding["dim"] != len(query_vector) for embedding in profiles.values()):
-        raise InvalidRequest(f"{model} vectors have {next(iter(profiles.values()))['dim']} dimensions, and the query "
-                             f"{len(query_vector)}")
+    # Every active profile for the model must fit: a query is never silently scored against only some of them.
+    for generation, embedding in profiles.items():
+        if embedding["dim"] != len(query_vector):
+            raise InvalidRequest(f"{producers[generation]}'s active generation {generation} embeds {model} in "
+                                 f"{embedding['dim']} dimensions, and the query has {len(query_vector)}")
     return profiles
 
 

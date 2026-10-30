@@ -477,7 +477,14 @@ With `[search] embeddings = true`, a generation can be created with an embedding
 "inner_product"}}`). Baton never computes a vector: the indexer supplies them in each commit, as `vectors`
 (`{"item": {"kind": K} | {"message_id": M}, "vector": [...]}`) and `skips` (`empty_text`, `over_token_limit` or
 `excluded_kind`), one for every kind written and every message the batch served that has none yet. A commit
-missing one is refused whole, with nothing recorded, and can be retried with the same `request_id`.
+missing one is refused whole, with nothing recorded, and can be retried with the same `request_id`. A
+generation holds at most `[indexer] max_vectors_per_generation` vectors (1,000,000 by default); a commit that
+would pass it is refused whole with `limit_exceeded`.
+
+A search with `query_vector` and `model` re-ranks a wider keyword pool: up to 4× the limit of message matches,
+and up to 4× the limit of artifact matches when `kinds` asks for them, so up to 8× in all. Every active
+generation that embeds with `model` must have the query's dimension; otherwise the search is refused, naming
+the producer, generation and dimension that don't fit.
 
 ## Documentation
 
