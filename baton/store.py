@@ -17,9 +17,9 @@ from pathlib import Path
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5)
+MIGRATES_FROM = (2, 3, 4, 5, 6)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -74,6 +74,10 @@ _ADDED_COLUMNS = {
     # A conversation's optional readable topic. The first step to alter another table, which is why each
     # one names its own.
     6: {"conversations": ("topic TEXT",)},
+    # What a reminder wake needs and an ordinary wake leaves NULL: when it becomes eligible, the read
+    # position the batch had when its original wake was delivered, which of the two it is, and when it
+    # first took a cap slot. Added, never rewritten, so an existing wake comes through untouched.
+    7: {"wakes": ("due_at REAL", "baseline_seq INTEGER", "ordinal INTEGER", "claimed_at REAL")},
 }
 _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
@@ -164,6 +168,10 @@ _SCHEMA = (
         attempts INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         finished_at TEXT,
+        due_at REAL,
+        baseline_seq INTEGER,
+        ordinal INTEGER,
+        claimed_at REAL,
         PRIMARY KEY (role, key)
     )""",
 )
@@ -261,9 +269,15 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         for step in _STEPS:
             if version is None or version >= step:
                 continue
-            if not rebuilding:
-                for table, columns in _ADDED_COLUMNS.get(step, {}).items():
-                    for column in columns:
+            for table, columns in _ADDED_COLUMNS.get(step, {}).items():
+                # Add only what is missing. Several paths reach this point: a table the version-3
+                # rebuild recreated, or one the statements above created for the first time, already
+                # has every column of the current schema, while a table carried over from an older
+                # database has none of them. Asking the table is simpler, and safer, than tracking
+                # which of those happened.
+                present = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                for column in columns:
+                    if column.split()[0] not in present:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
             for statement in _BACKFILL.get(step, ()):
                 conn.execute(statement)

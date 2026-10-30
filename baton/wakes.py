@@ -12,6 +12,26 @@ already waiting. Every wake is recorded
 before delivery and retried with backoff until it succeeds, is superseded, or
 runs out of attempts.
 
+Because one wake covers a whole batch, a role whose read fails after a
+delivered wake would otherwise hear nothing more until it happened to read on
+its own. So a delivered message wake schedules two reminders for the same
+batch, at `REMINDER_OFFSETS` after the moment it was durably delivered. Each
+is an ordinary wake with the batch's key and `:r1` or `:r2`, so it retries and
+is recorded like any other, under an id that is stable across its own attempts
+and distinct from the other ordinal's. Delivery stays at-least-once: a receiver
+dedupes by id.
+
+A reminder goes out only while the role has not read past the position the
+batch had when its original wake was delivered. A read retires every reminder
+for that batch that has not already been sent, in the same transaction, and
+they are never recreated. Reminders are bounded twice over: never more than two
+per batch, and never more than `REMINDER_CAP` logical reminders for one role in
+`REMINDER_WINDOW_SECONDS`. Over that cap a reminder waits rather than
+disappearing, and comes back when the window moves. The later ordinal retires
+the earlier one, so a host that was down past both deadlines sends one wake and
+not two; an attempt already in flight may still arrive, which is harmless
+because a wake carries nothing.
+
 Webhooks are signed with the Standard Webhooks scheme when the role names a
 secret: HMAC-SHA256 over `id.timestamp.body`, in the `webhook-signature`
 header. The URL comes from the operator's config, never from a client.
@@ -43,11 +63,24 @@ log = logging.getLogger("baton.wakes")
 CURSOR = "wake-dispatcher"
 PAGE = 100
 MAX_ATTEMPTS = 8
+# A delivered message wake that is never read is tried again at these offsets from its durable
+# delivery, and then never again. They are recovery attempts after a failed read, not a latency
+# guarantee: a due time is when a reminder becomes eligible, not when it is promised to arrive.
+REMINDER_OFFSETS = (300.0, 1200.0)
+# At most this many logical reminders per role in a rolling window. Attempts are not counted, and
+# original message and job wakes never charge it. Over the cap a reminder waits rather than vanishing.
+REMINDER_CAP = 6
+REMINDER_WINDOW_SECONDS = 3600.0
 LEASE_SECONDS = 60.0
 MAX_BACKOFF_SECONDS = 3600.0
 
 # (wake config, wake id, JSON body) -> delivered?
 Deliver = Callable[[Wake, str, bytes], bool]
+
+
+def _now() -> float:
+    """The clock every lease and due time is measured by, in one place so a test can move it."""
+    return time.time()
 
 
 def sign(secret: str, message_id: str, timestamp: int, body: bytes) -> str:
@@ -113,8 +146,9 @@ class Dispatcher:
             messages.sweep(conn)
             tried = 0
             for row in conn.execute("SELECT role, key FROM wakes WHERE status = 'pending' AND lease_until <= ?"
-                                    " ORDER BY lease_until LIMIT ?", (time.time(), PAGE)).fetchall():
+                                    " ORDER BY lease_until LIMIT ?", (_now(), PAGE)).fetchall():
                 tried += self._attempt(conn, row["role"], row["key"])
+            tried += self._due_reminders(conn)
             while rows := conn.execute("SELECT * FROM events WHERE pos > ? ORDER BY pos LIMIT ?",
                                        (events.cursor(conn, CURSOR), PAGE)).fetchall():
                 for event in rows:
@@ -166,17 +200,105 @@ class Dispatcher:
                 log.error("wake %s %s gave up after %d attempts", role, key, row["attempts"])
                 return 0
             conn.execute("UPDATE wakes SET attempts = attempts + 1, lease_until = ? WHERE role = ? AND key = ?",
-                         (time.time() + LEASE_SECONDS, role, key))
+                         (_now() + LEASE_SECONDS, role, key))
         delivered = self._send(role, wake_id(role, key), row["payload"].encode())
         with transaction(conn):
             if delivered:
                 conn.execute("UPDATE wakes SET status = 'delivered', finished_at = ? WHERE role = ? AND key = ?"
                              " AND status = 'pending'", (events.now(), role, key))
+                self._schedule_reminders(conn, role, key, row)
             else:
                 backoff = min(MAX_BACKOFF_SECONDS, LEASE_SECONDS * 2 ** row["attempts"])
                 conn.execute("UPDATE wakes SET lease_until = ? WHERE role = ? AND key = ?",
-                             (time.time() + backoff, role, key))
+                             (_now() + backoff, role, key))
         return 1
+
+    def _schedule_reminders(self, conn: sqlite3.Connection, role: str, key: str,
+                            row: sqlite3.Row) -> None:
+        """Set both reminders for a message batch whose original wake has just been delivered.
+
+        Anchored here, at durable delivery, so a restart needs no reconstruction and a later message
+        joining the same batch cannot push the times back. A reminder never schedules its own: only a
+        row with no ordinal gets them.
+        """
+        if row["ordinal"] is not None or not key.startswith("messages:"):
+            return
+        batch = int(key.removeprefix("messages:"))
+        delivered_at = _now()
+        for ordinal, offset in enumerate(REMINDER_OFFSETS, start=1):
+            conn.execute(
+                "INSERT INTO wakes (role, key, payload, status, lease_until, attempts, created_at,"
+                " due_at, baseline_seq, ordinal) VALUES (?, ?, ?, 'scheduled', 0, 0, ?, ?, ?, ?)"
+                " ON CONFLICT (role, key) DO NOTHING",
+                (role, f"{key}:r{ordinal}", row["payload"], events.now(),
+                 delivered_at + offset, batch - 1, ordinal))
+
+    def _due_reminders(self, conn: sqlite3.Connection) -> int:
+        """Claim and send every reminder that has come due; return how many were tried.
+
+        Runs on the ordinary pass rather than a loop of its own, so the original wakes keep their
+        cadence. `capped` rows are revisited here too, which is how a deferred reminder comes back
+        without needing new mail.
+        """
+        tried = 0
+        due = conn.execute("SELECT role, key, ordinal, baseline_seq FROM wakes"
+                           " WHERE ordinal IS NOT NULL AND status IN ('scheduled', 'capped')"
+                           " AND due_at <= ? ORDER BY due_at, ordinal LIMIT ?",
+                           (_now(), PAGE)).fetchall()
+        # Only the latest ordinal a batch has reached is offered. Coming back to a host that was
+        # down past both deadlines must not send two wakes at once, and the earlier one is retired
+        # by the claim below rather than delivered first and then regretted.
+        latest: dict[tuple[str, str], sqlite3.Row] = {}
+        for row in due:
+            batch = (row["role"], row["key"].rsplit(":r", 1)[0])
+            if row["ordinal"] >= latest.get(batch, row)["ordinal"]:
+                latest[batch] = row
+        for row in latest.values():
+            if self._claim_reminder(conn, row["role"], row["key"], row["ordinal"], row["baseline_seq"]):
+                tried += self._attempt(conn, row["role"], row["key"])
+        return tried
+
+    def _claim_reminder(self, conn: sqlite3.Connection, role: str, key: str, ordinal: int,
+                        baseline: int) -> bool:
+        """Take an exclusive claim on one due reminder, charging its cap slot once. True if won.
+
+        Everything that decides whether it may go happens in one transaction: the role must not have
+        read past the batch's baseline, the later ordinal retires the earlier one, and the cap is
+        counted and reserved here rather than at send time. A second worker meeting the same row
+        finds it no longer `scheduled` and stands down.
+        """
+        batch = key.rsplit(":r", 1)[0]
+        with transaction(conn):
+            if messages.read_seq(conn, role) > baseline:
+                conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ?"
+                             " WHERE role = ? AND key = ? AND status IN ('scheduled', 'capped')",
+                             (events.now(), role, key))
+                return False
+            if ordinal == max(range(1, len(REMINDER_OFFSETS) + 1)):
+                # The last ordinal is due, so anything earlier has had its turn. Unsent work is
+                # skipped and work still retrying is retired, but a delivered record is left alone.
+                conn.execute("UPDATE wakes SET status = 'skipped', finished_at = ? WHERE role = ?"
+                             " AND key LIKE ? AND key != ? AND status IN ('scheduled', 'capped')",
+                             (events.now(), role, f"{batch}:r%", key))
+                conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ?"
+                             " AND key LIKE ? AND key != ? AND status = 'pending'",
+                             (events.now(), role, f"{batch}:r%", key))
+            charged = conn.execute(
+                "SELECT COUNT(*) FROM wakes WHERE role = ? AND ordinal IS NOT NULL"
+                " AND claimed_at IS NOT NULL AND claimed_at > ?",
+                (role, _now() - REMINDER_WINDOW_SECONDS)).fetchone()[0]
+            already = conn.execute("SELECT claimed_at FROM wakes WHERE role = ? AND key = ?",
+                                   (role, key)).fetchone()
+            if already is None:
+                return False
+            if already["claimed_at"] is None and charged >= REMINDER_CAP:
+                conn.execute("UPDATE wakes SET status = 'capped' WHERE role = ? AND key = ?"
+                             " AND status = 'scheduled'", (role, key))
+                return False
+            return bool(conn.execute(
+                "UPDATE wakes SET status = 'pending', lease_until = 0, claimed_at = COALESCE(claimed_at, ?)"
+                " WHERE role = ? AND key = ? AND status IN ('scheduled', 'capped')",
+                (_now(), role, key)).rowcount)
 
     def _send(self, role: str, wake_id: str, body: bytes) -> bool:
         wake = self._config.roles[role].wake

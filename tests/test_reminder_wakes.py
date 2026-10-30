@@ -351,7 +351,8 @@ def test_no_reminders_when_the_original_wake_was_never_delivered(tmp_path: Path,
     dispatcher = wakes.Dispatcher(host.config, recorder)
     conn = connect(host.config.db_path)
     messages.send(conn, sender="planner", recipient="worker", text="never got through")
-    dispatcher.pass_once()
+    dispatcher.pass_once()                       # the one allowed attempt, which fails
+    dispatcher.pass_once()                       # the next pass is where it gives up
     assert rows(conn)["messages:1"] == "failed"
 
     clock.advance(TWENTY_MINUTES * 2)
@@ -470,6 +471,7 @@ def test_upgrading_a_version_six_database_keeps_every_wake_row(tmp_path: Path) -
                     " finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", before)
     raw.commit()
     raw.close()
+    (data / "baton.db").chmod(0o600)             # the host refuses a data directory it can share
 
     conn = connect(data / "baton.db")
     assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION

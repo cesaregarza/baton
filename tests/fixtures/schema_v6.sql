@@ -83,7 +83,6 @@ CREATE TABLE participants (
         PRIMARY KEY (conversation_id, role)
     );
 CREATE TABLE schema_version (version INTEGER NOT NULL);
-CREATE TABLE sqlite_sequence(name,seq);
 CREATE TABLE wakes (
         role TEXT NOT NULL,
         key TEXT NOT NULL,

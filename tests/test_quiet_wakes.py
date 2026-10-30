@@ -40,9 +40,20 @@ def quiet_config(tmp_path: Path, *, hooks: tuple[str, ...] = ("reviewer", "assis
     return config_module.parse(raw)
 
 
+def woken_then_reminded(seq: int) -> list[tuple[str, str]]:
+    """What `queued` shows once a message wake is delivered: the wake, and the two reminders it sets.
+
+    Delivering a message wake now schedules a reminder for five minutes and one for twenty, in case
+    the role never reads. Neither is due here, so both sit scheduled.
+    """
+    return [(f"messages:{seq}", "delivered"),
+            (f"messages:{seq}:r1", "scheduled"),
+            (f"messages:{seq}:r2", "scheduled")]
+
+
 def queued(db: sqlite3.Connection, role: str) -> list[tuple[str, str]]:
     """The wakes owed to `role`: what each is about, and how it ended."""
-    return [(row["key"], row["status"]) for row in wakes.recent(db) if row["role"] == role]
+    return sorted((row["key"], row["status"]) for row in wakes.recent(db) if row["role"] == role)
 
 
 # 4 -------------------------------------------------------------------------------------------------------
@@ -59,7 +70,7 @@ def test_4_a_quiet_role_is_woken_by_the_message_that_names_it_and_by_no_other(tm
 
     say(db, config, "orchestrator", conversation_id, "your call", attention=[QUIET])
     assert [(c["role"], c["reason"], c["first_unread_seq"]) for c in woken(config)] == [(QUIET, "message", 1)]
-    assert queued(db, QUIET) == [("messages:1", "delivered")]
+    assert queued(db, QUIET) == woken_then_reminded(1)
     page = messages.read(db, QUIET, after_seq=0)
     assert [(m["attention"], m["needs_decision"]) for m in page["messages"]] == [(None, False), ([QUIET], False)]
 
@@ -143,12 +154,15 @@ def test_7_unread_quiet_messages_still_leave_exactly_one_wake_for_the_one_that_a
     for index in range(2):
         say(db, config, "orchestrator", conversation_id, f"more chatter {index}")
     assert woken(config) == []
-    assert queued(db, QUIET) == [("messages:1", "delivered")]
+    assert queued(db, QUIET) == woken_then_reminded(1)
 
     assert len(messages.read(db, QUIET)["messages"]) == 6  # every message was there to read all along
     say(db, config, "orchestrator", conversation_id, "chatter after the read")
     assert woken(config) == []
-    assert queued(db, QUIET) == [("messages:1", "delivered")]
+    # The read answered the batch, so its reminders are retired rather than left to fire later.
+    assert queued(db, QUIET) == [("messages:1", "delivered"),
+                                 ("messages:1:r1", "superseded"),
+                                 ("messages:1:r2", "superseded")]
 
 
 def test_7_a_failed_wake_is_retried_under_one_id_and_never_duplicated(tmp_path, monkeypatch) -> None:
@@ -165,12 +179,12 @@ def test_7_a_failed_wake_is_retried_under_one_id_and_never_duplicated(tmp_path, 
         dispatcher.pass_once()
     assert [c["first_unread_seq"] for c in recorder.calls] == [1, 1, 1]
     assert len({c["id"] for c in recorder.calls}) == 1  # one wake, delivered three times over
-    assert queued(db, QUIET) == [("messages:1", "delivered")]
+    assert queued(db, QUIET) == woken_then_reminded(1)
 
     say(db, config, "orchestrator", conversation_id, "more chatter")
     dispatcher.pass_once()
     assert len(recorder.calls) == 3
-    assert queued(db, QUIET) == [("messages:1", "delivered")]
+    assert queued(db, QUIET) == woken_then_reminded(1)
 
 
 def test_7_a_read_before_the_message_that_addresses_it_still_leaves_one_wake(tmp_path) -> None:
@@ -181,7 +195,7 @@ def test_7_a_read_before_the_message_that_addresses_it_still_leaves_one_wake(tmp
     messages.read(db, QUIET)
     say(db, config, "orchestrator", conversation_id, "your call", attention=[QUIET])
     assert [(c["role"], c["first_unread_seq"]) for c in woken(config)] == [(QUIET, 2)]
-    assert queued(db, QUIET) == [("messages:2", "delivered")]
+    assert queued(db, QUIET) == woken_then_reminded(2)
 
 
 # 8 -------------------------------------------------------------------------------------------------------

@@ -156,7 +156,8 @@ def test_gzip_bodied_delivery_answers_are_judged_by_status_alone(gzip_host, monk
     assert sorted(events) == ["/hooks/big", "/hooks/gone", "/hooks/ok"]  # each exactly once: no retries
     subs = {sub["url"].rsplit("/", 1)[1]: sub for sub in state(host)["subscriptions"].values()}
     assert (subs["gone"]["active"], subs["ok"]["active"], subs["big"]["active"]) == (False, True, True)
-    assert [w["status"] for w in wakes.recent(connect(host.config.db_path))] == ["delivered"]
+    assert sorted(w["status"] for w in wakes.recent(connect(host.config.db_path))) \
+        == ["delivered", "scheduled", "scheduled"]  # the wake, and the two reminders it sets
 
 
 def test_a_gzip_challenge_answer_is_still_refused(bad_server_gzip_challenge) -> None:
