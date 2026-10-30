@@ -177,7 +177,8 @@ def test_the_upgrade_steps_cover_every_version_there_is_a_fixture_for() -> None:
 WHOLE_TABLES = {8: {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"},  # the browser seat
                 9: {"change_log", "log_meta"},  # the conversation change log
                 10: {"generations", "batches", "batch_pages", "artifact_versions", "artifact_inputs",
-                     "artifact_depends_on", "commit_requests"}}  # the local indexing writer's derived data
+                     "artifact_depends_on", "commit_requests"},  # the local indexing writer's derived data
+                11: {"vectors", "vector_skips"}}  # embeddings a producer supplies, per generation
 
 
 @pytest.mark.parametrize("version", FIXTURE_VERSIONS)

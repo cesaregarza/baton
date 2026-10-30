@@ -262,12 +262,11 @@ def test_read_artifacts_is_a_read_only_tool_present_with_search(tmp_path: Path, 
 
 
 def test_a_version_made_from_no_message_is_served_to_no_one(db, config) -> None:
-    conversation_id, sent = converse(db, config, 2)
-    expire(db, *sent)  # every message gone: a batch over holes alone
-    manifest = begin(db, config, conversation_id)
-    assert manifest["item_count"] == 0
-    commit(db, config, manifest)
-    assert db.execute("SELECT COUNT(*) FROM artifact_versions").fetchone()[0] == 1
+    """The writer can't make one (a conversation with no copy left takes no batch), so the rows are stood up
+    directly: the rule must not depend on that."""
+    conversation_id, _ = converse(db, config, 2)
+    publish(db, config, conversation_id)
+    db.execute("DELETE FROM artifact_inputs")
     assert shown(db, config, "viewer", conversation_id) == []  # not visible by vacuous truth
 
 
