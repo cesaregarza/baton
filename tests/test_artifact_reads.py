@@ -286,3 +286,78 @@ def test_an_invalid_version_is_hidden_even_with_every_input_still_held(db, confi
     db.execute("UPDATE artifact_versions SET state = 'invalid'")
     assert shown(db, config, "viewer", conversation_id) == []
     assert artifact_hits(search.search(db, config, "viewer", "ibis", kinds=["summary"])) == []
+
+
+# Review round: a recent window that reaches the newest message, and complete labels ---------------------------
+
+
+def test_a_fragmented_recent_window_reaches_the_newest_message(tmp_path: Path) -> None:
+    config = reads_config(tmp_path, rolling=3, max_manifest_segments=1)
+    db = connect(config.db_path)
+    conversation_id, sent = converse(db, config, 5)
+    expire(db, sent[1], sent[3])  # retained seqs 1, 3 and 5: one segment holds only one of them
+    manifest = begin(db, config, conversation_id, kinds=("summary_recent",))
+    assert manifest["window"] == {"from_seq": 5, "to_seq": 5}
+    assert [item["seq"] for segment in manifest["segments"] for item in segment["items"]] == [5]
+    read_all(db, config, manifest)
+    result = commit(db, config, manifest)
+    assert [v["state"] for v in result["versions"]] == ["valid"]
+    with pytest.raises(BatonError) as again:  # current, not the old prefix again
+        begin(db, config, conversation_id, kinds=("summary_recent",))
+    assert again.value.code == "up_to_date"
+    db.close()
+
+
+def test_artifact_hits_carry_the_provenance_labels(db, config) -> None:
+    conversation_id, _ = converse(db, config, 2)
+    publish(db, config, conversation_id, body="puffin summary")
+    [hit] = search.search(db, config, "assistant", "puffin", kinds=["summary"])["hits"]
+    [artifact] = search.read_artifacts(db, config, "assistant", conversation_id)["artifacts"]
+    for field in ("scope_id", "generation", "source_revision", "version", "state", "covered_through_seq"):
+        assert hit[field] == artifact[field], field
+
+
+def test_a_recent_summary_names_both_ends_of_its_window_everywhere(tmp_path: Path) -> None:
+    config = reads_config(tmp_path, rolling=3)
+    db = connect(config.db_path)
+    conversation_id, _ = converse(db, config, 6)
+    publish(db, config, conversation_id, kinds=("summary_recent",), body="gannet recent")
+    [artifact] = search.read_artifacts(db, config, "assistant", conversation_id)["artifacts"]
+    [hit] = search.search(db, config, "assistant", "gannet", kinds=["summary_recent"])["hits"]
+    for shown_as in (artifact, hit):
+        assert (shown_as["window"], shown_as["from_seq"], shown_as["to_seq"]) == ("recent", 4, 6)
+    db.close()
+
+
+def test_the_kinds_help_names_the_recent_window(capsys) -> None:
+    from baton import cli
+    with pytest.raises(SystemExit):
+        cli.main(["index", "begin-batch", "--help"])
+    assert "summary_recent" in capsys.readouterr().out
+
+
+def test_before_filters_messages_by_send_time_and_artifacts_by_when_written(db, config) -> None:
+    conversation_id, sent = converse(db, config, 1)
+    say(db, config, conversation_id, "kestrel message")
+    publish(db, config, conversation_id, body="kestrel summary")
+    message_id = db.execute("SELECT id FROM messages WHERE text = 'kestrel message' LIMIT 1").fetchone()[0]
+
+    def kinds_found(before: str) -> set[str]:
+        hits = search.search(db, config, "assistant", "kestrel", kinds=["message", "summary"], before=before)["hits"]
+        return {"artifact" if hit["derived"] else "message" for hit in hits}
+
+    db.execute("UPDATE messages SET at = '2026-01-10T00:00:00+00:00' WHERE id = ?", (message_id,))
+    db.execute("UPDATE artifact_versions SET created_at = '2026-01-20T00:00:00+00:00'")
+    assert kinds_found("2026-01-15T00:00:00Z") == {"message"}
+    db.execute("UPDATE messages SET at = '2026-01-20T00:00:00+00:00' WHERE id = ?", (message_id,))
+    db.execute("UPDATE artifact_versions SET created_at = '2026-01-10T00:00:00+00:00'")
+    assert kinds_found("2026-01-15T00:00:00Z") == {"artifact"}
+
+
+def test_the_before_help_says_which_time_each_kind_is_compared_by() -> None:
+    import inspect
+
+    from baton import app
+    annotation = inspect.signature(app.Tools.search).parameters["before"].annotation
+    description = " ".join(str(getattr(meta, "description", "")) for meta in getattr(annotation, "__metadata__", ()))
+    assert "sent" in description and "written" in description, description
