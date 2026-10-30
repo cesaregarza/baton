@@ -143,6 +143,48 @@ class ProvenanceLimitExceeded(BatonError):
                       "items": items}
 
 
+class NothingToIndex(BatonError):
+    code = "nothing_to_index"
+
+
+class UnknownGeneration(BatonError):
+    code = "unknown_generation"
+
+
+class GenerationDropped(BatonError):
+    code = "generation_dropped"
+
+
+class GenerationActive(BatonError):
+    code = "generation_active"
+
+
+class ActivationRefused(BatonError):
+    """A generation can't be switched to yet: `pairs` names (some of) the (conversation, kind) pairs not current."""
+
+    def __init__(self, detail: str, pairs: list[dict]) -> None:
+        super().__init__(detail)
+        self.extra = {"pairs": pairs[:20], "count": len(pairs)}
+
+
+class GenerationIncomplete(ActivationRefused):
+    code = "generation_incomplete"
+
+
+class GenerationBehind(ActivationRefused):
+    code = "generation_behind"
+
+
+class ReconcileRequired(BatonError):
+    """Too many pairs to check from state in one activation; refill through `dirty` and try again."""
+
+    code = "reconcile_required"
+
+    def __init__(self, detail: str, pairs: int) -> None:
+        super().__init__(detail)
+        self.extra = {"pairs": pairs}
+
+
 class CursorExpired(BatonError):
     """The change-log position is from another log, or older than what retention kept: start again from state."""
 

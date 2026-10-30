@@ -19,9 +19,9 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -83,6 +83,9 @@ _ADDED_COLUMNS = {
     # Each conversation's source revision, bumped with every change the change log records, and when it
     # last had a message.
     9: {"conversations": ("revision INTEGER NOT NULL DEFAULT 0", "last_activity_at TEXT")},
+    # A generation's watermark, when it was switched to and from, and whether its owner dropped it.
+    11: {"generations": ("watermark_epoch TEXT", "watermark_seq INTEGER", "activated_at TEXT", "deactivated_at TEXT",
+                         "dropped_at TEXT")},
 }
 _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
@@ -90,6 +93,8 @@ _BACKFILL = {
     # Revisions start at 0 for every existing conversation; activity is the newest message still held.
     9: ("UPDATE conversations SET last_activity_at = COALESCE((SELECT MAX(at) FROM messages m"
         " WHERE m.conversation_id = conversations.id), created_at)",),
+    # A version-10 producer's one generation was active from creation.
+    11: ("UPDATE generations SET activated_at = created_at WHERE active = 1 AND activated_at IS NULL",),
 }
 # Tables a version adds whole. `_SCHEMA` creates them (IF NOT EXISTS) on every open, so an upgrade needs no
 # statement of its own for them; naming them here makes the version a step, and the tests check each exists.
@@ -103,6 +108,8 @@ _ADDED_TABLES = {
     # same reason as the messages'.
     10: ("generations", "batches", "batch_pages", "artifact_versions", "artifact_inputs", "artifact_depends_on",
          "commit_requests"),
+    # Vectors a producer supplies for a generation's artifacts and messages, and the items it skipped.
+    11: ("vectors", "vector_skips"),
 }
 _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys()))
 
@@ -157,7 +164,12 @@ _SCHEMA = (
         scope_id TEXT NOT NULL,
         profile TEXT NOT NULL,
         active INTEGER NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        watermark_epoch TEXT,
+        watermark_seq INTEGER,
+        activated_at TEXT,
+        deactivated_at TEXT,
+        dropped_at TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS generations_by_producer ON generations (producer, active)",
     # A read batch: the manifest Baton issued, which a commit is checked against. `expires_at` is epoch seconds.
@@ -210,6 +222,24 @@ _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS artifact_depends_on (version_id TEXT PRIMARY KEY, prior_id TEXT NOT NULL)",
     # A commit's retry identity and receipt. Kept apart from batches and versions, so a replay is answered
     # from this row alone after either is cleaned up, until `expires_at`.
+    # One vector per item per generation, as little-endian float32; Baton stores them and never computes one.
+    """CREATE TABLE IF NOT EXISTS vectors (
+        generation TEXT NOT NULL,
+        item_kind TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        dim INTEGER NOT NULL,
+        data BLOB NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (generation, item_kind, item_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS vector_skips (
+        generation TEXT NOT NULL,
+        item_kind TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        PRIMARY KEY (generation, item_kind, item_id)
+    )""",
     """CREATE TABLE IF NOT EXISTS commit_requests (
         producer TEXT NOT NULL,
         request_id TEXT NOT NULL,
