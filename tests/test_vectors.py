@@ -364,6 +364,7 @@ def test_hybrid_search_reranks_keyword_matches_by_their_vectors(db, config) -> N
                                                             ("message_id", far): UNIT["z"]}))
     derived.generation_activate(db, config, "alpha", generation)
     assert hybrid(db, config, "assistant", "kestrel", UNIT["z"])[0] == far  # the vector moves it up
+    assert hybrid(db, config, "assistant", "kestrel", UNIT["z"], limit=1) == [far]  # re-ranked from a wider pool
     assert hybrid(db, config, "assistant", "kestrel", UNIT["y"])[0] == near
     hits = search.search(db, config, "assistant", "kestrel", query_vector=UNIT["z"], model="toy-embed")["hits"]
     assert math.isclose(hits[0]["similarity"], 1.0)
