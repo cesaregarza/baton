@@ -348,6 +348,20 @@ def test_6_an_expiry_inside_the_window_supersedes_the_batch(db, config) -> None:
     assert versions(db, conversation_id) == []
 
 
+def test_13_the_prior_s_input_expiring_mid_batch_supersedes_it(db, config) -> None:
+    conversation_id, sent = converse(db, config, 3)
+    cycle(db, config, conversation_id, request_id="r-1")
+    [prior] = versions(db, conversation_id)
+    say(db, config, conversation_id, "a new message")
+    manifest = begin(db, config, conversation_id)
+    assert manifest["kinds"]["summary"]["prior_version_id"] == prior["id"]
+    read_all(db, config, manifest)
+    expire(db, sent[0])  # an input of the prior, after the batch began
+    error = refused("batch_superseded", commit, db, config, manifest, request_id="r-2")
+    assert prior["id"] in str(error)
+    assert [v["state"] for v in versions(db, conversation_id)] == ["invalid"]
+
+
 def test_4_a_citation_outside_the_covered_inputs_is_refused_by_name(db, config) -> None:
     conversation_id, sent = converse(db, config, 3)
     manifest = begin(db, config, conversation_id)
