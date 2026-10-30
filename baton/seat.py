@@ -70,7 +70,9 @@ HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Cache-Control": "no-store",
-    "Referrer-Policy": "no-referrer",
+    # Not no-referrer: under it Chromium sends `Origin: null` on a same-origin form post, which the exact Origin
+    # check (rightly) refuses. same-origin keeps the real Origin there and sends nothing to other sites.
+    "Referrer-Policy": "same-origin",
 }
 # Headers a request may carry once at most; two of them would leave it ambiguous which one counts.
 SINGLE_HEADERS = ("host", "origin", "cookie", "content-type", "content-length", "sec-fetch-site",
@@ -92,6 +94,7 @@ REQUEST_TIMEOUT = 10
 CONVERSATION_PATH = re.compile(r"/seat/c/([A-Za-z0-9_-]{1,64})")
 SEND_PATH = re.compile(r"/seat/c/([A-Za-z0-9_-]{1,64})/send")
 SEQ = re.compile(r"[0-9]{1,19}")
+MAX_SEQ = 2**63 - 1  # SQLite's largest integer
 MESSAGE_ID = re.compile(r"msg_[0-9a-f]{1,64}")
 # Each POST route's fields; anything else, or a field given twice, is refused before it is read.
 FIELDS = {"/seat/login": ({"token", "pre"}, {"token", "pre"}), "/seat/logout": ({"csrf"}, {"csrf"}),
@@ -132,6 +135,7 @@ li { border-bottom: 1px solid var(--rule); padding: .7rem 0; min-width: 0; }
 li.ask { border-left: 4px solid var(--ask); background: var(--ask-bg); padding-left: .7rem; padding-right: .5rem; }
 .ask-label { font-weight: 600; font-size: .875rem; margin: 0 0 .2rem; }
 .placeholder { color: var(--muted); font-style: italic; }
+.in { color: var(--muted); font-size: .8rem; margin: 0 0 .15rem; overflow-wrap: anywhere; }
 .sent { display: none; font-weight: 600; color: var(--action); margin: 0 0 .2rem; }
 li:target { background: var(--target); padding-left: .5rem; padding-right: .5rem; }
 li:target .sent { display: block; }
@@ -279,7 +283,7 @@ def _route(config: Config, conn: sqlite3.Connection, request: _Request) -> Respo
     session = _session(config, conn, request.cookies.get(SESSION_COOKIE))
     if session is None:
         return _to_login()
-    if request.method == "POST" and not hmac.compare_digest(request.form.get("csrf", ""), session.csrf):
+    if request.method == "POST" and not _same(request.form.get("csrf", ""), session.csrf):
         return _page(403, "Refused", "<p>This form is from another session. <a href=\"/seat/\">Start again</a>.</p>")
     if request.method == "POST":
         if request.path == "/seat/logout":
@@ -296,7 +300,7 @@ def _route(config: Config, conn: sqlite3.Connection, request: _Request) -> Respo
         query = parse_qs(request.query, keep_blank_values=True)
         after = query.get("after_seq", ["0"])[-1]
         reply = query.get("reply", [""])[-1]
-        if not SEQ.fullmatch(after) or (reply and not MESSAGE_ID.fullmatch(reply)):
+        if not SEQ.fullmatch(after) or int(after) > MAX_SEQ or (reply and not MESSAGE_ID.fullmatch(reply)):
             return _page(400, "Bad request", "<p>That link isn't one the seat makes.</p>")
         return _conversation(config, conn, session, match.group(1), int(after), reply or None)
     return _not_found()
@@ -335,7 +339,7 @@ def _login(config: Config, conn: sqlite3.Connection, request: _Request) -> Respo
     with transaction(conn):
         fresh = conn.execute("DELETE FROM seat_prelogin WHERE digest = ? AND expires_at > ?",
                              (_digest(pre), now)).rowcount
-    if not fresh or not hmac.compare_digest(request.cookies.get(PRE_COOKIE, ""), pre):
+    if not fresh or not _same(request.cookies.get(PRE_COOKIE, ""), pre):
         return _login_form(conn, 403, '<p class="notice-box">That login form had expired. Paste the token again.</p>')
     key = str(config.db_path)
     with _failures_lock:
@@ -465,8 +469,9 @@ def _inbox(config: Config, conn: sqlite3.Connection, session: _Session) -> Respo
         start = messages.read_seq(conn, session.role)
         rows = conn.execute("SELECT * FROM messages WHERE recipient = ? AND seq > ? ORDER BY seq LIMIT ?",
                             (session.role, start, INBOX_PAGE)).fetchall()
-        member = {row["conversation_id"] for row in conn.execute("SELECT conversation_id FROM participants"
-                                                                  " WHERE role = ?", (session.role,)).fetchall()}
+        member = {row["conversation_id"]: row["title"] for row in conn.execute(
+            "SELECT p.conversation_id, c.title FROM participants p JOIN conversations c ON c.id = p.conversation_id"
+            " WHERE p.role = ?", (session.role,)).fetchall()}
         page = messages.as_page(rows, lambda row: _inbox_entry(row, member))
         receipt = ""
         if page:
@@ -491,10 +496,11 @@ def _inbox(config: Config, conn: sqlite3.Connection, session: _Session) -> Respo
     return _page(200, "Inbox", body)
 
 
-def _inbox_entry(row: sqlite3.Row, member: set[str]) -> dict[str, Any]:
+def _inbox_entry(row: sqlite3.Row, member: dict[str, str]) -> dict[str, Any]:
     if row["conversation_id"] is not None and row["conversation_id"] not in member:
         return {"seq": row["seq"], "placeholder": True}
-    return {**messages.as_dict(row), "conversation_seq": row["conversation_seq"]}
+    return {**messages.as_dict(row), "conversation_seq": row["conversation_seq"],
+            "title": member.get(row["conversation_id"] or "")}
 
 
 def _inbox_item(entry: dict[str, Any], session: _Session) -> str:
@@ -502,7 +508,8 @@ def _inbox_item(entry: dict[str, Any], session: _Session) -> str:
         return '<li class="placeholder">A message from a conversation you\'re no longer in.</li>'
     where = (f'<p class="actions"><a href="{_link(entry["conversation_id"], entry["conversation_seq"])}">'
              'Open in conversation</a></p>' if entry["conversation_id"] else "")
-    return _message(entry, session, where)
+    title = f'<p class="in">{_e(entry["title"])}</p>' if entry.get("title") else ""
+    return _message(entry, session, where, before=title)
 
 def _ack(config: Config, conn: sqlite3.Connection, session: _Session, receipt: str) -> Response:
     with transaction(conn):
@@ -533,8 +540,12 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
     request_id = request_id or _mint_request(conn, session, conversation_id)
     shown = {int(item["seq"]) for item in page["messages"]}
     items = "".join(_history_item(conversation_id, item, shown, session) for item in page["messages"])
+    # A page can end early on its byte budget, so whether more follow is asked of the store, not the page's length.
+    more = conn.execute("SELECT 1 FROM messages WHERE conversation_id = ? AND conversation_seq > ?"
+                        " AND (recipient = ? OR sender = ?) LIMIT 1",
+                        (conversation_id, page["next_seq"], session.role, session.role)).fetchone()
     newer = (f'<p class="pager"><a href="/seat/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Newer</a></p>'
-             if len(page["messages"]) == HISTORY_PAGE else "")
+             if page["messages"] and more else "")
     parent = next((item for item in page["messages"] if item["message_id"] == reply), None) if reply else None
     quoted = (f'<blockquote class="relayed"><p>{_e(_short(parent["text"]))}</p></blockquote>' if parent
               else "")
@@ -573,16 +584,41 @@ def _send(config: Config, conn: sqlite3.Connection, session: _Session, conversat
     """Membership and the form's own binding first, so a retry never replays past either; then one send."""
     if session.role not in _participants(conn, conversation_id):
         return _not_in(403, "You're no longer in this conversation, so nothing was sent.")
-    request_id, text, reply_to = form["request_id"], form["text"], form.get("reply_to") or None
+    request_id = form["request_id"]
     now = _now()
+    # The quota check and the reservation are one transaction, so two overlapping sends can't both take the last
+    # place. A form already sent is a retry and takes no new place; a send that stores nothing gives its place back.
     with transaction(conn):
         bound = conn.execute("SELECT * FROM seat_requests WHERE request_id = ?", (request_id,)).fetchone()
-        sent = conn.execute("SELECT COUNT(*) FROM seat_requests WHERE session = ? AND sent_at > ?",
-                            (session.digest, now - 3600)).fetchone()[0]
-    if bound is None or bound["session"] != session.digest or bound["conversation_id"] != conversation_id:
+        mine = bound is not None and bound["session"] == session.digest and bound["conversation_id"] == conversation_id
+        reserved = mine and bound["sent_at"] is None
+        if reserved:
+            taken = conn.execute("SELECT COUNT(*) FROM seat_requests WHERE session = ? AND sent_at > ?",
+                                 (session.digest, now - 3600)).fetchone()[0]
+            if taken >= SENDS_PER_HOUR:
+                reserved = None
+            else:
+                conn.execute("UPDATE seat_requests SET sent_at = ? WHERE request_id = ?", (now, request_id))
+    if not mine:
         return _page(403, "Refused", '<p>This form belongs to another page. <a href="/seat/">Start again</a>.</p>')
-    if bound["sent_at"] is None and sent >= SENDS_PER_HOUR:
+    if reserved is None:
         return _retry(config, conn, session, conversation_id, form, 429, "You've sent a lot this hour; try later.")
+    try:
+        return _store(config, conn, session, conversation_id, form)
+    finally:
+        if reserved and not _stored(conn, request_id):
+            with transaction(conn):
+                conn.execute("UPDATE seat_requests SET sent_at = NULL WHERE request_id = ? AND sent_at = ?",
+                             (request_id, now))
+
+
+def _stored(conn: sqlite3.Connection, request_id: str) -> bool:
+    return conn.execute("SELECT 1 FROM message_requests WHERE request_id = ?", (request_id,)).fetchone() is not None
+
+
+def _store(config: Config, conn: sqlite3.Connection, session: _Session, conversation_id: str,
+           form: dict[str, str]) -> Response:
+    request_id, text, reply_to = form["request_id"], form["text"], form.get("reply_to") or None
     try:
         result = conversations.send(conn, config, sender=session.role, conversation_id=conversation_id, text=text,
                                     request_id=request_id, reply_to=reply_to)
@@ -598,10 +634,8 @@ def _send(config: Config, conn: sqlite3.Connection, session: _Session, conversat
     except BatonError:
         return _retry(config, conn, session, conversation_id, form, 400, "That couldn't be sent as written. "
                       "Nothing was sent.")
-    with transaction(conn):
-        conn.execute("UPDATE seat_requests SET sent_at = COALESCE(sent_at, ?) WHERE request_id = ?", (now, request_id))
-        seq = conn.execute("SELECT conversation_seq FROM messages WHERE id = ? LIMIT 1",
-                           (result["message_id"],)).fetchone()["conversation_seq"]
+    seq = conn.execute("SELECT conversation_seq FROM messages WHERE id = ? LIMIT 1",
+                       (result["message_id"],)).fetchone()["conversation_seq"]
     return _redirect(_link(conversation_id, seq))
 
 
@@ -618,9 +652,11 @@ def _mint_request(conn: sqlite3.Connection, session: _Session, conversation_id: 
     with transaction(conn):
         conn.execute("INSERT INTO seat_requests (request_id, session, conversation_id, created_at) VALUES"
                      " (?, ?, ?, ?)", (request_id, session.digest, conversation_id, _now()))
-        conn.execute("DELETE FROM seat_requests WHERE session = ? AND sent_at IS NULL AND request_id NOT IN"
-                     " (SELECT request_id FROM seat_requests WHERE session = ? AND sent_at IS NULL"
-                     " ORDER BY created_at DESC LIMIT ?)", (session.digest, session.digest, MAX_REQUESTS))
+        # At most MAX_REQUESTS kept per session, sent or not: this hour's sends first (the quota counts them),
+        # then the newest forms. With MAX_SESSIONS sessions at most, that bounds the table.
+        conn.execute("DELETE FROM seat_requests WHERE session = ? AND request_id NOT IN (SELECT request_id FROM"
+                     " seat_requests WHERE session = ? ORDER BY (sent_at IS NOT NULL AND sent_at > ?) DESC,"
+                     " created_at DESC LIMIT ?)", (session.digest, session.digest, _now() - 3600, MAX_REQUESTS))
     return request_id
 
 
@@ -670,6 +706,11 @@ def _when(at: str, zone: tzinfo) -> str:
         return at
     hour = moment.hour % 12 or 12
     return f"{moment.day} {moment:%b}, {hour}:{moment:%M} {'am' if moment.hour < 12 else 'pm'} {moment:%Z}"
+
+
+def _same(given: str, expected: str) -> bool:
+    """A constant-time comparison that refuses, rather than raises on, a value that isn't ASCII."""
+    return hmac.compare_digest(given.encode(), expected.encode())
 
 
 def _short(text: str, limit: int = 160) -> str:
