@@ -85,7 +85,7 @@ _ADDED_COLUMNS = {
     9: {"conversations": ("revision INTEGER NOT NULL DEFAULT 0", "last_activity_at TEXT")},
     # A generation's watermark, when it was switched to and from, and whether its owner dropped it.
     11: {"generations": ("watermark_epoch TEXT", "watermark_seq INTEGER", "activated_at TEXT", "deactivated_at TEXT",
-                         "dropped_at TEXT")},
+                         "dropped_at TEXT", "last_write_at TEXT")},
 }
 _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
@@ -94,7 +94,8 @@ _BACKFILL = {
     9: ("UPDATE conversations SET last_activity_at = COALESCE((SELECT MAX(at) FROM messages m"
         " WHERE m.conversation_id = conversations.id), created_at)",),
     # A version-10 producer's one generation was active from creation.
-    11: ("UPDATE generations SET activated_at = created_at WHERE active = 1 AND activated_at IS NULL",),
+    11: ("UPDATE generations SET activated_at = created_at WHERE active = 1 AND activated_at IS NULL",
+         "UPDATE generations SET last_write_at = created_at WHERE last_write_at IS NULL"),
 }
 # Tables a version adds whole. `_SCHEMA` creates them (IF NOT EXISTS) on every open, so an upgrade needs no
 # statement of its own for them; naming them here makes the version a step, and the tests check each exists.
@@ -169,7 +170,8 @@ _SCHEMA = (
         watermark_seq INTEGER,
         activated_at TEXT,
         deactivated_at TEXT,
-        dropped_at TEXT
+        dropped_at TEXT,
+        last_write_at TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS generations_by_producer ON generations (producer, active)",
     # A read batch: the manifest Baton issued, which a commit is checked against. `expires_at` is epoch seconds.

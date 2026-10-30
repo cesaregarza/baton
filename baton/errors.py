@@ -176,13 +176,13 @@ class GenerationBehind(ActivationRefused):
 
 
 class ReconcileRequired(BatonError):
-    """Too many pairs to check from state in one activation; refill through `dirty` and try again."""
+    """More pairs than one activation checks: the operator raises the bound in config and retries the same one."""
 
     code = "reconcile_required"
 
-    def __init__(self, detail: str, pairs: int) -> None:
+    def __init__(self, detail: str, pairs: int, bound: int) -> None:
         super().__init__(detail)
-        self.extra = {"pairs": pairs}
+        self.extra = {"pairs": pairs, "bound": bound, "key": "indexer.max_activation_reconcile"}
 
 
 class CursorExpired(BatonError):

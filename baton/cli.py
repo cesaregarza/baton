@@ -408,7 +408,7 @@ def _add_index_commands(commands: Any) -> None:
     create.add_argument("--producer", required=True)
     create.add_argument("--profile", help="its profile as JSON (summarizer, embedding); - for stdin")
     create.set_defaults(handler=lambda config, args: _write(config, lambda conn: derived.generation_create(
-        conn, config, args.producer, _json_file(args.profile) if args.profile else None)))
+        conn, config, args.producer, _json_file(args.profile, "--profile") if args.profile else None)))
     activate = generation.add_parser("activate", help="switch readers to a generation, if it is complete")
     activate.add_argument("generation")
     activate.add_argument("--producer", required=True)
@@ -429,11 +429,11 @@ def _write(config: Config, operation: Any) -> Any:
         conn.close()
 
 
-def _json_file(path: str) -> Any:
+def _json_file(path: str, flag: str = "--file") -> Any:
     try:
         return json.loads(sys.stdin.read() if path == "-" else Path(path).read_text())
     except (OSError, ValueError) as error:
-        raise InvalidRequest(f"--file must name readable JSON: {type(error).__name__}") from None
+        raise InvalidRequest(f"{flag} must name readable JSON: {type(error).__name__}") from None
 
 
 def _index(config: Config, operation: Any) -> Any:

@@ -166,7 +166,7 @@ INDEXER_LIMITS = {"max_artifact_bytes": (1, 1 << 20), "max_citations": (1, 1000)
                   "batch_ttl_seconds": (60, 86400), "max_input_segments": (1, 10000),
                   "max_commits_per_hour": (1, 10000), "receipt_retention_days": (1, 365), "cleanup_batch": (1, 10000),
                   "max_generations": (1, 100), "generation_retention_days": (1, 365),
-                  "max_activation_reconcile": (1, 1000000)}
+                  "max_activation_reconcile": (1, 100000)}
 
 
 # The dashboard binds only here: it has no login, so anyone who can reach its port can read it.
