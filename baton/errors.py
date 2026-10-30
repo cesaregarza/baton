@@ -147,6 +147,24 @@ class NothingToIndex(BatonError):
     code = "nothing_to_index"
 
 
+class VectorsIncomplete(BatonError):
+    code = "vectors_incomplete"
+
+
+class VectorConflict(BatonError):
+    code = "vector_conflict"
+
+
+class EmbeddingProfileConflict(BatonError):
+    """Another producer's active generation already embeds this model with a different signature."""
+
+    code = "embedding_profile_conflict"
+
+    def __init__(self, detail: str, model: str, signature: dict, other: dict) -> None:
+        super().__init__(detail)
+        self.extra = {"model": model, "signature": signature, "other": other}
+
+
 class UnknownGeneration(BatonError):
     code = "unknown_generation"
 

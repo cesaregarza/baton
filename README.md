@@ -410,7 +410,7 @@ Every tool acts as the caller's role, which comes from the caller's credential.
 | `read_history(conversation_id, after_seq?, before_seq?, limit?)` | A conversation as you saw it, your own messages included. `before_seq` pages backwards. Marks nothing read |
 | `set_topic(conversation_id, topic?)` | Set, rename or clear a conversation's topic. Needs `can_manage_participants` and membership |
 | `add_participant(conversation_id, participant)`, `remove_participant(...)` | Change who is in a conversation. Needs `can_manage_participants` |
-| `search(query, conversation_id?, topic?, kinds?, limit?, before?, producer?)` | Messages you can read that contain every word of `query` (at most 8 words and 200 characters; a longer query is refused, not shortened), best first, one hit per message. `kinds` adds derived artifacts (`summary`, `decisions`, `open_questions`, `summary_recent`), which `producer` can narrow. `before` is an ISO 8601 time with its UTC offset. Uses SQLite FTS5 when available, otherwise a slower scan; `keyword_index` says which. Present when `[search] enabled = true` |
+| `search(query, conversation_id?, topic?, kinds?, limit?, before?, producer?, query_vector?, model?)` | Messages you can read that contain every word of `query` (at most 8 words and 200 characters; a longer query is refused, not shortened), best first, one hit per message. `kinds` adds derived artifacts (`summary`, `decisions`, `open_questions`, `summary_recent`), which `producer` can narrow. With embeddings on, `query_vector` and `model` re-order the keyword matches you can read by similarity; they never add one. `before` is an ISO 8601 time with its UTC offset. Uses SQLite FTS5 when available, otherwise a slower scan; `keyword_index` says which. Present when `[search] enabled = true` |
 | `get_message(message_id)` | One message you can read. Present when search is enabled |
 | `read_artifacts(conversation_id, producer?)` | A conversation's derived summaries, decisions and open questions that you can read, each labelled derived, not authoritative, and `valid` or `behind`. Present when search is enabled |
 
@@ -471,6 +471,26 @@ keeps serving; `generation activate G` switches readers to it in one step, but o
 with a message left is covered through its latest message, and otherwise says which conversations are
 incomplete or changed since. `generation drop G` discards an inactive generation and frees its place at once
 (a producer holds at most `[indexer] max_generations`, 3 by default).
+
+With `[search] embeddings = true`, a generation can be created with an embedding profile (`--profile` JSON:
+`{"embedding": {"model": ..., "dim": ..., "normalization": "unit" | "none", "distance": "cosine" |
+"inner_product"}}`). Baton never computes a vector: the indexer supplies them in each commit, as `vectors`
+(`{"item": {"kind": K} | {"message_id": M}, "vector": [...]}`) and `skips` (`empty_text`, `over_token_limit` or
+`excluded_kind`), one for every kind written and every message the batch served that has none yet. A commit
+missing one is refused whole, with nothing recorded, and can be retried with the same `request_id`. A
+generation holds at most `[indexer] max_vectors_per_generation` vectors (1,000,000 by default); a commit that
+would pass it is refused whole with `limit_exceeded`.
+
+A search with `query_vector` and `model` re-ranks a wider keyword pool: up to 4× the limit of message matches,
+and up to 4× the limit of artifact matches when `kinds` asks for them, so up to 8× in all. Every active
+generation that embeds with `model` must have the query's dimension; otherwise the search is refused, naming
+the producer, generation and dimension that don't fit.
+
+One model name means one embedding signature (model, dimension, normalization and distance) across all active
+generations. `generation activate` refuses a generation whose signature differs from another producer's active
+one for the same model, with `embedding_profile_conflict` naming both, and nothing switches; a producer may
+change its own, since the generation it replaces isn't compared. Give a different embedding its own model
+name, such as `toy-embed@256`.
 
 ## Documentation
 
