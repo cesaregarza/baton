@@ -5,6 +5,8 @@ from __future__ import annotations
 
 class BatonError(Exception):
     code = "baton_error"
+    # Fields a refusal reports beside its code and detail, such as where to resume.
+    extra: dict = {}
 
 
 class InvalidRequest(BatonError):
@@ -75,3 +77,23 @@ class ConversationFull(BatonError):
 
 class ConversationRateLimited(BatonError):
     code = "conversation_rate_limited"
+
+
+class UnknownMessage(BatonError):
+    """No message with that id that the caller may read. The same refusal either way, so it reveals nothing."""
+
+    code = "unknown_message"
+
+
+class UnsupportedKind(BatonError):
+    code = "unsupported_kind"
+
+
+class CursorExpired(BatonError):
+    """The change-log position is from another log, or older than what retention kept: start again from state."""
+
+    code = "cursor_expired"
+
+    def __init__(self, detail: str, reset_cursor: str) -> None:
+        super().__init__(detail)
+        self.extra = {"reset_cursor": reset_cursor, "resync": True}

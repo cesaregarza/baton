@@ -38,7 +38,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from baton import events, messages
+from baton import changes, events, messages
 from baton.config import Config, Conversations
 from baton.errors import (
     ConversationFull,
@@ -145,18 +145,21 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str, 
 
 
 def list_for(conn: sqlite3.Connection, role: str, topic: Any = None, *, limit: int = MAX_LISTED,
-             before: tuple[str, str] | None = None) -> list[dict[str, Any]]:
+             before: tuple[str, str] | None = None, changed_since: str | None = None) -> list[dict[str, Any]]:
     """The conversations `role` takes part in, newest first, with their participants.
 
     `topic` narrows them to that topic and anything under it. It never widens what the role may see: a
     conversation it is not in stays out whether it has a topic or not. One call returns at most `limit`;
-    to read on, pass the last one's `page_cursor(...)` as `before`.
+    to read on, pass the last one's `page_cursor(...)` as `before`. `changed_since`, an ISO time, keeps only
+    those with a message after it: a discovery aid, not a guarantee of completeness.
     """
     where, values = _under(topic)
     after, cursor = _before(before, "c.")
+    since, moment = ("", ()) if changed_since is None else (" AND COALESCE(c.last_activity_at, c.created_at) > ?",
+                                                            (utc_iso(changed_since, "changed_since"),))
     rows = conn.execute("SELECT c.* FROM conversations c JOIN participants p ON p.conversation_id = c.id"
-                        f" WHERE p.role = ?{where}{after} ORDER BY c.created_at DESC, c.id DESC LIMIT ?",
-                        (role, *values, *cursor, _limit(limit))).fetchall()
+                        f" WHERE p.role = ?{where}{after}{since} ORDER BY c.created_at DESC, c.id DESC LIMIT ?",
+                        (role, *values, *cursor, *moment, _limit(limit))).fetchall()
     return [_summary(conn, row) for row in rows]
 
 
@@ -213,6 +216,7 @@ def add(conn: sqlite3.Connection, config: Config, conversation_id: str, particip
                                      f"{settings.max_participants}")
             conn.execute("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
                          (conversation_id, participant, events.now()))
+            changes.record(conn, conversation_id, "participant_added", role=participant)
             _fan_out(conn, conversation_id, [*current, participant], sender=None, text=f"{actor} added {participant}",
                      notice={"event": "participant_added", "participant": participant, "by": actor})
         participants = _participants(conn, conversation_id)
@@ -231,6 +235,7 @@ def remove(conn: sqlite3.Connection, config: Config, conversation_id: str, parti
                 raise InvalidRequest(f"a conversation keeps at least {MIN_PARTICIPANTS} participants")
             conn.execute("DELETE FROM participants WHERE conversation_id = ? AND role = ?",
                          (conversation_id, participant))
+            changes.record(conn, conversation_id, "participant_removed", role=participant)
             _fan_out(conn, conversation_id, [role for role in current if role != participant], sender=None,
                      text=f"{actor} removed {participant}",
                      notice={"event": "participant_removed", "participant": participant, "by": actor})
@@ -302,7 +307,7 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
 
 
 def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq: int = 0,
-            limit: int = 50) -> dict[str, Any]:
+            limit: int = 50, before_seq: int | None = None) -> dict[str, Any]:
     """The conversation as `role` saw it, oldest first, after `after_seq`: what it received and what it sent.
 
     That is exactly the messages sent while it was a participant, so a role
@@ -312,20 +317,30 @@ def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq
     cursor, so `read_messages` and `wait` still hand over each unread message
     once. A message is gone from history once retention deletes the reader's
     copy.
+
+    With `before_seq`, the page is the messages just before it instead, still oldest first, and `prev_seq`
+    (the page's first seq) is where to read further back from.
     """
-    if not 1 <= limit <= messages.MAX_PAGE_MESSAGES or after_seq < 0:
-        raise InvalidRequest(f"limit must be 1-{messages.MAX_PAGE_MESSAGES} and after_seq at least 0")
+    if not 1 <= limit <= messages.MAX_PAGE_MESSAGES or after_seq < 0 or (before_seq is not None and before_seq < 1):
+        raise InvalidRequest(f"limit must be 1-{messages.MAX_PAGE_MESSAGES}, after_seq at least 0 and before_seq "
+                             "at least 1")
     with transaction(conn):
         _load(conn, conversation_id)
         if role not in _participants(conn, conversation_id):
             raise NotAParticipant(f"{role} is not in {conversation_id}")
         # The reader's copy of each message to it, and one copy of each it sent, which it holds none of.
+        # Reading backwards takes the newest ones before `before_seq`, so a page cut by size keeps those.
+        backwards = before_seq is not None
         rows = conn.execute("SELECT * FROM messages WHERE conversation_id = ? AND conversation_seq > ?"
-                            " AND (recipient = ? OR sender = ?) GROUP BY conversation_seq"
-                            " ORDER BY conversation_seq LIMIT ?", (conversation_id, after_seq, role, role, limit)
+                            " AND conversation_seq < ? AND (recipient = ? OR sender = ?) GROUP BY conversation_seq"
+                            f" ORDER BY conversation_seq {'DESC' if backwards else ''} LIMIT ?",
+                            (conversation_id, after_seq, before_seq if backwards else 2 ** 62, role, role, limit)
                             ).fetchall()
         page = messages.as_page_for(conn, role, rows, _history_entry)
-    return {"messages": page, "next_seq": page[-1]["seq"] if page else after_seq}
+    if backwards:
+        page.reverse()
+    return {"messages": page, "next_seq": page[-1]["seq"] if page else after_seq,
+            "prev_seq": page[0]["seq"] if page else (before_seq if backwards else after_seq)}
 
 
 def full_history(conn: sqlite3.Connection, conversation_id: str, after_seq: int = 0,
@@ -365,8 +380,10 @@ def _fan_out(conn: sqlite3.Connection, conversation_id: str, recipients: list[st
         raise ConversationFull(f"{', '.join(full)} has {messages.MAX_UNREAD} unread messages, so no participant "
                                "got this; retry after it reads")
     message_id = message_id or messages.new_message_id()
-    conn.execute("UPDATE conversations SET last_seq = last_seq + 1 WHERE id = ?", (conversation_id,))
+    conn.execute("UPDATE conversations SET last_seq = last_seq + 1, last_activity_at = ? WHERE id = ?",
+                 (events.now(), conversation_id))
     conversation_seq = _load(conn, conversation_id)["last_seq"]
+    changes.record(conn, conversation_id, "message_added", message_id=message_id)
     return {role: messages.store_copy(conn, message_id=message_id, sender=sender, recipient=role, text=text,
                                       job_id=job_id, conversation_id=conversation_id,
                                       conversation_seq=conversation_seq, relayed=relayed, notice=notice,
@@ -462,4 +479,21 @@ def _history_entry(row: sqlite3.Row, reply_to: dict[str, Any] | None = None) -> 
 def _summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     return {"conversation_id": row["id"], "title": row["title"], "topic": row["topic"],
             "created_by": row["created_by"], "created_at": row["created_at"],
-            "participants": _participants(conn, row["id"])}
+            "participants": _participants(conn, row["id"]), "revision": row["revision"],
+            "last_seq": row["last_seq"], "last_activity_at": row["last_activity_at"] or row["created_at"]}
+
+
+def utc_iso(moment: str, name: str) -> str:
+    """A time to compare with stored times, in the form they are stored in: UTC `isoformat()`.
+
+    Stored times all come from `datetime.now(UTC).isoformat()`, so once a given time is converted to UTC and
+    written the same way, comparing the strings compares the instants. One in another offset is converted;
+    one without an offset, or that doesn't parse, is refused.
+    """
+    try:
+        parsed = datetime.fromisoformat(str(moment))
+    except ValueError:
+        raise InvalidRequest(f"{name} must be an ISO 8601 time with its UTC offset") from None
+    if parsed.tzinfo is None:
+        raise InvalidRequest(f"{name} must carry its UTC offset")
+    return parsed.astimezone(UTC).isoformat()

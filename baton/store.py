@@ -9,17 +9,19 @@ between a read and the write that depends on it.
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -78,16 +80,25 @@ _ADDED_COLUMNS = {
     # position the batch had when its original wake was delivered, which of the two it is, and when it
     # first took a cap slot. Added, never rewritten, so an existing wake comes through untouched.
     7: {"wakes": ("due_at REAL", "baseline_seq INTEGER", "ordinal INTEGER", "claimed_at REAL")},
+    # Each conversation's source revision, bumped with every change the change log records, and when it
+    # last had a message.
+    9: {"conversations": ("revision INTEGER NOT NULL DEFAULT 0", "last_activity_at TEXT")},
 }
 _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
     5: ("UPDATE messages SET author_kind = 'agent' WHERE sender IS NOT NULL",),
+    # Revisions start at 0 for every existing conversation; activity is the newest message still held.
+    9: ("UPDATE conversations SET last_activity_at = COALESCE((SELECT MAX(at) FROM messages m"
+        " WHERE m.conversation_id = conversations.id), created_at)",),
 }
 # Tables a version adds whole. `_SCHEMA` creates them (IF NOT EXISTS) on every open, so an upgrade needs no
 # statement of its own for them; naming them here makes the version a step, and the tests check each exists.
 _ADDED_TABLES = {
     # The browser seat (`baton.seat`).
     8: ("seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"),
+    # The conversation change log and its epoch and retention floor (`baton.changes`). The search index is
+    # not listed: it exists only where SQLite has FTS5.
+    9: ("change_log", "log_meta"),
 }
 _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys()))
 
@@ -116,8 +127,24 @@ _SCHEMA = (
         created_at TEXT NOT NULL,
         last_seq INTEGER NOT NULL DEFAULT 0,
         escalated_at TEXT,
-        topic TEXT
+        topic TEXT,
+        revision INTEGER NOT NULL DEFAULT 0,
+        last_activity_at TEXT
     )""",
+    # Every change to a conversation's source, in order: a message added, a copy expired by retention, a
+    # participant added or removed. Each carries the revision it bumped the conversation to. Only source
+    # changes are logged; reading logs nothing. See baton.changes.
+    """CREATE TABLE IF NOT EXISTS change_log (
+        change_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        message_id TEXT,
+        role TEXT,
+        at TEXT NOT NULL
+    )""",
+    # The log's identity (`log_epoch`) and how far retention has pruned it (`pruned_through`).
+    "CREATE TABLE IF NOT EXISTS log_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     """CREATE TABLE IF NOT EXISTS participants (
         conversation_id TEXT NOT NULL REFERENCES conversations(id),
         role TEXT NOT NULL,
@@ -317,7 +344,67 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
             for statement in _BACKFILL.get(step, ()):
                 conn.execute(statement)
+        # A random epoch no client can already hold, written once: at creation, or at the upgrade adding the log.
+        conn.execute("INSERT OR IGNORE INTO log_meta (key, value) VALUES ('log_epoch', ?), ('pruned_through', '0')",
+                     (secrets.token_hex(16),))
+        _ensure_search_index(conn)
         if version is None:
             conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         elif version != SCHEMA_VERSION:
             conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+
+
+def fts5_available(conn: sqlite3.Connection) -> bool:
+    """Whether this SQLite has FTS5. Without it, search falls back to a bounded LIKE scan (baton.search)."""
+    try:
+        conn.execute("CREATE VIRTUAL TABLE temp.fts5_probe USING fts5(x)")
+    except sqlite3.OperationalError:
+        return False
+    conn.execute("DROP TABLE temp.fts5_probe")
+    return True
+
+
+def _ensure_search_index(conn: sqlite3.Connection) -> None:
+    """The keyword index over message text: created once, filled from what is already stored, kept by triggers.
+
+    It holds its own copy of each text with the copy's real key, (recipient, seq), and search joins on that
+    key, never on rowid: `messages` has no INTEGER PRIMARY KEY, so a VACUUM may renumber rowids, and a
+    rowid join could then pair one copy's text with another copy's reader. The delete trigger matches the key
+    too, so a renumbered rowid can only leave an orphan row, which never joins.
+    """
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'messages_fts'").fetchone() or not fts5_available(conn):
+        return
+    conn.execute("CREATE VIRTUAL TABLE messages_fts USING fts5(text, recipient UNINDEXED, seq UNINDEXED,"
+                 " tokenize = 'unicode61 remove_diacritics 2')")
+    conn.execute("INSERT INTO messages_fts (rowid, text, recipient, seq)"
+                 " SELECT rowid, text, recipient, seq FROM messages")
+    conn.execute("CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN"
+                 " INSERT INTO messages_fts (rowid, text, recipient, seq) VALUES (new.rowid, new.text, new.recipient,"
+                 " new.seq); END")
+    conn.execute("CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN"
+                 " DELETE FROM messages_fts WHERE rowid = old.rowid AND recipient = old.recipient AND seq = old.seq;"
+                 " END")
+
+
+def connect_read_only(path: Path) -> sqlite3.Connection:
+    """Open the database for reading only, as the local `baton index` commands do.
+
+    Read-only twice over: the file is opened `mode=ro`, and `PRAGMA query_only` refuses any write the
+    connection is asked for. It never creates or upgrades the schema, so a database another version made is
+    refused: start the host once to migrate it.
+    """
+    directory = datadir.canonical(path.parent)
+    path = directory / path.name
+    with datadir.opened(directory):
+        if not path.exists():
+            raise ConfigError(f"no database at {path} yet; start the host once to create it")
+    conn = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, isolation_level=None, timeout=30,
+                           check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    row = conn.execute("SELECT version FROM schema_version").fetchone()
+    if row is None or row["version"] != SCHEMA_VERSION:
+        conn.close()
+        raise SchemaMismatch(f"the database's schema is version {row['version'] if row else 'unknown'}, and this "
+                             f"baton reads version {SCHEMA_VERSION}: start the host once to migrate it first")
+    return conn

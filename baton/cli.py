@@ -21,11 +21,11 @@ import sys
 import time
 from typing import Any
 
+from baton import changes, conversations, datadir, inbox, jobs, messages, remote, wakes
 from baton import config as config_module
-from baton import conversations, datadir, inbox, jobs, messages, remote, wakes
 from baton.config import Config, ConfigError
 from baton.errors import BatonError, InvalidRequest
-from baton.store import connect
+from baton.store import connect, connect_read_only
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         _print({"error": getattr(error, "code", "config"), "detail": str(error)})
         return 2
     except BatonError as error:
-        _print({"error": error.code, "detail": str(error)})
+        _print({"error": error.code, "detail": str(error), **error.extra})
         return 1
     _print(result)
     return 0
@@ -123,6 +123,7 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("hash-passphrase", help="hash an OAuth consent passphrase for the config")
     oauth = commands.add_parser("oauth", help="OAuth grants").add_subparsers(dest="oauth_command", required=True)
     oauth.add_parser("revoke-all", help="end every OAuth access and refresh grant").set_defaults(handler=_revoke_all)
+    _add_index_commands(commands)
     commands.add_parser("wakes", help="show recent wakes and how they ended").set_defaults(
         handler=lambda config, args: _db(config, wakes.recent))
     return parser
@@ -354,6 +355,34 @@ def _revoke_all(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     from baton.auth import revoke_all
 
     return {"revoked": revoke_all(config.oauth_state_path)}
+
+
+def _add_index_commands(commands: Any) -> None:
+    """Local, read-only commands for the host owner's indexing worker: no role, no token, no MCP.
+
+    They open the database read-only, follow the change log through a cursor the worker keeps, and print
+    change metadata only, never message text. They write nothing at all.
+    """
+    index = commands.add_parser("index", help="read-only change feed for a local indexing worker").add_subparsers(
+        dest="index_command", required=True)
+    changes_parser = index.add_parser("changes", help="changes after a cursor, oldest first, metadata only")
+    changes_parser.add_argument("--after", help="the next_cursor of the last call; omit to start at the oldest kept")
+    changes_parser.add_argument("--limit", type=int, default=100)
+    changes_parser.set_defaults(handler=lambda config, args: _index(config, lambda conn: changes.read(
+        conn, changes.Scope.ALL, cursor=args.after, limit=args.limit)))
+    wait_parser = index.add_parser("wait", help="block until something changes after a cursor; prints only its seq")
+    wait_parser.add_argument("--after", required=True)
+    wait_parser.add_argument("--timeout", type=float, default=30.0, help="seconds")
+    wait_parser.set_defaults(handler=lambda config, args: _index(config, lambda conn: changes.wait(
+        conn, changes.Scope.ALL, cursor=args.after, timeout_seconds=args.timeout)))
+
+
+def _index(config: Config, operation: Any) -> Any:
+    conn = connect_read_only(config.db_path)
+    try:
+        return operation(conn)
+    finally:
+        conn.close()
 
 
 def _print(value: Any) -> None:

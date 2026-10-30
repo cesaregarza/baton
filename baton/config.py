@@ -127,6 +127,13 @@ class Conversations:
     escalation_role: str | None = None
 
 
+@dataclass(frozen=True)
+class Search:
+    """Keyword search over messages for roles, off unless enabled. Each role finds only what it may read."""
+
+    enabled: bool = False
+
+
 # The dashboard binds only here: it has no login, so anyone who can reach its port can read it.
 LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 # An https origin: lowercase host name or IPv4 address, optional port, nothing after it.
@@ -183,6 +190,7 @@ class Config:
     conversations: Conversations = field(default_factory=Conversations)
     dashboard: Dashboard = field(default_factory=Dashboard)
     seat: Seat = field(default_factory=Seat)
+    search: Search = field(default_factory=Search)
 
     @property
     def resource_url(self) -> str:
@@ -236,6 +244,7 @@ def load(explicit: str | os.PathLike[str] | None = None) -> Config:
 
 
 def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
+    _refuse_reserved(raw)
     host = raw.get("host", {})
     public_url = str(host.get("public_url", "")).rstrip("/")
     if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", public_url):
@@ -275,7 +284,20 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         conversations=conversations,
         dashboard=dashboard,
         seat=_seat(raw.get("seat", {}), roles, public_url, dashboard),
+        search=Search(enabled=_boolean(raw.get("search", {}), "enabled", False, "search.enabled")),
     )
+
+
+# Keys a later indexer slice will read. Refused until then, so a config written for that slice can't load here
+# and appear to work.
+RESERVED_INDEXER_KEYS = ("messaging_role", "proposal_recipients")
+
+
+def _refuse_reserved(raw: dict) -> None:
+    indexer = raw.get("indexer", {})
+    for key in RESERVED_INDEXER_KEYS:
+        if isinstance(indexer, dict) and key in indexer:
+            raise ConfigError(f"indexer.{key} is not supported yet")
 
 
 def canonical_issuer(public_url: str) -> str:

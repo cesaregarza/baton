@@ -18,7 +18,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from baton import events
+from baton import changes, events
 from baton.errors import InvalidRequest, MailboxFull, RequestTooOld
 from baton.store import transaction
 
@@ -352,6 +352,10 @@ def _forget_old(conn: sqlite3.Connection, recipient: str, read_seq: int) -> None
     """Delete read messages, and their job-less events, once past retention; expire old retry identities."""
     current = datetime.now(UTC)
     cutoff = (current - READ_RETENTION).isoformat()
+    # Each conversation copy that goes is a change to that conversation's source, logged per copy.
+    for row in conn.execute("SELECT id, conversation_id FROM messages WHERE recipient = ? AND seq <= ? AND at < ?"
+                            " AND conversation_id IS NOT NULL ORDER BY seq", (recipient, read_seq, cutoff)).fetchall():
+        changes.record(conn, row["conversation_id"], "message_expired", message_id=row["id"], role=recipient)
     conn.execute("DELETE FROM messages WHERE recipient = ? AND seq <= ? AND at < ?", (recipient, read_seq, cutoff))
     conn.execute("DELETE FROM events WHERE job_id IS NULL AND kind = 'message' AND audience = ? AND seq <= ?"
                  " AND at < ?", (recipient, read_seq, cutoff))
