@@ -196,10 +196,26 @@ class Dispatcher:
                 return 0
             if row["ordinal"] is not None and self._reminder_is_spent(conn, row):
                 return 0
+            configured = self._config.roles.get(role)
+            if configured is None or not configured.wake.enabled:
+                # The hook can be taken away while an attempt is still waiting to be retried. The
+                # claim refuses one that has not gone yet, but a retry arrives here instead, and
+                # there is still nothing to send to: a deliverer handed an empty target raises on
+                # the way out and ends the pass.
+                conn.execute("UPDATE wakes SET status = 'skipped', finished_at = ? WHERE role = ?"
+                             " AND key = ? AND status = 'pending'", (events.now(), role, key))
+                log.info("wake %s %s skipped: the role has no wake to send to", role, key)
+                return 0
             if row["attempts"] >= MAX_ATTEMPTS:
-                conn.execute("UPDATE wakes SET status = 'failed', finished_at = ? WHERE role = ? AND key = ?",
-                             (events.now(), role, key))
-                log.error("wake %s %s gave up after %d attempts", role, key, row["attempts"])
+                # Giving up is gated on the lease, exactly as sending is. A live lease means the
+                # last allowed attempt is still in flight and its callback may yet report success;
+                # retiring the row here would record a delivered wake as failed and lose its
+                # reminders, because the callback lands on a row that is no longer pending.
+                if conn.execute(
+                        "UPDATE wakes SET status = 'failed', finished_at = ? WHERE role = ? AND key = ?"
+                        " AND status = 'pending' AND lease_until <= ?",
+                        (events.now(), role, key, _now())).rowcount:
+                    log.error("wake %s %s gave up after %d attempts", role, key, row["attempts"])
                 return 0
             # Taking the lease is the claim to send, so it is one conditional update: a worker that
             # lost the race finds the row leased and does nothing. Checking the status and writing
@@ -265,7 +281,11 @@ class Dispatcher:
             " AND NOT EXISTS (SELECT 1 FROM wakes AS later WHERE later.role = w.role"
             "                 AND later.baseline_seq = w.baseline_seq AND later.ordinal > w.ordinal"
             "                 AND later.status IN ('scheduled', 'capped') AND later.due_at <= ?)"
-            " ORDER BY w.due_at LIMIT ?", (_now(), _now(), PAGE)).fetchall()
+            # Deferred work sorts last. A `capped` row keeps its original due time, so ordering by
+            # due time alone puts it at the front of every pass, where it is offered and refused
+            # again; enough of them fill the page and a role whose reminder has just come due with
+            # cap to spare is never reached. Work that can be served goes first.
+            " ORDER BY w.status = 'capped', w.due_at LIMIT ?", (_now(), _now(), PAGE)).fetchall()
         for row in due:
             if self._claim_reminder(conn, row["role"], row["key"], row["ordinal"], row["baseline_seq"]):
                 tried += self._attempt(conn, row["role"], row["key"])
