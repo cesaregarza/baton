@@ -659,3 +659,26 @@ def test_a_read_during_the_original_delivery_leaves_no_reminders(tmp_path: Path,
 
     assert [key for key in rows(conn) if key.endswith((":r1", ":r2"))] == [], \
         "a read during the original delivery still left reminders scheduled"
+
+
+def test_the_second_retires_a_first_whose_lease_is_still_live(tmp_path: Path, clock,
+                                                              monkeypatch) -> None:
+    """A first reminder holding a live lease is retired by the second's claim, not by a retry.
+
+    With its lease expired it is the retry path that stops it, which is the other test. While the
+    lease is still live nothing retries it, so the claim of the later ordinal is the only thing that
+    can end its chain.
+    """
+    monkeypatch.setattr(wakes, "LEASE_SECONDS", 1800.0)
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder(True, False))
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()                       # r1 sent, failed, lease live for another 25 minutes
+    assert rows(conn)["messages:1:r1"] == "pending"
+
+    clock.advance(TWENTY_MINUTES - FIVE_MINUTES)
+    leased_until = conn.execute("SELECT lease_until FROM wakes WHERE key = 'messages:1:r1'").fetchone()[0]
+    assert leased_until > wakes._now(), "this case needs the lease still live when the second falls due"
+
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1:r1"] == "superseded", "a leased first reminder kept its chain"
+    assert [c["id"] for c in recorder.calls][2:] == [wakes.wake_id("worker", "messages:1:r2")]
