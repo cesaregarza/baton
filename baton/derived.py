@@ -578,8 +578,8 @@ def _vector_entries(entries: Any, field: str) -> list[dict[str, Any]]:
         if field == "vectors":
             vector = entry.get("vector")
             if not isinstance(vector, list) or not all(
-                    isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x) for x in vector):
-                raise InvalidRequest(f"the vector for {_item_name(item)} is a list of finite numbers")
+                    isinstance(x, int | float) and not isinstance(x, bool) for x in vector):
+                raise InvalidRequest(f"the vector for {_item_name(item)} is a list of numbers")  # range: _check_fit
             canonical.append({"item": item, "vector": [float(x) for x in vector]})
         else:
             if entry.get("reason") not in SKIP_REASONS:
