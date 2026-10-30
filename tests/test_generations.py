@@ -597,3 +597,12 @@ def test_a_conversation_empty_at_the_watermark_and_refilled_after_is_behind(db, 
     say(db, config, emptied, "back after the watermark")
     error = refused("generation_behind", activate, db, config, new)
     assert {p["conversation_id"] for p in error.extra["pairs"]} == {emptied}
+
+
+def test_an_obligation_owed_at_the_watermark_stays_incomplete_after_its_copies_expire(db, config) -> None:
+    owed, sent = converse(db, config, 2)  # a copy existed at the watermark, and nothing was filled for it
+    new = create(db, config)
+    expire(db, *sent)  # every copy from then goes after the watermark; only the log shows it existed
+    say(db, config, owed, "a new message")
+    error = refused("generation_incomplete", activate, db, config, new)
+    assert {p["conversation_id"] for p in error.extra["pairs"]} == {owed}
