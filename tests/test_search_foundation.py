@@ -393,12 +393,14 @@ def test_search_covers_direct_messages_only_for_their_two_ends(db, config) -> No
     assert ids(search.search(db, config, "viewer", "ocelot")) == []  # view-all widens to conversations only
 
 
-def test_search_refuses_artifact_kinds_and_takes_messages(db, config) -> None:
+def test_search_takes_message_and_artifact_kinds_and_refuses_others(db, config) -> None:
+    """Slice 1 refused artifact kinds while none existed; they are searchable now (test_artifact_reads)."""
     conversation_id = start(db, config)
     say(db, config, "reviewer", conversation_id, "lemur notes")
-    refused("unsupported_kind", search.search, db, config, "assistant", "lemur", kinds=["summary"])
-    refused("unsupported_kind", search.search, db, config, "assistant", "lemur", kinds=["message", "decisions"])
+    refused("unsupported_kind", search.search, db, config, "assistant", "lemur", kinds=["vectors"])
+    refused("unsupported_kind", search.search, db, config, "assistant", "lemur", kinds=["message", "embeddings"])
     assert len(search.search(db, config, "assistant", "lemur", kinds=["message"])["hits"]) == 1
+    assert search.search(db, config, "assistant", "lemur", kinds=["summary"])["hits"] == []
 
 
 def test_search_treats_query_syntax_as_plain_words(db, config) -> None:
