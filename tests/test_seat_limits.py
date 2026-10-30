@@ -198,3 +198,40 @@ def test_sends_older_than_the_hour_are_trimmed_too(room, monkeypatch) -> None:
     for _ in range(12):
         get(host.config, f"/seat/c/{cid}", cookies=cookies)
     assert _rows(host) <= 10
+
+
+def test_a_retry_that_stores_while_its_failed_twin_releases_is_still_counted(room, monkeypatch) -> None:
+    """At the quota's last place: attempt A (a bad parent) reserves it; the corrected retry B, same form id, passes
+    its check while A holds it; A fails and gives the place back; then B stores. B must still count, so the next
+    new form is refused."""
+    import threading
+
+    host, cid, cookies = room
+    monkeypatch.setattr(seat, "SENDS_PER_HOUR", 2)
+    post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": "one"}, cookies=cookies)
+    form = _form(host, cid, cookies)
+    real_send = seat.conversations.send
+    b_waiting, a_done, results = threading.Event(), threading.Event(), {}
+
+    def send(*args, **kwargs):
+        if threading.current_thread().name == "retry":
+            b_waiting.set()
+            a_done.wait(30)  # B has passed its check; it stores only after A has failed and released
+            return real_send(*args, **kwargs)
+        retry = threading.Thread(name="retry", target=lambda: results.setdefault("b", post(
+            host.config, f"/seat/c/{cid}/send", form | {"text": "two"}, cookies=cookies)))
+        retry.start()
+        b_waiting.wait(30)
+        results["retry"] = retry
+        return real_send(*args, **kwargs)  # A: its parent doesn't exist, so this raises and stores nothing
+
+    monkeypatch.setattr(seat.conversations, "send", send)
+    a = post(host.config, f"/seat/c/{cid}/send", form | {"text": "two", "reply_to": "msg_000000000000000000000000"},
+             cookies=cookies)
+    a_done.set()
+    results["retry"].join(30)
+    monkeypatch.setattr(seat.conversations, "send", real_send)
+    assert a.status == 400 and results["b"].status == 303
+    assert [row[2] for row in stored_by_seat(host)] == ["one", "two"]
+    third = post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": "three"}, cookies=cookies)
+    assert third.status == 429 and len(stored_by_seat(host)) == 2
