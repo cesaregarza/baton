@@ -30,6 +30,8 @@ MAX_TERMS = 8
 MAX_QUERY = 200
 SNIPPET_CHARS = 160
 ARTIFACT_KINDS = (*derived.KINDS, derived.RECENT)
+# The first message a version was made from, which a recent window reports as where it starts.
+FIRST_INPUT = "(SELECT MIN(i.from_seq) FROM artifact_inputs i WHERE i.version_id = v.id) AS first_input"
 TOPIC = re.compile(r"[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)?")
 
 
@@ -138,7 +140,8 @@ def _artifact_hits(conn: sqlite3.Connection, config: Config, role: str, terms: l
     if mode == "fts5":
         values["match"] = _match(terms)
         rows = conn.execute(
-            "WITH matched AS MATERIALIZED (SELECT v.*, c.last_seq, snippet(artifacts_fts, 0, '[', ']', '…', 12)"
+            f"WITH matched AS MATERIALIZED (SELECT v.*, c.last_seq, {FIRST_INPUT},"
+            " snippet(artifacts_fts, 0, '[', ']', '…', 12)"
             " AS snippet, bm25(artifacts_fts) AS score FROM artifacts_fts"
             " JOIN artifact_versions v ON v.id = artifacts_fts.version_id"
             " JOIN conversations c ON c.id = v.conversation_id"
@@ -148,16 +151,12 @@ def _artifact_hits(conn: sqlite3.Connection, config: Config, role: str, terms: l
     else:
         likes = _likes(terms, "v.body", values)
         rows = conn.execute(
-            "SELECT v.*, c.last_seq, 0 AS score FROM artifact_versions v JOIN conversations c ON c.id ="
+            f"SELECT v.*, c.last_seq, {FIRST_INPUT}, 0 AS score FROM artifact_versions v JOIN conversations c ON c.id ="
             f" v.conversation_id WHERE {likes} AND {condition}{filters} ORDER BY v.created_at DESC LIMIT :limit",
             {**values, "limit": limit}).fetchall()
-    return [(row["score"], {
-        "version_id": row["id"], "conversation_id": row["conversation_id"], "kind": row["kind"],
-        "producer": row["producer"], "version": row["version"], "state": _state(row),
-        "covered_through_seq": row["covered_through_seq"], "at": row["created_at"],
-        "snippet": row["snippet"] if mode == "fts5" else _snippet(row["body"], terms),
-        "derived": True, "authoritative": False,
-    }) for row in rows]
+    return [(row["score"], {**_labels(row), "at": row["created_at"],
+                            "snippet": row["snippet"] if mode == "fts5" else _snippet(row["body"], terms)})
+            for row in rows]
 
 
 def read_artifacts(conn: sqlite3.Connection, config: Config, role: str, conversation_id: str,
@@ -169,9 +168,9 @@ def read_artifacts(conn: sqlite3.Connection, config: Config, role: str, conversa
     condition, values = served(config, role)
     filters, extra = _artifact_filters(list(ARTIFACT_KINDS), str(conversation_id), None, None, producer)
     rows = conn.execute(
-        "SELECT v.*, c.last_seq, (SELECT MIN(i.from_seq) FROM artifact_inputs i WHERE i.version_id = v.id)"
-        " AS first_input FROM artifact_versions v JOIN conversations c ON c.id = v.conversation_id"
-        f" WHERE {condition}{filters} ORDER BY v.kind, v.producer", {**values, **extra}).fetchall()
+        f"SELECT v.*, c.last_seq, {FIRST_INPUT} FROM artifact_versions v"
+        f" JOIN conversations c ON c.id = v.conversation_id WHERE {condition}{filters} ORDER BY v.kind, v.producer",
+        {**values, **extra}).fetchall()
     return {"artifacts": [_artifact(row) for row in rows]}
 
 
@@ -195,16 +194,20 @@ def served(config: Config, role: str) -> tuple[str, dict[str, Any]]:
 
 
 def _artifact(row: sqlite3.Row) -> dict[str, Any]:
-    shown = {
+    return {**_labels(row), "body": row["body"], "citations": json.loads(row["citations"])}
+
+
+def _labels(row: sqlite3.Row) -> dict[str, Any]:
+    """What every served artifact says about itself, in reads and in search alike."""
+    labels = {
         "version_id": row["id"], "conversation_id": row["conversation_id"], "kind": row["kind"],
         "producer": row["producer"], "scope_id": row["scope_id"], "generation": row["generation"],
         "version": row["version"], "state": _state(row), "covered_through_seq": row["covered_through_seq"],
-        "source_revision": row["source_revision"], "body": row["body"], "citations": json.loads(row["citations"]),
-        "derived": True, "authoritative": False,
+        "source_revision": row["source_revision"], "derived": True, "authoritative": False,
     }
     if row["kind"] == derived.RECENT:  # a window over the latest messages, never coverage of the whole
-        shown |= {"window": "recent", "from_seq": row["first_input"]}
-    return shown
+        labels |= {"window": "recent", "from_seq": row["first_input"], "to_seq": row["covered_through_seq"]}
+    return labels
 
 
 def _state(row: sqlite3.Row) -> str:

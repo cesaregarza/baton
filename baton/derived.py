@@ -342,16 +342,28 @@ def _kind_plan(conn: sqlite3.Connection, producer: str, generation: str | None, 
 
 def _recent_plan(conn: sqlite3.Connection, config: Config, producer: str, generation: str | None,
                  conversation_id: str, last_seq: int) -> dict[str, Any]:
-    """A recent window builds on nothing: it starts at the oldest of the latest messages that still have a copy."""
+    """A recent window builds on nothing and always reaches the newest message.
+
+    It is chosen from the newest message backwards: as many of the latest messages that still have a copy as
+    the window size and every bound allow. Built forwards from the oldest of them instead, a fragmented
+    history would truncate the window short of the newest and commit the same old prefix every time.
+    """
     current = _current(conn, producer, generation, conversation_id, RECENT)
     if current is not None and current["state"] == "valid" and current["covered_through_seq"] >= last_seq:
         raise UpToDate(f"{RECENT} already covers the latest messages")
-    latest = conn.execute("SELECT conversation_seq FROM messages WHERE conversation_id = ? GROUP BY conversation_seq"
-                          " ORDER BY conversation_seq DESC LIMIT ?",
-                          (conversation_id, config.search.rolling_window_messages)).fetchall()
-    return {"prior_version_id": None, "prior_version": current["version"] if current else 0,
-            "start_seq": latest[-1][0] if latest else last_seq + 1, "prior_inputs": [], "rebase": False,
-            "reason": None}
+    limits = config.indexer
+    most = min(config.search.rolling_window_messages, limits.max_manifest_items)
+    ranges_allowed = min(limits.max_manifest_segments, limits.max_input_segments)
+    start, ranges, previous = last_seq + 1, 0, None
+    for (seq,) in conn.execute("SELECT conversation_seq FROM messages WHERE conversation_id = ? GROUP BY"
+                               " conversation_seq ORDER BY conversation_seq DESC LIMIT ?", (conversation_id, most)):
+        joins = previous is not None and seq == previous - 1  # continues the range the newer message began
+        if not joins and ranges == ranges_allowed:
+            break
+        ranges += 0 if joins else 1
+        start = previous = seq
+    return {"prior_version_id": None, "prior_version": current["version"] if current else 0, "start_seq": start,
+            "prior_inputs": [], "rebase": False, "reason": None}
 
 
 def _window(conn: sqlite3.Connection, config: Config, conversation_id: str, plans: dict[str, dict[str, Any]],

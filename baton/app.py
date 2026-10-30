@@ -188,8 +188,9 @@ class Tools:
             "\"open_questions\" and \"summary_recent\". Any other kind is refused."))] = None,
         limit: Annotated[int, Field(ge=1, le=search_module.MAX_HITS)] = 20,
         before: Annotated[str | None, Field(description=(
-            "Only messages sent before this ISO 8601 time. It must carry its UTC offset (Z or +hh:mm), and is "
-            "compared as an instant."))] = None,
+            "An ISO 8601 time with its UTC offset (Z or +hh:mm), compared as an instant: only messages sent "
+            "before it, and only artifacts written before it (when the artifact was made, not when the messages "
+            "it covers were sent)."))] = None,
         producer: Annotated[str | None, Field(description="Only artifacts from this producer. A filter only.")] = None,
     ) -> dict[str, Any]:
         """Messages, and derived artifacts if `kinds` asks for them, matching every word of `query`, best first.
