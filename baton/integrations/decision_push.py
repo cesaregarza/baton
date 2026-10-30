@@ -45,12 +45,13 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
-from urllib.parse import SplitResult, quote, urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from mcp.server.mcpserver import MCPServer
 
 from baton import datadir
 from baton.config import Config, ConfigError
+from baton.dashboard import message_path
 from baton.integrations import IntegrationUnavailable
 from baton.store import connect
 
@@ -241,10 +242,9 @@ class DecisionPush:
     def _link(self, conversation_id: str | None, conversation_seq: int | None) -> str | None:
         if self.settings.link_base is None or conversation_id is None or conversation_seq is None:
             return None
-        # The page that starts at the message, as the dashboard's own Needs you links it: past the first page
-        # a bare anchor would land on a page that doesn't hold it.
-        seq = int(conversation_seq)
-        return f"{self.settings.link_base}/c/{quote(conversation_id, safe='')}?after_seq={seq - 1}#m-{seq}"
+        # The dashboard's own link to the message, the one its pages use: past the first page a bare anchor
+        # would land on a page that doesn't hold it.
+        return self.settings.link_base + message_path(conversation_id, int(conversation_seq))
 
     def _push(self, link: str | None) -> bool:
         headers = {"Title": TITLE, "Content-Type": "text/plain; charset=utf-8"}
