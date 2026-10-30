@@ -437,16 +437,28 @@ baton oauth revoke-all                        end every OAuth grant
 baton wakes                                   recent wakes and how they ended
 baton index changes [--after CURSOR] [--limit N]   conversation changes after a cursor (metadata only)
 baton index wait --after CURSOR [--timeout S]      block until a change is logged after CURSOR
+baton index dirty --producer P                     what producer P has no current summary of
+baton index begin-batch --producer P --conversation C --kinds K1,K2   a manifest of the messages to read
+baton index read-batch B --page N --producer P     one page of batch B's messages
+baton index commit-batch B --file F --producer P   write a version of each kind from batch B
 ```
 
 `--as` defaults to `$BATON_ROLE` (never a human role), `--host` to `$BATON_HOST`, and `--config` to `$BATON_CONFIG` or
 `~/.config/baton/baton.toml`. Every command prints JSON. A refusal prints `{"error": code, "detail": ...}`
 and exits with status 1. A configuration problem exits with status 2.
 
-`baton index` opens the database read-only and is meant for a local indexer on the host. Every new message,
-expired copy and participant change in a conversation bumps that conversation's `revision` and appends to a
-change log kept for 30 days. A cursor from before that, or from a different database, is refused as
-`cursor_expired` with a `reset_cursor` to rebuild from.
+`baton index` is for a local indexer on the host. `changes`, `wait` and `dirty` open the database read-only.
+Every new message, expired copy and participant change in a conversation bumps that conversation's `revision`
+and appends to a change log kept for 30 days. A cursor from before that, or from a different database, is
+refused as `cursor_expired` with a `reset_cursor` to rebuild from.
+
+The writers act as a producer named in `[indexer] producers` (a name that isn't also a role). A batch's
+manifest lists exactly which messages it covers; the indexer reads every page, then commits a summary,
+decisions or open questions for the conversation, and Baton records which messages each version was made
+from. A version becomes invalid as soon as one of those messages is gone from every mailbox, and the next
+batch for that kind rebuilds it from the start. Retrying a commit with the same `request_id` and an identical
+payload (the same digest) returns its receipt and writes nothing; the same `request_id` with anything changed
+is refused as `idempotency_conflict`. Nothing an indexer writes is shown to roles yet.
 
 ## Documentation
 

@@ -19,9 +19,9 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -99,6 +99,10 @@ _ADDED_TABLES = {
     # The conversation change log and its epoch and retention floor (`baton.changes`). The search index is
     # not listed: it exists only where SQLite has FTS5.
     9: ("change_log", "log_meta"),
+    # The local indexing writer's derived data (`baton.derived`). Its keyword index is not listed, for the
+    # same reason as the messages'.
+    10: ("generations", "batches", "batch_pages", "artifact_versions", "artifact_inputs", "artifact_depends_on",
+         "commit_requests"),
 }
 _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys()))
 
@@ -145,6 +149,76 @@ _SCHEMA = (
     )""",
     # The log's identity (`log_epoch`) and how far retention has pruned it (`pruned_through`).
     "CREATE TABLE IF NOT EXISTS log_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    # Derived data, written only by the local indexing writer (baton.derived). A generation is one producer's
+    # set of artifacts; each producer has one so far, created by its first batch.
+    """CREATE TABLE IF NOT EXISTS generations (
+        id TEXT PRIMARY KEY,
+        producer TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        profile TEXT NOT NULL,
+        active INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS generations_by_producer ON generations (producer, active)",
+    # A read batch: the manifest Baton issued, which a commit is checked against. `expires_at` is epoch seconds.
+    """CREATE TABLE IF NOT EXISTS batches (
+        id TEXT PRIMARY KEY,
+        producer TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        generation TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        manifest TEXT NOT NULL,
+        manifest_digest TEXT NOT NULL,
+        pages INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at REAL NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS batch_pages (
+        batch_id TEXT NOT NULL,
+        page INTEGER NOT NULL,
+        delivered_at TEXT NOT NULL,
+        PRIMARY KEY (batch_id, page)
+    )""",
+    # Immutable once written, apart from `state`, which goes from valid to invalid and never back.
+    """CREATE TABLE IF NOT EXISTS artifact_versions (
+        id TEXT PRIMARY KEY,
+        producer TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        generation TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        body TEXT NOT NULL,
+        citations TEXT NOT NULL,
+        covered_through_seq INTEGER NOT NULL,
+        source_revision INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        batch_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (producer, scope_id, generation, conversation_id, kind, version)
+    )""",
+    # Every conversation seq a version was made from, its prior's included, as merged ranges.
+    """CREATE TABLE IF NOT EXISTS artifact_inputs (
+        version_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        from_seq INTEGER NOT NULL,
+        to_seq INTEGER NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS artifact_inputs_by_seq ON artifact_inputs (conversation_id, from_seq, to_seq)",
+    "CREATE INDEX IF NOT EXISTS artifact_inputs_by_version ON artifact_inputs (version_id)",
+    "CREATE TABLE IF NOT EXISTS artifact_depends_on (version_id TEXT PRIMARY KEY, prior_id TEXT NOT NULL)",
+    # A commit's retry identity and receipt. Kept apart from batches and versions, so a replay is answered
+    # from this row alone after either is cleaned up, until `expires_at`.
+    """CREATE TABLE IF NOT EXISTS commit_requests (
+        producer TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        receipt TEXT NOT NULL,
+        committed_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        PRIMARY KEY (producer, request_id)
+    )""",
     """CREATE TABLE IF NOT EXISTS participants (
         conversation_id TEXT NOT NULL REFERENCES conversations(id),
         role TEXT NOT NULL,
@@ -348,6 +422,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT OR IGNORE INTO log_meta (key, value) VALUES ('log_epoch', ?), ('pruned_through', '0')",
                      (secrets.token_hex(16),))
         _ensure_search_index(conn)
+        _ensure_artifact_index(conn)
         if version is None:
             conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         elif version != SCHEMA_VERSION:
@@ -384,6 +459,19 @@ def _ensure_search_index(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN"
                  " DELETE FROM messages_fts WHERE rowid = old.rowid AND recipient = old.recipient AND seq = old.seq;"
                  " END")
+
+
+def _ensure_artifact_index(conn: sqlite3.Connection) -> None:
+    """The keyword index over artifact bodies, kept by triggers as the messages' is. Nothing reads it yet."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'artifacts_fts'").fetchone() or not fts5_available(conn):
+        return
+    conn.execute("CREATE VIRTUAL TABLE artifacts_fts USING fts5(body, version_id UNINDEXED,"
+                 " tokenize = 'unicode61 remove_diacritics 2')")
+    conn.execute("INSERT INTO artifacts_fts (rowid, body, version_id) SELECT rowid, body, id FROM artifact_versions")
+    conn.execute("CREATE TRIGGER artifacts_fts_insert AFTER INSERT ON artifact_versions BEGIN"
+                 " INSERT INTO artifacts_fts (rowid, body, version_id) VALUES (new.rowid, new.body, new.id); END")
+    conn.execute("CREATE TRIGGER artifacts_fts_delete AFTER DELETE ON artifact_versions BEGIN"
+                 " DELETE FROM artifacts_fts WHERE rowid = old.rowid AND version_id = old.id; END")
 
 
 def connect_read_only(path: Path) -> sqlite3.Connection:
