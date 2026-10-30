@@ -8,7 +8,7 @@ invalid kind is rebuilt by a rebase, a fresh first version from seq 1.
 
 Every writer runs in one transaction and checks its producer before anything else. Nothing here logs a
 change, adds an event or wakes anyone, and nothing here is authority: an artifact is a derived reading of
-messages, never a decision. Roles can't reach any of it yet.
+messages, never a decision. Roles read it only through `baton.search`, under the reader's own visibility.
 """
 
 from __future__ import annotations

@@ -462,7 +462,7 @@ decisions or open questions for the conversation, and Baton records which messag
 from. A version becomes invalid as soon as one of those messages is gone from every mailbox, and the next
 batch for that kind rebuilds it from the start. Retrying a commit with the same `request_id` and an identical
 payload (the same digest) returns its receipt and writes nothing; the same `request_id` with anything changed
-is refused as `idempotency_conflict`. Nothing an indexer writes is shown to roles yet.
+is refused as `idempotency_conflict`. Roles read the result through `read_artifacts` and `search`.
 
 ## Documentation
 
