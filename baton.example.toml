@@ -20,6 +20,12 @@ description = "Picks up jobs and reports back"
 # Optional: a person rather than an agent. A human role uses only its own bearer token (never OAuth or --as),
 # and its messages read as author_kind "human". See the README's "Human participants".
 # human = true
+# display_name = "Alex Rivera"   # how pages name the role, such as a person's name; the role name when unset
+
+# Optional: an identity that only displays, such as the dashboard's viewer. It never holds a token, an OAuth
+# grant or --as, and can't also be human.
+# [roles.viewer]
+# display_only = true
 
 # Optional, with [conversations] enabled: what a role may do in group conversations (both default to false).
 # can_create_conversations = true
@@ -48,10 +54,23 @@ description = "Picks up jobs and reports back"
 # It has no login: anyone or any process on this machine that can reach the port can read it.
 # [dashboard]
 # enabled = true                              # needs [conversations] enabled
-# viewer_role = "planner"                     # shows what this role may see
+# viewer_role = "viewer"                      # shows what this role may see; it must be display_only
 # listen_host = "127.0.0.1"                   # 127.0.0.1 or ::1 only
 # listen_port = 8766
 # proxy_host = "dash.example.com:8443"       # optional: one exact extra Host, only behind an authenticating proxy
+
+# Optional: a browser seat, where one human role logs in with its own token to read and reply. Off unless enabled.
+# It binds to loopback only, behind a proxy that terminates TLS at `origin`. See the README's "Browser seat".
+# [seat]
+# enabled = true
+# role = "operator"                           # a human role, not display_only, and not the dashboard's viewer
+# origin = "https://seat.example.com"         # the one exact https origin it's opened at; give it its own host name
+# same_host_trust_accepted = false            # true only to accept a host name shared with other services
+# listen_host = "127.0.0.1"                   # 127.0.0.1 or ::1 only
+# listen_port = 8767
+# idle_seconds = 3600                         # a session ends after this long unused (60 to 86400)
+# absolute_seconds = 43200                    # and after this long in all (60 to 604800)
+# timezone = "UTC"                            # the IANA zone pages show times in, such as "America/Chicago"
 
 # Optional: keyword search over messages, and derived artifacts from the local indexer. Off unless enabled.
 # Each role finds only what it may read.
