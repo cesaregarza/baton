@@ -45,12 +45,13 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
-from urllib.parse import SplitResult, quote, urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from mcp.server.mcpserver import MCPServer
 
 from baton import datadir
 from baton.config import Config, ConfigError
+from baton.dashboard import message_path
 from baton.integrations import IntegrationUnavailable
 from baton.store import connect
 
@@ -197,8 +198,16 @@ class DecisionPush:
         return sent
 
     def counts(self) -> dict[str, int]:
-        with self._state() as state:
-            return dict(state["counts"])
+        """How many pushes were sent, failed and held back by the cap. A read: it writes nothing."""
+        directory = self.config.data_dir
+        with datadir.opened(directory) as dir_fd:
+            lock = datadir.open_file(dir_fd, LOCK_FILE, os.O_RDWR | os.O_CREAT, directory=directory)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_SH)
+                found = datadir.read_file(dir_fd, STATE_FILE, directory=directory)
+                return dict((_shape(found[1]) if found else _shape(b"{}"))["counts"])
+            finally:
+                os.close(lock)
 
     def _claim(self, state: dict[str, Any]) -> list[str | None]:
         """Move the watermark past the role's new messages, and return the links of the decisions to push."""
@@ -241,10 +250,9 @@ class DecisionPush:
     def _link(self, conversation_id: str | None, conversation_seq: int | None) -> str | None:
         if self.settings.link_base is None or conversation_id is None or conversation_seq is None:
             return None
-        # The page that starts at the message, as the dashboard's own Needs you links it: past the first page
-        # a bare anchor would land on a page that doesn't hold it.
-        seq = int(conversation_seq)
-        return f"{self.settings.link_base}/c/{quote(conversation_id, safe='')}?after_seq={seq - 1}#m-{seq}"
+        # The dashboard's own link to the message, the one its pages use: past the first page a bare anchor
+        # would land on a page that doesn't hold it.
+        return self.settings.link_base + message_path(conversation_id, int(conversation_seq))
 
     def _push(self, link: str | None) -> bool:
         headers = {"Title": TITLE, "Content-Type": "text/plain; charset=utf-8"}

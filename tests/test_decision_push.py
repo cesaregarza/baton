@@ -7,9 +7,11 @@ link to the dashboard item; never a message's words.
 
 from __future__ import annotations
 
+import html
 import http.server
 import json
 import logging
+import re
 import socket
 import threading
 import time
@@ -443,6 +445,10 @@ def test_a_link_past_the_first_page_opens_the_page_holding_the_message(tmp_path)
     assert page.status == 200
     body = page.body.decode()
     assert 'id="m-105"' in body and "the late decision" in body
+    # The same link the dashboard's own Needs you page gives that message, so the two can't drift.
+    needs = dashboard.respond(config, "GET", "/needs", "127.0.0.1:8766").body.decode()
+    [needs_link] = re.findall(r'href="([^"]*#m-105)"', needs)
+    assert html.unescape(needs_link) == link.removeprefix("http://127.0.0.1:8766")
 
 
 # An unreadable push state never stops Baton (reviewer finding on eb9bd0f1) -----------------------------------
