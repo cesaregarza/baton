@@ -198,8 +198,16 @@ class DecisionPush:
         return sent
 
     def counts(self) -> dict[str, int]:
-        with self._state() as state:
-            return dict(state["counts"])
+        """How many pushes were sent, failed and held back by the cap. A read: it writes nothing."""
+        directory = self.config.data_dir
+        with datadir.opened(directory) as dir_fd:
+            lock = datadir.open_file(dir_fd, LOCK_FILE, os.O_RDWR | os.O_CREAT, directory=directory)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_SH)
+                found = datadir.read_file(dir_fd, STATE_FILE, directory=directory)
+                return dict((_shape(found[1]) if found else _shape(b"{}"))["counts"])
+            finally:
+                os.close(lock)
 
     def _claim(self, state: dict[str, Any]) -> list[str | None]:
         """Move the watermark past the role's new messages, and return the links of the decisions to push."""
