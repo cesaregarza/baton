@@ -393,8 +393,10 @@ def _profile(config: Config, profile: Any) -> dict[str, Any]:
             raise InvalidRequest("profile.embedding.model is a name of 1 to 200 characters")
         if isinstance(dim, bool) or not isinstance(dim, int) or not 1 <= dim <= config.search.max_vector_dim:
             raise InvalidRequest(f"profile.embedding.dim is 1 to {config.search.max_vector_dim}")
-        if embedding["normalization"] not in ("unit", "none") or embedding["distance"] not in ("cosine", "dot"):
-            raise InvalidRequest("profile.embedding.normalization is unit or none, and distance is cosine or dot")
+        if embedding["normalization"] not in ("unit", "none") or \
+                embedding["distance"] not in ("cosine", "inner_product"):
+            raise InvalidRequest("profile.embedding.normalization is unit or none, and distance is cosine or "
+                                 "inner_product")
     return profile
 
 
