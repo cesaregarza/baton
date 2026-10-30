@@ -177,7 +177,7 @@ def commit_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_
                 raise ProvenanceLimitExceeded(
                     f"{kind}'s inputs would be {len(merged)} ranges, over {limits.max_input_segments}",
                     limit="max_input_segments", conversation_id=manifest["conversation_id"], kind=kind,
-                    segments=len(merged))
+                    segments=len(merged), items=_count(merged))
             version_id = _write_version(conn, manifest, artifact, current_version + 1, merged, prior_id)
             written.append({"kind": kind, "version_id": version_id, "version": current_version + 1})
         conn.execute("UPDATE batches SET state = 'committed' WHERE id = ?", (batch_id,))
@@ -188,8 +188,7 @@ def commit_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_
         conn.execute("INSERT INTO commit_requests (producer, request_id, digest, receipt, committed_at, expires_at)"
                      " VALUES (?, ?, ?, ?, ?, ?)", (producer, request_id, digest, json.dumps(stored), committed_at,
                                                     expires))
-    return {"created": True, "request_id": request_id, "committed_at": committed_at,
-            "versions": [{**version, "state": "valid"} for version in written]}
+    return {"created": True, **_with_states(conn, stored)}
 
 
 def dirty(conn: sqlite3.Connection, config: Config, producer: str) -> dict[str, Any]:
@@ -265,13 +264,22 @@ def _commit_request(payload: Any) -> tuple[str, list[dict[str, Any]]]:
 
 def _replay(conn: sqlite3.Connection, receipt: sqlite3.Row) -> dict[str, Any]:
     """The stored receipt with each version's state now: no batch, no revalidation, no write, no content."""
-    stored = json.loads(receipt["receipt"])
-    versions = []
-    for version in stored["versions"]:
-        row = conn.execute("SELECT state FROM artifact_versions WHERE id = ?", (version["version_id"],)).fetchone()
-        versions.append({**version, "state": row["state"] if row else "invalid"})  # only invalid ones are cleaned
-    return {"created": False, "request_id": stored["request_id"], "committed_at": stored["committed_at"],
-            "versions": versions}
+    return {"created": False, **_with_states(conn, json.loads(receipt["receipt"]))}
+
+
+def _with_states(conn: sqlite3.Connection, receipt: dict[str, Any]) -> dict[str, Any]:
+    return {**receipt, "versions": [{**version, "state": _state(conn, version["version_id"])}
+                                    for version in receipt["versions"]]}
+
+
+def _state(conn: sqlite3.Connection, version_id: str) -> str:
+    """`invalid`; `behind`, valid but not covering the whole conversation; or `valid`, as things stand now."""
+    row = conn.execute("SELECT version.state, version.covered_through_seq, conversation.last_seq FROM"
+                       " artifact_versions AS version JOIN conversations AS conversation ON conversation.id ="
+                       " version.conversation_id WHERE version.id = ?", (version_id,)).fetchone()
+    if row is None or row["state"] == "invalid":  # cleanup removes only invalid versions
+        return "invalid"
+    return "behind" if row["covered_through_seq"] < row["last_seq"] else "valid"
 
 
 def _open_batch(conn: sqlite3.Connection, producer: str, batch_id: str) -> sqlite3.Row:
@@ -321,47 +329,47 @@ def _window(conn: sqlite3.Connection, config: Config, conversation_id: str, plan
             last_seq: int) -> dict[str, Any]:
     """The seqs this batch covers, from the lowest checkpoint asked for, as far as the bounds allow.
 
-    A seq with no copy left is an absent hole: covered, never served, never an input. The window stops before
-    the item that would break a bound; the provenance bound is checked for each kind that can commit from
-    here, and if not even one item fits, nothing can advance for that kind.
+    A seq with no copy left is an absent hole: covered, never served, never an input. A run of them is one
+    absent range, so there are never more ranges than segments plus one, and at most `max_manifest_items` + 1
+    rows are read, however long the history. The window stops before the item that would break a bound; the
+    provenance bound is checked for each kind that can commit from here, and if not even one item fits,
+    nothing can advance for that kind.
     """
     limits = config.indexer
     from_seq = min(plan["start_seq"] for plan in plans.values())
     if from_seq > last_seq:
         raise UpToDate("every kind asked for already covers the whole conversation")
     eligible = {kind: plan for kind, plan in plans.items() if plan["start_seq"] == from_seq}
-    present = _present(conn, conversation_id, from_seq, last_seq)
     items: list[tuple[int, str]] = []
     ranges: list[list[int]] = []
-    absent: list[int] = []
-    pending: list[int] = []
-    seq = from_seq
-    for seq in range(from_seq, last_seq + 1):
-        message_id = present.get(seq)
-        if message_id is None:
-            pending.append(seq)
-            continue
+    absent: list[list[int]] = []
+    unaccounted = from_seq  # the first seq neither served nor recorded absent yet
+    stop = None  # the item the window couldn't take
+    for seq, message_id in _present(conn, conversation_id, from_seq, last_seq, limits.max_manifest_items + 1):
         extended = _extend(ranges, seq)
         if len(items) >= limits.max_manifest_items or len(extended) > limits.max_manifest_segments:
+            stop = seq
             break
         over = [kind for kind, plan in eligible.items()
                 if len(_merge(plan["prior_inputs"] + extended)) > limits.max_input_segments]
         if over:
             if not items:
+                merged = _merge(eligible[over[0]]["prior_inputs"] + extended)
                 raise ProvenanceLimitExceeded(
                     f"{over[0]}'s inputs can't take another range within {limits.max_input_segments}",
                     limit="max_input_segments", conversation_id=conversation_id, kind=over[0],
-                    segments=len(_merge(eligible[over[0]]["prior_inputs"] + extended)))
+                    segments=len(merged), items=_count(merged))
+            stop = seq
             break
-        absent += pending
-        pending = []
+        if seq > unaccounted:
+            absent.append([unaccounted, seq - 1])
         items.append((seq, message_id))
         ranges = extended
-    else:
-        seq = last_seq + 1
-    # It covers up to the first item it couldn't take, the holes before that item included.
-    absent += pending
-    to_seq = seq - 1
+        unaccounted = seq + 1
+    # It covers up to the first item it couldn't take, or to the end, the holes before either included.
+    to_seq = last_seq if stop is None else stop - 1
+    if to_seq >= unaccounted:
+        absent.append([unaccounted, to_seq])
     segments = []
     for start, end in ranges:
         run = [(seq, message_id) for seq, message_id in items if start <= seq <= end]
@@ -370,14 +378,17 @@ def _window(conn: sqlite3.Connection, config: Config, conversation_id: str, plan
             "items": [{"seq": seq, "message_id": message_id, "item_revision": ITEM_REVISION}
                       for seq, message_id in run]})
     return {"window": {"from_seq": from_seq, "to_seq": to_seq}, "segments": segments,
-            "absent": [{"seq": seq, "reason": "expired"} for seq in absent], "item_count": len(items)}
+            "absent": [{"from_seq": start, "to_seq": end, "reason": "expired"} for start, end in absent],
+            "item_count": len(items)}
 
 
-def _present(conn: sqlite3.Connection, conversation_id: str, from_seq: int, to_seq: int) -> dict[int, str]:
-    """Conversation seq to message id, for each seq in range that still has a copy."""
-    return {row[0]: row[1] for row in conn.execute(
+def _present(conn: sqlite3.Connection, conversation_id: str, from_seq: int, to_seq: int,
+             limit: int) -> list[tuple[int, str]]:
+    """The first `limit` seqs in range that still have a copy, in order, each with its message id."""
+    return [(row[0], row[1]) for row in conn.execute(
         "SELECT conversation_seq, MIN(id) FROM messages WHERE conversation_id = ? AND conversation_seq BETWEEN ?"
-        " AND ? GROUP BY conversation_seq", (conversation_id, from_seq, to_seq))}
+        " AND ? GROUP BY conversation_seq ORDER BY conversation_seq LIMIT ?",
+        (conversation_id, from_seq, to_seq, limit))]
 
 
 def _revalidate(conn: sqlite3.Connection, manifest: dict[str, Any], kinds: list[str]) -> None:
@@ -389,8 +400,9 @@ def _revalidate(conn: sqlite3.Connection, manifest: dict[str, Any], kinds: list[
                     is None:
                 raise BatchSuperseded(f"message {item['message_id']} at seq {item['seq']} has no copy left")
     for hole in manifest["absent"]:
-        if _present(conn, manifest["conversation_id"], hole["seq"], hole["seq"]):
-            raise BatchSuperseded(f"seq {hole['seq']}, absent when the batch began, now has a message")
+        if _present(conn, manifest["conversation_id"], hole["from_seq"], hole["to_seq"], 1):
+            raise BatchSuperseded(f"seqs {hole['from_seq']}-{hole['to_seq']}, absent when the batch began, now have"
+                                  " a message")
     for kind in kinds:
         prior_id = manifest["kinds"][kind]["prior_version_id"]
         if prior_id is not None:
@@ -474,6 +486,10 @@ def _merge(ranges: list[list[int]]) -> list[list[int]]:
         else:
             merged.append([start, end])
     return merged
+
+
+def _count(ranges: list[list[int]]) -> int:
+    return sum(end - start + 1 for start, end in ranges)
 
 
 def _within(seq: int, ranges: list[list[int]]) -> bool:

@@ -456,8 +456,9 @@ The writers act as a producer named in `[indexer] producers` (a name that isn't 
 manifest lists exactly which messages it covers; the indexer reads every page, then commits a summary,
 decisions or open questions for the conversation, and Baton records which messages each version was made
 from. A version becomes invalid as soon as one of those messages is gone from every mailbox, and the next
-batch for that kind rebuilds it from the start. Retrying a commit with the same `request_id` returns its
-receipt and writes nothing. Nothing an indexer writes is shown to roles yet.
+batch for that kind rebuilds it from the start. Retrying a commit with the same `request_id` and an identical
+payload (the same digest) returns its receipt and writes nothing; the same `request_id` with anything changed
+is refused as `idempotency_conflict`. Nothing an indexer writes is shown to roles yet.
 
 ## Documentation
 
