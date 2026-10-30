@@ -235,3 +235,39 @@ def test_a_retry_that_stores_while_its_failed_twin_releases_is_still_counted(roo
     assert [row[2] for row in stored_by_seat(host)] == ["one", "two"]
     third = post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": "three"}, cookies=cookies)
     assert third.status == 429 and len(stored_by_seat(host)) == 2
+
+
+def test_a_new_form_cannot_take_a_place_still_held_by_a_retry_in_flight(room, monkeypatch) -> None:
+    """A reserves the last place and fails while its retry B is still in flight; a new form C arriving then is
+    refused, because B still holds the place; B stores. The hour ends at the quota, never past it."""
+    import threading
+
+    host, cid, cookies = room
+    monkeypatch.setattr(seat, "SENDS_PER_HOUR", 2)
+    post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": "one"}, cookies=cookies)
+    form, other = _form(host, cid, cookies), _form(host, cid, cookies)
+    real_send = seat.conversations.send
+    b_waiting, a_done, results = threading.Event(), threading.Event(), {}
+
+    def send(*args, **kwargs):
+        if threading.current_thread().name == "retry":
+            b_waiting.set()
+            a_done.wait(30)
+            return real_send(*args, **kwargs)
+        if kwargs.get("text") == "three":
+            return real_send(*args, **kwargs)
+        retry = threading.Thread(name="retry", target=lambda: results.setdefault("b", post(
+            host.config, f"/seat/c/{cid}/send", form | {"text": "two"}, cookies=cookies)))
+        retry.start()
+        b_waiting.wait(30)
+        results["retry"] = retry
+        return real_send(*args, **kwargs)
+
+    monkeypatch.setattr(seat.conversations, "send", send)
+    a = post(host.config, f"/seat/c/{cid}/send", form | {"text": "two", "reply_to": "msg_000000000000000000000000"},
+             cookies=cookies)
+    c = post(host.config, f"/seat/c/{cid}/send", other | {"text": "three"}, cookies=cookies)
+    a_done.set()
+    results["retry"].join(30)
+    assert (a.status, c.status, results["b"].status) == (400, 429, 303)
+    assert [row[2] for row in stored_by_seat(host)] == ["one", "two"]
