@@ -806,3 +806,81 @@ def test_a_role_with_free_cap_is_served_although_capped_roles_fill_the_page(tmp_
 
     assert [c["id"] for c in recorder.calls] == [wakes.wake_id("worker", "messages:3:r1")], \
         "the worker's due reminder never got a pass while capped roles filled the page"
+
+
+def test_a_disabled_terminal_reminder_still_retires_the_earlier_one(tmp_path: Path, clock) -> None:
+    """Reaching the last ordinal ends the chain whether or not anything can be sent.
+
+    A host that was down past both deadlines comes back with the hook gone. The scan offers only the
+    second reminder, since the later due ordinal hides the earlier one, and the claim refuses it for
+    having nowhere to send. That refusal returns before the point where reaching the last ordinal
+    retires what came before it, so the first is left `scheduled` and overdue. Give the role its hook
+    back and the next pass sends a first reminder for a batch whose second was already retired --
+    after the chain was supposed to have ended.
+    """
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    recorder = Recorder()
+    conn = connect(host.config.db_path)
+    messages.send(conn, sender="planner", recipient="worker", text="woken while it had a hook")
+    wakes.Dispatcher(host.config, recorder).pass_once()
+    assert len(recorder.calls) == 1
+    sent = len(recorder.calls)
+
+    (tmp_path / "second").mkdir()
+    without = make_config(tmp_path / "second", data_dir=host.config.data_dir)   # the hook is gone
+    clock.advance(TWENTY_MINUTES + 1)                                          # both deadlines past
+    wakes.Dispatcher(without.config, recorder).pass_once()
+
+    assert rows(conn)["messages:1:r1"] != "scheduled", \
+        "the first reminder was left eligible after the last ordinal had been reached"
+
+    wakes.Dispatcher(host.config, recorder).pass_once()                        # the hook is back
+    assert len(recorder.calls) == sent, \
+        "a first reminder went out after its batch's last ordinal had already been retired"
+
+
+def test_a_recovered_capped_reminder_does_not_wait_on_other_roles_windows(tmp_path: Path, clock,
+                                                                           monkeypatch) -> None:
+    """A role whose own cap window has emptied is servable, whatever other roles are carrying.
+
+    Deferred rows keep their original due time, so ordering them among themselves by that time ties
+    one role's recovery to unrelated roles' cap windows: enough roles still at cap, with older
+    deferred rows, fill the page and a role whose own charges have aged out keeps waiting. Whether a
+    row can be served depends on its own role's window, not on when it first came due.
+    """
+    monkeypatch.setattr(wakes, "PAGE", CROWD)
+    setcap(monkeypatch, 1)
+    host = crowd_config(tmp_path)
+    recorder = Recorder()
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    conn = connect(host.config.db_path)
+    now = wakes._now()
+    window = wakes.REMINDER_WINDOW_SECONDS
+
+    # Each crowd role is still at cap: a charge inside the window, and a deferred row older than
+    # the worker's so it sorts ahead of it.
+    for n in range(CROWD):
+        conn.execute("INSERT INTO wakes (role, key, payload, status, lease_until, attempts,"
+                     " created_at, due_at, baseline_seq, ordinal, claimed_at)"
+                     " VALUES (?, 'messages:1:r1', '{}', 'delivered', 0, 1, ?, ?, 0, 1, ?)",
+                     (f"crowd{n}", now, now - 100, now))
+        conn.execute("INSERT INTO wakes (role, key, payload, status, lease_until, attempts,"
+                     " created_at, due_at, baseline_seq, ordinal)"
+                     " VALUES (?, 'messages:2:r1', '{}', 'capped', 0, 0, ?, ?, 1, 1)",
+                     (f"crowd{n}", now, now - 100))
+    # The worker's own charge has aged out of the window, so its cap is free again. Its deferred row
+    # is the newest of the lot, which is exactly what ties it to the others under due-time ordering.
+    conn.execute("INSERT INTO wakes (role, key, payload, status, lease_until, attempts, created_at,"
+                 " due_at, baseline_seq, ordinal, claimed_at)"
+                 " VALUES ('worker', 'messages:1:r1', '{}', 'delivered', 0, 1, ?, ?, 0, 1, ?)",
+                 (now, now - 100, now - window - 1))
+    conn.execute("INSERT INTO wakes (role, key, payload, status, lease_until, attempts, created_at,"
+                 " due_at, baseline_seq, ordinal)"
+                 " VALUES ('worker', 'messages:3:r1', '{}', 'capped', 0, 0, ?, ?, 2, 1)",
+                 (now, now - 1))
+    conn.commit()
+
+    dispatcher.pass_once()
+
+    assert [c["id"] for c in recorder.calls] == [wakes.wake_id("worker", "messages:3:r1")], \
+        "the worker's deferred reminder waited on other roles' cap windows"
