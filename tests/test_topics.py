@@ -240,6 +240,8 @@ def test_the_topic_step_names_the_table_it_alters() -> None:
     topic_step = 6
     assert topic_step <= SCHEMA_VERSION, "the topic step is not in the schema"
     assert store._ADDED_COLUMNS[topic_step] == {"conversations": ("topic TEXT",)}
-    # Named by its own version, not by the current one: a later step adding a column elsewhere must
-    # not make this read as a failure of the topic step.
-    assert all(step for step in store._ADDED_COLUMNS.values()), "a step names no table"
+    # Named by its own version, not by the current one, so a later step adding a column elsewhere
+    # does not read as a failure of the topic step. The set below is still exact: a step that alters
+    # a new table has to be added here deliberately, which is the point of the assertion.
+    assert {table for step in store._ADDED_COLUMNS.values() for table in step} \
+        == {"messages", "conversations", "wakes"}
