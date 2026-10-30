@@ -96,6 +96,9 @@ _BACKFILL = {
 _ADDED_TABLES = {
     # The browser seat (`baton.seat`).
     8: ("seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"),
+    # The conversation change log and its epoch and retention floor (`baton.changes`). The search index is
+    # not listed: it exists only where SQLite has FTS5.
+    9: ("change_log", "log_meta"),
 }
 _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys()))
 

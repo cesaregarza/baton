@@ -186,7 +186,6 @@ def test_every_older_schema_gains_the_seat_tables(tmp_path: Path, version: int) 
     db.close()
 
 
-def test_the_seat_tables_are_the_newest_step() -> None:
-    assert max(store._ADDED_TABLES) == SCHEMA_VERSION
-    assert set(store._ADDED_TABLES[SCHEMA_VERSION]) == {"seat_sessions", "seat_prelogin", "seat_receipts",
-                                                        "seat_requests"}
+def test_the_seat_tables_are_step_8() -> None:
+    # Named by its own version, not the current one, so a later step that adds tables doesn't break it.
+    assert set(store._ADDED_TABLES[8]) == {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"}
