@@ -580,7 +580,12 @@ def _vector_entries(entries: Any, field: str) -> list[dict[str, Any]]:
             if not isinstance(vector, list) or not all(
                     isinstance(x, int | float) and not isinstance(x, bool) for x in vector):
                 raise InvalidRequest(f"the vector for {_item_name(item)} is a list of numbers")  # range: _check_fit
-            canonical.append({"item": item, "vector": [float(x) for x in vector]})
+            try:
+                as_floats = [float(x) for x in vector]
+            except OverflowError:  # an integer of any size is valid JSON; past a float's range it is refused here
+                raise InvalidRequest(f"the vector for {_item_name(item)} has a component that isn't a finite float32"
+                                     ) from None
+            canonical.append({"item": item, "vector": as_floats})
         else:
             if entry.get("reason") not in SKIP_REASONS:
                 raise InvalidRequest(f"a skip's reason is one of {', '.join(SKIP_REASONS)}")
@@ -651,7 +656,12 @@ def _check_vectors(conn: sqlite3.Connection, config: Config, manifest: dict[str,
 
 
 def fits_float32(value: float) -> bool:
-    """Whether a vector component can be stored as it is kept, a float32: finite and within its range."""
+    """Whether a vector component can be stored as it is kept, a float32: finite and within its range. An integer
+    too large for any float is simply one that can't."""
+    try:
+        value = float(value)
+    except OverflowError:
+        return False
     if not math.isfinite(value):
         return False
     try:
