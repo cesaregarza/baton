@@ -682,3 +682,70 @@ def test_the_second_retires_a_first_whose_lease_is_still_live(tmp_path: Path, cl
     dispatcher.pass_once()
     assert rows(conn)["messages:1:r1"] == "superseded", "a leased first reminder kept its chain"
     assert [c["id"] for c in recorder.calls][2:] == [wakes.wake_id("worker", "messages:1:r2")]
+
+
+def test_a_pending_reminder_is_not_retried_for_a_role_that_lost_its_hook(tmp_path: Path,
+                                                                         clock) -> None:
+    """Losing the hook has to stop a reminder already retrying, not only one still waiting.
+
+    The claim refuses a reminder that is `scheduled` or `capped`, which covers one whose turn has
+    not come. A reminder that was claimed, sent, and failed sits at `pending` and comes back through
+    the retry scan instead, which asks nothing about the config -- so it reaches the deliverer with
+    an empty command and raises on the way out, ending the pass.
+    """
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    recorder = Recorder(True, False)             # the original lands; the first reminder fails
+    conn = connect(host.config.db_path)
+    messages.send(conn, sender="planner", recipient="worker", text="woken while it had a hook")
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    dispatcher.pass_once()
+    clock.advance(FIVE_MINUTES)
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1:r1"] == "pending", "this case needs a reminder left retrying"
+    sent = len(recorder.calls)
+
+    (tmp_path / "second").mkdir()
+    without = make_config(tmp_path / "second", data_dir=host.config.data_dir)   # the hook is gone
+    assert not without.config.roles["worker"].wake.enabled
+    clock.advance(wakes.LEASE_SECONDS + 1)       # past the backoff, well short of the second's turn
+    wakes.Dispatcher(without.config, recorder).pass_once()                      # must not raise
+
+    assert len(recorder.calls) == sent, "a pending reminder was retried for a role with no wake"
+    assert rows(conn)["messages:1:r1"] == "skipped", \
+        "the reminder stayed eligible although it had nowhere to go"
+
+
+def test_a_stale_worker_does_not_fail_an_attempt_that_is_still_in_flight(tmp_path: Path, clock,
+                                                                          monkeypatch) -> None:
+    """Giving up has to be gated on the lease, the same way sending is.
+
+    The attempt count is read and compared before the lease is looked at, so a worker holding a
+    stale snapshot can mark the row failed while the last allowed attempt is still in flight. The
+    send's callback is made outside the transaction, so it then reports success against a row that
+    is no longer pending: a wake that was delivered is recorded as failed and loses its reminders.
+    """
+    monkeypatch.setattr(wakes, "MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(wakes, "LEASE_SECONDS", 1.0)
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    conn = connect(host.config.db_path)
+    first, stale = [False], []
+
+    def deliver(wake: Wake, wake_id: str, body: bytes) -> bool:
+        if first:
+            return first.pop()                   # the first attempt fails, leaving one allowed
+        stale.append(dispatcher._attempt(conn, "worker", "messages:1"))
+        return True
+
+    dispatcher = wakes.Dispatcher(host.config, deliver)
+    messages.send(conn, sender="planner", recipient="worker", text="the one it must read")
+    dispatcher.pass_once()
+    assert rows(conn)["messages:1"] == "pending", "this case needs one failed attempt first"
+
+    clock.advance(wakes.LEASE_SECONDS + 1)
+    dispatcher.pass_once()                       # the last allowed attempt, succeeding
+
+    assert stale == [0], "the stale worker took work that was already in flight"
+    assert rows(conn)["messages:1"] == "delivered", \
+        "a stale worker recorded a delivered wake as failed"
+    assert sorted(k for k in rows(conn) if k.startswith("messages:1:r")) \
+        == ["messages:1:r1", "messages:1:r2"], "the delivered wake lost its reminders"
