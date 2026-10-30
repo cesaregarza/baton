@@ -19,9 +19,9 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -82,13 +82,13 @@ _ADDED_COLUMNS = {
     7: {"wakes": ("due_at REAL", "baseline_seq INTEGER", "ordinal INTEGER", "claimed_at REAL")},
     # Each conversation's source revision, bumped with every change the change log records, and when it
     # last had a message.
-    8: {"conversations": ("revision INTEGER NOT NULL DEFAULT 0", "last_activity_at TEXT")},
+    9: {"conversations": ("revision INTEGER NOT NULL DEFAULT 0", "last_activity_at TEXT")},
 }
 _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
     5: ("UPDATE messages SET author_kind = 'agent' WHERE sender IS NOT NULL",),
     # Revisions start at 0 for every existing conversation; activity is the newest message still held.
-    8: ("UPDATE conversations SET last_activity_at = COALESCE((SELECT MAX(at) FROM messages m"
+    9: ("UPDATE conversations SET last_activity_at = COALESCE((SELECT MAX(at) FROM messages m"
         " WHERE m.conversation_id = conversations.id), created_at)",),
 }
 # Tables a version adds whole. `_SCHEMA` creates them (IF NOT EXISTS) on every open, so an upgrade needs no
