@@ -384,7 +384,8 @@ def _add_index_commands(commands: Any) -> None:
     begin = index.add_parser("begin-batch", help="issue a manifest of the messages a batch reads")
     begin.add_argument("--producer", required=True)
     begin.add_argument("--conversation", required=True)
-    begin.add_argument("--kinds", required=True, help=f"comma-separated, from {', '.join(derived.KINDS)}")
+    begin.add_argument("--kinds", required=True, help=f"comma-separated, from {', '.join(derived.KINDS)}; or "
+                       f"{derived.RECENT} alone, when [search] rolling_window_messages is set")
     begin.set_defaults(handler=lambda config, args: _write(config, lambda conn: derived.begin_batch(
         conn, config, args.producer, args.conversation, args.kinds.split(","))))
     read = index.add_parser("read-batch", help="one page of a batch's messages, recorded as delivered")

@@ -183,21 +183,32 @@ class Tools:
             f"{search_module.MAX_QUERY} characters: a longer query is refused, never shortened."))],
         conversation_id: str | None = None,
         topic: str | None = None,
-        kinds: Annotated[list[str] | None, Field(
-            description="Only [\"message\"] exists so far; any other kind is refused.")] = None,
+        kinds: Annotated[list[str] | None, Field(description=(
+            "What to search: \"message\" (the default), and the derived kinds \"summary\", \"decisions\", "
+            "\"open_questions\" and \"summary_recent\". Any other kind is refused."))] = None,
         limit: Annotated[int, Field(ge=1, le=search_module.MAX_HITS)] = 20,
         before: Annotated[str | None, Field(description=(
-            "Only messages sent before this ISO 8601 time. It must carry its UTC offset (Z or +hh:mm), and is "
-            "compared as an instant."))] = None,
+            "An ISO 8601 time with its UTC offset (Z or +hh:mm), compared as an instant: only messages sent "
+            "before it, and only artifacts written before it (when the artifact was made, not when the messages "
+            "it covers were sent)."))] = None,
+        producer: Annotated[str | None, Field(description="Only artifacts from this producer. A filter only.")] = None,
     ) -> dict[str, Any]:
-        """Messages you can read that match every word of `query`, best first, one hit per message.
+        """Messages, and derived artifacts if `kinds` asks for them, matching every word of `query`, best first.
 
-        Searching marks nothing read and moves nothing. Hits never include a message you couldn't read
-        with read_history or get_message.
+        Searching marks nothing read and moves nothing. Hits never include a message you couldn't read with
+        read_history or get_message, or an artifact made from one. Artifact hits are labelled derived and not
+        authoritative.
         """
         with self._conn() as conn:
             return search_module.search(conn, self._config, role, query, conversation_id=conversation_id,
-                                        topic=topic, kinds=kinds, limit=limit, before=before)
+                                        topic=topic, kinds=kinds, limit=limit, before=before, producer=producer)
+
+    def read_artifacts(self, role: str, conversation_id: str, producer: str | None = None) -> dict[str, Any]:
+        """A conversation's derived summaries, decisions and open questions that you can read: each only if you
+        could read every message it was made from. They are derived readings, never authority; each says how
+        far it covers. `producer` only filters which indexer's you see."""
+        with self._conn() as conn:
+            return search_module.read_artifacts(conn, self._config, role, conversation_id, producer=producer)
 
     def get_message(self, role: str, message_id: str) -> dict[str, Any]:
         """One message by its id, if you can read it: one you sent or hold, or any conversation message if
@@ -294,6 +305,10 @@ CONVERSATION_TOOLS = (
 SEARCH_TOOLS = (
     ("search", auth.SCOPE_READ, True),
     ("get_message", auth.SCOPE_READ, True),
+)
+# Present only when the config enables search. Read-only: nothing on MCP writes derived data.
+ARTIFACT_TOOLS = (
+    ("read_artifacts", auth.SCOPE_READ, True),
 )
 AUDITED_IDS = ("to", "conversation_id", "participant", "topic", "job_id", "reply_to", "request_id",
                "to_state", "expected_revision")
@@ -396,7 +411,7 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
     else:
         server = MCPServer(token_verifier=auth.StaticTokenVerifier(config), **common)
     for name, scope, read_only in (TOOLS + (CONVERSATION_TOOLS if config.conversations.enabled else ())
-                                   + (SEARCH_TOOLS if config.search.enabled else ())):
+                                   + (SEARCH_TOOLS + ARTIFACT_TOOLS if config.search.enabled else ())):
         server.add_tool(guard.wrap(name, scope, getattr(tools, name)), name=name,
                         annotations=ToolAnnotations(readOnlyHint=read_only, destructiveHint=False,
                                                     openWorldHint=False))
