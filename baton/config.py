@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 CONFIG_ENV = "BATON_CONFIG"
 DEFAULT_CONFIG = Path("~/.config/baton/baton.toml")
@@ -158,6 +159,8 @@ class Seat:
     same_host_trust_accepted: bool = False
     idle_seconds: int = 3600
     absolute_seconds: int = 12 * 3600
+    # The one zone the pages show times in; they run no scripts, so they can't ask the phone for its own.
+    timezone: str = "UTC"
 
     @property
     def host(self) -> str:
@@ -424,10 +427,19 @@ def _seat(table: dict[str, Any], roles: dict[str, Role], public_url: str, dashbo
     if listen_host not in LOOPBACK_HOSTS:
         raise ConfigError(f"seat.listen_host must be a loopback address ({' or '.join(LOOPBACK_HOSTS)}); the seat is "
                           "reached only through the proxy at seat.origin")
+    timezone = table.get("timezone", "UTC")
+    try:
+        if not isinstance(timezone, str) or timezone != timezone.strip():
+            raise ValueError(timezone)
+        ZoneInfo(timezone)
+    except (ValueError, ZoneInfoNotFoundError):
+        raise ConfigError(f"seat.timezone must be an IANA time zone such as America/Chicago; "
+                          f"got {timezone!r}") from None
     return Seat(True, role, listen_host,
                 _number(table, "listen_port", 8767, "seat.listen_port", 1, 65535, integer=True), origin, trusted,
                 _number(table, "idle_seconds", 3600, "seat.idle_seconds", 60, 24 * 3600, integer=True),
-                _number(table, "absolute_seconds", 12 * 3600, "seat.absolute_seconds", 60, 7 * 86400, integer=True))
+                _number(table, "absolute_seconds", 12 * 3600, "seat.absolute_seconds", 60, 7 * 86400, integer=True),
+                timezone)
 
 
 def _proxy_host(value: Any) -> str | None:

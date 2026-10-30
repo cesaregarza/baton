@@ -42,10 +42,11 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, tzinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlsplit
+from zoneinfo import ZoneInfo
 
 from baton import auth, conversations, messages
 from baton.config import Config
@@ -184,6 +185,7 @@ class _Session:
     raw: str
     digest: str
     role: str
+    zone: tzinfo
 
     @property
     def csrf(self) -> str:
@@ -389,7 +391,7 @@ def _session(config: Config, conn: sqlite3.Connection, raw: str | None) -> _Sess
             _end(conn, digest)
             return None
         conn.execute("UPDATE seat_sessions SET last_seen = ? WHERE digest = ?", (now, digest))
-    return _Session(raw, digest, row["role"])
+    return _Session(raw, digest, row["role"], ZoneInfo(config.seat.timezone))
 
 
 def _end(conn: sqlite3.Connection, digest: str) -> None:
@@ -476,7 +478,7 @@ def _inbox(config: Config, conn: sqlite3.Connection, session: _Session) -> Respo
                          " seat_receipts WHERE session = ? ORDER BY expires_at DESC LIMIT ?)",
                          (session.digest, session.digest, MAX_RECEIPTS))
     unread = messages.unread(conn, session.role)
-    items = "".join(_inbox_item(entry, session.role) for entry in page)
+    items = "".join(_inbox_item(entry, session) for entry in page)
     ack = (f'<form class="bar" method="post" action="/seat/ack">{_csrf(session)}'
            f'<input type="hidden" name="receipt" value="{_e(receipt)}">'
            f'<button type="submit">Mark these {len(page)} as seen</button>'
@@ -495,12 +497,12 @@ def _inbox_entry(row: sqlite3.Row, member: set[str]) -> dict[str, Any]:
     return {**messages.as_dict(row), "conversation_seq": row["conversation_seq"]}
 
 
-def _inbox_item(entry: dict[str, Any], role: str) -> str:
+def _inbox_item(entry: dict[str, Any], session: _Session) -> str:
     if entry.get("placeholder"):
         return '<li class="placeholder">A message from a conversation you\'re no longer in.</li>'
     where = (f'<p class="actions"><a href="{_link(entry["conversation_id"], entry["conversation_seq"])}">'
              'Open in conversation</a></p>' if entry["conversation_id"] else "")
-    return _message(entry, role, where)
+    return _message(entry, session, where)
 
 def _ack(config: Config, conn: sqlite3.Connection, session: _Session, receipt: str) -> Response:
     with transaction(conn):
@@ -530,7 +532,7 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
     title = conn.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,)).fetchone()["title"]
     request_id = request_id or _mint_request(conn, session, conversation_id)
     shown = {int(item["seq"]) for item in page["messages"]}
-    items = "".join(_history_item(conversation_id, item, shown, session.role) for item in page["messages"])
+    items = "".join(_history_item(conversation_id, item, shown, session) for item in page["messages"])
     newer = (f'<p class="pager"><a href="/seat/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Newer</a></p>'
              if len(page["messages"]) == HISTORY_PAGE else "")
     parent = next((item for item in page["messages"] if item["message_id"] == reply), None) if reply else None
@@ -554,7 +556,7 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
     return _page(status, title, body)
 
 
-def _history_item(conversation_id: str, item: dict[str, Any], shown: set[int], role: str) -> str:
+def _history_item(conversation_id: str, item: dict[str, Any], shown: set[int], session: _Session) -> str:
     parent = item.get("reply_to")
     marker = ""
     if parent:
@@ -563,8 +565,8 @@ def _history_item(conversation_id: str, item: dict[str, Any], shown: set[int], r
                   f'<p class="reply-to">in reply to <a href="{_link(conversation_id, int(parent["seq"]))}">'
                   f'an earlier message</a></p>')
     actions = (f'<p class="actions"><a href="/seat/c/{_e(conversation_id)}?reply={_e(item["message_id"])}#compose">'
-               'Reply</a></p>' if item.get("from_role") and item.get("from_role") != role else "")
-    return _message(item, role, actions, anchor=f"m-{int(item['seq'])}", before=marker)
+               'Reply</a></p>' if item.get("from_role") and item.get("from_role") != session.role else "")
+    return _message(item, session, actions, anchor=f"m-{int(item['seq'])}", before=marker)
 
 def _send(config: Config, conn: sqlite3.Connection, session: _Session, conversation_id: str,
           form: dict[str, str]) -> Response:
@@ -635,8 +637,9 @@ def _link(conversation_id: str, seq: int) -> str:
     return f"/seat/c/{conversation_id}?after_seq={seq - 1}#m-{seq}"
 
 
-def _message(item: dict[str, Any], role: str, after: str, *, anchor: str = "", before: str = "") -> str:
+def _message(item: dict[str, Any], session: _Session, after: str, *, anchor: str = "", before: str = "") -> str:
     """One message: who and when, what a decision or attention asks of the seat, its words and any relayed quote."""
+    role = session.role
     ident = f' id="{anchor}"' if anchor else ""
     if not item.get("from_role"):
         return f'<li{ident}><p class="notice">{_e(item["text"])}</p></li>'
@@ -648,24 +651,25 @@ def _message(item: dict[str, Any], role: str, after: str, *, anchor: str = "", b
                       f'<p>{_e(quote.get("text", ""))}</p></blockquote>' for quote in item.get("relayed") or [])
     flag = f'<p class="ask-label">{label}</p>' if label else ""
     sent = '<p class="sent">Sent</p>' if item["from_role"] == role else ""
-    return (f'<li{ident}{css}>{before}{flag}{sent}{_meta(item, role)}<p class="text">{_e(item["text"])}</p>{relayed}'
+    return (f'<li{ident}{css}>{before}{flag}{sent}{_meta(item, session)}<p class="text">{_e(item["text"])}</p>{relayed}'
             f'{after}</li>')
 
 
-def _meta(item: dict[str, Any], role: str) -> str:
-    who = "You" if item["from_role"] == role else item["from_role"]
+def _meta(item: dict[str, Any], session: _Session) -> str:
+    who = "You" if item["from_role"] == session.role else item["from_role"]
     person = ' <span class="person">person</span>' if item.get("author_kind") == "human" else ""
     return (f'<p class="meta"><span class="role">{_e(who)}</span>{person}'
-            f'<time datetime="{_e(item.get("at", ""))}">{_e(_when(item.get("at", "")))}</time></p>')
+            f'<time datetime="{_e(item.get("at", ""))}">{_e(_when(item.get("at", ""), session.zone))}</time></p>')
 
 
-def _when(at: str) -> str:
-    """`29 Oct, 18:02 UTC` from a stored ISO time; the stored text itself if it isn't one."""
+def _when(at: str, zone: tzinfo) -> str:
+    """`29 Oct, 8:14 pm CDT` from a stored ISO time, in the seat's zone; the stored text itself if it isn't one."""
     try:
-        moment = datetime.fromisoformat(at).astimezone(UTC)
+        moment = datetime.fromisoformat(at).astimezone(zone)
     except ValueError:
         return at
-    return f"{moment.day} {moment:%b}, {moment:%H:%M} UTC"
+    hour = moment.hour % 12 or 12
+    return f"{moment.day} {moment:%b}, {hour}:{moment:%M} {'am' if moment.hour < 12 else 'pm'} {moment:%Z}"
 
 
 def _short(text: str, limit: int = 160) -> str:
