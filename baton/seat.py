@@ -586,34 +586,33 @@ def _send(config: Config, conn: sqlite3.Connection, session: _Session, conversat
         return _not_in(403, "You're no longer in this conversation, so nothing was sent.")
     request_id = form["request_id"]
     now = _now()
-    # The quota check and the reservation are one transaction, so two overlapping sends can't both take the last
-    # place. A form already sent is a retry and takes no new place; a send that stores nothing gives its place back.
+    # A form's place in the hourly quota belongs to the form id, not to one request: the quota check and the
+    # reservation are one transaction, every request for the id holds the place while it is in flight, and the
+    # last one out gives it back only if nothing was stored under the id. So two overlapping sends can't both
+    # take the last place, and a failed attempt can't free a place its own retry is about to use.
     with transaction(conn):
         bound = conn.execute("SELECT * FROM seat_requests WHERE request_id = ?", (request_id,)).fetchone()
         mine = bound is not None and bound["session"] == session.digest and bound["conversation_id"] == conversation_id
-        reserved = mine and bound["sent_at"] is None
-        if reserved:
+        full = False
+        if mine and bound["sent_at"] is None:
             taken = conn.execute("SELECT COUNT(*) FROM seat_requests WHERE session = ? AND sent_at > ?",
                                  (session.digest, now - 3600)).fetchone()[0]
-            if taken >= SENDS_PER_HOUR:
-                reserved = None
-            else:
+            full = taken >= SENDS_PER_HOUR
+            if not full:
                 conn.execute("UPDATE seat_requests SET sent_at = ? WHERE request_id = ?", (now, request_id))
+        if mine and not full:
+            conn.execute("UPDATE seat_requests SET holders = holders + 1 WHERE request_id = ?", (request_id,))
     if not mine:
         return _page(403, "Refused", '<p>This form belongs to another page. <a href="/seat/">Start again</a>.</p>')
-    if reserved is None:
+    if full:
         return _retry(config, conn, session, conversation_id, form, 429, "You've sent a lot this hour; try later.")
     try:
         return _store(config, conn, session, conversation_id, form)
     finally:
-        if reserved and not _stored(conn, request_id):
-            with transaction(conn):
-                conn.execute("UPDATE seat_requests SET sent_at = NULL WHERE request_id = ? AND sent_at = ?",
-                             (request_id, now))
-
-
-def _stored(conn: sqlite3.Connection, request_id: str) -> bool:
-    return conn.execute("SELECT 1 FROM message_requests WHERE request_id = ?", (request_id,)).fetchone() is not None
+        with transaction(conn):
+            conn.execute("UPDATE seat_requests SET holders = holders - 1 WHERE request_id = ?", (request_id,))
+            conn.execute("UPDATE seat_requests SET sent_at = NULL WHERE request_id = ? AND holders = 0 AND NOT"
+                         " EXISTS (SELECT 1 FROM message_requests WHERE request_id = ?)", (request_id, request_id))
 
 
 def _store(config: Config, conn: sqlite3.Connection, session: _Session, conversation_id: str,

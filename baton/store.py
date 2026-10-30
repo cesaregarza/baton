@@ -186,13 +186,15 @@ _SCHEMA = (
         last_seq INTEGER NOT NULL,
         expires_at REAL NOT NULL
     )""",
-    # A compose form's request id, bound to the session and conversation it was rendered for.
+    # A compose form's request id, bound to the session and conversation it was rendered for. `sent_at` is its
+    # place in the hourly quota, held while `holders` requests for it are in flight or once it is stored.
     """CREATE TABLE IF NOT EXISTS seat_requests (
         request_id TEXT PRIMARY KEY,
         session TEXT NOT NULL,
         conversation_id TEXT NOT NULL,
         created_at REAL NOT NULL,
-        sent_at REAL
+        sent_at REAL,
+        holders INTEGER NOT NULL DEFAULT 0
     )""",
 )
 
