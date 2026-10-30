@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 CONFIG_ENV = "BATON_CONFIG"
 DEFAULT_CONFIG = Path("~/.config/baton/baton.toml")
@@ -70,6 +71,14 @@ class Role:
     can_view_all_conversations: bool = False
     # A person, not an agent: acts only with its own bearer token, never through OAuth or `--as`.
     human: bool = False
+    # An identity that only displays, like the dashboard's viewer: it never holds a credential of any kind.
+    display_only: bool = False
+    # How pages name the role, such as a person's name; the role name when unset.
+    display_name: str = ""
+
+    @property
+    def label(self) -> str:
+        return self.display_name or self.name
 
 
 @dataclass(frozen=True)
@@ -120,6 +129,8 @@ class Conversations:
 
 # The dashboard binds only here: it has no login, so anyone who can reach its port can read it.
 LOOPBACK_HOSTS = ("127.0.0.1", "::1")
+# An https origin: lowercase host name or IPv4 address, optional port, nothing after it.
+SEAT_ORIGIN = re.compile(r"https://[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[1-9][0-9]{0,4})?")
 
 
 @dataclass(frozen=True)
@@ -132,6 +143,28 @@ class Dashboard:
     listen_port: int = 8766
     # One more Host the view answers to, exactly, for an authenticating proxy in front of it. Off by default.
     proxy_host: str | None = None
+
+
+@dataclass(frozen=True)
+class Seat:
+    """The optional browser seat for one human role, off unless enabled; see `baton.seat`."""
+
+    enabled: bool = False
+    role: str | None = None
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 8767
+    # The one exact https origin the seat is reached at, through a proxy that terminates TLS.
+    origin: str = ""
+    # A seat on a host name other services share hands them its cookie: allowed only when written down here.
+    same_host_trust_accepted: bool = False
+    idle_seconds: int = 3600
+    absolute_seconds: int = 12 * 3600
+    # The one zone the pages show times in; they run no scripts, so they can't ask the phone for its own.
+    timezone: str = "UTC"
+
+    @property
+    def host(self) -> str:
+        return urlparse(self.origin).netloc
 
 
 @dataclass(frozen=True)
@@ -149,6 +182,7 @@ class Config:
     integrations: dict[str, dict[str, Any]] = field(default_factory=dict)
     conversations: Conversations = field(default_factory=Conversations)
     dashboard: Dashboard = field(default_factory=Dashboard)
+    seat: Seat = field(default_factory=Seat)
 
     @property
     def resource_url(self) -> str:
@@ -222,6 +256,11 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         raise ConfigError(f"auth.tokens has more than one entry named {twice[0]!r}: a token's name must be unique, "
                           "so that revoking it ends exactly that token")
     conversations = _conversations(raw.get("conversations", {}), roles)
+    displayed = [token for token in tokens if roles[token.role].display_only]
+    if displayed:
+        raise ConfigError(f"auth.tokens entry {displayed[0].name!r} is for {displayed[0].role!r}, a display_only "
+                          "role: a role that only displays never holds a credential")
+    dashboard = _dashboard(raw.get("dashboard", {}), roles, conversations)
     return Config(
         public_url=public_url,
         listen_host=str(host.get("listen_host", "127.0.0.1")),
@@ -234,7 +273,8 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         allowed_origins=tuple(str(origin) for origin in host.get("allowed_origins", [])),
         integrations=integrations,
         conversations=conversations,
-        dashboard=_dashboard(raw.get("dashboard", {}), roles, conversations),
+        dashboard=dashboard,
+        seat=_seat(raw.get("seat", {}), roles, public_url, dashboard),
     )
 
 
@@ -307,6 +347,12 @@ def _role(name: str, table: dict[str, Any]) -> Role:
     command = wake.get("command", [])
     if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
         raise ConfigError(f"roles.{name}.wake.command must be a list of strings (argv, no shell)")
+    if _boolean(table, "display_only", False, f"roles.{name}.display_only") and table.get("human") is True:
+        raise ConfigError(f"roles.{name} sets both display_only and human: a person's role holds a credential, and "
+                          "a display_only one never does")
+    display_name = table.get("display_name", "")
+    if not isinstance(display_name, str) or len(display_name) > 80 or display_name != display_name.strip():
+        raise ConfigError(f"roles.{name}.display_name must be text of at most 80 characters")
     integration = wake.get("integration")
     if integration is not None and not INTEGRATION_NAME.fullmatch(str(integration)):
         raise ConfigError(f"roles.{name}.wake.integration must match {INTEGRATION_NAME.pattern}")
@@ -318,7 +364,9 @@ def _role(name: str, table: dict[str, Any]) -> Role:
     ), _boolean(table, "can_create_conversations", False, f"roles.{name}.can_create_conversations"),
         _boolean(table, "can_manage_participants", False, f"roles.{name}.can_manage_participants"),
         _boolean(table, "can_view_all_conversations", False, f"roles.{name}.can_view_all_conversations"),
-        _boolean(table, "human", False, f"roles.{name}.human"))
+        _boolean(table, "human", False, f"roles.{name}.human"),
+        _boolean(table, "display_only", False, f"roles.{name}.display_only"),
+        str(table.get("display_name", "")))
 
 
 def _valid_webhook(url: str) -> bool:
@@ -350,6 +398,9 @@ def _dashboard(table: dict[str, Any], roles: dict[str, Role], conversations: Con
     viewer_role = table.get("viewer_role")
     if viewer_role not in roles:
         raise ConfigError(f"dashboard.viewer_role must name a configured role; got {viewer_role!r}")
+    if not roles[viewer_role].display_only:
+        raise ConfigError(f"dashboard.viewer_role {viewer_role!r} must set display_only = true (and not human): the "
+                          "view has no login, so its identity must never be one that holds a credential")
     if not conversations.enabled:
         raise ConfigError("the dashboard shows conversations: set conversations.enabled = true to enable it")
     listen_host = table.get("listen_host", "127.0.0.1")
@@ -359,6 +410,46 @@ def _dashboard(table: dict[str, Any], roles: dict[str, Role], conversations: Con
     return Dashboard(True, viewer_role, listen_host,
                      _number(table, "listen_port", 8766, "dashboard.listen_port", 1, 65535, integer=True),
                      _proxy_host(table.get("proxy_host")))
+
+
+def _seat(table: dict[str, Any], roles: dict[str, Role], public_url: str, dashboard: Dashboard) -> Seat:
+    if not _boolean(table, "enabled", False, "seat.enabled"):
+        return Seat()
+    role = table.get("role")
+    if role not in roles or not roles[role].human or roles[role].display_only:
+        raise ConfigError(f"seat.role must name a configured human role (human = true, not display_only); got "
+                          f"{role!r}")
+    if role == dashboard.viewer_role:
+        raise ConfigError("seat.role may not be the dashboard's viewer_role")
+    origin = str(table.get("origin", ""))
+    if not SEAT_ORIGIN.fullmatch(origin):
+        raise ConfigError(f"seat.origin must be one exact https origin, such as https://seat.example.com, with no "
+                          f"path, query or trailing slash; got {origin!r}")
+    shared = {urlparse(public_url).hostname, urlparse(f"//{dashboard.proxy_host}").hostname if dashboard.proxy_host
+              else None} - {None}
+    trusted = _boolean(table, "same_host_trust_accepted", False, "seat.same_host_trust_accepted")
+    if urlparse(origin).hostname in shared and not trusted:
+        raise ConfigError(f"seat.origin {origin!r} shares its host name with the host or the dashboard, and a browser "
+                          "sends the seat's cookie to every service on that name. Give the seat a host name of its "
+                          "own, or set seat.same_host_trust_accepted = true to record that every service there is "
+                          "trusted with the person's authority")
+    listen_host = str(table.get("listen_host", "127.0.0.1"))
+    if listen_host not in LOOPBACK_HOSTS:
+        raise ConfigError(f"seat.listen_host must be a loopback address ({' or '.join(LOOPBACK_HOSTS)}); the seat is "
+                          "reached only through the proxy at seat.origin")
+    timezone = table.get("timezone", "UTC")
+    try:
+        if not isinstance(timezone, str) or timezone != timezone.strip():
+            raise ValueError(timezone)
+        ZoneInfo(timezone)
+    except (ValueError, ZoneInfoNotFoundError):
+        raise ConfigError(f"seat.timezone must be an IANA time zone such as America/Chicago; "
+                          f"got {timezone!r}") from None
+    return Seat(True, role, listen_host,
+                _number(table, "listen_port", 8767, "seat.listen_port", 1, 65535, integer=True), origin, trusted,
+                _number(table, "idle_seconds", 3600, "seat.idle_seconds", 60, 24 * 3600, integer=True),
+                _number(table, "absolute_seconds", 12 * 3600, "seat.absolute_seconds", 60, 7 * 86400, integer=True),
+                timezone)
 
 
 def _proxy_host(value: Any) -> str | None:
@@ -412,6 +503,10 @@ def _oauth(table: dict[str, Any], roles: dict[str, Role]) -> OAuth:
     oauth_roles = tuple(table.get("roles", []))
     if not oauth_roles or any(role not in roles for role in oauth_roles):
         raise ConfigError("auth.oauth.roles must list one or more configured roles an OAuth client may act as")
+    displayed = [role for role in oauth_roles if roles[role].display_only]
+    if displayed:
+        raise ConfigError(f"auth.oauth.roles lists the display_only role {displayed[0]!r}, which never holds a "
+                          "credential")
     humans = [role for role in oauth_roles if roles[role].human]
     if humans:
         raise ConfigError(f"auth.oauth.roles lists the human role {humans[0]!r}: a human role signs in only with "

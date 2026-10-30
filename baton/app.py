@@ -31,7 +31,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
 from starlette.types import ASGIApp
 
-from baton import __version__, auth, conversations, dashboard, datadir, inbox, jobs, messages
+from baton import __version__, auth, conversations, dashboard, datadir, inbox, jobs, messages, seat
 from baton.config import Config
 from baton.errors import BatonError, InvalidRequest, UnknownRole
 from baton.integrations import Integration, IntegrationUnavailable, load_enabled
@@ -401,10 +401,12 @@ def serve(config: Config) -> None:
         if loop is not None:  # an integration with work of its own runs it beside the server, until stop
             threading.Thread(target=loop, args=(stop,), daemon=True, name=name).start()
     view = dashboard.start(config)
+    seat_view = seat.start(config)
     try:
         uvicorn.run(app, host=config.listen_host, port=config.listen_port, log_level="info")
     finally:
         stop.set()
-        if view is not None:
-            view.shutdown()
-            view.server_close()
+        for bound in (view, seat_view):
+            if bound is not None:
+                bound.shutdown()
+                bound.server_close()

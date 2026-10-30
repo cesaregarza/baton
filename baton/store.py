@@ -17,9 +17,9 @@ from pathlib import Path
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -83,7 +83,13 @@ _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
     5: ("UPDATE messages SET author_kind = 'agent' WHERE sender IS NOT NULL",),
 }
-_STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys()))
+# Tables a version adds whole. `_SCHEMA` creates them (IF NOT EXISTS) on every open, so an upgrade needs no
+# statement of its own for them; naming them here makes the version a step, and the tests check each exists.
+_ADDED_TABLES = {
+    # The browser seat (`baton.seat`).
+    8: ("seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"),
+}
+_STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys()))
 
 # One statement per entry: executescript() would commit on its own, outside
 # the transaction that creates the schema.
@@ -173,6 +179,36 @@ _SCHEMA = (
         ordinal INTEGER,
         claimed_at REAL,
         PRIMARY KEY (role, key)
+    )""",
+    # The browser seat (`baton.seat`). Nothing secret is stored: a session, a pre-login form and an inbox
+    # receipt are kept only as SHA-256 digests of their random values, and a session's credential only as
+    # the name, digest and role that `auth.authority_live` checks again on every request.
+    """CREATE TABLE IF NOT EXISTS seat_sessions (
+        digest TEXT PRIMARY KEY,
+        role TEXT NOT NULL,
+        authority TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        last_seen REAL NOT NULL
+    )""",
+    "CREATE TABLE IF NOT EXISTS seat_prelogin (digest TEXT PRIMARY KEY, expires_at REAL NOT NULL)",
+    # One rendered inbox page: acknowledging it advances the cursor from `start_seq` to `last_seq`, or nothing.
+    """CREATE TABLE IF NOT EXISTS seat_receipts (
+        digest TEXT PRIMARY KEY,
+        session TEXT NOT NULL,
+        role TEXT NOT NULL,
+        start_seq INTEGER NOT NULL,
+        last_seq INTEGER NOT NULL,
+        expires_at REAL NOT NULL
+    )""",
+    # A compose form's request id, bound to the session and conversation it was rendered for. `sent_at` is its
+    # place in the hourly quota, held while `holders` requests for it are in flight or once it is stored.
+    """CREATE TABLE IF NOT EXISTS seat_requests (
+        request_id TEXT PRIMARY KEY,
+        session TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        sent_at REAL,
+        holders INTEGER NOT NULL DEFAULT 0
     )""",
 )
 
