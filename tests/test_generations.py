@@ -419,3 +419,15 @@ def test_step_11_adds_the_generation_columns_and_the_vector_tables(db) -> None:
     columns = {row[1] for row in db.execute("PRAGMA table_info(generations)")}
     assert {"watermark_epoch", "watermark_seq", "activated_at", "deactivated_at", "dropped_at"} <= columns
     assert set(store._ADDED_TABLES[store.SCHEMA_VERSION]) == {"vectors", "vector_skips"}
+
+
+def test_a_drop_frees_the_slot_before_its_rows_are_gone(tmp_path: Path) -> None:
+    config = reads_config(tmp_path, max_generations=1, cleanup_batch=1)
+    db = connect(config.db_path)
+    conversation_id, _ = converse(db, config, 2)
+    full = create(db, config)
+    fill(db, config, conversation_id, generation=full)  # three versions, more than one sweep removes
+    derived.generation_drop(db, config, "alpha", full)
+    create(db, config)  # the slot is free at once, though the dropped rows are still being swept
+    assert db.execute("SELECT COUNT(*) FROM artifact_versions WHERE generation = ?", (full,)).fetchone()[0] > 0
+    db.close()
