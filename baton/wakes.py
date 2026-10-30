@@ -102,8 +102,9 @@ class Dispatcher:
         while not stop.is_set():
             try:
                 self.pass_once()
-            except Exception:
-                log.exception("wake dispatch pass failed")
+            except Exception as error:
+                # The type only: exception text can carry a webhook URL, and a token in it.
+                log.error("wake dispatch pass failed: %s", type(error).__name__)
             stop.wait(poll_seconds)
 
     def pass_once(self) -> int:
@@ -188,8 +189,8 @@ class Dispatcher:
             return False
         try:
             return integration.deliver(role, wake_id, body)
-        except Exception:
-            log.exception("wake %s: integration %s failed", wake_id, wake.integration)
+        except Exception as error:
+            log.error("wake %s: integration %s failed: %s", wake_id, wake.integration, type(error).__name__)
             return False
 
 
