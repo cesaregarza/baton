@@ -134,6 +134,32 @@ class Search:
     enabled: bool = False
 
 
+@dataclass(frozen=True)
+class Indexer:
+    """The host owner's local indexing worker: the producer names its writer commands may act as, and the bounds
+    every batch and commit is held to. Empty `producers` turns the writer off; the read-only commands need none."""
+
+    producers: tuple[str, ...] = ()
+    max_artifact_bytes: int = 16384
+    max_citations: int = 64
+    max_manifest_items: int = 500
+    max_manifest_segments: int = 64
+    page_items: int = 100
+    max_open_batches: int = 4
+    batch_ttl_seconds: int = 900
+    max_input_segments: int = 256
+    max_commits_per_hour: int = 60
+    receipt_retention_days: int = 30
+    cleanup_batch: int = 100
+
+
+# Each limit and its accepted range; the defaults are the dataclass's.
+INDEXER_LIMITS = {"max_artifact_bytes": (1, 1 << 20), "max_citations": (1, 1000), "max_manifest_items": (1, 10000),
+                  "max_manifest_segments": (1, 1000), "page_items": (1, 1000), "max_open_batches": (1, 100),
+                  "batch_ttl_seconds": (60, 86400), "max_input_segments": (1, 10000),
+                  "max_commits_per_hour": (1, 10000), "receipt_retention_days": (1, 365), "cleanup_batch": (1, 10000)}
+
+
 # The dashboard binds only here: it has no login, so anyone who can reach its port can read it.
 LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 # An https origin: lowercase host name or IPv4 address, optional port, nothing after it.
@@ -191,6 +217,7 @@ class Config:
     dashboard: Dashboard = field(default_factory=Dashboard)
     seat: Seat = field(default_factory=Seat)
     search: Search = field(default_factory=Search)
+    indexer: Indexer = field(default_factory=Indexer)
 
     @property
     def resource_url(self) -> str:
@@ -285,7 +312,27 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         dashboard=dashboard,
         seat=_seat(raw.get("seat", {}), roles, public_url, dashboard),
         search=Search(enabled=_boolean(raw.get("search", {}), "enabled", False, "search.enabled")),
+        indexer=_indexer(raw.get("indexer", {}), roles),
     )
+
+
+def _indexer(table: dict[str, Any], roles: dict[str, Role]) -> Indexer:
+    producers = table.get("producers", [])
+    if not isinstance(producers, list) or not all(isinstance(name, str) for name in producers):
+        raise ConfigError("indexer.producers must be a list of names")
+    for name in producers:
+        if not ROLE_NAME.fullmatch(name):
+            raise ConfigError(f"indexer.producers: {name!r} must match {ROLE_NAME.pattern}, as role names do")
+        if name in roles:
+            # A producer acts through local commands, a role through its credential: one name for both would
+            # blur which of the two did something.
+            raise ConfigError(f"indexer.producers: {name!r} is also a role name, and a producer's must differ")
+    if len(set(producers)) != len(producers):
+        raise ConfigError("indexer.producers lists a name more than once")
+    defaults = Indexer()
+    limits = {key: _number(table, key, getattr(defaults, key), f"indexer.{key}", low, high, integer=True)
+              for key, (low, high) in INDEXER_LIMITS.items()}
+    return Indexer(producers=tuple(producers), **limits)
 
 
 # Keys a later indexer slice will read. Refused until then, so a config written for that slice can't load here
