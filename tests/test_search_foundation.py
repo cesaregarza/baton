@@ -520,11 +520,13 @@ def test_whoami_reports_the_keyword_mode(config) -> None:
     assert shown["search"] == {"enabled": True, "keyword_index": "fts5"}
 
 
-def test_no_command_line_index_writer_exists_yet() -> None:
+def test_the_index_commands_are_the_feed_and_the_producer_gated_writer() -> None:
+    """Slice 1 had only the read-only feed; the writers came later, each needing a listed producer (see
+    test_index_writer)."""
     result = subprocess.run([sys.executable, "-m", "baton.cli", "index", "--help"], capture_output=True, text=True,
                             cwd=Path(__file__).parent.parent)
-    assert "changes" in result.stdout and "wait" in result.stdout
-    assert "commit" not in result.stdout and "begin" not in result.stdout  # writers arrive in a later slice
+    for command in ("changes", "wait", "dirty", "begin-batch", "read-batch", "commit-batch"):
+        assert command in result.stdout, command
 
 
 @pytest.mark.parametrize("key, value", [("messaging_role", "worker"), ("proposal_recipients", ["worker"])])
