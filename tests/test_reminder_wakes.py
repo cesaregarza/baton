@@ -608,3 +608,54 @@ def test_the_latest_due_ordinal_is_chosen_before_the_page_limit(tmp_path: Path, 
     for role, seq in (("worker", 1), ("planner", 1)):
         assert wakes.wake_id(role, f"messages:{seq}:r1") not in sent, \
             f"{role}'s first reminder went out although its second was due"
+
+
+def test_a_reminder_for_a_role_that_lost_its_hook_ends_without_dispatching(tmp_path: Path, clock) -> None:
+    """A wake the config no longer describes has nowhere to go, and must not be attempted.
+
+    The hook can be taken away between the original delivery and the reminder's due time. Sending
+    then fails inside the deliverer rather than over the network -- an empty command raises on the
+    way out, taking an attempt and a cap slot with it and ending the whole pass.
+    """
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    recorder = Recorder()
+    conn = connect(host.config.db_path)
+    messages.send(conn, sender="planner", recipient="worker", text="woken while it had a hook")
+    wakes.Dispatcher(host.config, recorder).pass_once()
+    assert len(recorder.calls) == 1
+
+    (tmp_path / "second").mkdir()
+    without = make_config(tmp_path / "second", data_dir=host.config.data_dir)   # the hook is gone
+    assert not without.config.roles["worker"].wake.enabled
+    clock.advance(FIVE_MINUTES)
+    wakes.Dispatcher(without.config, recorder).pass_once()                      # must not raise
+
+    assert len(recorder.calls) == 1, "a reminder was dispatched for a role with no wake"
+    assert rows(conn)["messages:1:r1"] not in {"pending", "delivered"}, \
+        "the reminder was claimed although it had nowhere to go"
+    charged = conn.execute("SELECT COUNT(*) FROM wakes WHERE claimed_at IS NOT NULL").fetchone()[0]
+    assert charged == 0, "a reminder with no target still took a cap slot"
+
+
+def test_a_read_during_the_original_delivery_leaves_no_reminders(tmp_path: Path, clock) -> None:
+    """The original's callback is made outside the transaction, so a read can land mid-flight.
+
+    The read supersedes the original wake. Scheduling afterwards anyway would leave two reminders
+    for a batch that has already been read -- stopped later by the eligibility checks, but recreated
+    after a read, which the contract says must not happen.
+    """
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    conn = connect(host.config.db_path)
+
+    class ReadsWhileDelivering(Recorder):
+        def __call__(self, wake, wake_id: str, body: bytes) -> bool:
+            messages.read(conn, "worker")        # the role reads before the callback returns
+            return super().__call__(wake, wake_id, body)
+
+    recorder = ReadsWhileDelivering()
+    messages.send(conn, sender="planner", recipient="worker", text="read while the wake was in flight")
+    wakes.Dispatcher(host.config, recorder).pass_once()
+    assert len(recorder.calls) == 1
+
+    assert [key for key in rows(conn) if key.endswith((":r1", ":r2"))] == [], \
+        "a read during the original delivery still left reminders scheduled"
