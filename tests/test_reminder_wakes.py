@@ -884,3 +884,31 @@ def test_a_recovered_capped_reminder_does_not_wait_on_other_roles_windows(tmp_pa
 
     assert [c["id"] for c in recorder.calls] == [wakes.wake_id("worker", "messages:3:r1")], \
         "the worker's deferred reminder waited on other roles' cap windows"
+
+
+def test_a_read_leaves_reminders_for_a_batch_it_has_not_reached(tmp_path: Path, clock) -> None:
+    """A read retires the reminders it has caught up with, and only those.
+
+    Reminders are matched by the read position their batch had when they were scheduled, so one for
+    a batch the role has not reached yet must survive. Drop that comparison and a single read retires
+    every reminder the role holds, including those for mail it has never seen -- and because the rows
+    go in the same transaction as the read, nothing afterwards brings them back.
+
+    The two rows are built directly: a role cannot hold live reminders for two batches at once
+    through the ordinary path, since a later message coalesces into the batch that is still unread.
+    """
+    host = make_config(tmp_path, extra=WORKER_WAKE)
+    conn = connect(host.config.db_path)
+    for key, baseline in (("messages:1:r1", 0), ("messages:6:r1", 5)):
+        conn.execute("INSERT INTO wakes (role, key, payload, status, lease_until, attempts,"
+                     " created_at, due_at, baseline_seq, ordinal)"
+                     " VALUES ('worker', ?, '{}', 'scheduled', 0, 0, ?, ?, ?, 1)",
+                     (key, wakes._now(), wakes._now() + FIVE_MINUTES, baseline))
+    conn.commit()
+
+    messages.mark_read(conn, "worker", 1)        # caught up with the first batch only
+    conn.commit()
+
+    assert rows(conn)["messages:1:r1"] == "superseded", "the read left its own batch's reminder live"
+    assert rows(conn)["messages:6:r1"] == "scheduled", \
+        "the read retired a reminder for a batch it had not reached"
