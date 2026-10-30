@@ -147,6 +147,14 @@ class NothingToIndex(BatonError):
     code = "nothing_to_index"
 
 
+class VectorsIncomplete(BatonError):
+    code = "vectors_incomplete"
+
+
+class VectorConflict(BatonError):
+    code = "vector_conflict"
+
+
 class UnknownGeneration(BatonError):
     code = "unknown_generation"
 

@@ -192,6 +192,10 @@ class Tools:
             "before it, and only artifacts written before it (when the artifact was made, not when the messages "
             "it covers were sent)."))] = None,
         producer: Annotated[str | None, Field(description="Only artifacts from this producer. A filter only.")] = None,
+        query_vector: Annotated[list[float] | None, Field(description=(
+            "Optional, when embeddings are on: re-ranks the keyword matches you can read by similarity to this "
+            "vector. Keyword-first: it never adds a match."))] = None,
+        model: Annotated[str | None, Field(description="The embedding model query_vector was made with.")] = None,
     ) -> dict[str, Any]:
         """Messages, and derived artifacts if `kinds` asks for them, matching every word of `query`, best first.
 
@@ -201,7 +205,8 @@ class Tools:
         """
         with self._conn() as conn:
             return search_module.search(conn, self._config, role, query, conversation_id=conversation_id,
-                                        topic=topic, kinds=kinds, limit=limit, before=before, producer=producer)
+                                        topic=topic, kinds=kinds, limit=limit, before=before, producer=producer,
+                                        query_vector=query_vector, model=model)
 
     def read_artifacts(self, role: str, conversation_id: str, producer: str | None = None) -> dict[str, Any]:
         """A conversation's derived summaries, decisions and open questions that you can read: each only if you

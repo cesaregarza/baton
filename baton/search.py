@@ -16,8 +16,10 @@ scan; `keyword_mode` says which. Nothing here writes, so searching and fetching 
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
+import struct
 from typing import Any
 
 from baton import derived, messages
@@ -65,9 +67,16 @@ def get_message(conn: sqlite3.Connection, config: Config, role: str, message_id:
 
 def search(conn: sqlite3.Connection, config: Config, role: str, query: str, *, conversation_id: str | None = None,
            topic: str | None = None, kinds: list[str] | None = None, limit: int = 20,
-           before: str | None = None, producer: str | None = None) -> dict[str, Any]:
+           before: str | None = None, producer: str | None = None, query_vector: list[float] | None = None,
+           model: str | None = None) -> dict[str, Any]:
     """Messages, and derived artifacts when `kinds` asks for them, matching every word of `query` that the
-    caller may read, best first: one hit per message, and per artifact version."""
+    caller may read, best first: one hit per message, and per artifact version.
+
+    With `query_vector`, ranking stays keyword-first: the same authorized keyword matches, a wider pool of
+    them, are re-ordered by cosine similarity to the vectors producers stored for `model`; matches without a
+    vector follow in keyword order. Nothing the caller can't read is ever a candidate, so none can be lifted
+    in or ahead by its vector.
+    """
     if kinds is None:
         kinds = ["message"]
     if not isinstance(kinds, list) or not kinds or not set(kinds) <= {"message", *ARTIFACT_KINDS}:
@@ -84,19 +93,73 @@ def search(conn: sqlite3.Connection, config: Config, role: str, query: str, *, c
         raise InvalidRequest("give at least one word to search for")
     if len(terms) > MAX_TERMS:
         raise InvalidRequest(f"a query is at most {MAX_TERMS} words, and this one has {len(terms)}")
+    profiles = _query_profiles(conn, config, query_vector, model) if query_vector is not None or model else None
+    pool = min(limit * POOL_FACTOR, MAX_HITS * POOL_FACTOR) if profiles else limit
     mode = keyword_mode(conn)
     ranked: list[tuple[Any, dict[str, Any]]] = []
     if "message" in kinds:
-        ranked += _message_hits(conn, config, role, terms, mode, limit, conversation_id, topic, before)
+        ranked += _message_hits(conn, config, role, terms, mode, pool, conversation_id, topic, before)
     wanted = [kind for kind in kinds if kind != "message"]
     if wanted:
-        ranked += _artifact_hits(conn, config, role, terms, mode, limit, wanted, conversation_id, topic, before,
+        ranked += _artifact_hits(conn, config, role, terms, mode, pool, wanted, conversation_id, topic, before,
                                  producer)
     if mode == "fts5":
         ranked.sort(key=lambda pair: pair[0])  # bm25: lower is better
     else:
         ranked.sort(key=lambda pair: pair[1]["at"], reverse=True)  # newest first; UTC ISO times sort as text
-    return {"hits": [hit for _, hit in ranked[:limit]], "keyword_index": mode}
+    hits = [hit for _, hit in ranked]
+    if profiles:
+        hits = _rerank(conn, hits, query_vector, model, profiles)
+    return {"hits": hits[:limit], "keyword_index": mode}
+
+
+POOL_FACTOR = 4  # with a query vector, re-rank this many times the limit of keyword matches
+
+
+def _query_profiles(conn: sqlite3.Connection, config: Config, query_vector: Any, model: Any) -> dict[str, dict]:
+    """The active generations that embed with `model`, by id; or a refusal naming what doesn't fit."""
+    if not config.search.embeddings:
+        raise InvalidRequest("query vectors need [search] embeddings = true")
+    if not isinstance(model, str) or not model:
+        raise InvalidRequest("a query vector names its model")
+    if not isinstance(query_vector, list) or not query_vector or not all(
+            isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x) for x in query_vector):
+        raise InvalidRequest("query_vector is a list of finite numbers")
+    profiles = {}
+    for generation, profile in conn.execute("SELECT id, profile FROM generations WHERE active = 1"):
+        embedding = json.loads(profile).get("embedding")
+        if embedding and embedding["model"] == model:
+            profiles[generation] = embedding
+    if not profiles:
+        raise InvalidRequest(f"no active generation embeds with {model}")
+    if any(embedding["dim"] != len(query_vector) for embedding in profiles.values()):
+        raise InvalidRequest(f"{model} vectors have {next(iter(profiles.values()))['dim']} dimensions, and the query "
+                             f"{len(query_vector)}")
+    return profiles
+
+
+def _rerank(conn: sqlite3.Connection, hits: list[dict], query_vector: list[float], model: str,
+            profiles: dict[str, dict]) -> list[dict]:
+    """Keyword matches with a vector first, most similar first; then the rest, in keyword order."""
+    marks = ", ".join("?" for _ in profiles)
+    scored = []
+    for order, hit in enumerate(hits):
+        item_kind, item_id = ("artifact", hit["version_id"]) if hit["derived"] else ("message", hit["message_id"])
+        rows = conn.execute(f"SELECT generation, dim, data FROM vectors WHERE item_kind = ? AND item_id = ?"
+                            f" AND model = ? AND generation IN ({marks})", (item_kind, item_id, model, *profiles))
+        similarities = [_similarity(query_vector, list(struct.unpack(f"<{dim}f", data)), profiles[generation])
+                        for generation, dim, data in rows]
+        hit["similarity"] = max(similarities) if similarities else None
+        scored.append((hit["similarity"] is None, -(hit["similarity"] or 0.0), order, hit))
+    return [hit for *_, hit in sorted(scored, key=lambda entry: entry[:3])]
+
+
+def _similarity(a: list[float], b: list[float], embedding: dict) -> float:
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    if embedding["distance"] == "inner_product":
+        return dot
+    norms = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+    return dot / norms if norms else 0.0
 
 
 def _message_hits(conn: sqlite3.Connection, config: Config, role: str, terms: list[str], mode: str, limit: int,

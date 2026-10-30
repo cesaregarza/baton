@@ -18,6 +18,7 @@ import json
 import math
 import secrets
 import sqlite3
+import struct
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -44,6 +45,8 @@ from baton.errors import (
     UnknownConversation,
     UnknownGeneration,
     UpToDate,
+    VectorConflict,
+    VectorsIncomplete,
     VersionConflict,
 )
 from baton.store import transaction
@@ -53,7 +56,10 @@ KINDS = ("summary", "decisions", "open_questions")
 # from the end of the conversation, so it never counts toward any kind's coverage.
 RECENT = "summary_recent"
 SCOPE = "all"  # a local producer reads the host's own database: every conversation
-ITEM_REVISION = 1  # messages are immutable; a later edit would raise this
+ITEM_REVISION = 1
+# Why an item may go without a vector. `empty_text` is checked; the others are the producer's word.
+SKIP_REASONS = ("empty_text", "over_token_limit", "excluded_kind")
+UNIT_TOLERANCE = 1e-3  # messages are immutable; a later edit would raise this
 MAX_REQUEST_ID = 200
 
 
@@ -146,8 +152,11 @@ def commit_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_
     kind builds on, its checkpoint, its citations, and its provenance bound. An identical retry is answered
     from its receipt alone, even after the batch is gone or the producer was removed from the config.
     """
-    request_id, artifacts = _commit_request(payload)
-    digest = _digest({"operation": "commit_batch", "batch_id": str(batch_id), "artifacts": artifacts})
+    request_id, artifacts, vectors, skips = _commit_request(payload)
+    request = {"operation": "commit_batch", "batch_id": str(batch_id), "artifacts": artifacts}
+    if vectors or skips:  # a commit without them keeps the digest it always had
+        request |= {"vectors": vectors, "skips": skips}
+    digest = _digest(request)
     limits = config.indexer
     with transaction(conn):
         receipt = conn.execute("SELECT * FROM commit_requests WHERE producer = ? AND request_id = ?"
@@ -180,6 +189,9 @@ def commit_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_
         if delivered < manifest["pages"]:
             raise BatchIncomplete(f"{manifest['pages'] - delivered} of {manifest['pages']} pages not yet read")
         _revalidate(conn, manifest, [artifact["kind"] for artifact in artifacts])
+        # Checked whole before anything is written: a commit either carries every vector it owes, or nothing.
+        embedding = _embedding(conn, manifest["generation"])
+        owed = _check_vectors(conn, config, manifest, artifacts, vectors, skips, embedding)
         window_ranges = [[segment["from_seq"], segment["to_seq"]] for segment in manifest["segments"]]
         written = []
         for artifact in artifacts:
@@ -211,6 +223,11 @@ def commit_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_
                     segments=len(merged), items=_count(merged))
             version_id = _write_version(conn, manifest, artifact, current_version + 1, merged, prior_id)
             written.append({"kind": kind, "version_id": version_id, "version": current_version + 1})
+            if embedding:
+                _write_vector(conn, manifest["generation"], embedding, "artifact", version_id, owed[("kind", kind)])
+        for (field, value), entry in owed.items():
+            if field == "message_id" and entry is not None:
+                _write_vector(conn, manifest["generation"], embedding, "message", value, entry)
         conn.execute("UPDATE batches SET state = 'committed' WHERE id = ?", (batch_id,))
         conn.execute("UPDATE generations SET last_write_at = ? WHERE id = ?", (_now(), manifest["generation"]))
         committed_at = _now()
@@ -320,6 +337,10 @@ def generation_activate(conn: sqlite3.Connection, config: Config, producer: str,
                                        incomplete)
         if behind:
             raise GenerationBehind(f"{len(behind)} pairs changed since {target['id']} was filled", behind)
+        if json.loads(target["profile"]).get("embedding"):
+            missing = _unvectored(conn, producer, target["id"], counted)
+            if missing:  # every commit carries what it owes, so this is a guard, not a path
+                raise GenerationIncomplete(f"{len(missing)} items in {target['id']} have no vector or skip", missing)
         now = _now()
         conn.execute("UPDATE generations SET active = 0, deactivated_at = ? WHERE producer = ? AND active = 1",
                      (now, producer))
@@ -412,6 +433,21 @@ def _met_at_watermark(version: sqlite3.Row | None, conversation: sqlite3.Row, ad
     return version["state"] == "valid" or expired_after
 
 
+def _unvectored(conn: sqlite3.Connection, producer: str, generation: str, counted: list) -> list[dict]:
+    """Served versions and messages with a copy, in counted conversations, holding no vector or skip."""
+    missing = []
+    for conversation in counted:
+        for kind in KINDS:
+            version = _current(conn, producer, generation, conversation["id"], kind)
+            if version is not None and _held(conn, generation, "artifact", version["id"]) is None:
+                missing.append({"conversation_id": conversation["id"], "item": f"artifact {version['id']}"})
+        for (message_id,) in conn.execute("SELECT DISTINCT id FROM messages WHERE conversation_id = ?",
+                                          (conversation["id"],)).fetchall():
+            if _held(conn, generation, "message", message_id) is None:
+                missing.append({"conversation_id": conversation["id"], "item": f"message {message_id}"})
+    return missing
+
+
 def _require_slot(conn: sqlite3.Connection, config: Config, producer: str) -> None:
     held = conn.execute("SELECT COUNT(*) FROM generations WHERE producer = ? AND dropped_at IS NULL",
                         (producer,)).fetchone()[0]
@@ -449,6 +485,8 @@ def _profile(config: Config, profile: Any) -> dict[str, Any]:
     if summarizer is not None and (not isinstance(summarizer, str) or not 0 < len(summarizer) <= 200):
         raise InvalidRequest("profile.summarizer is a label of 1 to 200 characters")
     embedding = profile.get("embedding")
+    if embedding is not None and not config.search.embeddings:
+        raise InvalidRequest("profile.embedding needs [search] embeddings = true")
     if embedding is not None:
         if not isinstance(embedding, dict) or set(embedding) != {"model", "dim", "normalization", "distance"}:
             raise InvalidRequest("profile.embedding has exactly model, dim, normalization and distance")
@@ -494,7 +532,131 @@ def _commit_request(payload: Any) -> tuple[str, list[dict[str, Any]]]:
                           "expected_version": expected})
     if len({artifact["kind"] for artifact in canonical}) != len(canonical):
         raise InvalidRequest("each kind appears once in a commit")
-    return request_id, sorted(canonical, key=lambda artifact: artifact["kind"])
+    vectors, skips = _vector_entries(payload.get("vectors", []), "vectors"), _vector_entries(payload.get("skips", []),
+                                                                                             "skips")
+    seen = [_item_key(entry["item"]) for entry in vectors + skips]
+    if len(set(seen)) != len(seen):
+        raise InvalidRequest("each item has one vector or one skip, not both and not twice")
+    return request_id, sorted(canonical, key=lambda artifact: artifact["kind"]), vectors, skips
+
+
+def _vector_entries(entries: Any, field: str) -> list[dict[str, Any]]:
+    """`vectors` or `skips` in canonical form: each names one item, a kind written here or a served message."""
+    if not isinstance(entries, list):
+        raise InvalidRequest(f"{field} is a list")
+    canonical = []
+    for entry in entries:
+        item = entry.get("item") if isinstance(entry, dict) else None
+        if not isinstance(item, dict) or len(item) != 1 or not isinstance(next(iter(item.values())), str) or \
+                next(iter(item)) not in ("kind", "message_id"):
+            raise InvalidRequest(f"each of {field} names one item: {{\"kind\": ...}} or {{\"message_id\": ...}}")
+        if field == "vectors":
+            vector = entry.get("vector")
+            if not isinstance(vector, list) or not all(
+                    isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x) for x in vector):
+                raise InvalidRequest(f"the vector for {_item_name(item)} is a list of finite numbers")
+            canonical.append({"item": item, "vector": [float(x) for x in vector]})
+        else:
+            if entry.get("reason") not in SKIP_REASONS:
+                raise InvalidRequest(f"a skip's reason is one of {', '.join(SKIP_REASONS)}")
+            canonical.append({"item": item, "reason": entry["reason"]})
+    return sorted(canonical, key=lambda entry: _item_key(entry["item"]))
+
+
+def _item_key(item: dict[str, str]) -> tuple[str, str]:
+    return next(iter(item.items()))
+
+
+def _item_name(item: dict[str, str]) -> str:
+    field, value = _item_key(item)
+    return f"kind {value}" if field == "kind" else f"message {value}"
+
+
+def _embedding(conn: sqlite3.Connection, generation: str) -> dict[str, Any] | None:
+    profile = conn.execute("SELECT profile FROM generations WHERE id = ?", (generation,)).fetchone()[0]
+    return json.loads(profile).get("embedding")
+
+
+def _check_vectors(conn: sqlite3.Connection, config: Config, manifest: dict[str, Any], artifacts: list[dict],
+                   vectors: list[dict], skips: list[dict], embedding: dict | None) -> dict:
+    """What this commit owes in vectors and skips, checked whole before anything is written.
+
+    Returns, for each kind written and each served message that holds nothing yet, its vector or skip; and
+    None for a served message that already holds one (an identical resend is a no-op, a different one a
+    conflict). Without an embedding profile, a commit carries none.
+    """
+    if embedding is None:
+        if vectors or skips:
+            raise InvalidRequest("this generation's profile has no embedding, so its commits carry no vectors")
+        return {}
+    given = {_item_key(entry["item"]): entry for entry in vectors + skips}
+    served = {item["message_id"]: item["seq"] for segment in manifest["segments"] for item in segment["items"]}
+    bodies = {artifact["kind"]: artifact["body"] for artifact in artifacts}
+    for (field, value), entry in given.items():
+        if (field == "kind" and value not in bodies) or (field == "message_id" and value not in served):
+            raise InvalidRequest(f"{_item_name(entry['item'])} isn't written or served by this commit")
+        if "vector" in entry:
+            _check_fit(entry["vector"], embedding, _item_name(entry["item"]))
+        elif entry["reason"] == "empty_text":
+            text = bodies[value] if field == "kind" else conn.execute(
+                "SELECT text FROM messages WHERE id = ? LIMIT 1", (value,)).fetchone()[0]
+            if text.strip():
+                raise InvalidRequest(f"{_item_name(entry['item'])} isn't empty, so it can't be skipped as empty_text")
+    owed: dict = {}
+    for kind in sorted(bodies):
+        if ("kind", kind) not in given:
+            raise VectorsIncomplete(f"no vector or skip for kind {kind}")
+        owed[("kind", kind)] = given[("kind", kind)]
+    for message_id in served:
+        held = _held(conn, manifest["generation"], "message", message_id)
+        entry = given.get(("message_id", message_id))
+        if held is None:
+            if entry is None:
+                raise VectorsIncomplete(f"no vector or skip for message {message_id}")
+            owed[("message_id", message_id)] = entry
+        elif entry is not None and _stored_form(entry, embedding) != held:
+            raise VectorConflict(f"message {message_id} already has a different vector or skip in this generation")
+        else:
+            owed[("message_id", message_id)] = None  # held already: nothing to write
+    adding = sum(1 for entry in owed.values() if entry is not None and "vector" in entry)
+    stored = conn.execute("SELECT COUNT(*) FROM vectors WHERE generation = ?", (manifest["generation"],)).fetchone()[0]
+    if stored + adding > config.indexer.max_vectors_per_generation:
+        raise LimitExceeded(f"this generation would hold {stored + adding} vectors", "max_vectors_per_generation")
+    return owed
+
+
+def _check_fit(vector: list[float], embedding: dict[str, Any], name: str) -> None:
+    if len(vector) != embedding["dim"]:
+        raise InvalidRequest(f"the vector for {name} has {len(vector)} dimensions, and the profile {embedding['dim']}")
+    if embedding["normalization"] == "unit" and abs(math.sqrt(sum(x * x for x in vector)) - 1) > UNIT_TOLERANCE:
+        raise InvalidRequest(f"the vector for {name} isn't unit length, as the profile requires")
+
+
+def _held(conn: sqlite3.Connection, generation: str, item_kind: str, item_id: str) -> tuple | None:
+    vector = conn.execute("SELECT data FROM vectors WHERE generation = ? AND item_kind = ? AND item_id = ?",
+                          (generation, item_kind, item_id)).fetchone()
+    if vector is not None:
+        return ("vector", bytes(vector[0]))
+    skip = conn.execute("SELECT reason FROM vector_skips WHERE generation = ? AND item_kind = ? AND item_id = ?",
+                        (generation, item_kind, item_id)).fetchone()
+    return ("skip", skip[0]) if skip is not None else None
+
+
+def _stored_form(entry: dict[str, Any], embedding: dict[str, Any]) -> tuple:
+    if "vector" in entry:
+        return ("vector", struct.pack(f"<{embedding['dim']}f", *entry["vector"]))
+    return ("skip", entry["reason"])
+
+
+def _write_vector(conn: sqlite3.Connection, generation: str, embedding: dict[str, Any], item_kind: str,
+                  item_id: str, entry: dict[str, Any]) -> None:
+    if "vector" in entry:
+        conn.execute("INSERT INTO vectors (generation, item_kind, item_id, model, dim, data, created_at)"
+                     " VALUES (?, ?, ?, ?, ?, ?, ?)", (generation, item_kind, item_id, embedding["model"],
+                                                       embedding["dim"], _stored_form(entry, embedding)[1], _now()))
+    else:
+        conn.execute("INSERT INTO vector_skips (generation, item_kind, item_id, reason) VALUES (?, ?, ?, ?)",
+                     (generation, item_kind, item_id, entry["reason"]))
 
 
 def _replay(conn: sqlite3.Connection, receipt: sqlite3.Row) -> dict[str, Any]:
@@ -752,6 +914,8 @@ def _cleanup(conn: sqlite3.Connection, config: Config) -> None:
         " old.generation AND newer.conversation_id = old.conversation_id AND newer.kind = old.kind AND"
         " newer.version > old.version) LIMIT ?", (limit,))]
     for version_id in replaced:
+        for table in ("vectors", "vector_skips"):
+            conn.execute(f"DELETE FROM {table} WHERE item_kind = 'artifact' AND item_id = ?", (version_id,))
         conn.execute("DELETE FROM artifact_inputs WHERE version_id = ?", (version_id,))
         conn.execute("DELETE FROM artifact_depends_on WHERE version_id = ?", (version_id,))
         conn.execute("DELETE FROM artifact_versions WHERE id = ?", (version_id,))
