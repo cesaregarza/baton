@@ -486,6 +486,12 @@ and up to 4× the limit of artifact matches when `kinds` asks for them, so up to
 generation that embeds with `model` must have the query's dimension; otherwise the search is refused, naming
 the producer, generation and dimension that don't fit.
 
+One model name means one embedding signature (model, dimension, normalization and distance) across all active
+generations. `generation activate` refuses a generation whose signature differs from another producer's active
+one for the same model, with `embedding_profile_conflict` naming both, and nothing switches; a producer may
+change its own, since the generation it replaces isn't compared. Give a different embedding its own model
+name, such as `toy-embed@256`.
+
 ## Documentation
 
 - [docs/design.md](docs/design.md): how it works.
