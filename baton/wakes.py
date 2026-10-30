@@ -250,9 +250,8 @@ class Dispatcher:
         # by the claim below rather than delivered first and then regretted.
         latest: dict[tuple[str, str], sqlite3.Row] = {}
         for row in due:
-            batch = (row["role"], row["key"].rsplit(":r", 1)[0])
-            if row["ordinal"] >= latest.get(batch, row)["ordinal"]:
-                latest[batch] = row
+            # The query is ordered by ordinal, so the last row seen for a batch is its latest.
+            latest[(row["role"], row["key"].rsplit(":r", 1)[0])] = row
         for row in latest.values():
             if self._claim_reminder(conn, row["role"], row["key"], row["ordinal"], row["baseline_seq"]):
                 tried += self._attempt(conn, row["role"], row["key"])

@@ -482,3 +482,57 @@ def test_upgrading_a_version_six_database_keeps_every_wake_row(tmp_path: Path) -
     assert all(all(value is None for value in row) for row in added), \
         "the upgrade gave an existing wake a reminder's columns"
     conn.close()
+
+
+# ------------------------------- the guards that only a direct call can reach
+
+def claim(dispatcher, conn, role: str, key: str, ordinal: int, baseline: int) -> bool:
+    """One claim attempt, called directly: these invariants sit between a scan and a send."""
+    return dispatcher._claim_reminder(conn, role, key, ordinal, baseline)
+
+
+def test_a_claim_is_refused_when_the_role_has_already_read_past_the_baseline(tmp_path: Path,
+                                                                            clock) -> None:
+    """The claim rechecks the read position rather than trusting the row it was handed.
+
+    A read normally retires the reminders itself, so this is the second line: a row left eligible
+    while the position has moved on -- a read landing between the scan and the claim, or a crash
+    between the two statements of a read -- must still be refused here.
+    """
+    _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
+    messages.read(conn, "worker")
+    with conn:                                   # put the row back as a crashed read would leave it
+        conn.execute("UPDATE wakes SET status = 'scheduled', finished_at = NULL"
+                     " WHERE key = 'messages:1:r1'")
+    assert rows(conn)["messages:1:r1"] == "scheduled"
+
+    assert claim(dispatcher, conn, "worker", "messages:1:r1", 1, 0) is False
+    assert rows(conn)["messages:1:r1"] == "superseded", "the stale row was left eligible"
+    assert len(recorder.calls) == 1
+
+
+def test_only_one_claimant_wins_the_same_due_reminder(tmp_path: Path, clock) -> None:
+    """Two workers reaching the same row: the second must find it taken and stand down."""
+    _, dispatcher, conn = woken_batch(tmp_path, Recorder())
+    clock.advance(FIVE_MINUTES)
+    assert claim(dispatcher, conn, "worker", "messages:1:r1", 1, 0) is True
+    assert claim(dispatcher, conn, "worker", "messages:1:r1", 1, 0) is False, \
+        "a second claim on a reminder already taken succeeded"
+
+
+def test_a_second_claim_keeps_the_first_claim_time_so_the_cap_is_charged_once(tmp_path: Path,
+                                                                             clock) -> None:
+    """The cap is charged by the first claim. Anything that requeues a charged reminder later must
+    not charge it again, so the claim keeps whatever time is already recorded."""
+    _, dispatcher, conn = woken_batch(tmp_path, Recorder())
+    clock.advance(FIVE_MINUTES)
+    assert claim(dispatcher, conn, "worker", "messages:1:r1", 1, 0) is True
+    charged_at = conn.execute("SELECT claimed_at FROM wakes WHERE key = 'messages:1:r1'").fetchone()[0]
+    assert charged_at is not None
+
+    with conn:                                   # a path that puts charged work back in the queue
+        conn.execute("UPDATE wakes SET status = 'scheduled' WHERE key = 'messages:1:r1'")
+    clock.advance(TWENTY_MINUTES)
+    assert claim(dispatcher, conn, "worker", "messages:1:r1", 1, 0) is True
+    again = conn.execute("SELECT claimed_at FROM wakes WHERE key = 'messages:1:r1'").fetchone()[0]
+    assert again == charged_at, "reclaiming moved the charge, so the cap window would restart"
