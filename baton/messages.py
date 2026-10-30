@@ -18,7 +18,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from baton import changes, events
+from baton import changes, derived, events
 from baton.errors import InvalidRequest, MailboxFull, RequestTooOld
 from baton.store import transaction
 
@@ -353,10 +353,18 @@ def _forget_old(conn: sqlite3.Connection, recipient: str, read_seq: int) -> None
     current = datetime.now(UTC)
     cutoff = (current - READ_RETENTION).isoformat()
     # Each conversation copy that goes is a change to that conversation's source, logged per copy.
-    for row in conn.execute("SELECT id, conversation_id FROM messages WHERE recipient = ? AND seq <= ? AND at < ?"
-                            " AND conversation_id IS NOT NULL ORDER BY seq", (recipient, read_seq, cutoff)).fetchall():
+    expiring = conn.execute("SELECT id, conversation_id, conversation_seq FROM messages WHERE recipient = ?"
+                            " AND seq <= ? AND at < ? AND conversation_id IS NOT NULL ORDER BY seq",
+                            (recipient, read_seq, cutoff)).fetchall()
+    for row in expiring:
         changes.record(conn, row["conversation_id"], "message_expired", message_id=row["id"], role=recipient)
     conn.execute("DELETE FROM messages WHERE recipient = ? AND seq <= ? AND at < ?", (recipient, read_seq, cutoff))
+    # A conversation message whose last copy just went takes every derived version made from it down with it.
+    lost = [(row["conversation_id"], row["conversation_seq"]) for row in expiring
+            if conn.execute("SELECT 1 FROM messages WHERE conversation_id = ? AND conversation_seq = ? LIMIT 1",
+                            (row["conversation_id"], row["conversation_seq"])).fetchone() is None]
+    if lost:
+        derived.invalidate_lost(conn, lost)
     conn.execute("DELETE FROM events WHERE job_id IS NULL AND kind = 'message' AND audience = ? AND seq <= ?"
                  " AND at < ?", (recipient, read_seq, cutoff))
     conn.execute("DELETE FROM message_requests WHERE created_at < ?", ((current - IDENTITY_RETENTION).isoformat(),))

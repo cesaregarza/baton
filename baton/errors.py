@@ -89,6 +89,58 @@ class UnsupportedKind(BatonError):
     code = "unsupported_kind"
 
 
+class UnknownBatch(BatonError):
+    code = "unknown_batch"
+
+
+class BatchExpired(BatonError):
+    code = "batch_expired"
+
+
+class BatchClosed(BatonError):
+    code = "batch_closed"
+
+
+class BatchIncomplete(BatonError):
+    code = "batch_incomplete"
+
+
+class BatchSuperseded(BatonError):
+    code = "batch_superseded"
+
+
+class VersionConflict(BatonError):
+    code = "version_conflict"
+
+
+class CheckpointGap(BatonError):
+    code = "checkpoint_gap"
+
+
+class UpToDate(BatonError):
+    code = "up_to_date"
+
+
+class LimitExceeded(BatonError):
+    """A bound was hit; `limit` names which, so the caller can tell one from another without parsing text."""
+
+    code = "limit_exceeded"
+
+    def __init__(self, detail: str, limit: str) -> None:
+        super().__init__(detail)
+        self.extra = {"limit": limit}
+
+
+class ProvenanceLimitExceeded(BatonError):
+    """A kind's inputs can't be recorded within the caps, so nothing advances for it and it stays dirty."""
+
+    code = "provenance_limit_exceeded"
+
+    def __init__(self, detail: str, *, limit: str, conversation_id: str, kind: str, segments: int) -> None:
+        super().__init__(detail)
+        self.extra = {"limit": limit, "conversation_id": conversation_id, "kind": kind, "segments": segments}
+
+
 class CursorExpired(BatonError):
     """The change-log position is from another log, or older than what retention kept: start again from state."""
 

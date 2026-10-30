@@ -19,9 +19,10 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
-from baton import changes, conversations, datadir, inbox, jobs, messages, remote, wakes
+from baton import changes, conversations, datadir, derived, inbox, jobs, messages, remote, wakes
 from baton import config as config_module
 from baton.config import Config, ConfigError
 from baton.errors import BatonError, InvalidRequest
@@ -358,13 +359,14 @@ def _revoke_all(config: Config, args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _add_index_commands(commands: Any) -> None:
-    """Local, read-only commands for the host owner's indexing worker: no role, no token, no MCP.
+    """Local commands for the host owner's indexing worker: no role, no token, no MCP.
 
-    They open the database read-only, follow the change log through a cursor the worker keeps, and print
-    change metadata only, never message text. They write nothing at all.
+    `changes`, `wait` and `dirty` open the database read-only and write nothing at all. The writers,
+    `begin-batch`, `read-batch` and `commit-batch`, act as a producer listed in `[indexer] producers`, each in
+    one short transaction; `read-batch` writes only its page-delivery record.
     """
-    index = commands.add_parser("index", help="read-only change feed for a local indexing worker").add_subparsers(
-        dest="index_command", required=True)
+    index = commands.add_parser("index", help="change feed and derived-data writer for a local indexing worker"
+                                ).add_subparsers(dest="index_command", required=True)
     changes_parser = index.add_parser("changes", help="changes after a cursor, oldest first, metadata only")
     changes_parser.add_argument("--after", help="the next_cursor of the last call; omit to start at the oldest kept")
     changes_parser.add_argument("--limit", type=int, default=100)
@@ -375,6 +377,43 @@ def _add_index_commands(commands: Any) -> None:
     wait_parser.add_argument("--timeout", type=float, default=30.0, help="seconds")
     wait_parser.set_defaults(handler=lambda config, args: _index(config, lambda conn: changes.wait(
         conn, changes.Scope.ALL, cursor=args.after, timeout_seconds=args.timeout)))
+    dirty_parser = index.add_parser("dirty", help="what a producer has no current version of; read-only")
+    dirty_parser.add_argument("--producer", required=True, help="whose set to list; not checked against the config")
+    dirty_parser.set_defaults(handler=lambda config, args: _index(config, lambda conn: derived.dirty(
+        conn, config, args.producer)))
+    begin = index.add_parser("begin-batch", help="issue a manifest of the messages a batch reads")
+    begin.add_argument("--producer", required=True)
+    begin.add_argument("--conversation", required=True)
+    begin.add_argument("--kinds", required=True, help=f"comma-separated, from {', '.join(derived.KINDS)}")
+    begin.set_defaults(handler=lambda config, args: _write(config, lambda conn: derived.begin_batch(
+        conn, config, args.producer, args.conversation, args.kinds.split(","))))
+    read = index.add_parser("read-batch", help="one page of a batch's messages, recorded as delivered")
+    read.add_argument("batch")
+    read.add_argument("--page", type=int, required=True)
+    read.add_argument("--producer", required=True)
+    read.set_defaults(handler=lambda config, args: _write(config, lambda conn: derived.read_batch(
+        conn, config, args.producer, args.batch, args.page)))
+    commit = index.add_parser("commit-batch", help="write a version of each kind from a delivered batch")
+    commit.add_argument("batch")
+    commit.add_argument("--file", required=True, help="the commit as JSON: request_id and artifacts; - for stdin")
+    commit.add_argument("--producer", required=True)
+    commit.set_defaults(handler=lambda config, args: _write(config, lambda conn: derived.commit_batch(
+        conn, config, args.producer, args.batch, _json_file(args.file))))
+
+
+def _write(config: Config, operation: Any) -> Any:
+    conn = connect(config.db_path)
+    try:
+        return operation(conn)
+    finally:
+        conn.close()
+
+
+def _json_file(path: str) -> Any:
+    try:
+        return json.loads(sys.stdin.read() if path == "-" else Path(path).read_text())
+    except (OSError, ValueError) as error:
+        raise InvalidRequest(f"--file must name readable JSON: {type(error).__name__}") from None
 
 
 def _index(config: Config, operation: Any) -> Any:
