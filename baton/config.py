@@ -132,6 +132,8 @@ class Search:
     """Keyword search over messages for roles, off unless enabled. Each role finds only what it may read."""
 
     enabled: bool = False
+    # Off at 0. Otherwise a producer may also write `summary_recent`, over at most this many latest messages.
+    rolling_window_messages: int = 0
 
 
 @dataclass(frozen=True)
@@ -297,6 +299,14 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         raise ConfigError(f"auth.tokens entry {displayed[0].name!r} is for {displayed[0].role!r}, a display_only "
                           "role: a role that only displays never holds a credential")
     dashboard = _dashboard(raw.get("dashboard", {}), roles, conversations)
+    search_table = raw.get("search", {})
+    search = Search(enabled=_boolean(search_table, "enabled", False, "search.enabled"),
+                    rolling_window_messages=_number(search_table, "rolling_window_messages", 0,
+                                                    "search.rolling_window_messages", 0, 10000, integer=True))
+    indexer = _indexer(raw.get("indexer", {}), roles)
+    if search.rolling_window_messages > indexer.max_manifest_items:
+        raise ConfigError("search.rolling_window_messages must be at most indexer.max_manifest_items: a recent "
+                          "window is one batch")
     return Config(
         public_url=public_url,
         listen_host=str(host.get("listen_host", "127.0.0.1")),
@@ -311,8 +321,8 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         conversations=conversations,
         dashboard=dashboard,
         seat=_seat(raw.get("seat", {}), roles, public_url, dashboard),
-        search=Search(enabled=_boolean(raw.get("search", {}), "enabled", False, "search.enabled")),
-        indexer=_indexer(raw.get("indexer", {}), roles),
+        search=search,
+        indexer=indexer,
     )
 
 

@@ -42,6 +42,9 @@ from baton.errors import (
 from baton.store import transaction
 
 KINDS = ("summary", "decisions", "open_questions")
+# A summary of only the latest messages, off unless `[search] rolling_window_messages` is set. Its window starts
+# from the end of the conversation, so it never counts toward any kind's coverage.
+RECENT = "summary_recent"
 SCOPE = "all"  # a local producer reads the host's own database: every conversation
 ITEM_REVISION = 1  # messages are immutable; a later edit would raise this
 MAX_REQUEST_ID = 200
@@ -51,7 +54,12 @@ def begin_batch(conn: sqlite3.Connection, config: Config, producer: str, convers
                 kinds: list[str]) -> dict[str, Any]:
     """Issue a manifest naming exactly which messages the batch reads, and what each kind builds on."""
     _require_producer(config, producer)
-    if not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds) or not set(kinds) <= set(KINDS):
+    if isinstance(kinds, list) and RECENT in kinds:
+        if not config.search.rolling_window_messages:
+            raise InvalidRequest(f"{RECENT} needs [search] rolling_window_messages")
+        if kinds != [RECENT]:
+            raise InvalidRequest(f"{RECENT} is a batch of its own")
+    elif not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds) or not set(kinds) <= set(KINDS):
         raise InvalidRequest(f"kinds is a non-empty list of distinct kinds from {', '.join(KINDS)}")
     limits = config.indexer
     with transaction(conn):
@@ -65,7 +73,11 @@ def begin_batch(conn: sqlite3.Connection, config: Config, producer: str, convers
         if open_batches >= limits.max_open_batches:
             raise LimitExceeded(f"{producer} already has {open_batches} open batches", "max_open_batches")
         generation = _generation(conn, producer)
-        plans = {kind: _kind_plan(conn, producer, generation, conversation_id, kind) for kind in kinds}
+        if kinds == [RECENT]:
+            plans = {RECENT: _recent_plan(conn, config, producer, generation, conversation_id,
+                                          conversation["last_seq"])}
+        else:
+            plans = {kind: _kind_plan(conn, producer, generation, conversation_id, kind) for kind in kinds}
         window = _window(conn, config, conversation_id, plans, conversation["last_seq"])
         if generation is None:  # the first batch makes the producer's one generation; `dirty` never does
             generation = "gen_" + secrets.token_hex(8)
@@ -160,7 +172,10 @@ def commit_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_
             current_version = current["version"] if current else 0
             if artifact["expected_version"] != current_version or plan["prior_version"] != current_version:
                 raise VersionConflict(f"{kind} is at version {current_version}, not {artifact['expected_version']}")
-            start = 1 if current is None or current["state"] == "invalid" else current["covered_through_seq"] + 1
+            if kind == RECENT:  # anchored to the end of the conversation, not to its previous coverage
+                start = plan["start_seq"]
+            else:
+                start = 1 if current is None or current["state"] == "invalid" else current["covered_through_seq"] + 1
             if start != manifest["window"]["from_seq"]:
                 raise CheckpointGap(f"{kind} continues from seq {start}, and this batch starts at "
                                     f"{manifest['window']['from_seq']}")
@@ -246,8 +261,8 @@ def _commit_request(payload: Any) -> tuple[str, list[dict[str, Any]]]:
         raise InvalidRequest("artifacts is a non-empty list")
     canonical = []
     for artifact in artifacts:
-        if not isinstance(artifact, dict) or artifact.get("kind") not in KINDS:
-            raise InvalidRequest(f"each artifact has a kind from {', '.join(KINDS)}")
+        if not isinstance(artifact, dict) or artifact.get("kind") not in (*KINDS, RECENT):
+            raise InvalidRequest(f"each artifact has a kind from {', '.join((*KINDS, RECENT))}")
         body, citations, expected = artifact.get("body"), artifact.get("citations"), artifact.get("expected_version")
         if not isinstance(body, str):
             raise InvalidRequest(f"the {artifact['kind']} body is a string")
@@ -323,6 +338,20 @@ def _kind_plan(conn: sqlite3.Connection, producer: str, generation: str | None, 
     return {"prior_version_id": current["id"], "prior_version": current["version"],
             "start_seq": current["covered_through_seq"] + 1, "prior_inputs": _inputs(conn, current["id"]),
             "rebase": False, "reason": None}
+
+
+def _recent_plan(conn: sqlite3.Connection, config: Config, producer: str, generation: str | None,
+                 conversation_id: str, last_seq: int) -> dict[str, Any]:
+    """A recent window builds on nothing: it starts at the oldest of the latest messages that still have a copy."""
+    current = _current(conn, producer, generation, conversation_id, RECENT)
+    if current is not None and current["state"] == "valid" and current["covered_through_seq"] >= last_seq:
+        raise UpToDate(f"{RECENT} already covers the latest messages")
+    latest = conn.execute("SELECT conversation_seq FROM messages WHERE conversation_id = ? GROUP BY conversation_seq"
+                          " ORDER BY conversation_seq DESC LIMIT ?",
+                          (conversation_id, config.search.rolling_window_messages)).fetchall()
+    return {"prior_version_id": None, "prior_version": current["version"] if current else 0,
+            "start_seq": latest[-1][0] if latest else last_seq + 1, "prior_inputs": [], "rebase": False,
+            "reason": None}
 
 
 def _window(conn: sqlite3.Connection, config: Config, conversation_id: str, plans: dict[str, dict[str, Any]],
