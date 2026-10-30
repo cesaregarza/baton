@@ -43,6 +43,21 @@ TOKEN_ENV = "BATON_TEST_PUSH_TOKEN"
 TOKEN_VALUE = "push-token-" + "x9" * 8
 
 
+WORKERS = ("decision_push", "wakes")
+
+
+@pytest.fixture(autouse=True)
+def workers_end_with_their_test() -> Any:
+    """Every worker thread a test starts through `serve` has ended when the test does, so no test counts
+    another's: wait for each, within a bound, and fail if one is still running."""
+    before = set(threading.enumerate())
+    yield
+    left = [thread for thread in threading.enumerate() if thread.name in WORKERS and thread not in before]
+    for thread in left:
+        thread.join(10)
+    assert not [thread.name for thread in left if thread.is_alive()], "a worker thread outlived its test"
+
+
 def push_config(tmp_path: Path, *, table: dict[str, Any] | None = None, roles: dict[str, Any] | None = None) -> Config:
     """Lane A's generic roles with the push on for `assistant`, unless `table` says otherwise."""
     settings = {"enabled": True, "role": ROLE, "url": "https://push.example.test/decisions",
@@ -90,12 +105,14 @@ def test_it_pushes_only_for_needs_decision_and_once_per_message(tmp_path) -> Non
     cid = start(db, config)
     say(db, config, "orchestrator", cid, "plain chatter")
     say(db, config, "orchestrator", cid, "look at this", attention=[ROLE])
-    decision = say(db, config, "orchestrator", cid, "please decide", needs_decision=True,
-                   request_id=rid("decide-once"))
+    # One id for both sends: rid stamps the current second, so calling it twice can straddle a second and
+    # turn the retry into a new message.
+    once = rid("decide-once")
+    decision = say(db, config, "orchestrator", cid, "please decide", needs_decision=True, request_id=once)
     push.poll_once()
     assert len(channel.calls) == 1
     # A retried send replays without a new copy, and later passes find nothing new.
-    again = say(db, config, "orchestrator", cid, "please decide", needs_decision=True, request_id=rid("decide-once"))
+    again = say(db, config, "orchestrator", cid, "please decide", needs_decision=True, request_id=once)
     assert again["message_id"] == decision["message_id"] and again["created"] is False
     push.poll_once()
     pusher(config, channel).poll_once()  # a restarted host keeps what it already pushed
@@ -296,13 +313,18 @@ def test_it_is_off_unless_enabled_and_serve_runs_it_when_it_is(tmp_path, monkeyp
                                                          "url": "https://push.example.test/d"})
     assert "decision_push" not in load_enabled(switched_off)
 
+    # The threads each serve started, so one call's worker still ending can't be read as the next call's.
     names: list[list[str]] = []
+    before: set[threading.Thread] = set()
     monkeypatch.setattr(app_module.uvicorn, "run", lambda *a, **k: names.append(
-        sorted(thread.name for thread in threading.enumerate())))
+        sorted(thread.name for thread in threading.enumerate() if thread not in before)))
+    before = set(threading.enumerate())
     app_module.serve(push_config(tmp_path / "on"))
-    deadline = time.monotonic() + 5
-    while any(t.name == "decision_push" for t in threading.enumerate()) and time.monotonic() < deadline:
-        time.sleep(0.02)
+    started = [thread for thread in threading.enumerate() if thread not in before and thread.name in WORKERS]
+    for thread in started:
+        thread.join(10)
+    assert not [thread.name for thread in started if thread.is_alive()], "the push worker outlived serve"
+    before = set(threading.enumerate())
     app_module.serve(switched_off)
     assert "decision_push" in names[0] and "decision_push" not in names[1]
 
@@ -462,9 +484,6 @@ def corrupt_state(config: Config, content: str) -> None:
     path.chmod(0o600)
 
 
-def live(name: str) -> int:
-    return sum(1 for thread in threading.enumerate() if thread.name == name and thread.is_alive())
-
 
 @pytest.mark.parametrize("content", [f"not json {SECRET_SHAPED}",
                                      json.dumps({"after_seq": f"x{SECRET_SHAPED}", "window": [], "counts": {}})])
@@ -472,21 +491,22 @@ def test_an_unreadable_push_state_switches_the_push_off_and_baton_still_serves(t
                                                                                content) -> None:
     config = push_config(tmp_path)
     corrupt_state(config, content)
-    wakes_before = live("wakes")
+    before = set(threading.enumerate())  # only this serve's threads count, never another test's still ending
     seen: dict[str, Any] = {}
 
     def serving(app: Any, **kwargs: Any) -> None:
         seen["served"] = True
-        seen["push threads"] = live("decision_push")
+        seen["push threads"] = sum(thread.name == "decision_push" for thread in threading.enumerate()
+                                   if thread not in before)
 
     monkeypatch.setattr(app_module.uvicorn, "run", serving)
     caplog.set_level(logging.INFO)
     app_module.serve(config)  # must not raise
     assert seen == {"served": True, "push threads": 0}
-    deadline = time.monotonic() + 5
-    while live("wakes") > wakes_before and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert live("wakes") == wakes_before and live("decision_push") == 0, "a thread was left behind"
+    started = [thread for thread in threading.enumerate() if thread not in before and thread.name in WORKERS]
+    for thread in started:
+        thread.join(10)
+    assert not [thread.name for thread in started if thread.is_alive()], "a thread was left behind"
     logged = caplog.text
     assert "decision_push" in logged and "decision_push.json" in logged
     assert SECRET_SHAPED not in logged and "not json" not in logged
@@ -532,8 +552,10 @@ def test_any_other_prepare_failure_is_contained_and_logged_by_type_alone(tmp_pat
         raise RuntimeError(f"something it read: {SECRET_SHAPED}")
 
     seen: dict[str, Any] = {}
+    before = set(threading.enumerate())
     monkeypatch.setattr(decision_push.DecisionPush, "prepare", failing)
-    monkeypatch.setattr(app_module.uvicorn, "run", lambda *a, **k: seen.update(served=live("decision_push")))
+    monkeypatch.setattr(app_module.uvicorn, "run", lambda *a, **k: seen.update(served=sum(
+        thread.name == "decision_push" for thread in threading.enumerate() if thread not in before)))
     caplog.set_level(logging.INFO)
     app_module.serve(push_config(tmp_path))  # must not raise
     assert seen == {"served": 0}
