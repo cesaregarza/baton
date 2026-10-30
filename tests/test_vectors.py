@@ -466,3 +466,41 @@ def test_a_query_vector_against_mixed_profiles_names_the_one_that_conflicts(db, 
         message = str(error)
         assert generation in message and producer in message and f"{dim} dimensions" in message, message
         assert f"the query has {len(query)}" in message, message
+
+
+FLOAT32_MAX = 3.4028234663852886e38
+UNNORMALIZED = {"embedding": {"model": "toy-embed", "dim": 3, "normalization": "none", "distance": "inner_product"}}
+
+
+@pytest.mark.parametrize("bad", [[1e39, 0.0, 0.0], [0.0, -1e39, 0.0], [FLOAT32_MAX * 2, 0.0, 0.0],
+                                 [float("nan"), 0.0, 0.0], [float("inf"), 0.0, 0.0], [0.0, float("-inf"), 0.0]])
+def test_a_vector_that_float32_cannot_hold_is_refused_whole_before_anything_is_stored(db, config, bad) -> None:
+    """Vectors are stored as float32: a component it can't represent is a labelled refusal, never an overflow,
+    and the same request id then commits once corrected."""
+    conversation_id, _ = converse(db, config, 1)
+    generation = derived.generation_create(db, config, "alpha", UNNORMALIZED)["generation"]
+    manifest = begin(db, config, conversation_id, generation)
+    body = payload(manifest)
+    body["vectors"][0]["vector"] = bad
+    error = refused("invalid_request", commit, db, config, manifest, body)
+    assert "float32" in str(error) or "finite" in str(error), str(error)
+    assert vector_rows(db, generation) == {}
+    assert commit(db, config, manifest, payload(manifest))["created"] is True
+
+
+def test_the_largest_float32_component_is_accepted(db, config) -> None:
+    conversation_id, _ = converse(db, config, 1)
+    generation = derived.generation_create(db, config, "alpha", UNNORMALIZED)["generation"]
+    manifest = begin(db, config, conversation_id, generation)
+    body = payload(manifest)
+    body["vectors"][0]["vector"] = [FLOAT32_MAX, 0.0, 0.0]
+    assert commit(db, config, manifest, body)["created"] is True
+
+
+@pytest.mark.parametrize("bad", [[1e39, 0.0, 0.0], [1e300, 1e300, 0.0]])
+def test_a_query_vector_that_float32_cannot_hold_is_refused(db, config, bad) -> None:
+    conversation_id, _ = converse(db, config, 1)
+    generation = derived.generation_create(db, config, "alpha", UNNORMALIZED)["generation"]
+    fill(db, config, conversation_id, generation)
+    derived.generation_activate(db, config, "alpha", generation)
+    refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=bad, model="toy-embed")
