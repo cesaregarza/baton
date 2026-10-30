@@ -136,7 +136,13 @@ def _query_profiles(conn: sqlite3.Connection, config: Config, query_vector: Any,
             profiles[generation], producers[generation] = embedding, producer
     if not profiles:
         raise InvalidRequest(f"no active generation embeds with {model}")
-    # Every active profile for the model must fit: a query is never silently scored against only some of them.
+    # Activation keeps one signature per model; should a database hold two anyway, refuse rather than score.
+    signatures = {json.dumps(derived.signature(embedding), sort_keys=True) for embedding in profiles.values()}
+    if len(signatures) > 1:
+        held = "; ".join(f"{producers[generation]}'s {generation}: {derived.signature(embedding)}"
+                         for generation, embedding in profiles.items())
+        raise InvalidRequest(f"{model} has more than one active embedding signature ({held}), so a query vector "
+                             "can't be scored")
     for generation, embedding in profiles.items():
         if embedding["dim"] != len(query_vector):
             raise InvalidRequest(f"{producers[generation]}'s active generation {generation} embeds {model} in "

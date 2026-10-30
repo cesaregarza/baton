@@ -30,6 +30,7 @@ from baton.errors import (
     BatchIncomplete,
     BatchSuperseded,
     CheckpointGap,
+    EmbeddingProfileConflict,
     Forbidden,
     GenerationActive,
     GenerationBehind,
@@ -303,6 +304,7 @@ def generation_activate(conn: sqlite3.Connection, config: Config, producer: str,
         previous = _generation(conn, producer)
         if previous == target["id"]:
             return {"generation": target["id"], "previous": previous, "mode": "unchanged"}
+        _require_one_signature(conn, producer, target)
         epoch, _ = _log_position(conn)
         pruned = int(conn.execute("SELECT value FROM log_meta WHERE key = 'pruned_through'").fetchone()[0])
         reconcile = (target["watermark_epoch"] != epoch or target["watermark_seq"] is None
@@ -347,6 +349,29 @@ def generation_activate(conn: sqlite3.Connection, config: Config, producer: str,
         conn.execute("UPDATE generations SET active = 1, activated_at = ?, deactivated_at = NULL WHERE id = ?",
                      (now, target["id"]))
     return {"generation": target["id"], "previous": previous, "mode": "reconcile" if reconcile else "watermark"}
+
+
+def signature(embedding: dict[str, Any]) -> dict[str, Any]:
+    """What an embedding profile commits a model name to: every active generation using the name must agree."""
+    return {key: embedding[key] for key in ("model", "dim", "normalization", "distance")}
+
+
+def _require_one_signature(conn: sqlite3.Connection, producer: str, target: sqlite3.Row) -> None:
+    """One model name, one embedding signature across active generations. Every other producer's active one is
+    compared; this producer's own, which the activation replaces, is not, so a producer may change its own."""
+    embedding = json.loads(target["profile"]).get("embedding")
+    if not embedding:
+        return
+    mine = signature(embedding)
+    for other in conn.execute("SELECT id, producer, profile FROM generations WHERE active = 1 AND producer != ?"
+                              " ORDER BY producer, id", (producer,)):
+        theirs = json.loads(other["profile"]).get("embedding")
+        if theirs and theirs["model"] == mine["model"] and signature(theirs) != mine:
+            raise EmbeddingProfileConflict(
+                f"{other['producer']}'s active generation {other['id']} embeds {mine['model']} as {signature(theirs)},"
+                f" and {target['id']} as {mine}: one model name has one signature, so give this one its own name",
+                mine["model"], mine, {"producer": other["producer"], "generation": other["id"],
+                                      "signature": signature(theirs)})
 
 
 def generation_drop(conn: sqlite3.Connection, config: Config, producer: str, generation: str) -> dict[str, Any]:
