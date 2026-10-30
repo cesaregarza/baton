@@ -625,7 +625,20 @@ def _check_vectors(conn: sqlite3.Connection, config: Config, manifest: dict[str,
     return owed
 
 
+def fits_float32(value: float) -> bool:
+    """Whether a vector component can be stored as it is kept, a float32: finite and within its range."""
+    if not math.isfinite(value):
+        return False
+    try:
+        struct.pack("<f", value)
+    except OverflowError:
+        return False
+    return True
+
+
 def _check_fit(vector: list[float], embedding: dict[str, Any], name: str) -> None:
+    if not all(fits_float32(x) for x in vector):
+        raise InvalidRequest(f"the vector for {name} has a component that isn't a finite float32")
     if len(vector) != embedding["dim"]:
         raise InvalidRequest(f"the vector for {name} has {len(vector)} dimensions, and the profile {embedding['dim']}")
     if embedding["normalization"] == "unit" and abs(math.sqrt(sum(x * x for x in vector)) - 1) > UNIT_TOLERANCE:

@@ -126,8 +126,8 @@ def _query_profiles(conn: sqlite3.Connection, config: Config, query_vector: Any,
     if not isinstance(model, str) or not model:
         raise InvalidRequest("a query vector names its model")
     if not isinstance(query_vector, list) or not query_vector or not all(
-            isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x) for x in query_vector):
-        raise InvalidRequest("query_vector is a list of finite numbers")
+            isinstance(x, int | float) and not isinstance(x, bool) and derived.fits_float32(x) for x in query_vector):
+        raise InvalidRequest("query_vector is a list of finite numbers that each fit a float32")
     profiles, producers = {}, {}
     for generation, producer, profile in conn.execute(
             "SELECT id, producer, profile FROM generations WHERE active = 1 ORDER BY producer, id"):
