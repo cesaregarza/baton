@@ -239,7 +239,7 @@ def test_11_a_retention_hole_is_absent_and_splits_the_segments(db, config) -> No
     conversation_id, sent = converse(db, config, 5)
     expire(db, sent[2])
     manifest = begin(db, config, conversation_id)
-    assert manifest["absent"] == [{"seq": 3, "reason": "expired"}]
+    assert manifest["absent"] == [{"from_seq": 3, "to_seq": 3, "reason": "expired"}]
     assert [(s["from_seq"], s["to_seq"], s["count"]) for s in manifest["segments"]] == [(1, 2, 2), (4, 5, 2)]
     read_all(db, config, manifest)
     commit(db, config, manifest)
@@ -536,7 +536,7 @@ def test_an_invalid_version_recovers_by_a_rebase_from_seq_1(db, config) -> None:
     assert (plan["rebase"], plan["reason"], plan["prior_version_id"], plan["start_seq"]) \
         == (True, "prior_invalid", None, 1)
     assert plan["prior_version"] == old["version"]  # what the compare-and-set names
-    assert manifest["absent"] == [{"seq": 2, "reason": "expired"}]
+    assert manifest["absent"] == [{"from_seq": 2, "to_seq": 2, "reason": "expired"}]
     read_all(db, config, manifest)
     commit(db, config, manifest, request_id="r-2")
     old_now, new = versions(db, conversation_id)
@@ -568,8 +568,10 @@ def test_a_long_conversation_recovers_over_several_batches(tmp_path: Path) -> No
     rebase = begin(db, config, conversation_id)
     assert rebase["kinds"]["summary"]["rebase"] is True and rebase["window"] == {"from_seq": 1, "to_seq": 4}
     read_all(db, config, rebase)
-    commit(db, config, rebase, request_id="r-2")
-    assert dirty(db, config)[(conversation_id, "summary")]["state"] == "behind"  # valid, and not yet current
+    partial = commit(db, config, rebase, request_id="r-2")
+    assert [v["state"] for v in partial["versions"]] == ["behind"]  # as dirty says: valid, not yet current
+    assert dirty(db, config)[(conversation_id, "summary")]["state"] == "behind"
+    assert [v["state"] for v in commit(db, config, rebase, request_id="r-2")["versions"]] == ["behind"]
     chained = begin(db, config, conversation_id)
     assert chained["kinds"]["summary"]["rebase"] is False and chained["window"]["from_seq"] == 5
     read_all(db, config, chained)
@@ -591,6 +593,7 @@ def test_19_a_provenance_limit_fails_closed_and_stays_dirty(tmp_path: Path) -> N
     before = snapshot(db)
     error = refused("provenance_limit_exceeded", begin, db, config, conversation_id)
     assert error.extra["limit"] == "max_input_segments" and error.extra["kind"] == "summary"
+    assert (error.extra["segments"], error.extra["items"]) == (3, 3)  # 1, 3 and 5: three ranges of one item
     assert snapshot(db) == before  # nothing advances
     pair = dirty(db, config)[(conversation_id, "summary")]
     assert (pair["state"], pair["covered_through_seq"], pair["provenance_limit_exceeded"]) == ("behind", 4, True)
@@ -761,3 +764,62 @@ def test_the_read_only_open_sees_the_derived_tables(tmp_path: Path) -> None:
     with pytest.raises(sqlite3.OperationalError):
         reader.execute("DELETE FROM artifact_versions")
     reader.close()
+
+
+# Review round: bounded holes and scans, labels that match the current state, a complete receipt -----------
+
+
+def test_a_run_of_holes_is_one_entry_and_the_manifest_stays_bounded(tmp_path: Path) -> None:
+    config = index_config(tmp_path, max_manifest_items=1)
+    db = connect(config.db_path)
+    conversation_id, sent = converse(db, config, 12)
+    expire(db, *sent[:11])  # seqs 1-11 gone, only 12 left
+    manifest = begin(db, config, conversation_id)
+    assert manifest["absent"] == [{"from_seq": 1, "to_seq": 11, "reason": "expired"}]
+    assert [item["seq"] for segment in manifest["segments"] for item in segment["items"]] == [12]
+    db.close()
+
+
+def test_alternating_holes_stay_within_the_segment_cap(tmp_path: Path) -> None:
+    config = index_config(tmp_path, max_manifest_segments=3)
+    db = connect(config.db_path)
+    conversation_id, sent = converse(db, config, 20)
+    expire(db, *sent[1::2])  # every even seq gone
+    manifest = begin(db, config, conversation_id)
+    assert [item["seq"] for segment in manifest["segments"] for item in segment["items"]] == [1, 3, 5]
+    assert manifest["absent"] == [{"from_seq": n, "to_seq": n, "reason": "expired"} for n in (2, 4, 6)]
+    assert len(manifest["absent"]) <= config.indexer.max_manifest_segments
+    assert manifest["window"] == {"from_seq": 1, "to_seq": 6}
+    db.close()
+
+
+def test_a_batch_reads_a_bounded_number_of_rows(tmp_path: Path, monkeypatch) -> None:
+    config = index_config(tmp_path, max_manifest_items=2)
+    db = connect(config.db_path)
+    conversation_id, _ = converse(db, config, 30)
+    loaded = []
+    real = derived._present
+
+    def counting(*args, **kwargs):
+        rows = real(*args, **kwargs)
+        loaded.append(len(rows))
+        return rows
+
+    monkeypatch.setattr(derived, "_present", counting)
+    begin(db, config, conversation_id)
+    assert loaded and max(loaded) <= config.indexer.max_manifest_items + 1  # never the whole history
+    db.close()
+
+
+def test_a_full_commit_is_valid_and_a_replay_reports_the_state_now(db, config) -> None:
+    conversation_id, _ = converse(db, config, 2)
+    first = cycle(db, config, conversation_id)
+    assert [v["state"] for v in first["versions"]] == ["valid"] and first["operation"] == "commit_batch"
+    say(db, config, conversation_id, "one more")
+    manifest_id = db.execute("SELECT batch_id FROM artifact_versions").fetchone()[0]
+    replay = derived.commit_batch(db, config, "alpha", manifest_id,
+                                  {"request_id": "r-1", "artifacts": [
+                                      {"kind": "summary", "body": "summary of the release plan", "citations": [],
+                                       "expected_version": 0}]})
+    assert replay["created"] is False and replay["operation"] == "commit_batch"
+    assert [v["state"] for v in replay["versions"]] == ["behind"]  # current state, not the stored one
