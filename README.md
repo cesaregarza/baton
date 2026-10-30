@@ -298,6 +298,7 @@ role = "operator"                        # a human role, not the dashboard's vie
 origin = "https://seat.example.com"      # the one exact https origin people open it at
 listen_port = 8767                       # loopback only; the proxy forwards here
 # idle_seconds = 3600, absolute_seconds = 43200   # session limits (at most a day idle, a week in all)
+# timezone = "America/Chicago"           # times on the pages; UTC unless set (the pages run no scripts)
 ```
 
 - **Log in with the role's own token.** The person pastes the token made by `baton token new --role operator`.
