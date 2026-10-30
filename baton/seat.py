@@ -42,11 +42,12 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlsplit
 
-from baton import auth, conversations, dashboard, messages
+from baton import auth, conversations, messages
 from baton.config import Config
 from baton.errors import (
     BatonError,
@@ -95,13 +96,51 @@ MESSAGE_ID = re.compile(r"msg_[0-9a-f]{1,64}")
 FIELDS = {"/seat/login": ({"token", "pre"}, {"token", "pre"}), "/seat/logout": ({"csrf"}, {"csrf"}),
           "/seat/ack": ({"csrf", "receipt"}, {"csrf", "receipt"}),
           "send": ({"text", "reply_to", "csrf", "request_id"}, {"text", "csrf", "request_id"})}
-STYLE = dashboard.STYLE + """\
-form.compose textarea { width: 100%; box-sizing: border-box; min-height: 6rem; font: inherit; }
-form.compose button, form.inline button, form.login button { font: inherit; padding: .5rem 1rem; margin-top: .4rem; }
+# One column, the phone's own type, 16px so iOS never zooms into a field. The one loud thing is a decision asked
+# of the seat; everything else stays quiet. Buttons are at least 44px tall.
+STYLE = """\
+:root { --ink: #1d2125; --muted: #5d6670; --rule: #e3e5e8; --action: #0d5c63; --ask: #c98a14; --ask-bg: #fdf3dc; }
+body { font: 16px/1.5 system-ui, -apple-system, sans-serif; margin: 0 auto; max-width: 40rem; padding: .75rem 1rem 6rem;
+       color: var(--ink); background: #fff; }
+a { color: var(--action); }
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--action); outline-offset: 2px; }
+nav { font-size: .9rem; }
+nav a { margin-right: 1rem; }
+h1 { font-size: 1.25rem; line-height: 1.3; margin: .9rem 0 .2rem; overflow-wrap: anywhere; }
+h2 { font-size: 1rem; margin: 1.4rem 0 .2rem; color: var(--muted); font-weight: 600; }
+ul { list-style: none; padding: 0; margin: .4rem 0; }
+li { border-bottom: 1px solid var(--rule); padding: .7rem 0; min-width: 0; }
+.muted, .meta time, .reply-to, .note { color: var(--muted); font-size: .875rem; }
+.meta { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; margin: 0; }
+.meta .role { font-weight: 600; }
+.meta time { margin-left: auto; }
+.person { font-size: .75rem; border: 1px solid var(--rule); border-radius: 1rem; padding: 0 .45rem;
+          color: var(--muted); }
+.text { white-space: pre-wrap; overflow-wrap: anywhere; margin: .25rem 0 0; }
+.notice { color: var(--muted); font-style: italic; margin: 0; }
+.relayed { border-left: 3px solid var(--rule); margin: .4rem 0 0; padding: .1rem 0 .1rem .7rem; }
+.relayed p { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.actions { margin: .3rem 0 0; font-size: .9rem; }
+li.ask { border-left: 4px solid var(--ask); background: var(--ask-bg); padding-left: .7rem; padding-right: .5rem; }
+.ask-label { font-weight: 600; font-size: .875rem; margin: 0 0 .2rem; }
+.placeholder { color: var(--muted); font-style: italic; }
+.sent { display: none; font-weight: 600; color: var(--action); margin: 0 0 .2rem; }
+li:target { background: #eef6f6; padding-left: .5rem; padding-right: .5rem; }
+li:target .sent { display: block; }
+.banner { border-left: 4px solid var(--ask); background: var(--ask-bg); padding: .6rem .8rem; margin: .8rem 0; }
+.bar { position: sticky; bottom: 0; background: #fff; border-top: 1px solid var(--rule); padding: .6rem 0; }
+button { font: inherit; font-weight: 600; min-height: 44px; padding: .5rem 1.1rem; border: 0; border-radius: .5rem;
+         background: var(--action); color: #fff; }
+button.quiet { background: none; color: var(--action); border: 1px solid var(--rule); }
+.bar button, form.login button, form.compose button { width: 100%; }
+label { display: block; font-weight: 600; margin: .8rem 0 .3rem; }
+input, textarea { font: inherit; width: 100%; box-sizing: border-box; border: 1px solid #b9bec4; border-radius: .5rem;
+                  padding: .6rem .7rem; }
+textarea { min-height: 7rem; resize: vertical; }
 form.inline { display: inline; }
-form.login input { width: 100%; box-sizing: border-box; font: inherit; padding: .4rem; }
-.banner { border: 1px solid #c4c7c5; border-radius: .4rem; padding: .5rem .7rem; margin: .6rem 0; }
-.placeholder { color: #5f6368; font-style: italic; }
+nav button.quiet { min-height: 0; padding: .2rem .6rem; font-weight: 400; font-size: .9rem; }
+.notice-box { border-left: 4px solid var(--muted); padding: .5rem .8rem; margin: .8rem 0; background: #f3f4f6; }
 """
 
 _failures: dict[str, deque[float]] = {}
@@ -270,11 +309,13 @@ def _login_form(conn: sqlite3.Connection, status: int = 200, notice: str = "") -
         conn.execute("DELETE FROM seat_prelogin WHERE digest NOT IN (SELECT digest FROM seat_prelogin"
                      " ORDER BY expires_at DESC LIMIT ?)", (MAX_PRE - 1,))
         conn.execute("INSERT INTO seat_prelogin (digest, expires_at) VALUES (?, ?)", (_digest(pre), now + PRE_TTL))
-    body = (f'<h1>Log in</h1>{notice}<form class="login" method="post" action="/seat/login">'
-            '<label for="token">Your token</label>'
-            '<input id="token" type="password" name="token" autocomplete="current-password" required>'
-            f'<input type="hidden" name="pre" value="{_e(pre)}"><button type="submit">Log in</button></form>'
-            '<p class="muted">Paste the token you keep for this seat. It is checked once and not kept.</p>')
+    body = (f'<h1>Log in to your seat</h1>{notice}<form class="login" method="post" action="/seat/login">'
+            '<label for="token">Seat token</label>'
+            '<input id="token" type="password" name="token" autocomplete="current-password" autocapitalize="off" '
+            'spellcheck="false" required>'
+            f'<input type="hidden" name="pre" value="{_e(pre)}"><p><button type="submit">Log in</button></p></form>'
+            '<p class="note">Paste the token from your password manager. It is checked once and not kept; your '
+            'session ends after an hour without use, or 12 hours in all.</p>')
     response = _page(status, "Log in", body)
     response.cookies.append(f"{PRE_COOKIE}={pre}; Max-Age={PRE_TTL}; {COOKIE_ATTRIBUTES}")
     return response
@@ -287,20 +328,22 @@ def _login(config: Config, conn: sqlite3.Connection, request: _Request) -> Respo
         fresh = conn.execute("DELETE FROM seat_prelogin WHERE digest = ? AND expires_at > ?",
                              (_digest(pre), now)).rowcount
     if not fresh or not hmac.compare_digest(request.cookies.get(PRE_COOKIE, ""), pre):
-        return _login_form(conn, 403, '<p class="notice">That login form had expired. Try again.</p>')
+        return _login_form(conn, 403, '<p class="notice-box">That login form had expired. Paste the token again.</p>')
     key = str(config.db_path)
     with _failures_lock:
         failures = _failures.setdefault(key, deque())
         while failures and now - failures[0] > 3600:
             failures.popleft()
         if len(failures) >= FAILURES_PER_HOUR:
-            return _login_form(conn, 429, '<p class="notice">Too many tries. Wait an hour and try again.</p>')
+            return _login_form(conn, 429, '<p class="notice-box">Too many tries. Logging in is paused for up '
+                                          'to an hour.</p>')
     token = request.form["token"].strip()
     access = auth.static_token(config, token) if token else None
     if access is None or auth.role_of(access) != config.seat.role or not _seat_role_ok(config):
         with _failures_lock:
             _failures[key].append(now)
-        return _login_form(conn, 401, '<p class="notice">That token was not accepted.</p>')
+        return _login_form(conn, 401, '<p class="notice-box">That token was not accepted. Check you copied the '
+                                      'whole seat token.</p>')
     authority = auth.credential_authority(access)
     raw = "seat_" + secrets.token_urlsafe(32)
     with transaction(conn):
@@ -395,19 +438,18 @@ def _home(config: Config, conn: sqlite3.Connection, session: _Session) -> Respon
     listed = conversations.list_for(conn, session.role)
     items = "".join(f'<li><a href="/seat/c/{_e(c["conversation_id"])}">{_e(c["title"])}</a>'
                     f'{_topic(c.get("topic"))}</li>' for c in listed)
-    body = (f'<h1>{_e(config.roles[session.role].label)}</h1>{_banner(unread)}'
-            f'<p><a href="/seat/inbox">Inbox</a> · {unread} unread</p>'
-            f'<h2>Your conversations</h2><ul>{items or "<li class=muted>None yet.</li>"}</ul>'
-            f'{_logout_form(session)}')
+    inbox = f"{unread} unread" if unread else "Nothing unread"
+    body = (f'{_nav(session)}<h1>{_e(config.roles[session.role].label)}</h1>{_banner(unread)}'
+            f'<p><a href="/seat/inbox">Inbox</a> <span class="muted">{inbox}</span></p>'
+            f'<h2>Your conversations</h2><ul>{items or "<li class=muted>You are not in any conversation yet.</li>"}'
+            '</ul>')
     return _page(200, "Seat", body)
-
 
 def _banner(unread: int) -> str:
     if unread < WARN_UNREAD:
         return ""
     return (f'<p class="banner">{unread} unread. Conversations you\'re in stop accepting messages at '
-            f'{messages.MAX_UNREAD} unread messages in your mailbox — <a href="/seat/inbox">mark some as seen</a>.</p>')
-
+            f'{messages.MAX_UNREAD} unread. <a href="/seat/inbox">Mark messages as seen</a> to keep them open.</p>')
 
 def _inbox(config: Config, conn: sqlite3.Connection, session: _Session) -> Response:
     """The mailbox from its cursor, without moving it, and a receipt for exactly the page shown."""
@@ -428,14 +470,15 @@ def _inbox(config: Config, conn: sqlite3.Connection, session: _Session) -> Respo
                          " seat_receipts WHERE session = ? ORDER BY expires_at DESC LIMIT ?)",
                          (session.digest, session.digest, MAX_RECEIPTS))
     unread = messages.unread(conn, session.role)
-    items = "".join(_inbox_item(entry) for entry in page)
-    ack = (f'<form class="inline" method="post" action="/seat/ack">{_csrf(session)}'
+    items = "".join(_inbox_item(entry, session.role) for entry in page)
+    ack = (f'<form class="bar" method="post" action="/seat/ack">{_csrf(session)}'
            f'<input type="hidden" name="receipt" value="{_e(receipt)}">'
-           f'<button type="submit">Mark these {len(page)} as seen</button></form>'
-           '<p class="muted">Seen only moves your inbox along. It is not a reply and approves nothing.</p>'
+           f'<button type="submit">Mark these {len(page)} as seen</button>'
+           '<p class="note">Seen only moves your inbox along. It is not a reply and approves nothing.</p></form>'
            if page else "")
-    body = (f'<p><a href="/seat/">Seat</a></p><h1>Inbox</h1>{_banner(unread)}'
-            f'<p class="muted">{unread} unread, oldest first. Reading here marks nothing.</p>'
+    more = f" Showing the oldest {len(page)}." if unread > len(page) else ""
+    body = (f'{_nav(session)}<h1>Inbox</h1>{_banner(unread)}'
+            f'<p class="muted">{unread} unread, oldest first.{more} Reading here marks nothing.</p>'
             f'<ul>{items or "<li class=muted>Nothing unread.</li>"}</ul>{ack}')
     return _page(200, "Inbox", body)
 
@@ -446,13 +489,12 @@ def _inbox_entry(row: sqlite3.Row, member: set[str]) -> dict[str, Any]:
     return {**messages.as_dict(row), "conversation_seq": row["conversation_seq"]}
 
 
-def _inbox_item(entry: dict[str, Any]) -> str:
+def _inbox_item(entry: dict[str, Any], role: str) -> str:
     if entry.get("placeholder"):
         return '<li class="placeholder">A message from a conversation you\'re no longer in.</li>'
-    where = (f' · <a href="{_link(entry["conversation_id"], entry["conversation_seq"])}">open</a>'
-             if entry["conversation_id"] else "")
-    return f'<li>{_meta(entry)}{where}<p class="text">{_e(entry["text"])}</p></li>'
-
+    where = (f'<p class="actions"><a href="{_link(entry["conversation_id"], entry["conversation_seq"])}">'
+             'Open in conversation</a></p>' if entry["conversation_id"] else "")
+    return _message(entry, role, where)
 
 def _ack(config: Config, conn: sqlite3.Connection, session: _Session, receipt: str) -> Response:
     with transaction(conn):
@@ -466,8 +508,9 @@ def _ack(config: Config, conn: sqlite3.Connection, session: _Session, receipt: s
             stale = False
             messages.mark_read(conn, session.role, row["last_seq"])
     if stale:
-        return _page(409, "Out of date", '<p>This page is out of date: nothing was marked. '
-                                         '<a href="/seat/inbox">Open the inbox again</a>.</p>')
+        return _page(409, "Out of date", '<h1>Nothing was marked</h1><p>This page is out of date: your inbox '
+                                         'moved on since it was shown, so marking it could skip a message.</p>'
+                                         '<p><a href="/seat/inbox">Open the inbox again</a></p>')
     return _redirect("/seat/inbox")
 
 
@@ -481,38 +524,41 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
     title = conn.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,)).fetchone()["title"]
     request_id = request_id or _mint_request(conn, session, conversation_id)
     shown = {int(item["seq"]) for item in page["messages"]}
-    items = "".join(_history_item(conversation_id, item, shown) for item in page["messages"])
+    items = "".join(_history_item(conversation_id, item, shown, session.role) for item in page["messages"])
     newer = (f'<p class="pager"><a href="/seat/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Newer</a></p>'
              if len(page["messages"]) == HISTORY_PAGE else "")
-    reply_field = (f'<input type="hidden" name="reply_to" value="{_e(reply)}"><p class="reply-to">Replying to a '
-                   f'message. <a href="/seat/c/{_e(conversation_id)}">Cancel</a></p>' if reply else "")
-    compose = (f'<form class="compose" method="post" action="/seat/c/{_e(conversation_id)}/send">{_csrf(session)}'
-               f'<input type="hidden" name="request_id" value="{_e(request_id)}">{reply_field}'
-               f'<label for="text">Reply as {_e(config.roles[session.role].label)}</label>'
+    parent = next((item for item in page["messages"] if item["message_id"] == reply), None) if reply else None
+    quoted = (f'<blockquote class="relayed"><p>{_e(_short(parent["text"]))}</p></blockquote>' if parent
+              else "")
+    reply_field = (f'<input type="hidden" name="reply_to" value="{_e(reply)}"><p class="muted">Replying to '
+                   f'{_e(parent["from_role"] if parent else "a message")}. '
+                   f'<a href="/seat/c/{_e(conversation_id)}#compose">Cancel</a></p>{quoted}' if reply else "")
+    label = config.roles[session.role].label
+    compose = (f'<form class="compose" id="compose" method="post" action="/seat/c/{_e(conversation_id)}/send">'
+               f'{_csrf(session)}<input type="hidden" name="request_id" value="{_e(request_id)}">{reply_field}'
+               f'<label for="text">Reply as {_e(label)}</label>'
                f'<textarea id="text" name="text" required maxlength="{messages.MAX_MESSAGE_BYTES}">{_e(text)}'
-               '</textarea><button type="submit">Send</button></form>'
-               '<p class="muted">Messages you send here are sent through authenticated seat as you. Viewing '
-               'changes nothing.</p>')
-    body = (f'<p><a href="/seat/">Seat</a> · <a href="/seat/inbox">Inbox</a></p><h1>{_e(title)}</h1>'
-            f'{notice}<p class="muted">Your history starts when you were added.</p>'
-            f'<ul>{items or "<li class=muted>Nothing yet.</li>"}</ul>{newer}{compose}')
+               '</textarea><p><button type="submit">Send</button></p>'
+               '<p class="note">Sent through authenticated seat as you. Viewing changes nothing.</p></form>')
+    earlier = (f'<p class="pager"><a href="/seat/c/{_e(conversation_id)}?after_seq={max(0, after - HISTORY_PAGE)}">'
+               'Earlier messages</a></p>' if after > 0 else "")
+    body = (f'{_nav(session)}<h1>{_e(title)}</h1>{notice}'
+            f'<p class="muted">From when you were added. <a href="#compose">Write a reply</a></p>'
+            f'{earlier}<ul>{items or "<li class=muted>Nothing yet.</li>"}</ul>{newer}{compose}')
     return _page(status, title, body)
 
 
-def _history_item(conversation_id: str, item: dict[str, Any], shown: set[int]) -> str:
+def _history_item(conversation_id: str, item: dict[str, Any], shown: set[int], role: str) -> str:
     parent = item.get("reply_to")
     marker = ""
     if parent:
-        marker = ('<p class="reply-to unavailable">parent unavailable</p>' if parent.get("seq") is None else
+        marker = ('<p class="reply-to">in reply to a message you can\'t see</p>' if parent.get("seq") is None else
                   "" if int(parent["seq"]) in shown else
                   f'<p class="reply-to">in reply to <a href="{_link(conversation_id, int(parent["seq"]))}">'
-                  f'#{int(parent["seq"])}</a></p>')
-    reply = (f' · <a href="/seat/c/{_e(conversation_id)}?reply={_e(item["message_id"])}#text">Reply</a>'
-             if item.get("from_role") else "")
-    words = (f'<p class="notice">{_e(item["notice"].get("text", ""))}</p>' if item.get("notice")
-             else f'<p class="text">{_e(item["text"])}</p>')
-    return f'<li id="m-{int(item["seq"])}">{marker}{_meta(item)}{reply}{words}</li>'
-
+                  f'an earlier message</a></p>')
+    actions = (f'<p class="actions"><a href="/seat/c/{_e(conversation_id)}?reply={_e(item["message_id"])}#compose">'
+               'Reply</a></p>' if item.get("from_role") and item.get("from_role") != role else "")
+    return _message(item, role, actions, anchor=f"m-{int(item['seq'])}", before=marker)
 
 def _send(config: Config, conn: sqlite3.Connection, session: _Session, conversation_id: str,
           form: dict[str, str]) -> Response:
@@ -534,8 +580,8 @@ def _send(config: Config, conn: sqlite3.Connection, session: _Session, conversat
                                     request_id=request_id, reply_to=reply_to)
     except IdempotencyConflict:
         return _conversation(config, conn, session, conversation_id, 0, reply_to, status=409, text=text,
-                             notice='<p class="notice">That form was already used for another message. Your text '
-                                    'is below in a fresh form.</p>')
+                             notice='<p class="notice-box">That form was already used for another message. Your '
+                                    'text is below in a fresh form.</p>')
     except (ConversationRateLimited, ConversationFull, MailboxFull):
         return _retry(config, conn, session, conversation_id, form, 429, "The conversation isn't accepting "
                       "messages right now. Nothing was sent; try again shortly.")
@@ -555,7 +601,7 @@ def _retry(config: Config, conn: sqlite3.Connection, session: _Session, conversa
            status: int, why: str) -> Response:
     """The same form again, with its text and its request id: whether or not the send happened, a repeat is safe."""
     return _conversation(config, conn, session, conversation_id, 0, form.get("reply_to") or None, status=status,
-                         notice=f'<p class="notice">{_e(why)}</p>', text=form["text"],
+                         notice=f'<p class="notice-box">{_e(why)}</p>', text=form["text"],
                          request_id=form["request_id"])
 
 
@@ -583,11 +629,45 @@ def _link(conversation_id: str, seq: int) -> str:
     return f"/seat/c/{conversation_id}?after_seq={seq - 1}#m-{seq}"
 
 
-def _meta(item: dict[str, Any]) -> str:
-    who = item.get("from_role") or "the host"
-    kind = " · person" if item.get("author_kind") == "human" else ""
-    return f'<p class="meta"><span class="role">{_e(who)}</span>{kind} · {_e(item.get("at", ""))[:16]}</p>'
+def _message(item: dict[str, Any], role: str, after: str, *, anchor: str = "", before: str = "") -> str:
+    """One message: who and when, what a decision or attention asks of the seat, its words and any relayed quote."""
+    ident = f' id="{anchor}"' if anchor else ""
+    if not item.get("from_role"):
+        return f'<li{ident}><p class="notice">{_e(item["text"])}</p></li>'
+    asked = role in (item.get("attention") or [])
+    label = ("Asks you to decide" if asked and item.get("needs_decision") else
+             "Asks for a decision" if item.get("needs_decision") else "Asks you to look" if asked else "")
+    css = ' class="ask"' if asked and item.get("needs_decision") else ""
+    relayed = "".join(f'<blockquote class="relayed"><p class="muted">relayed from {_e(quote.get("source", ""))}</p>'
+                      f'<p>{_e(quote.get("text", ""))}</p></blockquote>' for quote in item.get("relayed") or [])
+    flag = f'<p class="ask-label">{label}</p>' if label else ""
+    sent = '<p class="sent">Sent</p>' if item["from_role"] == role else ""
+    return (f'<li{ident}{css}>{before}{flag}{sent}{_meta(item, role)}<p class="text">{_e(item["text"])}</p>{relayed}'
+            f'{after}</li>')
 
+
+def _meta(item: dict[str, Any], role: str) -> str:
+    who = "You" if item["from_role"] == role else item["from_role"]
+    person = ' <span class="person">person</span>' if item.get("author_kind") == "human" else ""
+    return (f'<p class="meta"><span class="role">{_e(who)}</span>{person}'
+            f'<time datetime="{_e(item.get("at", ""))}">{_e(_when(item.get("at", "")))}</time></p>')
+
+
+def _when(at: str) -> str:
+    """`29 Oct, 18:02 UTC` from a stored ISO time; the stored text itself if it isn't one."""
+    try:
+        moment = datetime.fromisoformat(at).astimezone(UTC)
+    except ValueError:
+        return at
+    return f"{moment.day} {moment:%b}, {moment:%H:%M} UTC"
+
+
+def _short(text: str, limit: int = 160) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _nav(session: _Session) -> str:
+    return (f'<nav><a href="/seat/">Conversations</a><a href="/seat/inbox">Inbox</a>{_logout_form(session)}</nav>')
 
 def _topic(topic: str | None) -> str:
     return f' <span class="badge">{_e(topic)}</span>' if topic else ""
@@ -599,11 +679,12 @@ def _csrf(session: _Session) -> str:
 
 def _logout_form(session: _Session) -> str:
     return (f'<form class="inline" method="post" action="/seat/logout">{_csrf(session)}'
-            '<button type="submit">Log out</button></form>')
+            '<button class="quiet" type="submit">Log out</button></form>')
 
 
 def _not_in(status: int = 403, words: str = "You're not in this conversation.") -> Response:
-    return _page(status, "Not available", f'<p>{_e(words)} <a href="/seat/">Your conversations</a></p>')
+    return _page(status, "Not available", f'<h1>Not available</h1><p>{_e(words)}</p>'
+                                          '<p><a href="/seat/">Your conversations</a></p>')
 
 
 def _redirect(location: str) -> Response:
