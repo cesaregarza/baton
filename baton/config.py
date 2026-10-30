@@ -210,6 +210,7 @@ def load(explicit: str | os.PathLike[str] | None = None) -> Config:
 
 
 def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
+    _refuse_reserved(raw)
     host = raw.get("host", {})
     public_url = str(host.get("public_url", "")).rstrip("/")
     if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", public_url):
@@ -245,6 +246,18 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         dashboard=_dashboard(raw.get("dashboard", {}), roles, conversations),
         search=Search(enabled=_boolean(raw.get("search", {}), "enabled", False, "search.enabled")),
     )
+
+
+# Keys a later indexer slice will read. Refused until then, so a config written for that slice can't load here
+# and appear to work.
+RESERVED_INDEXER_KEYS = ("messaging_role", "proposal_recipients")
+
+
+def _refuse_reserved(raw: dict) -> None:
+    indexer = raw.get("indexer", {})
+    for key in RESERVED_INDEXER_KEYS:
+        if isinstance(indexer, dict) and key in indexer:
+            raise ConfigError(f"indexer.{key} is not supported yet")
 
 
 def canonical_issuer(public_url: str) -> str:
