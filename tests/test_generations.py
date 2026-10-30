@@ -15,9 +15,9 @@ import pytest
 from test_artifact_reads import reads_config, shown
 from test_index_writer import artifacts_for, commit, converse, expire, read_all, say
 
-from baton import conversations, derived, store
+from baton import changes, derived, store
 from baton.errors import BatonError
-from baton.store import connect
+from baton.store import connect, transaction
 
 
 @pytest.fixture
@@ -172,12 +172,19 @@ def test_18_a_change_after_the_watermark_must_be_covered_before_switching(db, co
     assert activate(db, config, new)["generation"] == new
 
 
+def participant_change(db, conversation_id: str) -> None:
+    """A participant change on its own: the logged change and the revision bump. (conversations.add also posts a
+    host notice, a message of its own, which would need covering like any other.)"""
+    with transaction(db):
+        changes.record(db, conversation_id, "participant_added", role="late")
+        changes.record(db, conversation_id, "participant_removed", role="reviewer")
+
+
 def test_r4_1_a_participant_change_after_the_watermark_needs_no_new_batch(db, config) -> None:
     conversation_id, _ = converse(db, config, 2)
     new = create(db, config)
     fill(db, config, conversation_id, generation=new)
-    conversations.add(db, config, actor="orchestrator", conversation_id=conversation_id, participant="late")
-    conversations.remove(db, config, actor="orchestrator", conversation_id=conversation_id, participant="reviewer")
+    participant_change(db, conversation_id)
     with pytest.raises(BatonError) as nothing_new:  # the revision moved, the coverage didn't
         derived.begin_batch(db, config, "alpha", conversation_id, ["summary"], generation=new)
     assert nothing_new.value.code == "up_to_date"
@@ -214,7 +221,7 @@ def test_23_reconciling_after_a_participant_change_succeeds(db, config) -> None:
     conversation_id, _ = converse(db, config, 2)
     new = create(db, config)
     fill(db, config, conversation_id, generation=new)
-    conversations.add(db, config, actor="orchestrator", conversation_id=conversation_id, participant="late")
+    participant_change(db, conversation_id)
     age_out_the_watermark(db)
     assert activate(db, config, new)["mode"] == "reconcile"
 
@@ -342,6 +349,7 @@ def test_a_dropped_generation_s_rows_go_in_bounded_sweeps_and_receipts_say_inval
     conversation_id, _ = converse(db, config, 2)
     new = create(db, config)
     fill(db, config, conversation_id, generation=new, request_id="r-drop")
+    batch_id = receipt_batch(db, "r-drop")
     derived.generation_drop(db, config, "alpha", new)
     held = lambda: db.execute("SELECT COUNT(*) FROM artifact_versions WHERE generation = ?",  # noqa: E731
                               (new,)).fetchone()[0]
@@ -349,7 +357,7 @@ def test_a_dropped_generation_s_rows_go_in_bounded_sweeps_and_receipts_say_inval
     other, _ = converse(db, config, 1)
     derived.begin_batch(db, config, "alpha", other, ["summary"])  # one writer call sweeps at most one version
     assert held() == 2
-    replay = commit(db, config, {"batch_id": receipt_batch(db, "r-drop"), "kinds": {}}, [
+    replay = commit(db, config, {"batch_id": batch_id, "kinds": {}}, [
         {"kind": kind, "body": f"{kind} of the release plan", "citations": [], "expected_version": 0}
         for kind in derived.KINDS], request_id="r-drop")
     assert {v["state"] for v in replay["versions"]} == {"invalid"} and replay["created"] is False
