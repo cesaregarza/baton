@@ -155,11 +155,11 @@ def _rerank(conn: sqlite3.Connection, hits: list[dict], query_vector: list[float
 
 
 def _similarity(a: list[float], b: list[float], embedding: dict) -> float:
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    product = sum(x * y for x, y in zip(a, b, strict=True))
     if embedding["distance"] == "inner_product":
-        return dot
+        return product
     norms = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
-    return dot / norms if norms else 0.0
+    return product / norms if norms else 0.0
 
 
 def _message_hits(conn: sqlite3.Connection, config: Config, role: str, terms: list[str], mode: str, limit: int,
