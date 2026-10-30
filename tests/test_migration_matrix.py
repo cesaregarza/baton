@@ -173,15 +173,23 @@ def test_the_upgrade_steps_cover_every_version_there_is_a_fixture_for() -> None:
     assert min(FIXTURE_VERSIONS) < min(store._STEPS), "nothing climbs from the oldest version baton accepts"
 
 
+# The tables each step adds whole, written out so a step's declared list can't quietly stand in for them.
+WHOLE_TABLES = {8: {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"},  # the browser seat
+                9: {"change_log", "log_meta"}}  # the conversation change log
+
+
 @pytest.mark.parametrize("version", FIXTURE_VERSIONS)
-def test_every_older_schema_gains_the_seat_tables(tmp_path: Path, version: int) -> None:
-    """The browser seat's tables are a version step of their own, created whole on upgrade from any version."""
+def test_every_older_schema_gains_every_added_table(tmp_path: Path, version: int) -> None:
+    """Each step that adds tables whole creates them on upgrade from any version, every step and not only
+    the newest."""
     config = group_config(tmp_path)
     old_database(config, version, rid(f"seat-from-v{version}"))
     db = connect(config.db_path)
     assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
     tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert set(store._ADDED_TABLES[max(store._ADDED_TABLES)]) <= tables
+    assert {step: set(names) for step, names in store._ADDED_TABLES.items()} == WHOLE_TABLES
+    for step, names in WHOLE_TABLES.items():
+        assert names <= tables, f"step {step} left out {sorted(names - tables)}"
     assert "holders" in {row["name"] for row in db.execute("PRAGMA table_info(seat_requests)")}
     db.close()
 
