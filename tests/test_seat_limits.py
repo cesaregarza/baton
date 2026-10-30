@@ -184,3 +184,17 @@ def test_each_inbox_item_names_its_conversation(room) -> None:
     first, second = body.index("from the first"), body.index("from the second")
     assert body.rfind("Example", 0, first) > body.rfind("</li>", 0, first)
     assert body.rfind("Weekly notes", 0, second) > body.rfind("</li>", 0, second)
+
+
+def test_sends_older_than_the_hour_are_trimmed_too(room, monkeypatch) -> None:
+    host, cid, cookies = room
+    monkeypatch.setattr(seat, "MAX_REQUESTS", 10)
+    for n in range(6):
+        post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": f"m{n}"}, cookies=cookies)
+    start = seat._now()
+    for minutes in (50, 100):  # the same session, kept alive, until those sends are more than an hour old
+        monkeypatch.setattr(seat, "_now", lambda m=minutes: start + m * 60)
+        assert get(host.config, "/seat/", cookies=cookies).status == 200
+    for _ in range(12):
+        get(host.config, f"/seat/c/{cid}", cookies=cookies)
+    assert _rows(host) <= 10
