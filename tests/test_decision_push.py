@@ -422,7 +422,8 @@ def test_a_link_past_the_first_page_opens_the_page_holding_the_message(tmp_path)
 
     config = config_module.parse({
         "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": {"orchestrator": {"can_create_conversations": True}, "reviewer": {}, "assistant": {}},
+        "roles": {"orchestrator": {"can_create_conversations": True}, "reviewer": {},
+                  "assistant": {"display_only": True}},
         "conversations": {"enabled": True, "max_messages_per_hour": 1000},
         "dashboard": {"enabled": True, "viewer_role": ROLE, "listen_port": 8766},
         "integrations": {"decision_push": {"enabled": True, "role": ROLE, "url": "https://push.example.test/d",

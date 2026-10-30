@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
             args.role = args.role or os.environ.get("BATON_ROLE")
             if not args.role:
                 raise ConfigError("name a role with --as or $BATON_ROLE")
+            if config.require_role(args.role).display_only:
+                raise ConfigError(f"{args.role} is display_only: it only displays, so nothing acts as it")
             if config.require_role(args.role).human:
                 raise ConfigError(f"{args.role} is a human role: it acts only with its own token, through "
                                   f"`baton --host URL` with ${remote.TOKEN_ENV}, never with --as")
@@ -112,6 +114,11 @@ def _parser() -> argparse.ArgumentParser:
     revoke = token.add_parser("revoke", help="end a configured token from its next call on, with no restart")
     revoke.add_argument("name", help="the token's auth.tokens name")
     revoke.set_defaults(handler=lambda config, args: _revoke_token(config, args.name))
+
+    seat_commands = commands.add_parser("seat", help="the browser seat").add_subparsers(dest="seat_command",
+                                                                                       required=True)
+    seat_commands.add_parser("logout-all", help="end every browser seat session at once").set_defaults(
+        handler=_seat_logout_all)
 
     commands.add_parser("hash-passphrase", help="hash an OAuth consent passphrase for the config")
     oauth = commands.add_parser("oauth", help="OAuth grants").add_subparsers(dest="oauth_command", required=True)
@@ -253,7 +260,8 @@ def _history(config: Config, args: argparse.Namespace) -> dict[str, Any]:
 def _new_token(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     from baton.auth import new_token
 
-    config.require_role(args.token_role)
+    if config.require_role(args.token_role).display_only:  # before any secret exists
+        raise ConfigError(f"{args.token_role} is display_only: a role that only displays never holds a credential")
     if any(entry.name == args.name for entry in config.tokens):
         raise ConfigError(f"a token named {args.name!r} is already configured; token names must be unique, so "
                           "pick another name (or revoke and remove the old one first)")
@@ -272,6 +280,12 @@ def _hash_passphrase() -> int:
         return 1
     _print({"passphrase_hash": hash_passphrase(passphrase)})
     return 0
+
+
+def _seat_logout_all(config: Config, args: argparse.Namespace) -> dict[str, Any]:
+    from baton import seat
+
+    return {"sessions_ended": seat.logout_all(config)}
 
 
 def _revoke_token(config: Config, name: str) -> dict[str, Any]:

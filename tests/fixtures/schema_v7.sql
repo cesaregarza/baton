@@ -1,4 +1,4 @@
--- The schema-version-7 tables exactly as the reminder-wake change created them, for the migration test.
+-- The schema-version-7 tables exactly as main 182049aed12dd96c5661393659f3c840d7cc4d16 (delivered-wake reminders) created them, for the migration test.
 CREATE TABLE conversations (
         id TEXT PRIMARY KEY,
         request_id TEXT NOT NULL UNIQUE,
@@ -83,7 +83,6 @@ CREATE TABLE participants (
         PRIMARY KEY (conversation_id, role)
     );
 CREATE TABLE schema_version (version INTEGER NOT NULL);
-INSERT INTO schema_version (version) VALUES (7);
 CREATE TABLE wakes (
         role TEXT NOT NULL,
         key TEXT NOT NULL,
@@ -99,3 +98,4 @@ CREATE TABLE wakes (
         claimed_at REAL,
         PRIMARY KEY (role, key)
     );
+INSERT INTO schema_version (version) VALUES (7);

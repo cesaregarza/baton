@@ -171,3 +171,22 @@ def test_the_upgrade_steps_cover_every_version_there_is_a_fixture_for() -> None:
     assert store._STEPS, "no upgrade steps are declared"
     assert max(store._STEPS) == SCHEMA_VERSION, "the newest step is not the current version"
     assert min(FIXTURE_VERSIONS) < min(store._STEPS), "nothing climbs from the oldest version baton accepts"
+
+
+@pytest.mark.parametrize("version", FIXTURE_VERSIONS)
+def test_every_older_schema_gains_the_seat_tables(tmp_path: Path, version: int) -> None:
+    """The browser seat's tables are a version step of their own, created whole on upgrade from any version."""
+    config = group_config(tmp_path)
+    old_database(config, version, rid(f"seat-from-v{version}"))
+    db = connect(config.db_path)
+    assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+    tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert set(store._ADDED_TABLES[max(store._ADDED_TABLES)]) <= tables
+    assert "holders" in {row["name"] for row in db.execute("PRAGMA table_info(seat_requests)")}
+    db.close()
+
+
+def test_the_seat_tables_are_the_newest_step() -> None:
+    assert max(store._ADDED_TABLES) == SCHEMA_VERSION
+    assert set(store._ADDED_TABLES[SCHEMA_VERSION]) == {"seat_sessions", "seat_prelogin", "seat_receipts",
+                                                        "seat_requests"}

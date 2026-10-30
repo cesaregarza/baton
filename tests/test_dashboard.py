@@ -44,7 +44,7 @@ def view_config(tmp_path: Path, *, view_all: bool = False, dashboard_table: dict
         "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
         "roles": {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True, **WAKE},
                   "reviewer": WAKE, "assistant": WAKE, "outsider": WAKE,
-                  "operator": {"can_view_all_conversations": view_all},
+                  "operator": {"can_view_all_conversations": view_all, "display_only": True},
                   "person": {"human": True, "can_create_conversations": True}},
         "conversations": {"enabled": conversations_enabled},
         "dashboard": table,
