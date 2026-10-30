@@ -749,3 +749,60 @@ def test_a_stale_worker_does_not_fail_an_attempt_that_is_still_in_flight(tmp_pat
         "a stale worker recorded a delivered wake as failed"
     assert sorted(k for k in rows(conn) if k.startswith("messages:1:r")) \
         == ["messages:1:r1", "messages:1:r2"], "the delivered wake lost its reminders"
+
+
+CROWD = 4
+
+
+def crowd_config(tmp_path: Path):
+    """A host where `CROWD` roles besides the worker each have a hook of their own."""
+    extra = WORKER_WAKE + "".join(
+        f'[roles.crowd{n}]\ndescription = "One of the crowd"\n'
+        f'[roles.crowd{n}.wake]\ncommand = ["true"]\n' for n in range(CROWD))
+    return make_config(tmp_path, extra=extra)
+
+
+def test_a_role_with_free_cap_is_served_although_capped_roles_fill_the_page(tmp_path: Path, clock,
+                                                                            monkeypatch) -> None:
+    """Deferred work must not crowd servable work out of the page.
+
+    A reminder for a role that is over its cap stays `capped` and keeps its original due time, so it
+    sorts to the front of the due scan on every pass and is offered again, only to be refused again.
+    Enough of those and they fill the page, and a role whose own reminder has just come due with cap
+    to spare is never reached. Ordering the scan by due time alone cannot distinguish work that can
+    be served from work that cannot.
+
+    The bound this asserts: a role whose due reminder is `scheduled` is offered on the next pass,
+    however much deferred work other roles are carrying. Reproduced with a page of `CROWD` rather
+    than the hundred-row default; it is the same arithmetic and far cheaper to run.
+    """
+    monkeypatch.setattr(wakes, "PAGE", CROWD)
+    setcap(monkeypatch, 1)                       # one charged reminder puts a role at its cap
+    host = crowd_config(tmp_path)
+    recorder = Recorder()
+    dispatcher = wakes.Dispatcher(host.config, recorder)
+    conn = connect(host.config.db_path)
+    now = wakes._now()
+
+    # Built directly: this is about which rows the scan reaches, so the states are set rather than
+    # driven. Each crowd role holds one charged reminder, which puts it at its cap, and one that is
+    # due and deferred -- older than the worker's, so it sorts ahead of it.
+    for n in range(CROWD):
+        conn.execute("INSERT INTO wakes (role, key, payload, status, lease_until, attempts,"
+                     " created_at, due_at, baseline_seq, ordinal, claimed_at)"
+                     " VALUES (?, 'messages:1:r1', '{}', 'delivered', 0, 1, ?, ?, 0, 1, ?)",
+                     (f"crowd{n}", now, now - 100, now))
+        conn.execute("INSERT INTO wakes (role, key, payload, status, lease_until, attempts,"
+                     " created_at, due_at, baseline_seq, ordinal)"
+                     " VALUES (?, 'messages:2:r1', '{}', 'capped', 0, 0, ?, ?, 1, 1)",
+                     (f"crowd{n}", now, now - 100))
+    conn.execute("INSERT INTO wakes (role, key, payload, status, lease_until, attempts, created_at,"
+                 " due_at, baseline_seq, ordinal)"
+                 " VALUES ('worker', 'messages:3:r1', '{}', 'scheduled', 0, 0, ?, ?, 2, 1)",
+                 (now, now - 1))
+    conn.commit()
+
+    dispatcher.pass_once()
+
+    assert [c["id"] for c in recorder.calls] == [wakes.wake_id("worker", "messages:3:r1")], \
+        "the worker's due reminder never got a pass while capped roles filled the page"
