@@ -53,6 +53,33 @@ description = "Picks up jobs and reports back"
 # listen_port = 8766
 # proxy_host = "dash.example.com:8443"       # optional: one exact extra Host, only behind an authenticating proxy
 
+# Optional: keyword search over messages, and derived artifacts from the local indexer. Off unless enabled.
+# Each role finds only what it may read.
+# [search]
+# enabled = true
+# rolling_window_messages = 0                 # 0 is off; else producers may write summary_recent over this many latest
+# max_vector_dim = 1024                       # the largest dimension an embedding profile may declare (1-16384)
+# embeddings = false                          # true: generations may embed, commits carry vectors, search re-ranks
+
+# Optional: the host owner's local indexing worker. Empty `producers` turns the writer off.
+# [indexer]
+# producers = ["indexer"]                     # the producer names the writer commands act as (not role names)
+# max_artifact_bytes = 16384                  # per artifact body
+# max_citations = 64                          # messages one artifact may cite
+# max_manifest_items = 500                    # messages one batch may serve
+# max_manifest_segments = 64                  # seq ranges one batch may serve
+# page_items = 100                            # messages per page when a batch is read
+# max_open_batches = 4                        # per producer at once
+# batch_ttl_seconds = 900                     # an open batch expires after this
+# max_input_segments = 256                    # seq ranges one artifact's inputs may span
+# max_commits_per_hour = 60                   # per producer
+# receipt_retention_days = 30                 # commit receipts kept for retries
+# cleanup_batch = 100                         # rows removed per cleanup pass
+# max_generations = 3                         # per producer, the active one included
+# generation_retention_days = 30              # a retired generation is removed after this
+# max_activation_reconcile = 10000            # (conversation, kind) pairs one activation may check
+# max_vectors_per_generation = 1000000        # vectors one generation may hold; past it a commit is refused
+
 # Bearer tokens: create with `baton token new --name <name> --role <role>` and paste the printed entry.
 # [[auth.tokens]]
 # name = "worker-laptop"
