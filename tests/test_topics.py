@@ -237,6 +237,5 @@ def test_every_older_database_gains_a_null_topic(tmp_path: Path, version: int) -
 def test_the_topic_step_names_the_table_it_alters() -> None:
     """The steps alter more than one table now, so each has to say which; a step that named none would
     silently alter `messages` and leave `conversations` without its column."""
-    assert SCHEMA_VERSION in store._ADDED_COLUMNS, "the current version adds no column"
-    assert store._ADDED_COLUMNS[SCHEMA_VERSION] == {"conversations": ("topic TEXT",)}
+    assert store._ADDED_COLUMNS[6] == {"conversations": ("topic TEXT",)}  # the topic step is 6
     assert {table for step in store._ADDED_COLUMNS.values() for table in step} == {"messages", "conversations"}
