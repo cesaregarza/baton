@@ -44,6 +44,13 @@ A role marked `human = true` is a person. It holds only a bearer token, never an
 every message records an `author_kind` (`human` or `agent`) at send time, so participants can tell a
 person's words from an assistant's. See the README's "Human participants".
 
+A human role can also take part from a browser, through the optional seat (`baton.seat`). The person logs in
+with the role's own token, which is checked once and never stored; the session keeps only which configured
+token it was, and `auth.authority_live` checks that again on every request. The seat reads the role's own
+history and mailbox, sends as the role, and moves the mailbox cursor only when the person acknowledges one
+exact rendered page. A role marked `display_only = true`, which the dashboard's viewer must be, is the
+opposite: it never holds a token, an OAuth grant or `--as`.
+
 ## Messages
 
 `send_message(to, text, job_id?, relayed?, request_id?)` stores the text as the recipient's next sequence number

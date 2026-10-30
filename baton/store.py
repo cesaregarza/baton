@@ -166,6 +166,34 @@ _SCHEMA = (
         finished_at TEXT,
         PRIMARY KEY (role, key)
     )""",
+    # The browser seat (`baton.seat`). Nothing secret is stored: a session, a pre-login form and an inbox
+    # receipt are kept only as SHA-256 digests of their random values, and a session's credential only as
+    # the name, digest and role that `auth.authority_live` checks again on every request.
+    """CREATE TABLE IF NOT EXISTS seat_sessions (
+        digest TEXT PRIMARY KEY,
+        role TEXT NOT NULL,
+        authority TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        last_seen REAL NOT NULL
+    )""",
+    "CREATE TABLE IF NOT EXISTS seat_prelogin (digest TEXT PRIMARY KEY, expires_at REAL NOT NULL)",
+    # One rendered inbox page: acknowledging it advances the cursor from `start_seq` to `last_seq`, or nothing.
+    """CREATE TABLE IF NOT EXISTS seat_receipts (
+        digest TEXT PRIMARY KEY,
+        session TEXT NOT NULL,
+        role TEXT NOT NULL,
+        start_seq INTEGER NOT NULL,
+        last_seq INTEGER NOT NULL,
+        expires_at REAL NOT NULL
+    )""",
+    # A compose form's request id, bound to the session and conversation it was rendered for.
+    """CREATE TABLE IF NOT EXISTS seat_requests (
+        request_id TEXT PRIMARY KEY,
+        session TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        sent_at REAL
+    )""",
 )
 
 

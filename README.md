@@ -282,15 +282,58 @@ baton wait --timeout 300
 itself is trustworthy: whoever controls the host machine can write anything into its database. And it marks
 authorship, not authority: what an assistant does with a message from a person is that assistant's own rule.
 
+### Browser seat (optional)
+
+A person can also read and reply from a phone's browser, as their human role. The seat is off unless you
+enable it, and it binds only to a loopback address, behind a proxy that terminates TLS at `origin`:
+
+```toml
+[roles.operator]
+human = true
+display_name = "Alex Rivera"   # how pages name the role; optional
+
+[seat]
+enabled = true
+role = "operator"                        # a human role, not the dashboard's viewer
+origin = "https://seat.example.com"      # the one exact https origin people open it at
+listen_port = 8767                       # loopback only; the proxy forwards here
+# idle_seconds = 3600, absolute_seconds = 43200   # session limits (at most a day idle, a week in all)
+```
+
+- **Log in with the role's own token.** The person pastes the token made by `baton token new --role operator`.
+  It is checked once and not kept: the session records only which configured token it was, and every request
+  checks that the same token is still configured, unrevoked and for the same role. `baton token revoke`,
+  removing or rotating the entry, or giving it another role ends its sessions. A session cookie is not a
+  bearer token, and the token itself keeps every MCP scope it already had.
+- **Give the seat a host name of its own.** A browser sends a host's cookies to every port and service on that
+  host name, so any of them could act as the person with a stolen session. The config refuses an `origin` on
+  the host's own name or the dashboard's unless `same_host_trust_accepted = true` records that every service
+  there is trusted with the person's authority.
+- **Cookies and forms.** `__Host-` cookies, Secure, HttpOnly, SameSite=Strict. Every form needs the exact
+  `Origin` and a per-session CSRF token. A duplicated header or field, an unexpected field, `Transfer-Encoding`
+  or a body that isn't exactly its `Content-Length` is refused, and nothing is stored.
+- **The inbox.** Reading marks nothing. The seat is a participant, so it receives every message, and a role with
+  500 unread stops its conversations accepting more; the pages warn from 400. "Mark these as seen" moves the
+  mailbox over exactly the page shown, and only if nothing was acknowledged since it was rendered; messages
+  that arrive meanwhile stay unread. A message from a conversation the person has left shows as a placeholder,
+  without its words. Seen is not a reply, and approves nothing.
+- **Replies.** A message sent here is sent through the authenticated seat as the role, so it records
+  `author_kind: human`, with the same meaning as above. Each form carries its own request id, bound to the
+  session and the conversation, so sending a form twice stores one copy. Only a current participant can send.
+- `baton seat logout-all` ends every seat session at once.
+
 ## Dashboard (optional)
 
 The host can serve a read-only web view of conversations for a person at the same machine. It is off unless
 you enable it, it needs conversations enabled, and it binds only to a loopback address:
 
 ```toml
+[roles.viewer]
+display_only = true       # an identity that only displays: it can never hold a token or an OAuth grant
+
 [dashboard]
 enabled = true
-viewer_role = "planner"   # the view shows what this role may see
+viewer_role = "viewer"    # the view shows what this role may see; it must be display_only
 listen_port = 8766        # http://127.0.0.1:8766/
 # proxy_host = "dash.example.com:8443"   # optional; only behind an authenticating proxy, see below
 ```
