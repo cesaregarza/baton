@@ -76,7 +76,13 @@ def opened(path: Path) -> Iterator[int]:
             raise UnsafeDataDir(path, "changed while it was being checked", "find what is changing it, then retry")
         with os.scandir(fd) as entries:
             for entry in entries:
-                _check_private(entry.stat(follow_symlinks=False), path / entry.name, want=stat.S_ISREG,
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    # Gone since it was listed: another writer's temp file renamed into place, or a SQLite
+                    # side file removed with its last connection. A file that no longer exists can't be unsafe.
+                    continue
+                _check_private(info, path / entry.name, want=stat.S_ISREG,
                                kind="regular file", fix="remove it or make it a private file (chmod 600)")
         yield fd
     finally:
