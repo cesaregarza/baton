@@ -133,8 +133,8 @@ def snapshot(db, skip: tuple[str, ...] = ()) -> dict[str, list[tuple]]:
             for table in tables if table not in skip}
 
 
-def dirty(db, producer: str = "alpha") -> dict[tuple[str, str], dict[str, Any]]:
-    return {(pair["conversation_id"], pair["kind"]): pair for pair in derived.dirty(db, producer)["pairs"]}
+def dirty(db, config, producer: str = "alpha") -> dict[tuple[str, str], dict[str, Any]]:
+    return {(pair["conversation_id"], pair["kind"]): pair for pair in derived.dirty(db, config, producer)["pairs"]}
 
 
 # Config: producers, and limits ----------------------------------------------------------------------------
@@ -184,7 +184,7 @@ def test_29_dirty_needs_no_listed_producer_and_creates_nothing(db, config) -> No
     conversation_id, _ = converse(db, config, 2)
     before = snapshot(db)
     for name in ("alpha", "gamma"):  # a selector, never checked against the list
-        pairs = dirty(db, name)
+        pairs = dirty(db, config, name)
         assert {kind for (_, kind) in pairs} == set(derived.KINDS)
         assert all(pair["state"] == "none" for pair in pairs.values())
     assert snapshot(db) == before  # in particular, no generation was created
@@ -215,7 +215,7 @@ def test_the_first_batch_creates_one_implicit_generation_scoped_all(db, config) 
     rows = [dict(row) for row in db.execute("SELECT * FROM generations")]
     assert len(rows) == 1 and rows[0]["producer"] == "alpha" and rows[0]["scope_id"] == "all"
     assert rows[0]["active"] == 1 and json.loads(rows[0]["profile"]) == {}
-    assert db.execute("SELECT DISTINCT scope_id FROM batches").fetchall() == [("all",)]
+    assert [tuple(row) for row in db.execute("SELECT DISTINCT scope_id FROM batches")] == [("all",)]
 
 
 def test_a_manifest_lists_exact_items_with_counts_and_digests(db, config) -> None:
@@ -267,7 +267,7 @@ def test_read_batch_serves_text_and_writes_only_its_delivery_row(db, config) -> 
     assert [(item["seq"], item["message_id"], item["text"]) for item in page["items"]] \
         == [(1, sent[0], "note 1"), (2, sent[1], "note 2")]
     assert snapshot(db, skip=("batch_pages",)) == before
-    assert db.execute("SELECT batch_id, page FROM batch_pages").fetchall() == [(manifest["batch_id"], 1)]
+    assert [tuple(row) for row in db.execute("SELECT batch_id, page FROM batch_pages")] == [(manifest["batch_id"], 1)]
 
 
 def test_bounds_are_refused_naming_the_limit(tmp_path: Path) -> None:
@@ -279,7 +279,8 @@ def test_bounds_are_refused_naming_the_limit(tmp_path: Path) -> None:
     read_all(db, config, manifest)
     error = refused("limit_exceeded", commit, db, config, manifest, artifacts_for(manifest, body="x" * 9))
     assert error.extra["limit"] == "max_artifact_bytes"
-    error = refused("limit_exceeded", commit, db, config, manifest, artifacts_for(manifest, citations=sent))
+    error = refused("limit_exceeded", commit, db, config, manifest, artifacts_for(manifest, body="x",
+                                                                                   citations=sent))
     assert error.extra["limit"] == "max_citations"
     db.close()
 
@@ -458,7 +459,7 @@ def test_2_the_last_copy_expiring_invalidates_the_version_and_lists_it_dirty(db,
     assert [v["state"] for v in versions(db, conversation_id)] == ["valid"]
     expire(db, sent[1])  # the last copy goes
     assert [v["state"] for v in versions(db, conversation_id)] == ["invalid"]
-    assert dirty(db)[(conversation_id, "summary")]["state"] == "invalid"
+    assert dirty(db, config)[(conversation_id, "summary")]["state"] == "invalid"
 
 
 def test_2_invalidation_shares_the_expiry_transaction(db, config, monkeypatch) -> None:
@@ -500,10 +501,10 @@ def test_3_a_participant_change_flips_no_version(db, config) -> None:
 def test_only_the_producer_s_own_pairs_are_its_dirty_set(db, config) -> None:
     conversation_id, _ = converse(db, config, 2)
     cycle(db, config, conversation_id, kinds=derived.KINDS)
-    assert (conversation_id, "summary") not in dirty(db, "alpha")
-    assert dirty(db, "beta")[(conversation_id, "summary")]["state"] == "none"
+    assert (conversation_id, "summary") not in dirty(db, config, "alpha")
+    assert dirty(db, config, "beta")[(conversation_id, "summary")]["state"] == "none"
     say(db, config, conversation_id, "one more")
-    behind = dirty(db, "alpha")[(conversation_id, "summary")]
+    behind = dirty(db, config, "alpha")[(conversation_id, "summary")]
     assert (behind["state"], behind["covered_through_seq"], behind["last_seq"]) == ("behind", 2, 3)
 
 
@@ -515,7 +516,7 @@ def test_an_invalid_version_recovers_by_a_rebase_from_seq_1(db, config) -> None:
     cycle(db, config, conversation_id, request_id="r-1")
     [old] = versions(db, conversation_id)
     expire(db, sent[1])  # a real last-copy expiry
-    assert dirty(db)[(conversation_id, "summary")]["state"] == "invalid"
+    assert dirty(db, config)[(conversation_id, "summary")]["state"] == "invalid"
     manifest = begin(db, config, conversation_id)
     plan = manifest["kinds"]["summary"]
     assert (plan["rebase"], plan["reason"], plan["prior_version_id"], plan["start_seq"]) \
@@ -529,7 +530,7 @@ def test_an_invalid_version_recovers_by_a_rebase_from_seq_1(db, config) -> None:
     assert inputs(db, new["id"]) == [[1, 1], [3, 3]]
     assert db.execute("SELECT COUNT(*) FROM artifact_depends_on WHERE version_id = ?", (new["id"],)).fetchone()[0] \
         == 0
-    assert (conversation_id, "summary") not in dirty(db)
+    assert (conversation_id, "summary") not in dirty(db, config)
 
 
 def test_a_rebase_commit_naming_an_older_version_conflicts(db, config) -> None:
@@ -554,12 +555,12 @@ def test_a_long_conversation_recovers_over_several_batches(tmp_path: Path) -> No
     assert rebase["kinds"]["summary"]["rebase"] is True and rebase["window"] == {"from_seq": 1, "to_seq": 4}
     read_all(db, config, rebase)
     commit(db, config, rebase, request_id="r-2")
-    assert dirty(db)[(conversation_id, "summary")]["state"] == "behind"  # valid, and not yet current
+    assert dirty(db, config)[(conversation_id, "summary")]["state"] == "behind"  # valid, and not yet current
     chained = begin(db, config, conversation_id)
     assert chained["kinds"]["summary"]["rebase"] is False and chained["window"]["from_seq"] == 5
     read_all(db, config, chained)
     commit(db, config, chained, request_id="r-3")
-    assert (conversation_id, "summary") not in dirty(db)
+    assert (conversation_id, "summary") not in dirty(db, config)
     assert inputs(db, versions(db, conversation_id)[-1]["id"]) == [[2, 6]]
     db.close()
 
@@ -577,7 +578,7 @@ def test_19_a_provenance_limit_fails_closed_and_stays_dirty(tmp_path: Path) -> N
     error = refused("provenance_limit_exceeded", begin, db, config, conversation_id)
     assert error.extra["limit"] == "max_input_segments" and error.extra["kind"] == "summary"
     assert snapshot(db) == before  # nothing advances
-    pair = dirty(db)[(conversation_id, "summary")]
+    pair = dirty(db, config)[(conversation_id, "summary")]
     assert (pair["state"], pair["covered_through_seq"], pair["provenance_limit_exceeded"]) == ("behind", 4, True)
     db.close()
 
@@ -727,7 +728,7 @@ def test_the_derived_tables_are_the_current_step_and_carry_scope_all(db, config)
     conversation_id, _ = converse(db, config, 2)
     cycle(db, config, conversation_id)
     for table in ("generations", "batches", "artifact_versions"):
-        assert db.execute(f"SELECT DISTINCT scope_id FROM {table}").fetchall() == [("all",)], table
+        assert [tuple(row) for row in db.execute(f"SELECT DISTINCT scope_id FROM {table}")] == [("all",)], table
 
 
 def test_the_derived_inputs_are_indexed_for_the_expiry_match(db) -> None:
