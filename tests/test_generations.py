@@ -560,3 +560,18 @@ def test_a_bad_profile_file_is_named_as_the_profile(tmp_path: Path, capsys) -> N
     assert cli.main(["--config", str(path), "index", "generation", "create", "--producer", "alpha",
                      "--profile", str(profile)]) == 1
     assert "--profile" in json.loads(capsys.readouterr().out)["detail"]
+
+
+def test_begin_and_commit_each_reset_the_retention_clock(db, config) -> None:
+    conversation_id, _ = converse(db, config, 2)
+    building = create(db, config)
+    clock = lambda: db.execute("SELECT last_write_at FROM generations WHERE id = ?",  # noqa: E731
+                               (building,)).fetchone()[0]
+    aging = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    db.execute("UPDATE generations SET last_write_at = ? WHERE id = ?", (aging, building))
+    manifest = derived.begin_batch(db, config, "alpha", conversation_id, ["summary"], generation=building)
+    assert clock() > aging  # begin
+    db.execute("UPDATE generations SET last_write_at = ? WHERE id = ?", (aging, building))
+    read_all(db, config, manifest)
+    commit(db, config, manifest)
+    assert clock() > aging  # commit
