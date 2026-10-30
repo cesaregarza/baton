@@ -261,7 +261,9 @@ def test_23_a_reconcile_over_the_bound_fails_closed(tmp_path: Path) -> None:
     fill(db, config, conversation_id, generation=new)
     age_out_the_watermark(db)
     error = refused("reconcile_required", activate, db, config, new)
-    assert error.extra["pairs"] == 3
+    assert error.extra == {"pairs": 3, "bound": 2, "key": "indexer.max_activation_reconcile"}
+    raised = reads_config(tmp_path, max_activation_reconcile=3)  # the operator raises the bound
+    assert activate(db, raised, new)["mode"] == "reconcile"  # the same generation, no new batch
     db.close()
 
 
@@ -444,3 +446,112 @@ def test_a_real_participant_change_posts_a_notice_that_must_be_covered(db, confi
     refused("generation_behind", activate, db, config, new)  # the notice is a new message after the watermark
     fill(db, config, conversation_id, generation=new)
     assert activate(db, config, new)["generation"] == new
+
+
+# Review round: the cap on implicit creation, lifecycle after the sweep, unmet W obligations, the bound, the
+# retention clock ---------------------------------------------------------------------------------------------
+
+
+def test_the_generation_cap_holds_for_an_implicit_generation_too(tmp_path: Path) -> None:
+    config = reads_config(tmp_path, max_generations=1)
+    db = connect(config.db_path)
+    conversation_id, _ = converse(db, config, 2)
+    create(db, config)  # one explicit, inactive generation: the cap is reached
+    error = refused("limit_exceeded", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"])
+    assert error.extra["limit"] == "max_generations"
+    assert db.execute("SELECT COUNT(*) FROM generations").fetchone()[0] == 1  # no implicit second one
+    db.close()
+
+
+def test_a_generation_retired_by_the_sweep_takes_no_new_batch(tmp_path: Path) -> None:
+    config = reads_config(tmp_path, generation_retention_days=1)
+    db = connect(config.db_path)
+    conversation_id, _ = converse(db, config, 2)
+    stale = create(db, config)
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    db.execute("UPDATE generations SET last_write_at = ?, created_at = ? WHERE id = ?", (old, old, stale))
+    refused("generation_dropped", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"],
+            generation=stale)  # validated after the sweep that retires it, so nothing is written for it
+    assert db.execute("SELECT COUNT(*) FROM batches WHERE generation = ?", (stale,)).fetchone()[0] == 0
+    refused("generation_dropped", activate, db, config, stale)  # the row stays as a tombstone
+    db.close()
+
+
+def test_an_open_batch_keeps_its_generation_from_retiring(tmp_path: Path) -> None:
+    config = reads_config(tmp_path, generation_retention_days=1)
+    db = connect(config.db_path)
+    conversation_id, _ = converse(db, config, 2)
+    building = create(db, config)
+    manifest = derived.begin_batch(db, config, "alpha", conversation_id, list(derived.KINDS), generation=building)
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    db.execute("UPDATE generations SET last_write_at = ?, created_at = ? WHERE id = ?", (old, old, building))
+    other, _ = converse(db, config, 1)
+    derived.begin_batch(db, config, "alpha", other, ["summary"])  # a writer call sweeps
+    assert db.execute("SELECT dropped_at FROM generations WHERE id = ?", (building,)).fetchone()[0] is None
+    read_all(db, config, manifest)
+    assert commit(db, config, manifest)["created"] is True  # the in-flight batch still lands
+    db.close()
+
+
+def test_writes_keep_an_unactivated_generation_and_it_retires_after_the_last(tmp_path: Path) -> None:
+    config = reads_config(tmp_path, generation_retention_days=1)
+    db = connect(config.db_path)
+    conversation_id, _ = converse(db, config, 2)
+    building = create(db, config)
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    db.execute("UPDATE generations SET created_at = ?, last_write_at = ? WHERE id = ?", (old, old, building))
+    fill(db, config, conversation_id, generation=building, kinds=("summary",))
+    last_write = db.execute("SELECT last_write_at FROM generations WHERE id = ?", (building,)).fetchone()[0]
+    assert last_write > old  # begin and commit reset the clock
+    other, _ = converse(db, config, 1)
+    derived.begin_batch(db, config, "alpha", other, ["summary"])
+    assert db.execute("SELECT dropped_at FROM generations WHERE id = ?", (building,)).fetchone()[0] is None
+    db.execute("UPDATE generations SET last_write_at = ? WHERE id = ?", (old, building))
+    db.execute("UPDATE batches SET expires_at = 0 WHERE generation = ?", (building,))
+    derived.begin_batch(db, config, "alpha", other, ["decisions"])
+    assert db.execute("SELECT dropped_at FROM generations WHERE id = ?", (building,)).fetchone()[0] is not None
+    db.close()
+
+
+def test_a_participant_change_leaves_an_unmet_watermark_obligation_incomplete(db, config) -> None:
+    conversation_id, _ = converse(db, config, 2)
+    new = create(db, config)
+    fill(db, config, conversation_id, generation=new, kinds=("summary", "decisions"))  # open_questions unmet at W
+    participant_change(db, conversation_id)  # metadata only, after the watermark
+    error = refused("generation_incomplete", activate, db, config, new)
+    assert {p["kind"] for p in error.extra["pairs"]} == {"open_questions"}
+
+
+def test_the_bound_holds_on_the_watermark_path_too(tmp_path: Path) -> None:
+    config = reads_config(tmp_path, max_activation_reconcile=2)
+    db = connect(config.db_path)
+    conversation_id, _ = converse(db, config, 2)
+    new = create(db, config)
+    fill(db, config, conversation_id, generation=new)
+    error = refused("reconcile_required", activate, db, config, new)  # nothing pruned: the watermark path
+    assert error.extra["bound"] == 2 and "max_activation_reconcile" in str(error)
+    db.close()
+
+
+def test_the_bound_has_a_ceiling(tmp_path: Path) -> None:
+    from baton.config import ConfigError
+    with pytest.raises(ConfigError, match="max_activation_reconcile"):
+        reads_config(tmp_path, max_activation_reconcile=100001)
+    assert reads_config(tmp_path, max_activation_reconcile=100000).indexer.max_activation_reconcile == 100000
+
+
+def test_a_bad_profile_file_is_named_as_the_profile(tmp_path: Path, capsys) -> None:
+    import json
+
+    from baton import cli
+    config = reads_config(tmp_path)
+    connect(config.db_path).close()
+    path = tmp_path / "baton.toml"
+    path.write_text("\n".join([
+        "[host]", 'public_url = "http://127.0.0.1:8765"', f'data_dir = "{config.data_dir}"',
+        "[roles.orchestrator]", "[indexer]", 'producers = ["alpha"]', ""]))
+    profile = tmp_path / "profile.json"
+    profile.write_text("{not json")
+    assert cli.main(["--config", str(path), "index", "generation", "create", "--producer", "alpha",
+                     "--profile", str(profile)]) == 1
+    assert "--profile" in json.loads(capsys.readouterr().out)["detail"]
