@@ -473,7 +473,11 @@ def test_a_generation_retired_by_the_sweep_takes_no_new_batch(tmp_path: Path) ->
     refused("generation_dropped", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"],
             generation=stale)  # validated after the sweep that retires it, so nothing is written for it
     assert db.execute("SELECT COUNT(*) FROM batches WHERE generation = ?", (stale,)).fetchone()[0] == 0
-    refused("generation_dropped", activate, db, config, stale)  # the row stays as a tombstone
+    other, _ = converse(db, config, 1)
+    derived.begin_batch(db, config, "alpha", other, ["summary"])  # a writer call that succeeds keeps the sweep
+    refused("generation_dropped", activate, db, config, stale)  # its row stays, as a tombstone
+    refused("generation_dropped", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"],
+            generation=stale)
     db.close()
 
 
@@ -498,11 +502,12 @@ def test_writes_keep_an_unactivated_generation_and_it_retires_after_the_last(tmp
     db = connect(config.db_path)
     conversation_id, _ = converse(db, config, 2)
     building = create(db, config)
-    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
-    db.execute("UPDATE generations SET created_at = ?, last_write_at = ? WHERE id = ?", (old, old, building))
+    aging = (datetime.now(UTC) - timedelta(hours=23)).isoformat()  # inside the one-day retention
+    db.execute("UPDATE generations SET created_at = ?, last_write_at = ? WHERE id = ?", (aging, aging, building))
     fill(db, config, conversation_id, generation=building, kinds=("summary",))
     last_write = db.execute("SELECT last_write_at FROM generations WHERE id = ?", (building,)).fetchone()[0]
-    assert last_write > old  # begin and commit reset the clock
+    assert last_write > aging  # begin and commit reset the clock
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     other, _ = converse(db, config, 1)
     derived.begin_batch(db, config, "alpha", other, ["summary"])
     assert db.execute("SELECT dropped_at FROM generations WHERE id = ?", (building,)).fetchone()[0] is None
