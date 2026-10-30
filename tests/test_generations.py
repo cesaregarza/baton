@@ -576,3 +576,24 @@ def test_begin_and_commit_each_reset_the_retention_clock(db, config) -> None:
     read_all(db, config, manifest)
     commit(db, config, manifest)
     assert clock() > aging  # commit
+
+
+# Review round 3: obligations that arose after the watermark ---------------------------------------------------
+
+
+def test_a_conversation_created_after_the_watermark_is_behind_not_incomplete(db, config) -> None:
+    first, _ = converse(db, config, 2)
+    new = create(db, config)
+    fill(db, config, first, generation=new)
+    later, _ = converse(db, config, 1)  # no obligation existed for it at the watermark
+    error = refused("generation_behind", activate, db, config, new)
+    assert {p["conversation_id"] for p in error.extra["pairs"]} == {later}
+
+
+def test_a_conversation_empty_at_the_watermark_and_refilled_after_is_behind(db, config) -> None:
+    emptied, sent = converse(db, config, 2)
+    expire(db, *sent)  # no copy left: required by nothing at the watermark
+    new = create(db, config)
+    say(db, config, emptied, "back after the watermark")
+    error = refused("generation_behind", activate, db, config, new)
+    assert {p["conversation_id"] for p in error.extra["pairs"]} == {emptied}
