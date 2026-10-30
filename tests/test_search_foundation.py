@@ -532,3 +532,88 @@ def test_the_reserved_indexer_keys_are_refused_for_now(key: str, value: Any) -> 
     raw = {"host": {"public_url": "http://127.0.0.1:8765"}, "roles": {"worker": {}}, "indexer": {key: value}}
     with pytest.raises(config_module.ConfigError, match=f"indexer.{key} is not supported yet"):
         config_module.parse(raw)
+
+
+# Review round: over-limit queries, `before` across offsets, one snapshot per change-log read ---------------
+
+
+@pytest.fixture(params=["fts5", "like"])
+def any_mode(request, tmp_path: Path, monkeypatch):
+    if request.param == "like":
+        monkeypatch.setattr(store, "fts5_available", lambda conn: False)
+    config = search_config(tmp_path)
+    connection = connect(config.db_path)
+    assert search.keyword_mode(connection) == request.param
+    yield connection, config
+    connection.close()
+
+
+def test_a_query_over_the_word_limit_is_refused_not_cut(any_mode) -> None:
+    db, config = any_mode
+    conversation_id = start(db, config)
+    say(db, config, "reviewer", conversation_id, "one two three four five six seven eight")
+    words = "one two three four five six seven eight"
+    assert len(search.search(db, config, "assistant", words)["hits"]) == 1
+    error = refused("invalid_request", search.search, db, config, "assistant", words + " absent")
+    assert str(search.MAX_TERMS) in str(error)  # a ninth required word is never dropped silently
+
+
+def test_a_query_over_the_length_limit_is_refused_not_cut(any_mode) -> None:
+    db, config = any_mode
+    conversation_id = start(db, config)
+    say(db, config, "reviewer", conversation_id, "needle")
+    padded = "needle " + " " * search.MAX_QUERY + "absent"
+    error = refused("invalid_request", search.search, db, config, "assistant", padded)
+    assert str(search.MAX_QUERY) in str(error)
+
+
+def placed(db, message_id: str, at: str) -> None:
+    db.execute("UPDATE messages SET at = ? WHERE id = ?", (at, message_id))
+
+
+def test_before_compares_instants_not_strings(any_mode) -> None:
+    db, config = any_mode
+    conversation_id = start(db, config)
+    sent = say(db, config, "reviewer", conversation_id, "heron")
+    placed(db, sent["message_id"], "2026-10-30T10:00:00.500000+00:00")
+    found = lambda before: ids(search.search(db, config, "assistant", "heron", before=before))  # noqa: E731
+    # the same instant in other offsets: never strictly before itself
+    assert found("2026-10-30T10:00:00.500000Z") == []
+    assert found("2026-10-30T12:00:00.500000+02:00") == []
+    assert found("2026-10-30T05:00:00.500000-05:00") == []
+    # a microsecond later, in an offset whose wall clock reads earlier than the stored text
+    assert found("2026-10-30T05:00:00.500001-05:00") == [sent["message_id"]]
+    # crossing: the wall clock reads later than the stored text, the instant is earlier
+    assert found("2026-10-30T11:30:00+02:00") == []
+
+
+@pytest.mark.parametrize("before", ["2026-10-30T10:00:00", "yesterday", "2026-13-01T00:00:00Z"])
+def test_before_without_an_offset_or_unparseable_is_refused(db, config, before: str) -> None:
+    refused("invalid_request", search.search, db, config, "assistant", "heron", before=before)
+
+
+def test_a_prune_between_validating_a_cursor_and_scanning_never_skips_rows(db, config, monkeypatch) -> None:
+    conversation_id = start(db, config)
+    for word in ("one", "two", "three", "four"):
+        say(db, config, "reviewer", conversation_id, word)
+    seqs = [entry["change_seq"] for entry in log(db)]
+    cursor = f"{changes.epoch(db)}:{seqs[0]}"
+    reader = store.connect_read_only(config.db_path)
+    validate = changes._position
+
+    def then_prune(conn, cursor):
+        position = validate(conn, cursor)
+        # another connection prunes past the cursor after it was found valid
+        db.execute("DELETE FROM change_log WHERE change_seq <= ?", (seqs[2],))
+        db.execute("UPDATE log_meta SET value = ? WHERE key = 'pruned_through'", (str(seqs[2]),))
+        return position
+
+    monkeypatch.setattr(changes, "_position", then_prune)
+    try:
+        page = changes.read(reader, changes.Scope.ALL, cursor=cursor)
+    except BatonError as expired:
+        assert expired.code == "cursor_expired"
+    else:  # a page from one snapshot: everything after the cursor, nothing skipped
+        assert [entry["change_seq"] for entry in page["entries"]] == seqs[1:]
+    finally:
+        reader.close()
