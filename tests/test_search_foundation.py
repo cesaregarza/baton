@@ -525,3 +525,10 @@ def test_no_command_line_index_writer_exists_yet() -> None:
                             cwd=Path(__file__).parent.parent)
     assert "changes" in result.stdout and "wait" in result.stdout
     assert "commit" not in result.stdout and "begin" not in result.stdout  # writers arrive in a later slice
+
+
+@pytest.mark.parametrize("key, value", [("messaging_role", "worker"), ("proposal_recipients", ["worker"])])
+def test_the_reserved_indexer_keys_are_refused_for_now(key: str, value: Any) -> None:
+    raw = {"host": {"public_url": "http://127.0.0.1:8765"}, "roles": {"worker": {}}, "indexer": {key: value}}
+    with pytest.raises(config_module.ConfigError, match=f"indexer.{key} is not supported yet"):
+        config_module.parse(raw)
