@@ -194,19 +194,33 @@ class Dispatcher:
             row = conn.execute("SELECT * FROM wakes WHERE role = ? AND key = ?", (role, key)).fetchone()
             if row is None or row["status"] != "pending":
                 return 0
+            if row["ordinal"] is not None and self._reminder_is_spent(conn, row):
+                return 0
             if row["attempts"] >= MAX_ATTEMPTS:
                 conn.execute("UPDATE wakes SET status = 'failed', finished_at = ? WHERE role = ? AND key = ?",
                              (events.now(), role, key))
                 log.error("wake %s %s gave up after %d attempts", role, key, row["attempts"])
                 return 0
-            conn.execute("UPDATE wakes SET attempts = attempts + 1, lease_until = ? WHERE role = ? AND key = ?",
-                         (_now() + LEASE_SECONDS, role, key))
+            # Taking the lease is the claim to send, so it is one conditional update: a worker that
+            # lost the race finds the row leased and does nothing. Checking the status and writing
+            # the lease separately would let two workers that both read it as pending both send.
+            if not conn.execute(
+                    "UPDATE wakes SET attempts = attempts + 1, lease_until = ? WHERE role = ? AND key = ?"
+                    " AND status = 'pending' AND lease_until <= ?",
+                    (_now() + LEASE_SECONDS, role, key, _now())).rowcount:
+                return 0
         delivered = self._send(role, wake_id(role, key), row["payload"].encode())
         with transaction(conn):
             if delivered:
-                conn.execute("UPDATE wakes SET status = 'delivered', finished_at = ? WHERE role = ? AND key = ?"
-                             " AND status = 'pending'", (events.now(), role, key))
-                self._schedule_reminders(conn, role, key, row)
+                # Only a wake that was still pending becomes delivered, and only that wake gets
+                # reminders. The callback is made outside the transaction, so the role can read
+                # while it is in flight; that read supersedes the wake, and a batch already read
+                # must not come back with reminders scheduled for it.
+                landed = conn.execute(
+                    "UPDATE wakes SET status = 'delivered', finished_at = ? WHERE role = ? AND key = ?"
+                    " AND status = 'pending'", (events.now(), role, key)).rowcount
+                if landed:
+                    self._schedule_reminders(conn, role, key, row)
             else:
                 backoff = min(MAX_BACKOFF_SECONDS, LEASE_SECONDS * 2 ** row["attempts"])
                 conn.execute("UPDATE wakes SET lease_until = ? WHERE role = ? AND key = ?",
@@ -241,21 +255,39 @@ class Dispatcher:
         without needing new mail.
         """
         tried = 0
-        due = conn.execute("SELECT role, key, ordinal, baseline_seq FROM wakes"
-                           " WHERE ordinal IS NOT NULL AND status IN ('scheduled', 'capped')"
-                           " AND due_at <= ? ORDER BY due_at, ordinal LIMIT ?",
-                           (_now(), PAGE)).fetchall()
-        # Only the latest ordinal a batch has reached is offered. Coming back to a host that was
-        # down past both deadlines must not send two wakes at once, and the earlier one is retired
-        # by the claim below rather than delivered first and then regretted.
-        latest: dict[tuple[str, str], sqlite3.Row] = {}
+        # Only the latest due ordinal of each batch is offered, and that is decided here rather than
+        # after the page limit: with more due rows than one page holds, a batch could otherwise have
+        # its first reminder inside the page and its second outside, and the first would be sent
+        # although the second was already due. A batch is (role, baseline_seq), so no key is parsed.
+        due = conn.execute(
+            "SELECT role, key, ordinal, baseline_seq FROM wakes AS w"
+            " WHERE w.ordinal IS NOT NULL AND w.status IN ('scheduled', 'capped') AND w.due_at <= ?"
+            " AND NOT EXISTS (SELECT 1 FROM wakes AS later WHERE later.role = w.role"
+            "                 AND later.baseline_seq = w.baseline_seq AND later.ordinal > w.ordinal"
+            "                 AND later.status IN ('scheduled', 'capped') AND later.due_at <= ?)"
+            " ORDER BY w.due_at LIMIT ?", (_now(), _now(), PAGE)).fetchall()
         for row in due:
-            # The query is ordered by ordinal, so the last row seen for a batch is its latest.
-            latest[(row["role"], row["key"].rsplit(":r", 1)[0])] = row
-        for row in latest.values():
             if self._claim_reminder(conn, row["role"], row["key"], row["ordinal"], row["baseline_seq"]):
                 tried += self._attempt(conn, row["role"], row["key"])
         return tried
+
+    def _reminder_is_spent(self, conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
+        """Whether a pending reminder has lost its turn, retiring it if so. Checked before each send.
+
+        Retries run before the due scan in a pass, so without this an earlier ordinal could be sent
+        again at the very moment the later one became due -- past the point the design says it stops.
+        A read landing since the claim retires it here too.
+        """
+        role, key = row["role"], row["key"]
+        later_is_due = conn.execute(
+            "SELECT 1 FROM wakes WHERE role = ? AND baseline_seq = ? AND ordinal > ?"
+            " AND status IN ('scheduled', 'capped', 'pending') AND due_at <= ?",
+            (role, row["baseline_seq"], row["ordinal"], _now())).fetchone() is not None
+        if not later_is_due and messages.read_seq(conn, role) <= row["baseline_seq"]:
+            return False
+        conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ? AND key = ?"
+                     " AND status = 'pending'", (events.now(), role, key))
+        return True
 
     def _claim_reminder(self, conn: sqlite3.Connection, role: str, key: str, ordinal: int,
                         baseline: int) -> bool:
@@ -268,6 +300,16 @@ class Dispatcher:
         """
         batch = key.rsplit(":r", 1)[0]
         with transaction(conn):
+            configured = self._config.roles.get(role)
+            if configured is None or not configured.wake.enabled:
+                # The hook can be taken away after the original was delivered. There is nothing to
+                # send to, so the reminder ends here: no attempt, no cap slot, and nothing raised
+                # out of the pass by a deliverer handed an empty target.
+                conn.execute("UPDATE wakes SET status = 'skipped', finished_at = ? WHERE role = ?"
+                             " AND key = ? AND status IN ('scheduled', 'capped')",
+                             (events.now(), role, key))
+                log.info("reminder %s %s skipped: the role has no wake to send to", role, key)
+                return False
             if messages.read_seq(conn, role) > baseline:
                 conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ?"
                              " WHERE role = ? AND key = ? AND status IN ('scheduled', 'capped')",
