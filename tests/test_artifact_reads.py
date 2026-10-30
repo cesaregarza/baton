@@ -276,3 +276,13 @@ def test_only_an_active_generation_is_served(db, config) -> None:
     publish(db, config, conversation_id)
     db.execute("UPDATE generations SET active = 0")
     assert shown(db, config, "viewer", conversation_id) == []
+
+
+def test_an_invalid_version_is_hidden_even_with_every_input_still_held(db, config) -> None:
+    """Expiry is today's only invalidation, and it also removes an input; the reserved edit and delete
+    invalidations would leave every input in place, and must hide the version just the same."""
+    conversation_id, _ = converse(db, config, 2)
+    publish(db, config, conversation_id, body="ibis summary")
+    db.execute("UPDATE artifact_versions SET state = 'invalid'")
+    assert shown(db, config, "viewer", conversation_id) == []
+    assert artifact_hits(search.search(db, config, "viewer", "ibis", kinds=["summary"])) == []
