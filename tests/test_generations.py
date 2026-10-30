@@ -194,7 +194,8 @@ def test_an_empty_log_never_reads_as_complete(db, config) -> None:
 
 
 def age_out_the_watermark(db) -> None:
-    """Retention has pruned past every watermark taken so far."""
+    """Retention has pruned everything logged so far. A watermark is aged out only if a change after it was
+    pruned too, so each caller makes one first; one sitting exactly at the floor has lost nothing."""
     floor = db.execute("SELECT MAX(change_seq) FROM change_log").fetchone()[0]
     db.execute("DELETE FROM change_log WHERE change_seq <= ?", (floor,))
     db.execute("UPDATE log_meta SET value = ? WHERE key = 'pruned_through'", (str(floor),))
@@ -203,6 +204,7 @@ def age_out_the_watermark(db) -> None:
 def test_23_an_aged_out_watermark_reconciles_from_state(db, config) -> None:
     conversation_id, _ = converse(db, config, 2)
     new = create(db, config)
+    say(db, config, conversation_id, "after the watermark")
     fill(db, config, conversation_id, generation=new)
     age_out_the_watermark(db)
     assert activate(db, config, new)["mode"] == "reconcile"
@@ -227,6 +229,14 @@ def test_23_reconciling_refuses_a_pair_that_is_not_current(db, config) -> None:
     assert {p["kind"] for p in error.extra["pairs"]} == set(derived.KINDS)
 
 
+def test_a_watermark_at_the_pruning_floor_has_lost_nothing(db, config) -> None:
+    conversation_id, _ = converse(db, config, 2)
+    new = create(db, config)
+    fill(db, config, conversation_id, generation=new)
+    age_out_the_watermark(db)  # nothing after the watermark was logged, so nothing after it was pruned
+    assert activate(db, config, new)["mode"] == "watermark"
+
+
 def test_23_another_epoch_reconciles_too(db, config) -> None:
     conversation_id, _ = converse(db, config, 2)
     new = create(db, config)
@@ -240,6 +250,7 @@ def test_23_a_reconcile_over_the_bound_fails_closed(tmp_path: Path) -> None:
     db = connect(config.db_path)
     conversation_id, _ = converse(db, config, 2)  # three pairs, over a bound of two
     new = create(db, config)
+    say(db, config, conversation_id, "after the watermark")
     fill(db, config, conversation_id, generation=new)
     age_out_the_watermark(db)
     error = refused("reconcile_required", activate, db, config, new)
