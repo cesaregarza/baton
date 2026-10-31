@@ -123,7 +123,7 @@ ul { list-style: none; padding: 0; margin: .4rem 0; }
 li { border-bottom: 1px solid var(--rule); padding: .7rem 0; min-width: 0; }
 .muted, .meta time, .reply-to, .note { color: var(--muted); font-size: .875rem; }
 .meta { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; margin: 0; }
-.meta .role { font-weight: 600; }
+.meta .role { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
 .meta time { margin-left: auto; }
 .person { font-size: .75rem; border: 1px solid var(--rule); border-radius: 1rem; padding: 0 .45rem;
           color: var(--muted); }
