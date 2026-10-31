@@ -347,6 +347,9 @@ listen_port = 8767                       # loopback only; the proxy forwards her
   `author_kind: human`, with the same meaning as above. Each form carries its own request id, bound to the
   session and the conversation, so sending a form twice stores one copy. Only a current participant can send.
 - `baton seat logout-all` ends every seat session at once.
+- **Config changes take a restart.** Removing or rotating a role's token in the config takes effect only after
+  the service restarts, because the server holds the config it parsed at startup. `baton token revoke` writes
+  the revocation file, which takes effect at once.
 
 ## Dashboard (optional)
 

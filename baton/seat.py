@@ -746,6 +746,10 @@ def _store(config: Config, conn: sqlite3.Connection, session: _Session, conversa
     except BatonError:
         return _retry(config, conn, session, conversation_id, form, 400, "That couldn't be sent as written. "
                       "Nothing was sent.")
+    # Core answers a retry from its record before it checks membership, so a role removed since this request's
+    # own check would be told an earlier send succeeded. It may no longer see the conversation: say so instead.
+    if result.get("created") is False and session.role not in _participants(conn, conversation_id):
+        return _not_in(403, "You're no longer in this conversation.")
     seq = conn.execute("SELECT conversation_seq FROM messages WHERE id = ? LIMIT 1",
                        (result["message_id"],)).fetchone()["conversation_seq"]
     return _redirect(_link(conversation_id, seq))
@@ -920,10 +924,29 @@ def server(config: Config) -> ThreadingHTTPServer | None:
     settings = config.seat
     if not settings.enabled:
         return None
+    _free_cut_off_sends(config)
     family = _V6Server if ":" in settings.listen_host else _Server
     bound = family((settings.listen_host, settings.listen_port), _Handler)
     bound.config = config
     return bound
+
+
+def _free_cut_off_sends(config: Config) -> None:
+    """Give back the hourly places that sends cut off by a crash still hold, in one transaction.
+
+    `_send` takes a form's place and gives it back in a `finally`; an exit between the two leaves the place held,
+    and counted until its hour passes. At startup no seat request is in flight, so nothing is legitimately held:
+    every form's holders go to 0, and a form with no stored message (in `message_requests`) has its place freed.
+    A stored send stays counted.
+    """
+    conn = connect(config.db_path)
+    try:
+        with transaction(conn):
+            conn.execute("UPDATE seat_requests SET holders = 0 WHERE holders != 0")
+            conn.execute("UPDATE seat_requests SET sent_at = NULL WHERE sent_at IS NOT NULL AND NOT EXISTS"
+                         " (SELECT 1 FROM message_requests WHERE request_id = seat_requests.request_id)")
+    finally:
+        conn.close()
 
 
 def start(config: Config) -> ThreadingHTTPServer | None:
