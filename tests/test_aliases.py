@@ -173,8 +173,8 @@ def test_human_seat_names_and_normalized_display_are_reserved(alias_store):
     from baton import aliases
     from baton.errors import Forbidden
     conn, config, principal = alias_store
-    config = replace(config, roles={**config.roles, "seat": Role(name="seat", human=True, display_name="Cesar")})
-    for name in ("seat", "CESAR", "cesar"):
+    config = replace(config, roles={**config.roles, "seat": Role(name="seat", human=True, display_name="Avery")})
+    for name in ("seat", "AVERY", "avery"):
         with pytest.raises(Forbidden, match="reserved"):
             aliases.claim(conn, config, principal, name, "synthetic")
     normalized = claim(alias_store, name="hiIary")
