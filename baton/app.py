@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 import uvicorn
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
@@ -372,6 +373,7 @@ class Guard:
         self._config = config
         self._audit_path = config.audit_path
         self._calls: dict[tuple[str, str], deque[float]] = {}
+        self._post_validation: Callable[[dict[str, Any]], dict[str, Any]] | None = None
         self._lock = threading.Lock()
 
     def wrap(self, name: str, scope: str, body: Callable[..., Any]) -> Callable[..., Any]:
@@ -432,6 +434,9 @@ class Guard:
 
         # The role is bound from the credential, so it is not part of the tool's schema.
         guarded.__signature__ = _without_role(body)  # type: ignore[attr-defined]
+        if name == "send_message":
+            # Use the same SDK model/pre-parser as actual dispatch, including optional arguments/coercions.
+            self._post_validation = func_metadata(guarded, structured_output=False).validate_arguments
         return guarded
 
     async def refuse_author_fields(self, ctx: Any, call_next: Any) -> Any:
@@ -474,12 +479,19 @@ class Guard:
             return await call_next(ctx)
         role = auth.role_of(get_access_token())
         arguments = params.get("arguments")
-        if role != "guest":
+        if role != "guest" and (not isinstance(arguments, dict) or arguments.get("token") is None):
             return await call_next(ctx)
         try:
             if not isinstance(arguments, dict) or not isinstance(arguments.get("text"), str):
                 raise InvalidRequest("send_message requires text")
             aliases.validate_proof(arguments.get("token"))
+            if self._post_validation is None:
+                raise InvalidRequest("send_message schema is unavailable")
+            try:
+                self._post_validation(arguments)
+            except Exception:
+                # This SDK-only boundary fails closed: exception text/input_value may contain the proof.
+                raise InvalidRequest("send_message arguments do not match the tool schema") from None
         except BatonError as error:
             refusal = self._refuse("send_message", role, {}, error.code, str(error))
             return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))], is_error=True)

@@ -125,6 +125,7 @@ li { border-bottom: 1px solid var(--rule); padding: .7rem 0; min-width: 0; }
 .meta { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; margin: 0; }
 .meta .role { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
 .meta time { margin-left: auto; }
+.reply-to { overflow-wrap: anywhere; }
 .person { font-size: .75rem; border: 1px solid var(--rule); border-radius: 1rem; padding: 0 .45rem;
           color: var(--muted); }
 .text { white-space: pre-wrap; overflow-wrap: anywhere; margin: .25rem 0 0; }
@@ -551,8 +552,8 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
     parent = next((item for item in page["messages"] if item["message_id"] == reply), None) if reply else None
     quoted = (f'<blockquote class="relayed"><p>{_e(_short(parent["text"]))}</p></blockquote>' if parent
               else "")
-    reply_field = (f'<input type="hidden" name="reply_to" value="{_e(reply)}"><p class="muted">Replying to '
-                   f'{_e(parent["from_role"] if parent else "a message")}. '
+    reply_field = (f'<input type="hidden" name="reply_to" value="{_e(reply)}"><p class="muted reply-to">Replying to '
+                   f'{_e(messages.author_label(parent) if parent else "a message")}. '
                    f'<a href="/seat/c/{_e(conversation_id)}#compose">Cancel</a></p>{quoted}' if reply else "")
     label = config.roles[session.role].label
     compose = (f'<form class="compose" id="compose" method="post" action="/seat/c/{_e(conversation_id)}/send">'

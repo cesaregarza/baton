@@ -305,6 +305,9 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
         participants = _participants(conn, conversation_id)
         if not guest and sender not in participants:
             raise NotAParticipant(f"{sender} is not in {conversation_id}")
+        recipients = [role for role in participants if role not in (sender, "guest")]
+        if not recipients:
+            raise InvalidRequest("conversation has no eligible delivery recipients; no message was stored")
         outside = [role for role in attention or () if role not in participants]
         if outside:
             raise NotAParticipant(f"attention names {outside[0]}, which is not in {conversation_id}; naming a "
@@ -319,7 +322,6 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
             _escalate(conn, settings, conversation, sender)
         if not limited:
             message_id = messages.new_message_id()
-            recipients = [role for role in participants if role not in (sender, "guest")]
             seqs = _fan_out(conn, conversation_id, recipients, sender=sender,
                             text=text, relayed=relayed, job_id=job_id, message_id=message_id,
                             author_kind="agent" if guest else config.author_kind(sender),

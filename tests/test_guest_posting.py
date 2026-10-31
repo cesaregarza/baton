@@ -660,3 +660,154 @@ def test_mailbox_wait_fallback_search_and_existing_html_show_attribution(posting
         assert identity(results["hits"][0]) == identity(bound)
 
     dispatch(posting_host, scenario)
+
+
+@pytest.mark.parametrize(
+    ("field", "shape"),
+    [
+        ("text", "list"),
+        ("to", "list"),
+        ("conversation_id", "list"),
+        ("job_id", "list"),
+        ("reply_to", "list"),
+        ("request_id", "list"),
+        ("attention", "dict"),
+        ("attention", "nested"),
+        ("relayed", "dict"),
+        ("relayed", "list"),
+        ("needs_decision", "dict"),
+        ("needs_decision", "scalar"),
+        ("token", "list"),
+    ],
+)
+@pytest.mark.parametrize("role", ["guest", "planner"])
+def test_optional_post_validation_never_echoes_binding_proof(posting_host, caplog, field, shape, role):
+    async def scenario(client):
+        conv = await board(client, posting_host)
+        bound = await claim(client, posting_host)
+        proof = bound["binding_token"]
+        bad = {"list": [proof], "dict": {"secret": proof}, "nested": [[proof]], "scalar": proof}[shape]
+        arguments = {"conversation_id": conv, "text": "refused", "token": proof, field: bad}
+        response = await rpc(
+            client, posting_host, "tools/call", {"name": "send_message", "arguments": arguments}, role=role
+        )
+        assert proof not in json.dumps(response), "optional-argument validation must not disclose the binding proof"
+        assert payload(response)["error"] in {"invalid_request", "forbidden"}
+        assert proof not in caplog.text and proof not in posting_host.config.audit_path.read_text()
+        conn = store.connect(posting_host.config.db_path)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM alias_posts").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM message_requests").fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    dispatch(posting_host, scenario)
+
+
+def test_legacy_two_member_conversation_without_delivery_recipient_refuses_atomically(posting_host):
+    async def scenario(client):
+        conv = await board(client, posting_host)
+        conn = store.connect(posting_host.config.db_path)
+        tables = (
+            "conversations",
+            "participants",
+            "messages",
+            "message_requests",
+            "events",
+            "mailboxes",
+            "change_log",
+            "wakes",
+        )
+
+        def state():
+            return {table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table}")] for table in tables}
+
+        try:
+            conn.execute(
+                "UPDATE participants SET role = 'guest' WHERE conversation_id = ? AND role = 'worker'", (conv,)
+            )
+            before = state()
+            request_id = messages.new_request_id()
+            for _ in range(2):
+                result = await call(
+                    client,
+                    posting_host,
+                    "send_message",
+                    {"conversation_id": conv, "text": "must persist or refuse", "request_id": request_id},
+                    role="planner",
+                )
+                assert result.get("error") == "invalid_request", "zero-copy sends must not report success or replay"
+                assert state() == before
+        finally:
+            conn.close()
+
+    dispatch(posting_host, scenario)
+
+
+@pytest.mark.parametrize("kind", ["guest", "fixed", "human"])
+def test_selected_guest_reply_form_keeps_alias_and_code(posting_host, kind):
+    from datetime import UTC
+
+    from baton import seat
+
+    if kind == "human":
+        config = posting_host.config
+        posting_host.config = replace(
+            config, roles={**config.roles, "planner": replace(config.roles["planner"], human=True)}
+        )
+
+    async def scenario(client):
+        conv = await board(client, posting_host)
+        bound = await claim(client, posting_host, "selected-guest")
+        posted = await call(
+            client,
+            posting_host,
+            "send_message",
+            {"conversation_id": conv, "text": "selected reply target", "token": bound["binding_token"]},
+            role="guest" if kind == "guest" else "planner",
+        )
+        conn = store.connect(posting_host.config.db_path)
+        try:
+            session = seat._Session("synthetic-reply-session", "synthetic-reply-digest", "planner", UTC)
+            response = seat._conversation(posting_host.config, conn, session, conv, 0, posted["message_id"])
+            html = response.body.decode()
+            label = f"guest · {bound['alias']} · {bound['code']}" if kind == "guest" else "planner"
+            assert f"Replying to {label}" in html
+        finally:
+            conn.close()
+
+    dispatch(posting_host, scenario)
+
+
+@pytest.mark.parametrize("role", ["guest", "planner"])
+def test_valid_optional_post_coercions_keep_sdk_compatibility(posting_host, role):
+    async def scenario(client):
+        conv = await board(client, posting_host)
+        bound = await claim(client, posting_host)
+        sent = await call(
+            client,
+            posting_host,
+            "send_message",
+            {
+                "conversation_id": conv,
+                "text": "valid optional fields",
+                "token": bound["binding_token"],
+                "attention": '["worker"]',
+                "needs_decision": "false",
+                "request_id": messages.new_request_id(),
+                "relayed": json.dumps([{"source": "synthetic source", "at": "2026-10-31T00:00:00Z", "text": "quoted"}]),
+            },
+            role=role,
+        )
+        assert sent["created"]
+        shown = await call(client, posting_host, "get_message", {"message_id": sent["message_id"]})
+        assert shown["from_role"] == role
+        assert shown["attention"] == ["worker"] and shown["needs_decision"] is False
+        assert shown["relayed"][0]["text"] == "quoted"
+        if role == "guest":
+            assert identity(shown) == identity(bound)
+        else:
+            assert "alias_id" not in shown
+
+    dispatch(posting_host, scenario)
