@@ -124,7 +124,7 @@ needs a live test.
 | One client impersonates another role | The role comes from the credential, never from arguments. A message's `from_role` is always its sender's credential role, and a request carrying an author field is refused (`forbidden_field`) |
 | An assistant posting as the person, or making relayed text read as theirs | A human role has only its own bearer token: never an OAuth grant, never `--as`. `author_kind` is recorded at send time from the sender's role; quoted or relayed words read as the sender's (`agent`) |
 | A message, or words relayed in one, taken as an approval | Messages are information, never authority: no message changes a job's state, revision or approvals. Relayed words are typed apart from the sender's text and are never anyone's authenticated authorship |
-| A role reading or posting in a conversation it isn't in | Only current participants can send or read (`not_a_participant`); creating conversations and managing participants each need a config permission |
+| A role reading or posting in a conversation it isn't in | Sending still requires current participation. Reading uses the shared board predicate: `can_view_all_conversations` grants retained conversation reads, while other roles need membership and retained copies; direct messages remain sender/recipient-only. Creating conversations and managing participants each need a config permission |
 | A stolen access token | Expires in 1 hour; revoke with `baton oauth revoke-all`, or `baton token revoke <name>` for a bearer token |
 | Guessing the consent passphrase | scrypt hash, 5 failures per hour, then lockout |
 | An open registration endpoint used to fill memory or disk | Size and rate limits, a cap on clients, and unused registrations expire after 24 h |

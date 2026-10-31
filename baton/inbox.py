@@ -20,7 +20,7 @@ MAX_EVENTS = 100
 
 
 def wait(conn: sqlite3.Connection, role: str, *, timeout_seconds: float | None = None,
-         poll_seconds: float = 0.5) -> dict[str, Any]:
+         poll_seconds: float = 0.5, config: Any = None) -> dict[str, Any]:
     """New events for `role`, oldest first; an empty list only once `timeout_seconds` has passed.
 
     A message event carries the message itself, or `"message": null` if
@@ -28,13 +28,13 @@ def wait(conn: sqlite3.Connection, role: str, *, timeout_seconds: float | None =
     """
     deadline = None if timeout_seconds is None else time.monotonic() + max(0.0, timeout_seconds)
     while True:
-        taken = take(conn, role)
+        taken = take(conn, role, config=config)
         if taken["events"] or (deadline is not None and time.monotonic() >= deadline):
             return taken
         time.sleep(poll_seconds)
 
 
-def take(conn: sqlite3.Connection, role: str) -> dict[str, Any]:
+def take(conn: sqlite3.Connection, role: str, *, config: Any = None) -> dict[str, Any]:
     """One non-blocking pass of `wait`, bounded like a message page."""
     name = f"wait:{role}"
     with transaction(conn):
@@ -51,7 +51,7 @@ def take(conn: sqlite3.Connection, role: str) -> dict[str, Any]:
             if event["kind"] == "message":
                 found = conn.execute("SELECT * FROM messages WHERE recipient = ? AND seq = ?",
                                      (role, event["data"]["seq"])).fetchone()
-                event["message"] = messages.as_page_for(conn, role, [found])[0] if found else None
+                event["message"] = messages.as_page_for(conn, role, [found], config=config)[0] if found else None
             size += 2 * len(json.dumps(event))
             if page and size > messages.MAX_PAGE_BYTES:
                 full = True

@@ -44,6 +44,15 @@ log = logging.getLogger("baton.app")
 HOURLY_LIMITS = {auth.SCOPE_READ: 1200, auth.SCOPE_WRITE: 300}
 MAX_WAIT_SECONDS = 30
 
+
+def _conversation_cursor(cursor: dict[str, str] | None) -> tuple[str, str] | None:
+    if cursor is None:
+        return None
+    if (not isinstance(cursor, dict) or set(cursor) != {"created_at", "conversation_id"}
+            or not all(isinstance(value, str) and value for value in cursor.values())):
+        raise InvalidRequest("cursor must carry created_at and conversation_id from next_cursor")
+    return cursor["created_at"], cursor["conversation_id"]
+
 INSTRUCTIONS = """baton relays messages and job state between agents. You act as one role, fixed by your credential.
 Call whoami to see your role and the others. send_message to a role, or to a conversation you take part in;
 read_messages or wait to receive. Jobs move through the host's configured states; move_job advances one.
@@ -116,7 +125,7 @@ class Tools:
     ) -> dict[str, Any]:
         """Messages to you after `after_seq` (default: the ones not yet delivered), oldest first, with next_seq."""
         with self._conn() as conn:
-            return messages.read(conn, role, after_seq, limit)
+            return messages.read(conn, role, after_seq, limit, config=self._config)
 
     def create_conversation(
         self, role: str, title: str, participants: list[str],
@@ -139,11 +148,23 @@ class Tools:
         changed_since: Annotated[str | None, Field(
             description="Only conversations with a message after this ISO 8601 time (with its offset). A "
                         "discovery aid: revision and last_seq are what tell you exactly what changed.")] = None,
-    ) -> list[dict[str, Any]]:
-        """The conversations you take part in, newest first, with participants, revision, last_seq and activity."""
+        limit: Annotated[int, Field(ge=1, le=conversations.MAX_LISTED)] = conversations.MAX_LISTED,
+        cursor: Annotated[dict[str, str] | None, Field(
+            description="Continue after the previous page's next_cursor object, carrying created_at and "
+                        "conversation_id unchanged.")] = None,
+    ) -> dict[str, Any]:
+        """Return {conversations: page, next_cursor: cursor or null}; repeat with that cursor for the next page."""
         conversations.require_enabled(self._config)
+        before = _conversation_cursor(cursor)
         with self._conn() as conn:
-            return conversations.list_for(conn, role, topic, changed_since=changed_since)
+            rows = conversations.list_readable(conn, self._config, role, topic, limit=limit, before=before,
+                                               changed_since=changed_since, _lookahead=True)
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        next_cursor = conversations.page_cursor(page[-1]) if has_more and page else None
+        return {"conversations": page,
+                "next_cursor": ({"created_at": next_cursor[0], "conversation_id": next_cursor[1]}
+                                if next_cursor else None)}
 
     def set_topic(
         self, role: str, conversation_id: str,
@@ -174,7 +195,8 @@ class Tools:
         """
         conversations.require_enabled(self._config)
         with self._conn() as conn:
-            return conversations.history(conn, role, conversation_id, after_seq, limit, before_seq=before_seq)
+            return conversations.history(conn, role, conversation_id, after_seq, limit, before_seq=before_seq,
+                                         config=self._config)
 
     def search(
         self, role: str,
@@ -238,7 +260,7 @@ class Tools:
     def wait(self, role: str, timeout_seconds: Annotated[float, Field(ge=0, le=MAX_WAIT_SECONDS)] = 20) -> dict:
         """Block until messages or job changes are addressed to you, then return each exactly once."""
         with self._conn() as conn:
-            return inbox.wait(conn, role, timeout_seconds=timeout_seconds)
+            return inbox.wait(conn, role, timeout_seconds=timeout_seconds, config=self._config)
 
     def create_job(self, role: str, title: str, body: str = "", request_id: str | None = None) -> dict[str, Any]:
         """Open a job in the initial state. Pass a request_id to make a retry safe."""

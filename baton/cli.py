@@ -97,12 +97,12 @@ def _parser() -> argparse.ArgumentParser:
     read.add_argument("--after-seq", type=int, help="default: only messages not yet delivered")
     read.add_argument("--limit", type=int, default=50)
     read.set_defaults(handler=lambda config, args: _db(config, lambda conn: messages.read(
-        conn, args.role, args.after_seq, args.limit)))
+        conn, args.role, args.after_seq, args.limit, config=config)))
 
     wait = _with_role(commands.add_parser("wait", help="block until messages or job changes reach your role"))
     wait.add_argument("--timeout", type=float, help="seconds; default: wait indefinitely")
     wait.set_defaults(handler=lambda config, args: _db(config, lambda conn: inbox.wait(
-        conn, args.role, timeout_seconds=args.timeout)))
+        conn, args.role, timeout_seconds=args.timeout, config=config)))
 
     _add_job_commands(commands)
     _add_conversation_commands(commands)
@@ -249,13 +249,13 @@ def _message(config: Config, args: argparse.Namespace) -> dict[str, Any]:
 
 def _list_conversations(config: Config, args: argparse.Namespace) -> list[dict[str, Any]]:
     conversations.require_enabled(config)
-    return _db(config, lambda conn: conversations.list_for(conn, args.role, args.topic))
+    return _db(config, lambda conn: conversations.list_readable(conn, config, args.role, args.topic))
 
 
 def _history(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     conversations.require_enabled(config)
     return _db(config, lambda conn: conversations.history(conn, args.role, args.conversation_id, args.after_seq,
-                                                          args.limit))
+                                                          args.limit, config=config))
 
 
 def _new_token(config: Config, args: argparse.Namespace) -> dict[str, Any]:

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -344,6 +345,139 @@ def test_read_history_reads_backwards_with_before_seq(db, config) -> None:
     earlier = conversations.history(db, "assistant", conversation_id, before_seq=page["prev_seq"], limit=5)
     assert [m["seq"] for m in earlier["messages"]] == [1, 2]
     refused("invalid_request", conversations.history, db, "assistant", conversation_id, before_seq=0)
+
+
+def test_shared_board_read_rule_covers_history_and_reply_parent(db, config) -> None:
+    conversation_id = start(db, config)
+    parent = say(db, config, "reviewer", conversation_id, "parent before viewer joined")
+    child = conversations.send(db, config, sender="assistant", conversation_id=conversation_id, text="answer",
+                              reply_to=parent["message_id"])
+
+    page = conversations.history(db, "viewer", conversation_id, config=config)
+    assert [item["text"] for item in page["messages"]] == ["parent before viewer joined", "answer"]
+    shown = search.get_message(db, config, "viewer", child["message_id"])
+    assert shown["reply_to"] == {"message_id": parent["message_id"], "seq": 1}
+    refused("not_a_participant", conversations.history, db, "outsider", conversation_id, config=config)
+    refused("unknown_message", search.get_message, db, config, "outsider", child["message_id"])
+
+
+def test_history_reports_retention_gaps_not_page_limits(db, config) -> None:
+    conversation_id = start(db, config)
+    assert conversations.history(db, "viewer", conversation_id, config=config)["retention_gaps"] == []
+    for index in range(1, 5):
+        say(db, config, "reviewer", conversation_id, f"m{index}")
+    db.execute("DELETE FROM messages WHERE conversation_id = ? AND conversation_seq = 2", (conversation_id,))
+    partial = conversations.history(db, "viewer", conversation_id, limit=2, config=config)
+    assert [item["seq"] for item in partial["messages"]] == [1, 3]
+    assert partial["retention_gaps"] == [{"from_seq": 2, "to_seq": 2}]
+    normal = conversations.history(db, "viewer", conversation_id, after_seq=3, limit=1, config=config)
+    assert normal["retention_gaps"] == []
+    limited = conversations.history(db, "viewer", conversation_id, limit=1, config=config)
+    assert [item["seq"] for item in limited["messages"]] == [1]
+    assert limited["retention_gaps"] == []
+
+    db.execute("DELETE FROM messages WHERE conversation_id = ? AND conversation_seq >= 3", (conversation_id,))
+    short = conversations.history(db, "viewer", conversation_id, config=config)
+    assert [item["seq"] for item in short["messages"]] == [1]
+    assert short["retention_gaps"] == [{"from_seq": 2, "to_seq": 4}]
+    backwards_short = conversations.history(db, "viewer", conversation_id, before_seq=5, config=config)
+    assert [item["seq"] for item in backwards_short["messages"]] == [1]
+    assert backwards_short["retention_gaps"] == [{"from_seq": 2, "to_seq": 4}]
+
+    db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+    expired = conversations.history(db, "viewer", conversation_id, config=config)
+    assert expired["messages"] == []
+    assert expired["retention_gaps"] == [{"from_seq": 1, "to_seq": 4}]
+    backwards = conversations.history(db, "viewer", conversation_id, before_seq=5, config=config)
+    assert backwards["retention_gaps"] == [{"from_seq": 1, "to_seq": 4}]
+
+
+def test_history_does_not_call_prejoin_messages_retention_gaps(db, config) -> None:
+    conversation_id = start(db, config)
+    say(db, config, "reviewer", conversation_id, "before the viewer joined")
+    conversations.add(db, config, conversation_id, "outsider", actor="orchestrator")
+    say(db, config, "assistant", conversation_id, "after the viewer joined")
+    db.execute("DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider' "
+               "AND conversation_seq = 3", (conversation_id,))
+
+    history = conversations.history(db, "outsider", conversation_id, config=config)
+    assert [item["seq"] for item in history["messages"]] == [2]
+    assert history["retention_gaps"] == [{"from_seq": 3, "to_seq": 3}]
+
+    db.execute("DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider'",
+               (conversation_id,))
+    empty = conversations.history(db, "outsider", conversation_id, config=config)
+    assert empty["messages"] == []
+    assert empty["retention_gaps"] == []
+    empty_backwards = conversations.history(db, "outsider", conversation_id, before_seq=5, config=config)
+    assert empty_backwards["messages"] == []
+    assert empty_backwards["retention_gaps"] == []
+
+    say(db, config, "reviewer", conversation_id, "after the deleted join marker")
+    say(db, config, "assistant", conversation_id, "retained after the join")
+    db.execute("DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider' "
+               "AND conversation_seq = 4", (conversation_id,))
+    after_arbitrary_cursor = conversations.history(db, "outsider", conversation_id, after_seq=1, config=config)
+    assert [item["seq"] for item in after_arbitrary_cursor["messages"]] == [5]
+    assert after_arbitrary_cursor["retention_gaps"] == []
+
+
+def test_history_does_not_infer_gap_boundaries_from_pre_rejoin_copies(db, config) -> None:
+    conversation_id = start(db, config, participants=["orchestrator", "reviewer", "outsider"])
+    say(db, config, "reviewer", conversation_id, "held before leaving")
+    conversations.remove(db, config, conversation_id, "outsider", actor="orchestrator")
+    say(db, config, "reviewer", conversation_id, "while outsider was away")
+    conversations.add(db, config, conversation_id, "outsider", actor="orchestrator")
+    say(db, config, "reviewer", conversation_id, "after outsider returned")
+    db.execute("DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider' "
+               "AND conversation_seq = 4", (conversation_id,))
+
+    history = conversations.history(db, "outsider", conversation_id, config=config)
+    assert [item["seq"] for item in history["messages"]] == [1, 5]
+    assert history["retention_gaps"] == []
+
+
+def test_wait_reply_parent_uses_the_shared_board_predicate(db, config, monkeypatch) -> None:
+    from baton.app import Tools
+
+    conversation_id = start(db, config)
+    parent = say(db, config, "reviewer", conversation_id, "before viewer joined")
+    conversations.add(db, config, conversation_id, "viewer", actor="orchestrator")
+    reply = conversations.send(db, config, sender="assistant", conversation_id=conversation_id, text="reply",
+                              reply_to=parent["message_id"])
+    tools = Tools(config)
+
+    @contextmanager
+    def connection():
+        yield db
+
+    monkeypatch.setattr(tools, "_conn", connection)
+    waited = tools.wait("viewer", timeout_seconds=0)
+    shaped = next(event["message"] for event in waited["events"]
+                  if event.get("message", {}).get("message_id") == reply["message_id"])
+    assert shaped["reply_to"] == {"message_id": parent["message_id"], "seq": 1}
+
+
+def test_mcp_board_listing_pages_every_conversation_and_filters_changed_since(db, config, monkeypatch) -> None:
+    from baton.app import Tools
+
+    tools = Tools(config)
+
+    @contextmanager
+    def connection():
+        yield db
+
+    monkeypatch.setattr(tools, "_conn", connection)
+    for index in range(205):
+        conversations.create(db, config, actor="orchestrator", title=f"conversation {index}",
+                             participants=GROUP, request_id=f"list-page-{index}")
+    first = tools.list_conversations("viewer", limit=200)
+    assert len(first["conversations"]) == 200 and first["next_cursor"]
+    second = tools.list_conversations("viewer", limit=200, cursor=first["next_cursor"])
+    assert len(second["conversations"]) == 5 and second["next_cursor"] is None
+    assert len({row["conversation_id"] for row in first["conversations"] + second["conversations"]}) == 205
+    future = (datetime.now(UTC) + timedelta(minutes=1)).isoformat()
+    assert tools.list_conversations("viewer", changed_since=future)["conversations"] == []
 
 
 def test_list_conversations_carries_revision_last_seq_and_activity(db, config) -> None:

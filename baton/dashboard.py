@@ -16,10 +16,9 @@ message's words, and no message has a resolved state, so nothing here says
 whether a signal was answered. `?topic=` narrows the messages; jobs carry no
 topic, so a filter shows none of them.
 
-What it shows is what one configured `viewer_role` may see: the
-conversations that role is in, from its join point, exactly as
-`read_history` returns them. A role sees every conversation only when its
-config sets `can_view_all_conversations`. Reading is bookmark-neutral:
+What it shows is what one configured `viewer_role` may see under the shared
+board-read predicate. A role with `can_view_all_conversations` sees every
+retained conversation, including history from before it joined. Reading is bookmark-neutral:
 viewing marks nothing read and moves no cursor.
 
 The threat model is the machine it runs on. The view has no login, so any
@@ -44,7 +43,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from baton import conversations, jobs, messages
+from baton import board_read, conversations, jobs, messages
 from baton.config import Config
 from baton.errors import BatonError
 from baton.store import connect
@@ -263,12 +262,11 @@ def _visible(config: Config, conn: Any, topic: str | None = None) -> tuple[list[
     """Every conversation the viewer may see, newest first and optionally under one topic, read page by page so
     none is left out; a phrase saying which; and whether that is every conversation. A filter only narrows."""
     viewer = config.dashboard.viewer_role
-    every = config.roles[viewer].can_view_all_conversations
+    every = board_read.sees_all(config, viewer)
     found: list[dict[str, Any]] = []
     while True:
         before = conversations.page_cursor(found[-1]) if found else None
-        page = (conversations.list_all(conn, topic, before=before) if every
-                else conversations.list_for(conn, viewer, topic, before=before))
+        page = conversations.list_readable(conn, config, viewer, topic, before=before)
         found += page
         if len(page) < conversations.MAX_LISTED:
             break
@@ -366,20 +364,18 @@ def _asking(config: Config, conn: Any, topic: str | None) -> tuple[list[tuple[di
     """Every message the viewer could read that names it in `attention` or asks for a decision, newest first,
     and the ids of the messages the viewer itself replied to.
 
-    It reads each visible conversation through the same path as its page: `history` from the viewer's join
-    point and within retention, or `full_history` for a viewer that sees every conversation. Each message
+    It reads each visible conversation through the same `history` path as its page, under the viewer's
+    shared board-read predicate and within retention. Each message
     comes once however many copies it has, and one the viewer sent itself isn't waiting on it.
     """
     viewer = config.dashboard.viewer_role
-    listed, _, every = _visible(config, conn, topic)
+    listed, _, _ = _visible(config, conn, topic)
     found, replied = [], set()
     for conversation in listed:
         after = 0
         while True:
-            if every:
-                page = conversations.full_history(conn, conversation["conversation_id"], after, MAX_NEEDS)
-            else:
-                page = conversations.history(conn, viewer, conversation["conversation_id"], after, MAX_NEEDS)
+            page = conversations.history(conn, viewer, conversation["conversation_id"], after, MAX_NEEDS,
+                                         config=config)
             if not page["messages"]:
                 break
             found += [(conversation, item) for item in page["messages"]
@@ -446,12 +442,8 @@ def _after_seq(value: str) -> int | None:
 
 def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -> Response:
     viewer = config.dashboard.viewer_role
-    if config.roles[viewer].can_view_all_conversations:
-        def read(after_seq: int, limit: int) -> dict[str, Any]:
-            return conversations.full_history(conn, conversation_id, after_seq, limit)
-    else:
-        def read(after_seq: int, limit: int) -> dict[str, Any]:
-            return conversations.history(conn, viewer, conversation_id, after_seq, limit)
+    def read(after_seq: int, limit: int) -> dict[str, Any]:
+        return conversations.history(conn, viewer, conversation_id, after_seq, limit, config=config)
     try:
         page = read(after, messages.MAX_PAGE_MESSAGES)
         # A page ends at a byte budget as well as a row count, so ask whether anything follows it.

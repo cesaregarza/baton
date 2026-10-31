@@ -139,9 +139,11 @@ def test_the_tools_carry_a_topic_and_filter_by_it(topic_host, capsys) -> None:
                         "conversation_id": made["conversation_id"]})).is_error}
 
     seen = anyio.run(run)
-    assert topics(seen["all"]) == [("a longer word", "projectile"), ("a subtopic", None),
-                                   ("the project", "project/renamed"), ("untagged", None)]
-    assert topics(seen["filtered"]) == [("the project", "project/renamed")]
+    assert topics(seen["all"]["conversations"]) == [("a longer word", "projectile"), ("a subtopic", None),
+                                                      ("the project", "project/renamed"), ("untagged", None)]
+    assert seen["all"]["next_cursor"] is None
+    assert topics(seen["filtered"]["conversations"]) == [("the project", "project/renamed")]
+    assert seen["filtered"]["next_cursor"] is None
     assert seen["forbidden"]["error"] == "forbidden"
     assert seen["malformed"]["error"] == "invalid_request"
     assert seen["omitted"] is True, "omitting the topic was accepted, which would clear it by accident"
