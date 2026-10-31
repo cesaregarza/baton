@@ -485,17 +485,24 @@ def _thread(items: list[dict[str, Any]], conversation_id: str = "",
         else:
             top.append(item)
 
+    # A gap's notice goes right before the first message after it, in whichever list that message is in, top
+    # level or nested under its parent, so the page reads in seq order; one after the last message ends the page.
+    ahead: dict[int, str] = {}
+    trailing = ""
+    for gap in sorted(gaps or [], key=lambda gap: gap["from_seq"]):
+        after = next((item["seq"] for item in sorted(items, key=lambda item: item["seq"])
+                      if item["seq"] > gap["to_seq"]), None)
+        if after is None:
+            trailing += _gap_notice(gap)
+        else:
+            ahead[after] = ahead.get(after, "") + _gap_notice(gap)
+
     def render(item: dict[str, Any]) -> str:
         nested = replies.get(item["seq"])
         inner = f'<ul class="replies">{"".join(render(reply) for reply in nested)}</ul>' if nested else ""
-        return _message(item, inner, on_page, conversation_id, parents or {})
+        return ahead.get(item["seq"], "") + _message(item, inner, on_page, conversation_id, parents or {})
 
-    out, pending = [], sorted(gaps or [], key=lambda gap: gap["from_seq"])
-    for item in top:  # a notice where messages are missing, before the first message after them
-        while pending and pending[0]["to_seq"] < item["seq"]:
-            out.append(_gap_notice(pending.pop(0)))
-        out.append(render(item))
-    return "".join(out + [_gap_notice(gap) for gap in pending])
+    return "".join(render(item) for item in top) + trailing
 
 
 def _gap_notice(gap: dict[str, int]) -> str:

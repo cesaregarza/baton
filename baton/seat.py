@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, parse_qsl, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlsplit
 from zoneinfo import ZoneInfo
 
 from baton import auth, board_read, conversations, messages
@@ -94,7 +94,9 @@ REQUEST_TIMEOUT = 10
 CONVERSATION_PATH = re.compile(r"/seat/c/([A-Za-z0-9_-]{1,64})")
 SEND_PATH = re.compile(r"/seat/c/([A-Za-z0-9_-]{1,64})/send")
 SEQ = re.compile(r"[0-9]{1,19}")
-PAGE = re.compile(r"[1-9][0-9]{0,5}")  # a page of the conversation list: 1-6 digits, no leading zero
+# Where the conversation list's next page starts: after a conversation's creation time and id, as the store writes them.
+CURSOR_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,15}(\+00:00|Z)")
+CONVERSATION_ID = re.compile(r"conv_[0-9a-f]{1,64}")
 MAX_SEQ = 2**63 - 1  # SQLite's largest integer
 MESSAGE_ID = re.compile(r"msg_[0-9a-f]{1,64}")
 # Each POST route's fields; anything else, or a field given twice, is refused before it is read.
@@ -294,10 +296,12 @@ def _route(config: Config, conn: sqlite3.Connection, request: _Request) -> Respo
             return _ack(config, conn, session, request.form["receipt"])
         return _send(config, conn, session, SEND_PATH.fullmatch(request.path).group(1), request.form)
     if request.path in ("/seat", "/seat/"):
-        pages = parse_qs(request.query, keep_blank_values=True).get("page", ["1"])
-        if len(pages) != 1 or not PAGE.fullmatch(pages[0]):
-            return _page(400, "Bad request", "<p>A page number is a whole number from 1, given once.</p>")
-        return _home(config, conn, session, int(pages[0]))
+        query = parse_qs(request.query, keep_blank_values=True)
+        at, ident = query.get("before_at", []), query.get("before_id", [])
+        if (at or ident) and not (len(at) == len(ident) == 1 and CURSOR_AT.fullmatch(at[0])
+                                  and CONVERSATION_ID.fullmatch(ident[0])):
+            return _page(400, "Bad request", "<p>That link isn't one the seat makes.</p>")
+        return _home(config, conn, session, (at[0], ident[0]) if at else None)
     if request.path == "/seat/inbox":
         return _inbox(config, conn, session)
     match = CONVERSATION_PATH.fullmatch(request.path)
@@ -450,36 +454,31 @@ def _to_login() -> Response:
 # Pages -----------------------------------------------------------------------------------------------------
 
 
-def _home(config: Config, conn: sqlite3.Connection, session: _Session, page: int = 1) -> Response:
+def _home(config: Config, conn: sqlite3.Connection, session: _Session,
+          before: tuple[str, str] | None = None) -> Response:
+    """One page of the conversations the seat may read, newest first. "Older" carries the cursor of the last row
+    shown, as the dashboard's list does, so a conversation added or left between pages never shifts another
+    out of view or onto two pages."""
     unread = messages.unread(conn, session.role)
-    readable = _readable(config, conn, session.role)
     size = conversations.MAX_LISTED
-    listed = readable[(page - 1) * size:page * size]
+    found = conversations.list_readable(conn, config, session.role, limit=size, before=before, _lookahead=True)
+    listed = found[:size]
     items = "".join(f'<li><a href="/seat/c/{_e(c["conversation_id"])}">{_e(c["title"])}</a>'
                     f'{_topic(c.get("topic"))}</li>' for c in listed)
-    links = ([f'<a href="/seat/?page={page - 1}">Newer conversations</a>'] if page > 1 else []) + \
-        ([f'<a href="/seat/?page={page + 1}">Older conversations</a>'] if page * size < len(readable) else [])
-    pager = (f'<p class="pager">{" · ".join(links)} <span class="muted">{len(readable)} in all</span></p>'
-             if links else "")
+    links = (['<a href="/seat/">Newest conversations</a>'] if before else [])
+    if len(found) > size:
+        at, ident = conversations.page_cursor(listed[-1])
+        links.append(f'<a href="/seat/?before_at={_e(quote(at))}&amp;before_id={_e(ident)}">Older conversations</a>')
+    pager = f'<p class="pager">{" · ".join(links)}</p>' if links else ""
+    empty = ("<li class=muted>No older conversations.</li>" if before
+             else "<li class=muted>You are not in any conversation yet.</li>")
     inbox = f"{unread} unread" if unread else "Nothing unread"
     heading = "Readable conversations" if board_read.sees_all(config, session.role) else "Your conversations"
     body = (f'{_nav(session)}<h1>{_e(config.roles[session.role].label)}</h1>{_banner(unread)}'
             f'<p><a href="/seat/inbox">Inbox</a> <span class="muted">{inbox}</span></p>'
-            f'<h2>{heading}</h2><ul>{items or "<li class=muted>You are not in any conversation yet.</li>"}'
-            f'</ul>{pager}')
+            f'<h2>{heading}</h2><ul>{items or empty}</ul>{pager}')
     return _page(200, "Seat", body)
 
-
-def _readable(config: Config, conn: sqlite3.Connection, role: str) -> list[dict[str, Any]]:
-    """Every conversation `role` may read, newest first, read page by page as the dashboard does, so none is
-    left out."""
-    found: list[dict[str, Any]] = []
-    while True:
-        before = conversations.page_cursor(found[-1]) if found else None
-        page = conversations.list_readable(conn, config, role, before=before)
-        found += page
-        if len(page) < conversations.MAX_LISTED:
-            return found
 
 def _banner(unread: int) -> str:
     if unread < WARN_UNREAD:
