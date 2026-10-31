@@ -14,28 +14,83 @@ from baton import conversations
 from baton.store import connect
 
 
+def _older(body: str) -> str | None:
+    found = re.search(r'href="(/seat/\?[^"]*)">Older conversations<', body)
+    return found.group(1).replace("&amp;", "&") if found else None
+
+
+def _walk(host, cookies, between=None) -> list[str]:
+    """Every title the seat lists, page by page through its Older links, calling `between` after each page."""
+    seen, target = [], "/seat/"
+    while target:
+        body = seat_get(host.config, target, cookies=cookies).body.decode()
+        seen += re.findall(r">(Thread \d{3})</a>", body)
+        if between:
+            between()
+        target = _older(body)
+    return seen
+
+
 def test_every_readable_conversation_is_reachable_through_the_seat_pager(tmp_path: Path) -> None:
     host = make_seat_host(tmp_path)
-    total = conversations.MAX_LISTED + 7
-    titles = {f"Thread {n:03d}" for n in range(total)}
-    for title in sorted(titles):
+    titles = [f"Thread {n:03d}" for n in range(conversations.MAX_LISTED + 7)]
+    for title in titles:
         conversation(host, title=title)
     _, cookies = log_in(host.config, host.seat_token)
-    seen, target, visited = set(), "/seat/", set()
-    while target and target not in visited:
-        visited.add(target)
-        body = seat_get(host.config, target, cookies=cookies).body.decode()
-        seen |= set(re.findall(r">(Thread \d{3})</a>", body))
-        older = re.search(r'href="(/seat/\?page=\d+)">Older conversations<', body)
-        target = older.group(1).replace("&amp;", "&") if older else None
-    assert seen == titles, f"{len(titles - seen)} conversations unreachable"
+    seen = _walk(host, cookies)
+    assert sorted(seen) == titles, f"{len(set(titles) - set(seen))} unreachable, {len(seen) - len(set(seen))} twice"
 
 
-def test_the_seat_pager_refuses_a_page_that_is_not_a_number(tmp_path: Path) -> None:
+def test_a_removal_between_pages_neither_hides_nor_repeats_a_conversation(tmp_path: Path) -> None:
+    host = make_seat_host(tmp_path)
+    ids = {f"Thread {n:03d}": conversation(host, participants=("orchestrator", "reviewer", "operator"),
+                                           title=f"Thread {n:03d}") for n in range(conversations.MAX_LISTED + 1)}
+    _, cookies = log_in(host.config, host.seat_token)
+    pages = []
+
+    def remove_one_from_the_first_page() -> None:
+        if not pages:
+            pages.append(1)
+            conn = connect(host.config.db_path)
+            conversations.remove(conn, host.config, ids["Thread 150"], "operator", actor="orchestrator")
+            conn.close()
+
+    seen = _walk(host, cookies, remove_one_from_the_first_page)
+    assert sorted(seen) == sorted(ids), f"missing {set(ids) - set(seen)}, repeated {len(seen) - len(set(seen))}"
+
+
+def test_an_insertion_between_pages_repeats_nothing(tmp_path: Path) -> None:
+    host = make_seat_host(tmp_path)
+    titles = [f"Thread {n:03d}" for n in range(conversations.MAX_LISTED + 1)]
+    for title in titles:
+        conversation(host, title=title)
+    _, cookies = log_in(host.config, host.seat_token)
+    added = []
+
+    def add_a_newer_one() -> None:
+        if not added:
+            added.append(conversation(host, title="Thread 999"))
+
+    seen = _walk(host, cookies, add_a_newer_one)
+    assert sorted(seen) == titles, f"repeated {len(seen) - len(set(seen))}"
+
+
+def test_a_page_past_the_oldest_says_so(tmp_path: Path) -> None:
+    host = make_seat_host(tmp_path)
+    conversation(host, title="Thread 001")
+    _, cookies = log_in(host.config, host.seat_token)
+    body = seat_get(host.config, "/seat/?before_at=2000-01-01T00:00:00%2B00:00&before_id=conv_000",
+                    cookies=cookies).body.decode()
+    assert "No older conversations" in body and "not in any conversation yet" not in body
+
+
+def test_the_seat_pager_refuses_a_cursor_it_did_not_make(tmp_path: Path) -> None:
     host = make_seat_host(tmp_path)
     _, cookies = log_in(host.config, host.seat_token)
-    for page in ("0", "-1", "two", "1&page=2", "9" * 7):
-        assert seat_get(host.config, f"/seat/?page={page}", cookies=cookies).status == 400
+    for query in ("before_at=2026-10-31T00:00:00%2B00:00", "before_id=conv_abc", "before_at=yesterday&before_id=c",
+                  "before_at=2026-10-31T00:00:00%2B00:00&before_id=conv_abc&before_id=conv_def",
+                  "before_at=2026-10-31T00:00:00%2B00:00&before_id=%3Cscript%3E"):
+        assert seat_get(host.config, f"/seat/?{query}", cookies=cookies).status == 400, query
 
 
 def _gap_between(body: str, before: str, after: str) -> str:
@@ -68,3 +123,33 @@ def test_the_dashboard_says_where_messages_are_no_longer_kept(tmp_path: Path) ->
     body = dashboard_get(config, f"/c/{cid}").body.decode()
     assert "Message #3 is no longer kept" in _gap_between(body, "second note", "fourth note")
     assert "no longer kept" not in _gap_between(body, "first note", "second note")
+
+
+def _replies_with_a_gap(conn, config, cid: str) -> None:
+    """A message, three replies to it, and the middle reply (seq 3) gone."""
+    parent = conversations.send(conn, config, sender="orchestrator", conversation_id=cid, text="first note")
+    for word in ("second note", "third note", "fourth note"):
+        conversations.send(conn, config, sender="reviewer", conversation_id=cid, text=word,
+                           reply_to=parent["message_id"])
+    conn.execute("DELETE FROM messages WHERE conversation_id = ? AND conversation_seq = 3", (cid,))
+
+
+def test_the_dashboard_places_a_gap_among_nested_replies_in_order(tmp_path: Path) -> None:
+    config = page_config(tmp_path)
+    conn = connect(config.db_path)
+    cid = made(conn, config, "Replies with a gap", MINE)
+    _replies_with_a_gap(conn, config, cid)
+    conn.close()
+    body = dashboard_get(config, f"/c/{cid}").body.decode()
+    assert "Message #3 is no longer kept" in _gap_between(body, "second note", "fourth note")
+
+
+def test_the_seat_places_a_gap_among_replies_in_order(tmp_path: Path) -> None:
+    host = make_seat_host(tmp_path)
+    cid = conversation(host, participants=("orchestrator", "reviewer", "operator"))
+    conn = connect(host.config.db_path)
+    _replies_with_a_gap(conn, host.config, cid)
+    conn.close()
+    _, cookies = log_in(host.config, host.seat_token)
+    body = seat_get(host.config, f"/seat/c/{cid}", cookies=cookies).body.decode()
+    assert "Message #3 is no longer kept" in _gap_between(body, "second note", "fourth note")
