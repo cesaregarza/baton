@@ -129,7 +129,8 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
     conn = connect(config.db_path)
     try:
         if url.path == "/needs":
-            return _page(200, "Needs you", _needs(config, conn, _needs_topic(url.query), pages))
+            body = _needs(config, conn, _needs_topic(url.query), pages)
+            return _page(200, f"Needs {_attention_label(config)}", body)
         if topic is not None:
             return _page(200, topic, _index(config, conn, topic, pages["page"]))
         if match is None:
@@ -225,7 +226,7 @@ def _pager(path: str, params: dict[str, str], name: str, page: int, size: int, t
                 + (f"#{anchor}" if anchor else ""))
     links = []
     if page * size < total:
-        links.append(f'<a href="{href(page + 1)}">{label}</a>')
+        links.append(f'<a href="{href(page + 1)}">{_e(label)}</a>')
     if page > 1:
         links.append(f'<a href="{href(1)}">Back to the first page</a>')
     return f'<p class="pager">{" · ".join(links)}</p>' if links else ""
@@ -276,12 +277,13 @@ def _visible(config: Config, conn: Any, topic: str | None = None) -> tuple[list[
 def _index(config: Config, conn: Any, topic: str | None = None, page: int = 1) -> str:
     viewer = config.dashboard.viewer_role
     listed, scope, _ = _visible(config, conn, topic)
+    needs = f"Needs {_e(_attention_label(config))}"
     heading = (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}. '
-               '<a href="/needs">Needs you</a></p>')
+               f'<a href="/needs">{needs}</a></p>')
     if topic is not None:
         heading = (f'<p><a href="/">All conversations</a> · {_e(" › ".join(topic.split("/")))}</p>'
                    f'<h1>{_e(topic)}</h1><p class="muted">Read-only. Showing {_e(scope)} under this topic, as '
-                   f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">Needs you here</a></p>')
+                   f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">{needs} here</a></p>')
     if not listed:
         return heading + f'<ul><li class=muted>{"None yet." if topic is None else "None under this topic."}</li></ul>'
     shown = _slice(listed, page, MAX_LISTED)
@@ -312,7 +314,7 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
     viewer = config.dashboard.viewer_role
     subject = config.dashboard.attention_role or viewer
     projected = subject != viewer
-    you = config.roles[subject].label if projected else "you"
+    you = _attention_label(config)   # plain text: every use below escapes it
     found, replied = _asking(config, conn, topic, subject)
     mine = [pair for pair in found if subject in (pair[1].get("attention") or [])]
     others = [pair for pair in found if subject not in (pair[1].get("attention") or [])]
@@ -379,6 +381,14 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
             f'{other_block}{job_block}')
 
 
+def _attention_label(config: Config) -> str:
+    """Whom the Needs page is about, as plain text: "you" for the viewer itself, else the attention role's display
+    name. It is configured text, so every page escapes it where it shows it."""
+    viewer = config.dashboard.viewer_role
+    subject = config.dashboard.attention_role or viewer
+    return "you" if subject == viewer else config.roles[subject].label
+
+
 def _asking(config: Config, conn: Any, topic: str | None,
             subject: str) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], set[str]]:
     """Every message the viewer could read that names `subject` in `attention` or asks for a decision, newest
@@ -430,7 +440,7 @@ def _signal(subject: str, you: str, conversation: dict[str, Any], item: dict[str
     why = " · ".join(labels)
     return (f'<li><div class="meta"><a href="{_e(message_path(conversation["conversation_id"], seq))}">'
             f'{_e(conversation["title"])}</a> · <span class="role">{_e(messages.author_label(item))}</span> · '
-            f'{_time(item["at"])} · #{seq} · {why}</div><p class="text">{_e(item["text"])}</p></li>')
+            f'{_time(item["at"])} · #{seq} · {_e(why)}</div><p class="text">{_e(item["text"])}</p></li>')
 
 
 def _job(job: dict[str, Any]) -> str:
