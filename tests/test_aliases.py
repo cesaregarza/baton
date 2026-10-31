@@ -36,9 +36,10 @@ async def rpc(client, host, method, params, *, role="guest"):
     meta = {"io.modelcontextprotocol/protocolVersion": PROTOCOL,
             "io.modelcontextprotocol/clientInfo": {"name": "alias-test", "version": "1"},
             "io.modelcontextprotocol/clientCapabilities": {}}
-    response = await client.post(host.config.resource_url, headers=headers,
-                                 json={"jsonrpc": "2.0", "id": 1, "method": method,
-                                       "params": {**params, "_meta": meta}})
+    # Escape lone surrogates on the wire so malformed strings reach MCP, not the client's UTF-8 encoder.
+    body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": {**params, "_meta": meta}}
+    response = await client.post(host.config.resource_url, headers={**headers, "Content-Type": "application/json"},
+                                 content=json.dumps(body).encode("ascii"))
     return response.json()
 
 
@@ -573,3 +574,66 @@ def test_oauth_refresh_preserves_claim_rate_identity_without_storing_access_toke
     assert refused.value.extra == {"limit": "alias_claims"}
     attempts = repr([tuple(row) for row in conn.execute("SELECT * FROM alias_claims")])
     assert "synthetic access" not in attempts and "synthetic refreshed access" not in attempts
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"], ids=["high-surrogate", "low-surrogate"])
+def test_raw_surrogate_passphrase_is_safely_refused_before_admission(guest_host, caplog, surrogate):
+    secret = "synthetic secret must stay private"
+
+    async def scenario(client):
+        response = await rpc(client, guest_host, "tools/call", {"name": "claim_alias", "arguments": {
+            "name": "malformed", "passphrase": secret + surrogate}})
+        text = response["result"]["content"][0]["text"]
+        assert '"invalid_request"' in text, "claim must return a structured invalid_request refusal"
+        assert json.loads(text)["error"] == "invalid_request"
+        assert secret not in json.dumps(response)
+        assert "Traceback" not in json.dumps(response)
+    dispatch(guest_host, scenario)
+    conn = store.connect(guest_host.config.db_path)
+    try:
+        assert snapshot(conn) == {"aliases": [], "alias_bindings": []}
+        assert conn.execute("SELECT COUNT(*) FROM alias_claims").fetchone()[0] == 0
+    finally:
+        conn.close()
+    assert secret not in guest_host.config.audit_path.read_text()
+    assert secret not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert not any(record.exc_info for record in caplog.records)
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"], ids=["high-surrogate", "low-surrogate"])
+def test_storage_surrogate_passphrase_is_refused_before_admission_or_hashing(alias_store, monkeypatch, surrogate):
+    from baton.errors import InvalidRequest
+    secret = "synthetic secret must stay private"
+    original = auth.hash_passphrase
+    hashed = []
+
+    def counted(*args, **kwargs):
+        hashed.append(True)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(auth, "hash_passphrase", counted)
+    before = snapshot(alias_store[0])
+    with pytest.raises(InvalidRequest) as refused:
+        claim(alias_store, passphrase=secret + surrogate)
+    assert secret not in str(refused.value)
+    assert hashed == []
+    assert snapshot(alias_store[0]) == before
+    assert alias_store[0].execute("SELECT COUNT(*) FROM alias_claims").fetchone()[0] == 0
+
+
+def test_valid_unicode_passphrase_claim_and_resumption_work_in_real_dispatch(guest_host):
+    secret = "café 漢字 🧪 e\u0301"
+
+    async def scenario(client):
+        responses = [payload(await rpc(client, guest_host, "tools/call", {"name": "claim_alias", "arguments": {
+            "name": "unicode-secret", "passphrase": secret}})) for _ in range(2)]
+        assert responses[0]["alias_id"] == responses[1]["alias_id"]
+        assert responses[0]["code"] == responses[1]["code"]
+        assert responses[0]["binding_token"] != responses[1]["binding_token"]
+    dispatch(guest_host, scenario)
+    conn = store.connect(guest_host.config.db_path)
+    try:
+        row = conn.execute("SELECT verifier FROM aliases WHERE name = 'unicode-secret'").fetchone()
+        assert auth.check_passphrase(secret, row["verifier"]) is True
+    finally:
+        conn.close()

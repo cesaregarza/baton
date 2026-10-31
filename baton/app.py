@@ -432,11 +432,12 @@ class Guard:
             return await call_next(ctx)
         arguments = params.get("arguments")
         # A missing field's SDK error can include the entire input object, including the passphrase.
-        if (not isinstance(arguments, dict) or not isinstance(arguments.get("name"), str)
-                or not isinstance(arguments.get("passphrase"), str)
-                or not 1 <= len(arguments["passphrase"]) <= aliases.MAX_PASSPHRASE):
-            refusal = self._refuse("claim_alias", auth.role_of(get_access_token()), {}, "invalid_request",
-                                   "claim_alias requires a name and a passphrase of 1-1024 characters")
+        try:
+            if not isinstance(arguments, dict) or not isinstance(arguments.get("name"), str):
+                raise InvalidRequest("claim_alias requires a name and a passphrase of 1-1024 characters")
+            aliases.validate_passphrase(arguments.get("passphrase"))
+        except InvalidRequest as error:
+            refusal = self._refuse("claim_alias", auth.role_of(get_access_token()), {}, error.code, str(error))
             return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))], is_error=True)
         return await call_next(ctx)
 

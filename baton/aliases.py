@@ -34,6 +34,16 @@ def normalize(name: str) -> str:
     return name
 
 
+def validate_passphrase(passphrase: object) -> None:
+    """Reject malformed text before admission/scrypt, without exposing any part of the secret."""
+    if not isinstance(passphrase, str) or not 1 <= len(passphrase) <= MAX_PASSPHRASE:
+        raise InvalidRequest("passphrase must contain 1-1024 characters")
+    try:
+        passphrase.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidRequest("passphrase must be valid UTF-8 text") from None
+
+
 def skeleton(name: str) -> str:
     return name.replace("1", "l").replace("0", "o").replace("rn", "m").replace("vv", "w")
 
@@ -81,8 +91,7 @@ def claim(conn: sqlite3.Connection, config: Config, principal: AccessToken | Non
     if type(binding_ttl) is not int or not 1 <= binding_ttl <= 86400:
         raise InvalidRequest("binding lifetime must be a whole number from 1 to 86400 seconds")
     name = normalize(name)
-    if not isinstance(passphrase, str) or not 1 <= len(passphrase) <= MAX_PASSPHRASE:
-        raise InvalidRequest("passphrase must contain 1-1024 characters")
+    validate_passphrase(passphrase)
     now = time.time()
     _admit(conn, config.aliases, credential, name, now)
     if _reserved(config, name):
