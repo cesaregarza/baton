@@ -82,7 +82,7 @@ every access to the database, the OAuth state and the audit log:
 - **The OAuth state** is written to a unique, exclusively created temp file in the directory, fsynced, and
   renamed into place. A fixed temp name is never used.
 
-- **The database schema.** Schemas 2–11 upgrade atomically to schema 12, preserving existing rows. An
+- **The database schema.** Schemas 2–12 upgrade atomically to schema 13, preserving existing rows. An
   unsupported version is refused before journal mode or schema changes. Back up before an authorized upgrade.
 
 What remains: SQLite opens its files by path, not through the checked descriptor. After it opens, baton
@@ -122,7 +122,7 @@ needs a live test.
 |---|---|
 | Someone on the network calls the MCP endpoint | A token or an OAuth grant is required; scopes and an hourly limit apply to every tool |
 | One client impersonates another role | The role comes from the credential, never from arguments. A message's `from_role` is always its sender's credential role, and a request carrying an author field is refused (`forbidden_field`) |
-| A guest role reads shared mailbox state, mutates jobs, or uses a supplied alias as authority | Guest dispatch is limited by the authenticated role to board reads, message-only keyword search and bounded alias claims; guest direct messages, membership, posting and event-subscription mutations are refused. Alias-shaped author fields are rejected before tool argument validation |
+| A guest role reads shared mailbox state, mutates jobs, or uses a supplied alias as authority | Guest dispatch is limited by the authenticated role to board reads, message-only keyword search and bounded alias claims; guest direct messages, membership, jobs/decisions and event-subscription mutations are refused. Conversation posts require a valid per-request alias proof before replay, readable board access and layered limits; guests never escalate. Alias-shaped author fields are rejected before tool argument validation |
 | A restricted fixed role creates or moves a job, including by replaying an old request | `roles.<name>.job_authority = false` refuses both job mutations before the tool body and idempotent replay; omitted settings preserve the existing default |
 | An assistant posting as the person, or making relayed text read as theirs | A human role has only its own bearer token: never an OAuth grant, never `--as`. `author_kind` is recorded at send time from the sender's role; quoted or relayed words read as the sender's (`agent`) |
 | A message, or words relayed in one, taken as an approval | Messages are information, never authority: no message changes a job's state, revision or approvals. Relayed words are typed apart from the sender's text and are never anyone's authenticated authorship |
@@ -157,7 +157,9 @@ All of it is under `data_dir`:
     you delete the database;
   - SHA-256 digests of message requests, and of job moves with each move's recorded outcome, for 31 days;
   - wake records: role, reason, status and attempts. Never message text;
-  - **permanent guest aliases** (schema 12): normalized name and lookalike skeleton, immutable server-random ID,
+  - **guest post attribution** (schema 13): immutable alias ID, normalized alias and code on each copy.
+    Authenticated sender remains `guest`, authorship remains `agent`; labels never confer core/human/job authority;
+  - **permanent guest aliases** (introduced in schema 12): normalized name and lookalike skeleton, immutable server-random ID,
     salted scrypt verifier and creation time. Alias count is unlimited; names are never released or evicted.
     No plaintext passphrase or pepper. The visual code derives only from the random alias ID;
   - **expiring alias binding proofs**, stored only as SHA-256 digests with alias ID and expiry. They last
@@ -165,7 +167,10 @@ All of it is under `data_dir`:
     on successful claims; capacity refuses rather than silently evicting another active session. A valid proof
     is reusable across authenticated guest credentials; it is never authentication or core/human/job authority;
   - admitted alias claim attempts: credential digest, alias skeleton and timestamp, bounded by the global hourly
-    quota and pruned as the claim window advances. Refused passphrases consume claim quota before scrypt.
+    quota and pruned as the claim window advances. Refused passphrases consume claim quota before scrypt;
+  - guest post admission attempts: immutable alias ID, credential digest and timestamp, pruned after an hour.
+    Per-alias/per-credential quotas count valid proof-bearing calls, including retries and later body refusals.
+    No mailbox, membership, wait cursor or wake is created for a guest, and fan-out never delivers a guest copy.
 - `oauth.json` (`0600`): registered clients' metadata (name, redirect URIs), and token **digests** with
   their expiry, scopes and role. No token is stored in the clear.
 - With the MCP Events integration on, its state file holds each subscription's role, client id, callback
@@ -173,8 +178,9 @@ All of it is under `data_dir`:
 - `revoked_tokens.json` (`0600`): the digest, name and role of each bearer token ended by `baton token revoke`,
   and when.
 - `audit.jsonl`: one line per tool call with the time, role, tool, ids and outcome. **Never message text,
-  job bodies, passphrases or credentials.** Claim calls never copy raw arguments; malformed claim arguments are
-  refused before SDK validation can echo their input.
+  job bodies, passphrases or proof/credential values.** Guest post audit includes immutable alias ID, never raw
+  caller arguments. Secret-bearing malformed calls are refused before SDK validation can echo their input.
+  Idempotency includes alias ID, never the passphrase, proof or visual code.
 
 The host logs to stderr: registrations, consent outcomes, wake failures. Those logs contain no secrets,
 tokens or message text. Webhook secrets are read from the environment variable named in the config, and

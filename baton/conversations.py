@@ -264,7 +264,8 @@ def remove(conn: sqlite3.Connection, config: Config, conversation_id: str, parti
 
 def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_id: str, text: str,
          relayed: Any = None, request_id: str | None = None, job_id: str | None = None,
-         reply_to: str | None = None, attention: Any = None, needs_decision: bool = False) -> dict[str, Any]:
+         reply_to: str | None = None, attention: Any = None, needs_decision: bool = False,
+         identity: dict[str, str] | None = None) -> dict[str, Any]:
     """Send to every other participant at once; `seqs` gives each recipient's seq. A retry replays.
 
     `reply_to` is the message_id of a message in this conversation that the
@@ -278,24 +279,35 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
     also wakes the escalation role, at most once an hour).
     """
     settings = require_enabled(config)
+    guest = sender == "guest"
+    if guest and (identity is None or job_id is not None or needs_decision):
+        raise Forbidden("guest posting requires alias continuity and cannot carry jobs or decisions")
     request_id = request_id or messages.new_request_id()
     created_at = messages.request_time(request_id)
     relayed = messages.check(text, relayed)
     attention = _check_attention(config, attention)
     digest = events.request_digest("send", {"sender": sender, "conversation_id": conversation_id, "text": text,
+                                            **({"alias_id": identity["alias_id"]} if guest else {}),
                                             "job_id": job_id, **({"relayed": relayed} if relayed else {}),
                                             **({"reply_to": reply_to} if reply_to else {}),
                                             **({"attention": attention} if attention else {}),
                                             **({"needs_decision": True} if needs_decision else {})})
     with transaction(conn):
+        if guest:
+            _load(conn, conversation_id)
+            if not board_read.may_read_conversation(conn, config, sender, conversation_id):
+                raise Forbidden("guest may post only to a readable board conversation")
         existing = events.replayed(conn, "message_requests", request_id, digest)
         if existing is not None:
             return {"message_id": existing["message_id"], "conversation_id": conversation_id,
                     "seqs": json.loads(existing["seqs"]), "request_id": request_id, "created": False}
         conversation = _load(conn, conversation_id)
         participants = _participants(conn, conversation_id)
-        if sender not in participants:
+        if not guest and sender not in participants:
             raise NotAParticipant(f"{sender} is not in {conversation_id}")
+        recipients = [role for role in participants if role not in (sender, "guest")]
+        if not recipients:
+            raise InvalidRequest("conversation has no eligible delivery recipients; no message was stored")
         outside = [role for role in attention or () if role not in participants]
         if outside:
             raise NotAParticipant(f"attention names {outside[0]}, which is not in {conversation_id}; naming a "
@@ -306,14 +318,15 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
 
             jobs.require_exists(conn, job_id)
         limited = _sent_within_window(conn, conversation_id) >= settings.max_messages_per_hour
-        if limited:
+        if limited and not guest:
             _escalate(conn, settings, conversation, sender)
-        else:
+        if not limited:
             message_id = messages.new_message_id()
-            seqs = _fan_out(conn, conversation_id, [role for role in participants if role != sender], sender=sender,
+            seqs = _fan_out(conn, conversation_id, recipients, sender=sender,
                             text=text, relayed=relayed, job_id=job_id, message_id=message_id,
-                            author_kind=config.author_kind(sender), reply_to=reply_to, attention=attention,
-                            needs_decision=needs_decision)
+                            author_kind="agent" if guest else config.author_kind(sender),
+                            reply_to=reply_to, attention=attention,
+                            needs_decision=needs_decision, identity=identity if guest else None)
             conn.execute("INSERT INTO message_requests (request_id, request_digest, message_id, seqs, created_at)"
                          " VALUES (?, ?, ?, ?, ?)", (request_id, digest, message_id, json.dumps(seqs),
                                                      created_at.isoformat()))
@@ -447,8 +460,9 @@ def _fan_out(conn: sqlite3.Connection, conversation_id: str, recipients: list[st
              text: str, relayed: list[dict] | None = None, notice: dict[str, str] | None = None,
              job_id: str | None = None, message_id: str | None = None, author_kind: str | None = None,
              reply_to: str | None = None, attention: list[str] | None = None,
-             needs_decision: bool = False) -> dict[str, int]:
+             needs_decision: bool = False, identity: dict[str, str] | None = None) -> dict[str, int]:
     """Store one copy for each recipient under one message_id, or refuse before storing any."""
+    recipients = [role for role in recipients if role != "guest"]
     full = [role for role in recipients if messages.unread(conn, role) >= messages.MAX_UNREAD]
     if full:
         raise ConversationFull(f"{', '.join(full)} has {messages.MAX_UNREAD} unread messages, so no participant "
@@ -462,7 +476,7 @@ def _fan_out(conn: sqlite3.Connection, conversation_id: str, recipients: list[st
                                       job_id=job_id, conversation_id=conversation_id,
                                       conversation_seq=conversation_seq, relayed=relayed, notice=notice,
                                       author_kind=author_kind, reply_to=reply_to, attention=attention,
-                                      needs_decision=needs_decision)
+                                      needs_decision=needs_decision, identity=identity)
             for role in recipients}
 
 

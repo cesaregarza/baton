@@ -135,12 +135,15 @@ class Aliases:
 
     binding_ttl_seconds: int = 86400
     max_bindings_per_alias: int = 20
+    max_posts_per_alias_per_hour: int = 30
+    max_posts_per_credential_per_hour: int = 300
     max_claims_per_credential_per_hour: int = 20
     max_claims_per_alias_per_hour: int = 5
     max_claims_per_hour: int = 100
 
 
-ALIAS_LIMITS = {"binding_ttl_seconds": (1, 86400), "max_bindings_per_alias": (1, 1000),
+ALIAS_LIMITS = {"max_posts_per_alias_per_hour": (1, 10000), "max_posts_per_credential_per_hour": (1, 10000),
+                "binding_ttl_seconds": (1, 86400), "max_bindings_per_alias": (1, 1000),
                 "max_claims_per_credential_per_hour": (1, 10000), "max_claims_per_alias_per_hour": (1, 10000),
                 "max_claims_per_hour": (1, 10000)}
 

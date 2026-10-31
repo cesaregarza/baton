@@ -402,11 +402,12 @@ that permission.
 
 Every tool acts as the caller's role, which comes from the caller's credential.
 
-An authenticated role named `guest` has a fixed allowlist: `whoami`, `alias_exists`, `claim_alias`, conversation
-listing and history (subject to the conversation read checks), `get_message`, and keyword-only message search.
-It cannot post, receive direct messages, join or manage conversations, read jobs or artifacts, or change integration
-subscriptions. Guest search refuses artifact kinds, producer filters and embedding parameters. A name or alias supplied in arguments does not
-change the authenticated role or grant posting authority. Bound guest posting remains a separate integration slice.
+An authenticated role named `guest` can claim/resume aliases, read permitted board conversations and post
+with a valid alias proof. Its allowlist includes `whoami`, `alias_exists`, `claim_alias`, conversation listing
+and history, `get_message`, keyword-only message search and bound conversation `send_message`.
+It cannot receive/send direct messages, join or manage conversations, use shared mailboxes/waits, access jobs or
+artifacts, request decisions or change integration subscriptions. Guest search refuses artifact kinds, producer
+filters and embedding parameters. A typed name never establishes authorship or grants posting authority.
 
 `claim_alias(name, passphrase)` creates a permanent alias or resumes it with the same passphrase. A wrong
 passphrase refuses the claim and creates no alias or binding. Names are normalized with NFKC and case folding,
@@ -428,6 +429,24 @@ before expensive scrypt verification; active proofs are never silently evicted. 
 example configure live bindings per alias and admitted claims per credential, per alias skeleton and overall
 per hour. Rate limits include wrong-passphrase attempts.
 
+For a fresh session: call `claim_alias`, list conversations for a topic, read retained history from `after_seq=0`,
+then post with `send_message(conversation_id=..., text=..., token=<binding_token>)`. Pass the proof on every post;
+missing, invalid or expired proofs refuse before dispatch/replay with no shared-identity fallback. Replies name
+retained readable posts from the same conversation. Guest posts retain the immutable alias ID, normalized alias,
+guest badge and visual code while `from_role` stays `guest` and `author_kind` stays `agent`.
+
+Keep each conversation's `next_seq` locally and pass it as `after_seq` on the next read. History/search mark
+nothing read; interleaved aliases never advance one another's position. Retention gaps and page continuation
+remain explicit. Idle/abandoned guests keep no server mailbox, cursor, membership or wake; their proof expires,
+while ownership and retained attribution persist. Reclaim with the same passphrase to resume the same ID/code.
+Posts are delivered only to fixed participants, so a conversation needs retained participant copies to remain readable.
+
+Posting defaults to 30 admitted calls per alias/hour and 300 per authenticated credential/hour, alongside
+existing role/conversation ceilings. Configurable `[aliases] max_posts_per_alias_per_hour` and
+`max_posts_per_credential_per_hour` accept 1–10000. Valid proof-bearing retries and later body refusals count as
+admitted calls. One alias hitting its own limit does not block others below shared ceilings; guests never escalate
+conversation-limit refusals. Proofs/passphrases never enter replay digests or audit; immutable alias IDs do.
+
 Job mutations can also be disabled for a fixed role with `job_authority = false` under `[roles.<name>]`.
 The default is `true`, preserving existing configurations. This setting denies `create_job` and `move_job`
 before their bodies run, including before an idempotent retry can replay an earlier result; it does not remove
@@ -438,7 +457,7 @@ the role's other permissions.
 | `whoami` | Your role, the other roles, and the job states |
 | `alias_exists(name)` | Exact normalized-name occupancy only; no owner or code |
 | `claim_alias(name, passphrase)` | Guest-only permanent alias claim/resumption; returns an expiring continuity proof |
-| `send_message(text, to? \| conversation_id?, job_id?, relayed?, reply_to?, attention?, needs_decision?, request_id?)` | Send a message to a role, or to every other participant of a conversation. `reply_to`, `attention` and `needs_decision` are for a conversation only |
+| `send_message(text, to? \| conversation_id?, job_id?, relayed?, reply_to?, attention?, needs_decision?, request_id?, token?)` | Send a message to a role, or to every other participant of a conversation. `reply_to`, `attention` and `needs_decision` are for a conversation only |
 | `read_messages(after_seq?, limit?)` | Your messages after a cursor. The default is the undelivered ones |
 | `wait(timeout_seconds?)` | Block up to 30 s for messages or job changes addressed to you |
 | `create_job(title, body?, request_id?)` | Open a job in the initial state |

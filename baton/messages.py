@@ -99,23 +99,27 @@ def store_copy(conn: sqlite3.Connection, *, message_id: str, sender: str | None,
                job_id: str | None = None, conversation_id: str | None = None, conversation_seq: int | None = None,
                relayed: list[dict] | None = None, notice: dict[str, str] | None = None,
                author_kind: str | None = None, reply_to: str | None = None,
-               attention: list[str] | None = None, needs_decision: bool = False) -> int:
+               attention: list[str] | None = None, needs_decision: bool = False,
+               identity: dict[str, str] | None = None) -> int:
     """Store one copy as the recipient's next seq, with its event; the caller holds the write lock and checked room."""
     last_seq, read_seq = _mailbox(conn, recipient)
     seq = last_seq + 1
     conn.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)"
                  " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq", (recipient, seq))
     conn.execute("INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, author_kind,"
-                 " recipient, seq, text, relayed, notice, reply_to, attention, needs_decision, at)"
-                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 " recipient, seq, text, relayed, notice, reply_to, attention, needs_decision, at,"
+                 " alias_id, alias, alias_code)"
+                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  (message_id, job_id, conversation_id, conversation_seq, sender, author_kind, recipient, seq,
                   text, json.dumps(relayed) if relayed else None, json.dumps(notice) if notice else None,
-                  reply_to, json.dumps(attention) if attention else None, int(needs_decision), events.now()))
+                  reply_to, json.dumps(attention) if attention else None, int(needs_decision), events.now(),
+                  (identity or {}).get("alias_id"), (identity or {}).get("alias"), (identity or {}).get("code")))
     # The event carries no text, so retention deleting the message leaves no copy behind.
     # A job-less event uses the message's seq as its own.
     events.append(conn, job_id=job_id, seq=None if job_id else seq, actor=sender or HOST_ACTOR,
                   audience=recipient, kind="message", summary=f"message {seq} from {sender or 'the host'}",
-                  data={"message_id": message_id, "seq": seq})
+                  data={"message_id": message_id, "seq": seq,
+                        **({"alias_id": identity["alias_id"]} if identity else {})})
     _forget_old(conn, recipient, read_seq)
     return seq
 
@@ -180,10 +184,11 @@ def reply_references(conn: sqlite3.Connection, reader: str, rows: list[sqlite3.R
     else:
         condition, values = board_read.message_condition(config, reader)
     params = {**values, **{f"parent_{index}": parent for index, (_, parent) in enumerate(answered)}}
-    visible = {(found["conversation_id"], found["id"]): found["conversation_seq"] for found in conn.execute(
-        f"SELECT m.id, m.conversation_id, m.conversation_seq FROM messages m WHERE m.id IN ({places})"
-        f" AND {condition}", params)}
-    return {key: {"message_id": key[1], "seq": visible.get(key)} for key in answered}
+    visible = {(found["conversation_id"], found["id"]): found for found in conn.execute(
+        f"SELECT m.id, m.conversation_id, m.conversation_seq, m.alias_id, m.alias, m.alias_code"
+        f" FROM messages m WHERE m.id IN ({places}) AND {condition}", params)}
+    return {key: {"message_id": key[1], "seq": visible[key]["conversation_seq"] if key in visible else None,
+                  **(attribution(visible[key]) if key in visible else {})} for key in answered}
 
 
 def check(text: str, relayed: Any) -> list[dict[str, str]] | None:
@@ -294,6 +299,18 @@ def wire_bytes(text: str) -> int:
     return len(json.dumps(text)) - 2
 
 
+def attribution(row: sqlite3.Row) -> dict[str, str]:
+    """Persisted server-bound attribution, optional so legacy/fixed-role results keep their shape."""
+    return ({"alias_id": row["alias_id"], "alias": row["alias"], "badge": "guest", "code": row["alias_code"]}
+            if row["alias_id"] else {})
+
+
+def author_label(item: dict[str, Any]) -> str:
+    if item.get("alias_id"):
+        return f"guest · {item['alias']} · {item['code']}"
+    return item.get("from_role") or "the host"
+
+
 def as_dict(row: sqlite3.Row, reply_to: dict[str, Any] | None = None) -> dict[str, Any]:
     """A message as readers see it. `from_role` is the sender's credential role, or None for a host notice.
 
@@ -302,7 +319,8 @@ def as_dict(row: sqlite3.Row, reply_to: dict[str, Any] | None = None) -> dict[st
     `reply_to` is the reader's view of the message this one answers, from `reply_references`; None means
     this message answers nothing, or that it is being shaped for no particular reader.
     """
-    return {"seq": row["seq"], "message_id": row["id"], "sender": row["sender"], "from_role": row["sender"],
+    return {**attribution(row), "seq": row["seq"], "message_id": row["id"], "sender": row["sender"],
+            "from_role": row["sender"],
             "author_kind": row["author_kind"],
             "conversation_id": row["conversation_id"], "job_id": row["job_id"], "text": row["text"],
             "relayed": json.loads(row["relayed"]) if row["relayed"] else None,

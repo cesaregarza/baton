@@ -51,8 +51,8 @@ def payload(response):
     return json.loads(result["content"][0]["text"])
 
 
-def dispatch(host, scenario):
-    app = app_module.create_app(host.config, {})
+def dispatch(host, scenario, integrations=None):
+    app = app_module.create_app(host.config, integrations or {})
 
     async def run():
         async with app.router.lifespan_context(app):
@@ -91,7 +91,7 @@ def test_schema_11_migrates_to_alias_storage_without_changing_existing_rows(gues
     database.chmod(0o600)
     conn = store.connect(database)
     try:
-        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == store.SCHEMA_VERSION
         assert tuple(conn.execute("SELECT * FROM mailboxes").fetchone()) == ("worker", 7, 3)
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"aliases", "alias_bindings"} <= tables
@@ -443,16 +443,20 @@ def test_claim_tools_keep_registered_guest_restrictions_in_force_in_real_dispatc
 def test_alias_limits_are_loaded_from_typed_config():
     from baton.config import parse
     configured = parse({"host": {"public_url": "https://alias.example.test"}, "roles": {"guest": {}},
-                        "aliases": {"max_bindings_per_alias": 4,
+                        "aliases": {"max_bindings_per_alias": 4, "max_posts_per_alias_per_hour": 8,
+                                    "max_posts_per_credential_per_hour": 9,
                                     "max_claims_per_credential_per_hour": 5,
                                     "max_claims_per_alias_per_hour": 6, "max_claims_per_hour": 7}})
+    assert configured.aliases.max_posts_per_alias_per_hour == 8
+    assert configured.aliases.max_posts_per_credential_per_hour == 9
     assert configured.aliases.max_bindings_per_alias == 4
     assert configured.aliases.max_claims_per_credential_per_hour == 5
     assert configured.aliases.max_claims_per_alias_per_hour == 6
     assert configured.aliases.max_claims_per_hour == 7
 
 
-@pytest.mark.parametrize("key", ["max_bindings_per_alias",
+@pytest.mark.parametrize("key", ["max_posts_per_alias_per_hour", "max_posts_per_credential_per_hour",
+                               "max_bindings_per_alias",
                                "max_claims_per_credential_per_hour", "max_claims_per_alias_per_hour",
                                "max_claims_per_hour"])
 @pytest.mark.parametrize("value", [True, "1", 0, -1, 1.5, 10001])
