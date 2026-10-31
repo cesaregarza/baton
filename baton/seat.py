@@ -48,7 +48,7 @@ from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlsplit
 from zoneinfo import ZoneInfo
 
-from baton import auth, board_read, conversations, messages
+from baton import auth, board_read, conversations, jobs, messages
 from baton.config import Config
 from baton.errors import (
     BatonError,
@@ -296,6 +296,8 @@ def _route(config: Config, conn: sqlite3.Connection, request: _Request) -> Respo
         return _home(config, conn, session)
     if request.path == "/seat/inbox":
         return _inbox(config, conn, session)
+    if request.path == "/seat/needs":
+        return _needs(config, conn, session)
     match = CONVERSATION_PATH.fullmatch(request.path)
     if match:
         query = parse_qs(request.query, keep_blank_values=True)
@@ -458,6 +460,79 @@ def _home(config: Config, conn: sqlite3.Connection, session: _Session) -> Respon
             f'<h2>{heading}</h2><ul>{items or "<li class=muted>You are not in any conversation yet.</li>"}'
             '</ul>')
     return _page(200, "Seat", body)
+
+NEEDS_SHOWN = 100  # the newest of each list on /seat/needs; the count says when there are more
+NEEDS_JOBS = 50
+
+
+def _needs(config: Config, conn: sqlite3.Connection, session: _Session) -> Response:
+    """What asks for the seat's own role, from what that role may read: the messages whose `attention` names it,
+    then decisions asked of others or of nobody, collapsed, then the jobs waiting on it. Reading moves nothing:
+    no cursor, no read state. "you replied" means only that you sent a reply; it approves or resolves nothing."""
+    role = session.role
+    found, replied, before = [], set(), None
+    while True:  # every conversation the role may read, page by page, as its own list does
+        listed = conversations.list_readable(conn, config, role, before=before)
+        for conversation in listed:
+            after = 0
+            while True:
+                page = conversations.history(conn, role, conversation["conversation_id"], after,
+                                             messages.MAX_PAGE_MESSAGES, config=config)
+                if not page["messages"]:
+                    break
+                found += [(conversation, item) for item in page["messages"]
+                          if item["from_role"] not in (None, role)
+                          and (item.get("needs_decision") or role in (item.get("attention") or []))]
+                replied |= {item["reply_to"]["message_id"] for item in page["messages"]
+                            if item["from_role"] == role and item.get("author_kind") == "human"
+                            and item.get("reply_to")}
+                after = page["next_seq"]
+        if len(listed) < conversations.MAX_LISTED:
+            break
+        before = conversations.page_cursor(listed[-1])
+    found.sort(key=lambda pair: (pair[1]["at"], pair[1]["seq"]), reverse=True)
+    mine = [pair for pair in found if role in (pair[1].get("attention") or [])]
+    others = [pair for pair in found if role not in (pair[1].get("attention") or [])]
+
+    def item(conversation: dict[str, Any], entry: dict[str, Any]) -> str:
+        attention = entry.get("attention") or []
+        labels = ["asks for you"] if role in attention else []
+        if entry.get("needs_decision"):
+            asked = [name for name in attention if name != role]
+            labels.append("a decision is needed" if role in attention else
+                          f"a decision is needed (asked of {', '.join(asked) or 'the whole conversation'})")
+        if entry["message_id"] in replied:
+            labels.append("you replied")
+        where = (f'<p class="actions"><a href="{_link(conversation["conversation_id"], int(entry["seq"]))}">'
+                 f'{_e(conversation["title"])}</a> · {_e(" · ".join(labels))}</p>')
+        return _message(entry, session, where)
+
+    def counted(pairs: list[tuple[dict[str, Any], dict[str, Any]]]) -> tuple[str, str]:
+        shown = pairs[:NEEDS_SHOWN]
+        more = f"Showing the newest {len(shown)} of {len(pairs)}." if len(pairs) > len(shown) else ""
+        return "".join(item(c, e) for c, e in shown) or "<li class=muted>None.</li>", more
+
+    mine_items, mine_more = counted(mine)
+    other_items, other_more = counted(others)
+    waiting = jobs.list_jobs(conn, waiting_on=role, limit=NEEDS_JOBS)
+    total = jobs.count_jobs(conn, waiting_on=role)
+    job_items = "".join(f'<li>{_e(job["title"])} <span class="muted">{_e(job["state"])}</span></li>'
+                        for job in waiting) or "<li class=muted>None.</li>"
+    job_more = f"Showing {len(waiting)} of {total}." if total > len(waiting) else ""
+    body = (f'{_nav(session)}<h1>Needs you</h1>'
+            f'<p class="muted">{len(mine)} asked for you · {len(others)} decisions not addressed to you · '
+            f'{total} job{" is" if total == 1 else "s are"} waiting on you. Each message asked for you, or for a '
+            'decision, when it was sent. "you replied" only means you sent a reply to it, which approves or '
+            'resolves nothing, and looking here marks nothing as seen.</p>'
+            f'<h2 id="for-you">For you</h2>{f"<p class=muted>{mine_more}</p>" if mine_more else ""}'
+            f'<ul class="history">{mine_items}</ul>'
+            f'<details id="decisions"><summary>Decisions not addressed to you ({len(others)})</summary>'
+            f'{f"<p class=muted>{other_more}</p>" if other_more else ""}'
+            f'<ul class="history">{other_items}</ul></details>'
+            f'<h2 id="jobs">Jobs waiting on you</h2>{f"<p class=muted>{job_more}</p>" if job_more else ""}'
+            f'<ul>{job_items}</ul>')
+    return _page(200, "Needs you", body)
+
 
 def _banner(unread: int) -> str:
     if unread < WARN_UNREAD:
@@ -720,7 +795,8 @@ def _short(text: str, limit: int = 160) -> str:
 
 
 def _nav(session: _Session) -> str:
-    return (f'<nav><a href="/seat/">Conversations</a><a href="/seat/inbox">Inbox</a>{_logout_form(session)}</nav>')
+    return (f'<nav><a href="/seat/">Conversations</a><a href="/seat/inbox">Inbox</a><a href="/seat/needs">Needs you</a>'
+            f'{_logout_form(session)}</nav>')
 
 def _topic(topic: str | None) -> str:
     return f' <span class="badge">{_e(topic)}</span>' if topic else ""
