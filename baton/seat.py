@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, parse_qsl, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlsplit
 from zoneinfo import ZoneInfo
 
 from baton import auth, board_read, conversations, jobs, messages
@@ -94,6 +94,9 @@ REQUEST_TIMEOUT = 10
 CONVERSATION_PATH = re.compile(r"/seat/c/([A-Za-z0-9_-]{1,64})")
 SEND_PATH = re.compile(r"/seat/c/([A-Za-z0-9_-]{1,64})/send")
 SEQ = re.compile(r"[0-9]{1,19}")
+# Where the conversation list's next page starts: after a conversation's creation time and id, as the store writes them.
+CURSOR_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,15}(\+00:00|Z)")
+CONVERSATION_ID = re.compile(r"conv_[0-9a-f]{1,64}")
 MAX_SEQ = 2**63 - 1  # SQLite's largest integer
 MESSAGE_ID = re.compile(r"msg_[0-9a-f]{1,64}")
 # Each POST route's fields; anything else, or a field given twice, is refused before it is read.
@@ -293,7 +296,12 @@ def _route(config: Config, conn: sqlite3.Connection, request: _Request) -> Respo
             return _ack(config, conn, session, request.form["receipt"])
         return _send(config, conn, session, SEND_PATH.fullmatch(request.path).group(1), request.form)
     if request.path in ("/seat", "/seat/"):
-        return _home(config, conn, session)
+        query = parse_qs(request.query, keep_blank_values=True)
+        at, ident = query.get("before_at", []), query.get("before_id", [])
+        if (at or ident) and not (len(at) == len(ident) == 1 and CURSOR_AT.fullmatch(at[0])
+                                  and CONVERSATION_ID.fullmatch(ident[0])):
+            return _page(400, "Bad request", "<p>That link isn't one the seat makes.</p>")
+        return _home(config, conn, session, (at[0], ident[0]) if at else None)
     if request.path == "/seat/inbox":
         return _inbox(config, conn, session)
     if request.path == "/seat/needs":
@@ -448,17 +456,29 @@ def _to_login() -> Response:
 # Pages -----------------------------------------------------------------------------------------------------
 
 
-def _home(config: Config, conn: sqlite3.Connection, session: _Session) -> Response:
+def _home(config: Config, conn: sqlite3.Connection, session: _Session,
+          before: tuple[str, str] | None = None) -> Response:
+    """One page of the conversations the seat may read, newest first. "Older" carries the cursor of the last row
+    shown, as the dashboard's list does, so a conversation added or left between pages never shifts another
+    out of view or onto two pages."""
     unread = messages.unread(conn, session.role)
-    listed = conversations.list_readable(conn, config, session.role, limit=conversations.MAX_LISTED)
+    size = conversations.MAX_LISTED
+    found = conversations.list_readable(conn, config, session.role, limit=size, before=before, _lookahead=True)
+    listed = found[:size]
     items = "".join(f'<li><a href="/seat/c/{_e(c["conversation_id"])}">{_e(c["title"])}</a>'
                     f'{_topic(c.get("topic"))}</li>' for c in listed)
+    links = (['<a href="/seat/">Newest conversations</a>'] if before else [])
+    if len(found) > size:
+        at, ident = conversations.page_cursor(listed[-1])
+        links.append(f'<a href="/seat/?before_at={_e(quote(at))}&amp;before_id={_e(ident)}">Older conversations</a>')
+    pager = f'<p class="pager">{" · ".join(links)}</p>' if links else ""
+    empty = ("<li class=muted>No older conversations.</li>" if before
+             else "<li class=muted>You are not in any conversation yet.</li>")
     inbox = f"{unread} unread" if unread else "Nothing unread"
     heading = "Readable conversations" if board_read.sees_all(config, session.role) else "Your conversations"
     body = (f'{_nav(session)}<h1>{_e(config.roles[session.role].label)}</h1>{_banner(unread)}'
             f'<p><a href="/seat/inbox">Inbox</a> <span class="muted">{inbox}</span></p>'
-            f'<h2>{heading}</h2><ul>{items or "<li class=muted>You are not in any conversation yet.</li>"}'
-            '</ul>')
+            f'<h2>{heading}</h2><ul>{items or empty}</ul>{pager}')
     return _page(200, "Seat", body)
 
 NEEDS_SHOWN = 100  # the newest of each list on /seat/needs; the count says when there are more
@@ -616,7 +636,8 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
     title = conn.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,)).fetchone()["title"]
     request_id = request_id or _mint_request(conn, session, conversation_id)
     shown = {int(item["seq"]) for item in page["messages"]}
-    items = "".join(_history_item(conversation_id, item, shown, session) for item in page["messages"])
+    items = _with_gaps([(item["seq"], _history_item(conversation_id, item, shown, session))
+                        for item in page["messages"]], page["retention_gaps"])
     # A page can end early on its byte budget, so whether more follow is asked of the store, not the page's length.
     readable_message, values = board_read.message_condition(config, session.role)
     more = conn.execute(f"SELECT 1 FROM messages m WHERE m.conversation_id = :conversation_id "
@@ -643,6 +664,20 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
             f'<p class="muted">From when you were added. <a href="#compose">Write a reply</a></p>'
             f'{earlier}<ul>{items or "<li class=muted>Nothing yet.</li>"}</ul>{newer}{compose}')
     return _page(status, title, body)
+
+
+def _with_gaps(rendered: list[tuple[int, str]], gaps: list[dict[str, int]]) -> str:
+    """Rendered messages in seq order, with a notice at each retention gap, where the missing messages were."""
+    out, pending = [], sorted(gaps, key=lambda gap: gap["from_seq"])
+    for seq, item in rendered:
+        while pending and pending[0]["to_seq"] < seq:
+            out.append(_gap_notice(pending.pop(0)))
+        out.append(item)
+    return "".join(out + [_gap_notice(gap) for gap in pending])
+
+
+def _gap_notice(gap: dict[str, int]) -> str:
+    return f'<li class="placeholder">{_e(conversations.gap_words(gap))}</li>'
 
 
 def _history_item(conversation_id: str, item: dict[str, Any], shown: set[int], session: _Session) -> str:

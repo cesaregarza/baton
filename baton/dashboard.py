@@ -496,11 +496,12 @@ def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -
             if found and found[0]["seq"] == seq:
                 parents[seq] = found[0]
     items = _thread(page["messages"], conversation_id, parents)
+    missing = _gap_summary(page["retention_gaps"])
     more = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
             if later else "")
     earlier = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={max(0, after - messages.MAX_PAGE_MESSAGES)}">'
                'Earlier messages</a></p>' if after > 0 else "")
-    return _page(200, title, f'<p><a href="/">All conversations</a></p><h1>{_e(title)}</h1>{earlier}'
+    return _page(200, title, f'<p><a href="/">All conversations</a></p><h1>{_e(title)}</h1>{earlier}{missing}'
                              f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{more}')
 
 
@@ -523,6 +524,17 @@ def _thread(items: list[dict[str, Any]], conversation_id: str = "",
         return _message(item, inner, on_page, conversation_id, parents or {})
 
     return "".join(render(item) for item in top)
+
+
+def _gap_summary(gaps: list[dict[str, int]]) -> str:
+    """Policy: the threaded view groups replies under their parent, so it isn't in seq order; it states the page's
+    missing messages once, above the thread, never among the messages, where a notice's place would imply when."""
+    if not gaps:
+        return ""
+    ranges = ", ".join(f"#{gap['from_seq']}" if gap["from_seq"] == gap["to_seq"]
+                       else f"#{gap['from_seq']}–#{gap['to_seq']}"
+                       for gap in sorted(gaps, key=lambda gap: gap["from_seq"]))
+    return f'<p class="notice">Not kept any more on this page: messages {_e(ranges)}</p>'
 
 
 def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | set[int] = frozenset(),

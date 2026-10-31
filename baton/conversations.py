@@ -428,6 +428,12 @@ def _has_readable_seq(conn: sqlite3.Connection, condition: str, values: dict[str
                                                        "start_seq": start, "end_seq": end}).fetchone() is not None
 
 
+def gap_words(gap: dict[str, int]) -> str:
+    """What a page says where `read_history` reports a retention gap."""
+    first, last = gap["from_seq"], gap["to_seq"]
+    return (f"Message #{first} is" if first == last else f"Messages #{first}–#{last} are") + " no longer kept."
+
+
 def _retention_gaps(page: list[dict[str, Any]], lower_seq: int | None, upper_seq: int | None,
                     access_start: int | None, joined_at: str | None) -> list[dict[str, int]]:
     """Report only missing ranges after access is independently established."""
