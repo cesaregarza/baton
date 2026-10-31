@@ -129,7 +129,8 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
     conn = connect(config.db_path)
     try:
         if url.path == "/needs":
-            return _page(200, "Needs you", _needs(config, conn, _needs_topic(url.query), pages))
+            body = _needs(config, conn, _needs_topic(url.query), pages)
+            return _page(200, f"Needs {_attention_label(config)}", body)
         if topic is not None:
             return _page(200, topic, _index(config, conn, topic, pages["page"]))
         if match is None:
@@ -225,7 +226,7 @@ def _pager(path: str, params: dict[str, str], name: str, page: int, size: int, t
                 + (f"#{anchor}" if anchor else ""))
     links = []
     if page * size < total:
-        links.append(f'<a href="{href(page + 1)}">{label}</a>')
+        links.append(f'<a href="{href(page + 1)}">{_e(label)}</a>')
     if page > 1:
         links.append(f'<a href="{href(1)}">Back to the first page</a>')
     return f'<p class="pager">{" · ".join(links)}</p>' if links else ""
@@ -276,12 +277,13 @@ def _visible(config: Config, conn: Any, topic: str | None = None) -> tuple[list[
 def _index(config: Config, conn: Any, topic: str | None = None, page: int = 1) -> str:
     viewer = config.dashboard.viewer_role
     listed, scope, _ = _visible(config, conn, topic)
+    needs = f"Needs {_e(_attention_label(config))}"
     heading = (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}. '
-               '<a href="/needs">Needs you</a></p>')
+               f'<a href="/needs">{needs}</a></p>')
     if topic is not None:
         heading = (f'<p><a href="/">All conversations</a> · {_e(" › ".join(topic.split("/")))}</p>'
                    f'<h1>{_e(topic)}</h1><p class="muted">Read-only. Showing {_e(scope)} under this topic, as '
-                   f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">Needs you here</a></p>')
+                   f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">{needs} here</a></p>')
     if not listed:
         return heading + f'<ul><li class=muted>{"None yet." if topic is None else "None under this topic."}</li></ul>'
     shown = _slice(listed, page, MAX_LISTED)
@@ -301,72 +303,102 @@ def _topic_link(topic: str | None) -> str:
 
 
 def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) -> str:
-    """What singles out the viewer, from what it could read, then the jobs waiting on it.
+    """What singles out the attention role, from what the viewer could read, then the jobs waiting on it.
 
-    By default it lists the messages whose `attention` names the viewer. Decisions asked of other roles, or of
-    the whole conversation, sit in a collapsed section of their own. "you replied" means only that the viewer
-    sent a reply to that message; nothing records a resolution.
+    The attention role is `dashboard.attention_role`, the viewer by default. It lists the messages whose
+    `attention` names that role; decisions asked of other roles, or of the whole conversation, sit in a
+    collapsed section of their own. Visibility is always the viewer's: when the attention role is someone else,
+    the page is a read-only projection of what the viewer may already read, and it never reads as that role.
+    "replied" means only that the role sent a reply to the message; nothing records a resolution.
     """
     viewer = config.dashboard.viewer_role
-    found, replied = _asking(config, conn, topic)
-    mine = [pair for pair in found if viewer in (pair[1].get("attention") or [])]
-    others = [pair for pair in found if viewer not in (pair[1].get("attention") or [])]
+    subject = config.dashboard.attention_role or viewer
+    projected = subject != viewer
+    you = _attention_label(config)   # plain text: every use below escapes it
+    found, replied = _asking(config, conn, topic, subject)
+    mine = [pair for pair in found if subject in (pair[1].get("attention") or [])]
+    others = [pair for pair in found if subject not in (pair[1].get("attention") or [])]
     # Each list's links keep the topic and where the other lists are, so paging one leaves the others in place.
     params = {**({"topic": topic} if topic else {}),
               **{name: str(number) for name, number in pages.items() if number > 1}}
     shown = _slice(mine, pages["page"], MAX_NEEDS)
     span = _span(len(shown), len(mine), pages["page"], MAX_NEEDS, "")
-    count = f'{len(mine)} message{"" if len(mine) == 1 else "s"} asked for you' + (f", {span}" if span else "")
-    other_count = f' · {len(others)} decision{"" if len(others) == 1 else "s"} not addressed to you'
+    count = f'{len(mine)} message{"" if len(mine) == 1 else "s"} asked for {_e(you)}' + (f", {span}" if span else "")
+    other_count = f' · {len(others)} decision{"" if len(others) == 1 else "s"} not addressed to {_e(you)}'
     where = f" under {_e(topic)}" if topic else ""
-    items = "".join(_signal(viewer, conversation, item, replied) for conversation, item in shown)
-    pager = _pager("/needs", params, "page", pages["page"], MAX_NEEDS, len(mine), "Older messages for you",
+    items = "".join(_signal(subject, you, conversation, item, replied) for conversation, item in shown)
+    pager = _pager("/needs", params, "page", pages["page"], MAX_NEEDS, len(mine), f"Older messages for {you}",
                    "for-you")
     other_shown = _slice(others, pages["others_page"], MAX_NEEDS)
     other_span = _span(len(other_shown), len(others), pages["others_page"], MAX_NEEDS, "")
-    other_items = "".join(_signal(viewer, conversation, item, replied) for conversation, item in other_shown)
+    other_items = "".join(_signal(subject, you, conversation, item, replied) for conversation, item in other_shown)
     other_pager = _pager("/needs", params, "others_page", pages["others_page"], MAX_NEEDS, len(others),
                          "Older decisions", "decisions")
     # Collapsed until the reader pages through it; then it reloads open, where the new items start.
     opened = " open" if pages["others_page"] > 1 else ""
     other_block = (f'<details id="decisions"{opened}>'
-                   f'<summary>Decisions not addressed to you ({len(others)})</summary>'
+                   f'<summary>Decisions not addressed to {_e(you)} ({len(others)})</summary>'
                    f'<p class="muted">Decision requests that name another role, or nobody, in the conversations '
-                   f'you can read.{" " + other_span.capitalize() + "." if other_span else ""}</p>'
+                   f'{"you can read" if not projected else _e(viewer) + " can read"}.'
+                   f'{" " + other_span.capitalize() + "." if other_span else ""}</p>'
                    f'<ul>{other_items or "<li class=muted>None.</li>"}</ul>{other_pager}</details>')
-    if topic is not None:
+    if projected and not config.dashboard.attention_jobs:
+        # Listing them would widen what the view's audience sees; that takes `dashboard.attention_jobs`.
+        job_count, job_block = "", (f'<h2 id="jobs">Jobs</h2><p class="muted">Jobs waiting on {_e(you)} aren\'t '
+                                    'shown in this read-only view.</p>')
+    elif topic is not None:
         job_count, job_block = "", ('<h2 id="jobs">Jobs</h2><p class="muted">Jobs have no topic, so none are '
-                                    'shown under a topic filter. <a href="/needs">See every job waiting on you</a>.'
-                                    '</p>')
+                                    f'shown under a topic filter. <a href="/needs">See every job waiting on '
+                                    f'{_e(you)}</a>.</p>')
     else:
-        total = jobs.count_jobs(conn, waiting_on=viewer)
-        waiting = jobs.list_jobs(conn, waiting_on=viewer, limit=MAX_NEEDS_JOBS,
+        total = jobs.count_jobs(conn, waiting_on=subject)
+        waiting = jobs.list_jobs(conn, waiting_on=subject, limit=MAX_NEEDS_JOBS,
                                  offset=(pages["jobs_page"] - 1) * MAX_NEEDS_JOBS)
         job_span = _span(len(waiting), total, pages["jobs_page"], MAX_NEEDS_JOBS, "", newest=False)
-        job_count = f' · {total} job{" is" if total == 1 else "s are"} waiting on you' + (
+        job_count = f' · {total} job{" is" if total == 1 else "s are"} waiting on {_e(you)}' + (
             f", {job_span}" if job_span else "")
         job_pager = _pager("/needs", params, "jobs_page", pages["jobs_page"], MAX_NEEDS_JOBS, total, "More jobs",
                            "jobs")
-        job_block = ('<h2 id="jobs">Jobs waiting on you</h2><ul>' + ("".join(_job(job) for job in waiting)
-                                                           or "<li class=muted>None.</li>") + "</ul>" + job_pager)
-    crumbs = '<p><a href="/">All conversations</a>' + (' · <a href="/needs">Needs you</a>' if topic else "") + "</p>"
-    return (f'{crumbs}<h1>Needs you{where}</h1><p class="muted">As {_e(viewer)}. {count}{other_count}{job_count}.</p>'
-            '<p class="muted">Each message is a retained signal: it asked for you, or for a decision, when it was '
-            'sent. "you replied" only means you sent a reply to it, and viewing changes nothing.</p>'
-            '<p class="muted">Jump to <a href="#for-you">For you</a> · <a href="#decisions">Decisions not addressed '
-            'to you</a> · <a href="#jobs">Jobs</a></p>'
-            f'<h2 id="for-you">For you</h2><ul>{items or "<li class=muted>None.</li>"}</ul>{pager}'
+        job_block = (f'<h2 id="jobs">Jobs waiting on {_e(you)}</h2><ul>' + ("".join(_job(job) for job in waiting)
+                     or "<li class=muted>None.</li>") + "</ul>" + job_pager)
+    needs = f"Needs {_e(you)}"
+    crumbs = '<p><a href="/">All conversations</a>' + (f' · <a href="/needs">{needs}</a>' if topic else "") + "</p>"
+    if projected:
+        head = (f'<h1>{needs}{where}</h1><p class="muted">{needs}, read-only view, as visible to {_e(viewer)}. '
+                f'{count}{other_count}{job_count}.</p>'
+                f'<p class="muted">Each message is a retained signal: it asked for {_e(you)}, or for a decision, when '
+                f'it was sent. "{_e(you)} replied" only means {_e(you)} sent a reply to it, which approves or resolves '
+                'nothing, and viewing changes nothing.</p>')
+    else:
+        head = (f'<h1>{needs}{where}</h1><p class="muted">As {_e(viewer)}. {count}{other_count}{job_count}.</p>'
+                '<p class="muted">Each message is a retained signal: it asked for you, or for a decision, when it was '
+                'sent. "you replied" only means you sent a reply to it, and viewing changes nothing.</p>')
+    for_you = f"For {_e(you)}"
+    return (f'{crumbs}{head}'
+            f'<p class="muted">Jump to <a href="#for-you">{for_you}</a> · <a href="#decisions">Decisions not '
+            f'addressed to {_e(you)}</a> · <a href="#jobs">Jobs</a></p>'
+            f'<h2 id="for-you">{for_you}</h2><ul>{items or "<li class=muted>None.</li>"}</ul>{pager}'
             f'{other_block}{job_block}')
 
 
-def _asking(config: Config, conn: Any, topic: str | None) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]],
-                                                                     set[str]]:
-    """Every message the viewer could read that names it in `attention` or asks for a decision, newest first,
-    and the ids of the messages the viewer itself replied to.
+def _attention_label(config: Config) -> str:
+    """Whom the Needs page is about, as plain text: "you" for the viewer itself, else the attention role's display
+    name. It is configured text, so every page escapes it where it shows it."""
+    viewer = config.dashboard.viewer_role
+    subject = config.dashboard.attention_role or viewer
+    return "you" if subject == viewer else config.roles[subject].label
+
+
+def _asking(config: Config, conn: Any, topic: str | None,
+            subject: str) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], set[str]]:
+    """Every message the viewer could read that names `subject` in `attention` or asks for a decision, newest
+    first, and the ids of the messages `subject` itself replied to.
 
     It reads each visible conversation through the same `history` path as its page, under the viewer's
-    shared board-read predicate and within retention. Each message
-    comes once however many copies it has, and one the viewer sent itself isn't waiting on it.
+    shared board-read predicate and within retention: `subject` only filters, it never reads. Each message
+    comes once however many copies it has, and one the viewer or `subject` sent isn't waiting on it. A reply
+    counts as `subject`'s only when `subject` sent it; when `subject` isn't the viewer it must also be stored as
+    a person's, so an agent relaying or quoting the person never counts.
     """
     viewer = config.dashboard.viewer_role
     listed, _, _ = _visible(config, conn, topic)
@@ -379,35 +411,36 @@ def _asking(config: Config, conn: Any, topic: str | None) -> tuple[list[tuple[di
             if not page["messages"]:
                 break
             found += [(conversation, item) for item in page["messages"]
-                      if item["from_role"] not in (None, viewer)
-                      and (item.get("needs_decision") or viewer in (item.get("attention") or []))]
+                      if item["from_role"] not in (None, viewer, subject)
+                      and (item.get("needs_decision") or subject in (item.get("attention") or []))]
             replied |= {item["reply_to"]["message_id"] for item in page["messages"]
-                        if item["from_role"] == viewer and item.get("reply_to")}
+                        if item["from_role"] == subject and item.get("reply_to")
+                        and (subject == viewer or item.get("author_kind") == "human")}
             after = page["next_seq"]
     return sorted(found, key=lambda pair: (pair[1]["at"], pair[1]["seq"]), reverse=True), replied
 
 
-def _signal(viewer: str, conversation: dict[str, Any], item: dict[str, Any], replied: set[str]) -> str:
+def _signal(subject: str, you: str, conversation: dict[str, Any], item: dict[str, Any], replied: set[str]) -> str:
     """One message on /needs, linked to its place: the page that starts with it, so it is always on it.
 
-    "asks for you" only when `attention` names the viewer. A decision request asks the conversation, so it
+    "asks for <you>" only when `attention` names `subject`. A decision request asks the conversation, so it
     shows for every reader; when its `attention` names other roles, the label says whom it was asked of.
     """
     seq = int(item["seq"])
     attention = item.get("attention") or []
-    labels = ["asks for you"] if viewer in attention else []
+    labels = [f"asks for {you}"] if subject in attention else []
     if item.get("needs_decision"):
-        others = [role for role in attention if role != viewer]
-        if viewer in attention:
+        others = [role for role in attention if role != subject]
+        if subject in attention:
             labels.append("a decision is needed")
         else:
             labels.append(f"a decision is needed (asked of {', '.join(others) or 'the whole conversation'})")
     if item["message_id"] in replied:
-        labels.append("you replied")
+        labels.append(f"{you} replied")
     why = " · ".join(labels)
     return (f'<li><div class="meta"><a href="{_e(message_path(conversation["conversation_id"], seq))}">'
             f'{_e(conversation["title"])}</a> · <span class="role">{_e(messages.author_label(item))}</span> · '
-            f'{_time(item["at"])} · #{seq} · {why}</div><p class="text">{_e(item["text"])}</p></li>')
+            f'{_time(item["at"])} · #{seq} · {_e(why)}</div><p class="text">{_e(item["text"])}</p></li>')
 
 
 def _job(job: dict[str, Any]) -> str:

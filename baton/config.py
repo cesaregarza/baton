@@ -209,6 +209,12 @@ class Dashboard:
     listen_port: int = 8766
     # One more Host the view answers to, exactly, for an authenticating proxy in front of it. Off by default.
     proxy_host: str | None = None
+    # Whose attention the Needs page is about: `viewer_role` unless set. Visibility stays `viewer_role`'s; this
+    # only chooses which of the messages the viewer may already read are listed as needing that role.
+    attention_role: str | None = None
+    # Whether the Needs page lists the jobs waiting on `attention_role` when that isn't the viewer. Off: showing
+    # them widens what the view's audience sees, so it is a decision of its own.
+    attention_jobs: bool = False
 
 
 @dataclass(frozen=True)
@@ -531,9 +537,13 @@ def _dashboard(table: dict[str, Any], roles: dict[str, Role], conversations: Con
     if listen_host not in LOOPBACK_HOSTS:
         raise ConfigError(f"dashboard.listen_host must be a loopback address ({' or '.join(LOOPBACK_HOSTS)}): the "
                           "view has no login, so reaching it from elsewhere needs its own auth in front of it")
+    attention_role = table.get("attention_role", viewer_role)
+    if not isinstance(attention_role, str) or attention_role not in roles:
+        raise ConfigError(f"dashboard.attention_role must name a configured role; got {attention_role!r}")
     return Dashboard(True, viewer_role, listen_host,
                      _number(table, "listen_port", 8766, "dashboard.listen_port", 1, 65535, integer=True),
-                     _proxy_host(table.get("proxy_host")))
+                     _proxy_host(table.get("proxy_host")), attention_role,
+                     _boolean(table, "attention_jobs", False, "dashboard.attention_jobs"))
 
 
 def _seat(table: dict[str, Any], roles: dict[str, Role], public_url: str, dashboard: Dashboard) -> Seat:
