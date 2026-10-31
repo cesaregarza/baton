@@ -44,6 +44,11 @@ def keyword_mode(conn: sqlite3.Connection) -> str:
 
 def readable(config: Config, role: str) -> tuple[str, dict[str, Any]]:
     """The SQL condition, on a `messages m` row, that `role` may read that copy; and its parameters."""
+    if role == "guest":
+        member = ("((m.recipient = :reader OR m.sender = :reader) AND EXISTS (SELECT 1 FROM participants p"
+                  " WHERE p.conversation_id = m.conversation_id AND p.role = :reader))")
+        conversations = "1" if config.roles[role].can_view_all_conversations else member
+        return f"(m.conversation_id IS NOT NULL AND {conversations})", {"reader": role}
     view_all = config.roles[role].can_view_all_conversations
     member = ("(m.recipient = :reader OR m.sender = :reader) AND EXISTS (SELECT 1 FROM participants p"
               " WHERE p.conversation_id = m.conversation_id AND p.role = :reader)")

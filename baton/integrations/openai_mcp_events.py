@@ -351,6 +351,7 @@ class McpEvents:
 
     async def _subscribe(self, ctx: Any, params: SubscribeParams) -> dict[str, Any]:
         token, role = _principal()
+        _refuse_guest_mutation(role)
         callback, secret = self._validated(params)
         sub_id = subscription_id(role, callback.url, params.name, {})
         expires_at = self._expiry(params)
@@ -385,6 +386,7 @@ class McpEvents:
 
     async def _unsubscribe(self, ctx: Any, params: UnsubscribeParams) -> dict[str, Any]:
         _, role = _principal()
+        _refuse_guest_mutation(role)
         sub_id = subscription_id(role, str(params.delivery.get("url", "")), params.name, dict(params.arguments))
         with self._state() as state:
             sub = state["subscriptions"].get(sub_id)
@@ -606,6 +608,12 @@ def _principal() -> tuple[Any, str]:
     if token is None or role is None or auth.SCOPE_READ not in token.scopes:
         raise MCPError(-32600, f"events need {auth.SCOPE_READ}")
     return token, role
+
+
+def _refuse_guest_mutation(role: str) -> None:
+    """Guests may discover the event definition, but cannot create or change subscriptions."""
+    if role == "guest":
+        raise MCPError(-32600, "guest credentials cannot subscribe to or modify integration events")
 
 
 async def _advertise_events(ctx: Any, call_next: Any) -> Any:

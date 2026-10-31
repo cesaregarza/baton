@@ -424,6 +424,8 @@ def _check_roles(config: Config, roles: Any, field: str = "participants") -> lis
     unknown = [role for role in roles if role not in config.roles]
     if unknown:
         raise UnknownRole(f"no role {unknown[0]!r}; call whoami for the list")
+    if "guest" in roles:
+        raise InvalidRequest("guest cannot be a conversation participant")
     if len(set(roles)) != len(roles):
         raise InvalidRequest(f"{field} lists a role twice")
     return roles

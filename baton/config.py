@@ -75,6 +75,8 @@ class Role:
     display_only: bool = False
     # How pages name the role, such as a person's name; the role name when unset.
     display_name: str = ""
+    # Whether this role may create or move jobs. Defaults on to preserve existing fixed-role behavior.
+    job_authority: bool = True
 
     @property
     def label(self) -> str:
@@ -458,7 +460,8 @@ def _role(name: str, table: dict[str, Any]) -> Role:
         _boolean(table, "can_view_all_conversations", False, f"roles.{name}.can_view_all_conversations"),
         _boolean(table, "human", False, f"roles.{name}.human"),
         _boolean(table, "display_only", False, f"roles.{name}.display_only"),
-        str(table.get("display_name", "")))
+        str(table.get("display_name", "")),
+        _boolean(table, "job_authority", True, f"roles.{name}.job_authority"))
 
 
 def _valid_webhook(url: str) -> bool:
