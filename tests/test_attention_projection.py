@@ -32,13 +32,13 @@ JOB_STATES = {"initial": "open", "states": {
     "done": {}}}
 
 
-def projection_config(tmp_path: Path, **dashboard_keys: Any) -> Config:
+def projection_config(tmp_path: Path, display_name: str = PERSON, **dashboard_keys: Any) -> Config:
     """`viewer` sees every conversation; `person` is the human the projection is about, in some of them."""
     return config_module.parse({
         "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
         "roles": {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
                   "assistant": {},
-                  "person": {"human": True, "display_name": PERSON},
+                  "person": {"human": True, "display_name": display_name},
                   "viewer": {"display_only": True, "can_view_all_conversations": True}},
         "conversations": {"enabled": True, "max_messages_per_hour": 1000},
         "jobs": JOB_STATES,
@@ -234,3 +234,59 @@ def test_seat_needs_without_a_session_goes_to_login(tmp_path) -> None:
     host = make_seat_host(tmp_path)
     response = seat_get(host.config, "/seat/needs")
     assert response.status in (302, 303) and "/seat/login" in response.headers.get("Location", "")
+
+
+# A display name is configured text, so every place a page shows it goes through the same escaping.
+
+MARKUP = "Alex <b>Team</b>"
+ESCAPED = "Alex &lt;b&gt;Team&lt;/b&gt;"
+
+
+def test_a_display_name_with_markup_is_escaped_in_each_needs_label(tmp_path) -> None:
+    config = projection_config(tmp_path, display_name=MARKUP, attention_role="person")
+    ids = seeded(config)
+    say(config, ids["room"], "person", "Yes, ship it.", reply_to=ids["needs_person"])
+    body = text(get(config, "/needs"))
+    assert "<b>Team</b>" not in body, "a display name reached the page as markup"
+    assert f"asks for {ESCAPED}" in body and f"{ESCAPED} replied" in body
+
+
+def test_a_display_name_with_markup_is_escaped_in_the_needs_pager(tmp_path) -> None:
+    config = projection_config(tmp_path, display_name=MARKUP, attention_role="person")
+    room = seeded(config)["room"]
+    for n in range(dashboard.MAX_NEEDS):   # one page more than fits: the pager shows
+        say(config, room, "orchestrator", f"ask {n}", attention=["person"])
+    body = text(get(config, "/needs"))
+    assert f"Older messages for {ESCAPED}" in body
+    assert "<b>Team</b>" not in body
+
+
+def test_projected_pages_say_needs_the_person_in_the_title_and_the_index_links(tmp_path) -> None:
+    config = projection_config(tmp_path, display_name=MARKUP, attention_role="person")
+    conn = connect(config.db_path)
+    try:
+        conversations.create(conn, config, actor="orchestrator", title="Topical",
+                             participants=["orchestrator", "person"], topic="alpha")
+    finally:
+        conn.close()
+    needs = text(get(config, "/needs"))
+    assert f"<title>Needs {ESCAPED} · baton</title>" in needs
+    index = text(get(config, "/"))
+    assert f'<a href="/needs">Needs {ESCAPED}</a>' in index
+    assert f"Needs {ESCAPED} here</a>" in text(get(config, "/t/alpha"))
+    for page in (needs, index, text(get(config, "/t/alpha"))):
+        assert "Needs you" not in page and "<b>Team</b>" not in page
+    plain = projection_config(tmp_path)
+    assert "<title>Needs you · baton</title>" in text(get(plain, "/needs"))
+    assert '<a href="/needs">Needs you</a>' in text(get(plain, "/"))
+
+
+def test_the_seat_escapes_a_display_name_with_markup(tmp_path) -> None:
+    host = make_seat_host(tmp_path)
+    host.reload(host.path.read_text().replace('display_name = "Alex Rivera"', f'display_name = "{MARKUP}"'))
+    room = conversation(host, ("orchestrator", "operator"), title="Ours")
+    agent_says(host, room, "Alex, a question", attention=["operator"], needs_decision=True)
+    _, cookies = log_in(host.config, host.seat_token)
+    for target in ("/seat/", "/seat/needs", f"/seat/c/{room}"):
+        body = seat_get(host.config, target, cookies=cookies).body.decode()
+        assert "<b>Team</b>" not in body, f"{target} shows a display name as markup"
