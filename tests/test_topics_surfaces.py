@@ -27,6 +27,7 @@ from test_integration import payload
 
 from baton import config as config_module
 from baton import conversations
+from baton import remote as remote_module
 from baton.auth import new_token
 from baton.store import connect
 
@@ -94,6 +95,24 @@ def opened(host: SeatHost, capsys, title: str, *extra: str) -> str:
 
 def topics(listed: list[dict[str, Any]]) -> list[tuple[str, Any]]:
     return sorted((item["title"], item["topic"]) for item in listed)
+
+
+def test_remote_cli_list_accepts_paged_and_legacy_host_responses(topic_host, capsys, monkeypatch) -> None:
+    expected = [{"conversation_id": "conversation-1", "title": "the project", "topic": "project"}]
+    response: list[Any] = [expected]
+    calls = []
+
+    def call(host: str, bearer: str, tool: str, arguments: dict[str, Any]) -> Any:
+        calls.append((host, tool, arguments))
+        return response[0]
+
+    monkeypatch.setattr(remote_module, "call", call)
+    for value in (expected, {"conversations": expected, "next_cursor": None}):
+        response[0] = value
+        code, listed = remote(topic_host, capsys, monkeypatch, "conversation", "list")
+        assert code == 0 and listed == expected
+    assert [tool for _, tool, _ in calls] == ["list_conversations", "list_conversations"]
+    assert all(arguments == {} for _, _, arguments in calls)
 
 
 # MCP ------------------------------------------------------------------------------------------------------
