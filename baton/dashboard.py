@@ -406,7 +406,7 @@ def _signal(viewer: str, conversation: dict[str, Any], item: dict[str, Any], rep
         labels.append("you replied")
     why = " · ".join(labels)
     return (f'<li><div class="meta"><a href="{_e(message_path(conversation["conversation_id"], seq))}">'
-            f'{_e(conversation["title"])}</a> · <span class="role">{_e(item["from_role"])}</span> · '
+            f'{_e(conversation["title"])}</a> · <span class="role">{_e(messages.author_label(item))}</span> · '
             f'{_time(item["at"])} · #{seq} · {why}</div><p class="text">{_e(item["text"])}</p></li>')
 
 
@@ -505,7 +505,7 @@ def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | 
     kind = item.get("author_kind")
     badge = f'<span class="badge {kind}">{kind}</span>' if kind in ("human", "agent") else ""
     return (f'<li class="message" id="m-{item["seq"]}"><div class="meta"><span class="role">'
-            f'{_e(item["from_role"])}</span>{badge} · {_time(item["at"])} · #{item["seq"]}</div>'
+            f'{_e(messages.author_label(item))}</span>{badge} · {_time(item["at"])} · #{item["seq"]}</div>'
             f'{_reply_marker(item.get("reply_to"), on_page, conversation_id, parents or {})}'
             f'<p class="text">{_e(item["text"])}</p>{relayed}{replies}</li>')
 
@@ -530,7 +530,7 @@ def _reply_marker(reply_to: dict[str, Any] | None, on_page: frozenset[int] | set
     quote = ""
     if parent is not None:
         words = parent["text"] if len(parent["text"]) <= QUOTE else parent["text"][:QUOTE] + "…"
-        quote = f' · {_e(parent["from_role"] or "the host")}: “{_e(words)}”'
+        quote = f' · {_e(messages.author_label(parent))}: “{_e(words)}”'
     return f'<p class="reply-to">in reply to {link}{quote}</p>'
 
 

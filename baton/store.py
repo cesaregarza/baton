@@ -19,9 +19,9 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -45,6 +45,9 @@ _MESSAGES = """CREATE TABLE IF NOT EXISTS messages (
         conversation_seq INTEGER,
         sender TEXT,
         author_kind TEXT,
+        alias_id TEXT REFERENCES aliases(id),
+        alias TEXT,
+        alias_code TEXT,
         recipient TEXT NOT NULL,
         seq INTEGER NOT NULL,
         text TEXT NOT NULL,
@@ -86,6 +89,7 @@ _ADDED_COLUMNS = {
     # A generation's watermark, when it was switched to and from, and whether its owner dropped it.
     11: {"generations": ("watermark_epoch TEXT", "watermark_seq INTEGER", "activated_at TEXT", "deactivated_at TEXT",
                          "dropped_at TEXT", "last_write_at TEXT")},
+    13: {"messages": ("alias_id TEXT REFERENCES aliases(id)", "alias TEXT", "alias_code TEXT")},
 }
 _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
@@ -112,6 +116,7 @@ _ADDED_TABLES = {
     # Vectors a producer supplies for a generation's artifacts and messages, and the items it skipped.
     11: ("vectors", "vector_skips"),
     12: ("aliases", "alias_bindings", "alias_claims"),
+    13: ("alias_posts",),
 }
 _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys()))
 
@@ -137,6 +142,12 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS alias_claims (
         credential TEXT NOT NULL,
         name TEXT NOT NULL,
+        at REAL NOT NULL
+    )""",
+    # Admitted guest post attempts, bounded by hourly alias/credential limits; never proof values.
+    """CREATE TABLE IF NOT EXISTS alias_posts (
+        alias_id TEXT NOT NULL REFERENCES aliases(id),
+        credential TEXT NOT NULL,
         at REAL NOT NULL
     )""",
     _MESSAGE_REQUESTS,

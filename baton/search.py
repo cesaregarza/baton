@@ -186,19 +186,22 @@ def _message_hits(conn: sqlite3.Connection, config: Config, role: str, terms: li
         # reduced to one hit per message.
         rows = conn.execute(
             "WITH matched AS MATERIALIZED (SELECT m.id AS message_id, m.conversation_id, m.conversation_seq, m.seq,"
-            " m.sender, m.at, snippet(messages_fts, 0, '[', ']', '…', 12) AS snippet, bm25(messages_fts) AS score"
+            " m.sender, m.alias_id, m.alias, m.alias_code, m.at,"
+            " snippet(messages_fts, 0, '[', ']', '…', 12) AS snippet, bm25(messages_fts) AS score"
             " FROM messages_fts JOIN messages m ON m.recipient = messages_fts.recipient AND m.seq = messages_fts.seq"
             f" WHERE messages_fts MATCH :match AND {condition}{filters})"
-            " SELECT message_id, conversation_id, conversation_seq, seq, sender, at, snippet, MIN(score) AS best"
+            " SELECT message_id, conversation_id, conversation_seq, seq, sender, alias_id, alias, alias_code, at,"
+            " snippet, MIN(score) AS best"
             " FROM matched GROUP BY message_id ORDER BY best, at DESC LIMIT :limit",
             {**values, "limit": limit}).fetchall()
     else:
         likes = _likes(terms, "m.text", values)
         rows = conn.execute(
-            "SELECT m.id AS message_id, m.conversation_id, m.conversation_seq, m.seq, m.sender, MAX(m.at) AS at,"
+            "SELECT m.id AS message_id, m.conversation_id, m.conversation_seq, m.seq, m.sender,"
+            " m.alias_id, m.alias, m.alias_code, MAX(m.at) AS at,"
             f" m.text AS text, 0 AS best FROM messages m WHERE {likes} AND {condition}{filters}"
             " GROUP BY m.id ORDER BY at DESC LIMIT :limit", {**values, "limit": limit}).fetchall()
-    return [(row["best"], {
+    return [(row["best"], {**messages.attribution(row),
         "message_id": row["message_id"], "conversation_id": row["conversation_id"],
         "seq": row["conversation_seq"] if row["conversation_id"] is not None else row["seq"],
         "from_role": row["sender"], "at": row["at"],

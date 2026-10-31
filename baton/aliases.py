@@ -118,13 +118,32 @@ def claim(conn: sqlite3.Connection, config: Config, principal: AccessToken | Non
         return {**_identity(row), "binding_token": proof, "expires_at": expires_at}
 
 
+def validate_proof(proof: object) -> None:
+    if not isinstance(proof, str) or not proof or len(proof) > 256 or not proof.isascii():
+        raise Forbidden("alias binding is missing, invalid or expired")
+
+
 def resolve_binding(conn: sqlite3.Connection, principal: AccessToken | None, proof: str | None) -> dict:
     """Resolve a portable proof on any authenticated guest credential; PR4 owns posting integration."""
     _credential(principal)
-    if not isinstance(proof, str) or not proof or len(proof) > 256:
-        raise Forbidden("alias binding is missing, invalid or expired")
+    validate_proof(proof)
     row = conn.execute("SELECT a.* FROM alias_bindings b JOIN aliases a ON a.id = b.alias_id"
                        " WHERE b.digest = ? AND b.expires_at > ?", (auth.token_digest(proof), time.time())).fetchone()
     if row is None:
         raise Forbidden("alias binding is missing, invalid or expired")
     return _identity(row)
+
+
+def admit_post(conn: sqlite3.Connection, config: Config, principal: AccessToken, identity: dict) -> None:
+    """Count admitted calls, including retries/refusals, like Guard's existing tool quotas; prune old attempts."""
+    credential = _credential(principal)
+    now = time.time()
+    with transaction(conn):
+        conn.execute("DELETE FROM alias_posts WHERE at <= ?", (now - CLAIM_WINDOW,))
+        counts = conn.execute("SELECT COALESCE(SUM(alias_id = ?), 0), COALESCE(SUM(credential = ?), 0)"
+                              " FROM alias_posts", (identity["alias_id"], credential)).fetchone()
+        caps = (config.aliases.max_posts_per_alias_per_hour, config.aliases.max_posts_per_credential_per_hour)
+        for count, cap, limit in zip(counts, caps, ("posts_per_alias", "posts_per_credential"), strict=True):
+            if count >= cap:
+                raise LimitExceeded("guest posting is over its hourly limit", limit)
+        conn.execute("INSERT INTO alias_posts VALUES (?, ?, ?)", (identity["alias_id"], credential, now))

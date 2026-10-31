@@ -179,7 +179,8 @@ WHOLE_TABLES = {8: {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_req
                 10: {"generations", "batches", "batch_pages", "artifact_versions", "artifact_inputs",
                      "artifact_depends_on", "commit_requests"},  # the local indexing writer's derived data
                 11: {"vectors", "vector_skips"},  # embeddings a producer supplies, per generation
-                12: {"aliases", "alias_bindings", "alias_claims"}}  # guest continuity
+                12: {"aliases", "alias_bindings", "alias_claims"},
+                13: {"alias_posts"}}  # guest continuity
 
 
 @pytest.mark.parametrize("version", FIXTURE_VERSIONS)

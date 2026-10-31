@@ -693,7 +693,7 @@ def _message(item: dict[str, Any], session: _Session, after: str, *, anchor: str
 
 
 def _meta(item: dict[str, Any], session: _Session) -> str:
-    who = "You" if item["from_role"] == session.role else item["from_role"]
+    who = "You" if item["from_role"] == session.role else messages.author_label(item)
     person = ' <span class="person">person</span>' if item.get("author_kind") == "human" else ""
     return (f'<p class="meta"><span class="role">{_e(who)}</span>{person}'
             f'<time datetime="{_e(item.get("at", ""))}">{_e(_when(item.get("at", ""), session.zone))}</time></p>')
