@@ -38,7 +38,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from baton import changes, events, messages
+from baton import board_read, changes, events, messages
 from baton.config import Config, Conversations
 from baton.errors import (
     ConversationFull,
@@ -145,7 +145,8 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str, 
 
 
 def list_for(conn: sqlite3.Connection, role: str, topic: Any = None, *, limit: int = MAX_LISTED,
-             before: tuple[str, str] | None = None, changed_since: str | None = None) -> list[dict[str, Any]]:
+             before: tuple[str, str] | None = None, changed_since: str | None = None,
+             _lookahead: bool = False) -> list[dict[str, Any]]:
     """The conversations `role` takes part in, newest first, with their participants.
 
     `topic` narrows them to that topic and anything under it. It never widens what the role may see: a
@@ -159,17 +160,23 @@ def list_for(conn: sqlite3.Connection, role: str, topic: Any = None, *, limit: i
                                                             (utc_iso(changed_since, "changed_since"),))
     rows = conn.execute("SELECT c.* FROM conversations c JOIN participants p ON p.conversation_id = c.id"
                         f" WHERE p.role = ?{where}{after}{since} ORDER BY c.created_at DESC, c.id DESC LIMIT ?",
-                        (role, *values, *cursor, *moment, _limit(limit))).fetchall()
+                        (role, *values, *cursor, *moment,
+                         _limit(limit + int(_lookahead), allow_lookahead=_lookahead))).fetchall()
     return [_summary(conn, row) for row in rows]
 
 
 def list_all(conn: sqlite3.Connection, topic: Any = None, *, limit: int = MAX_LISTED,
-             before: tuple[str, str] | None = None) -> list[dict[str, Any]]:
+             before: tuple[str, str] | None = None, changed_since: str | None = None,
+             _lookahead: bool = False) -> list[dict[str, Any]]:
     """Every conversation, newest first, paged like `list_for`: only for a viewer the config lets see them all."""
     where, values = _under(topic)
     after, cursor = _before(before, "")
-    rows = conn.execute(f"SELECT * FROM conversations WHERE 1 = 1{where}{after}"
-                        " ORDER BY created_at DESC, id DESC LIMIT ?", (*values, *cursor, _limit(limit))).fetchall()
+    since, moment = ("", ()) if changed_since is None else (" AND COALESCE(last_activity_at, created_at) > ?",
+                                                            (utc_iso(changed_since, "changed_since"),))
+    rows = conn.execute(f"SELECT * FROM conversations WHERE 1 = 1{where}{after}{since}"
+                        " ORDER BY created_at DESC, id DESC LIMIT ?",
+                        (*values, *cursor, *moment,
+                         _limit(limit + int(_lookahead), allow_lookahead=_lookahead))).fetchall()
     return [_summary(conn, row) for row in rows]
 
 
@@ -178,14 +185,26 @@ def page_cursor(summary: dict[str, Any]) -> tuple[str, str]:
     return summary["created_at"], summary["conversation_id"]
 
 
+def list_readable(conn: sqlite3.Connection, config: Config, role: str, topic: Any = None, *,
+                  limit: int = MAX_LISTED, before: tuple[str, str] | None = None,
+                  changed_since: str | None = None, _lookahead: bool = False) -> list[dict[str, Any]]:
+    """List the conversations this role may read under the shared board predicate."""
+    if board_read.sees_all(config, role):
+        return list_all(conn, topic, limit=limit, before=before, changed_since=changed_since,
+                        _lookahead=_lookahead)
+    return list_for(conn, role, topic, limit=limit, before=before, changed_since=changed_since,
+                    _lookahead=_lookahead)
+
+
 def _before(before: tuple[str, str] | None, alias: str) -> tuple[str, tuple[str, ...]]:
     if before is None:
         return "", ()
     return f" AND ({alias}created_at, {alias}id) < (?, ?)", (str(before[0]), str(before[1]))
 
 
-def _limit(limit: int) -> int:
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_LISTED:
+def _limit(limit: int, *, allow_lookahead: bool = False) -> int:
+    maximum = MAX_LISTED + int(allow_lookahead)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= maximum:
         raise InvalidRequest(f"limit must be 1-{MAX_LISTED}")
     return limit
 
@@ -281,7 +300,7 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
         if outside:
             raise NotAParticipant(f"attention names {outside[0]}, which is not in {conversation_id}; naming a "
                                   "role never adds it to a conversation")
-        _check_reply_to(conn, conversation_id, sender, reply_to)
+        _check_reply_to(conn, config, conversation_id, sender, reply_to)
         if job_id is not None:
             from baton import jobs  # lazily: jobs imports messages, which this module imports
 
@@ -307,66 +326,121 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
 
 
 def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq: int = 0,
-            limit: int = 50, before_seq: int | None = None) -> dict[str, Any]:
-    """The conversation as `role` saw it, oldest first, after `after_seq`: what it received and what it sent.
+            limit: int = 50, before_seq: int | None = None, config: Config | None = None) -> dict[str, Any]:
+    """A readable conversation page, oldest first, with retained gaps reported explicitly.
 
-    That is exactly the messages sent while it was a participant, so a role
-    added later sees nothing from before its join. Only a current participant
-    may read it. `seq` here is the conversation's order, the same for every
-    participant. Separate from delivery: it marks nothing read and moves no
-    cursor, so `read_messages` and `wait` still hand over each unread message
-    once. A message is gone from history once retention deletes the reader's
-    copy.
-
-    With `before_seq`, the page is the messages just before it instead, still oldest first, and `prev_seq`
-    (the page's first seq) is where to read further back from.
+    Non-view-all roles see retained copies while they are participants. A role with
+    ``can_view_all_conversations`` sees retained history from before it joined. Reading
+    marks nothing read and moves no cursor. ``before_seq`` reads backwards, oldest first.
     """
     if not 1 <= limit <= messages.MAX_PAGE_MESSAGES or after_seq < 0 or (before_seq is not None and before_seq < 1):
         raise InvalidRequest(f"limit must be 1-{messages.MAX_PAGE_MESSAGES}, after_seq at least 0 and before_seq "
                              "at least 1")
     with transaction(conn):
-        _load(conn, conversation_id)
-        if role not in _participants(conn, conversation_id):
+        conversation = _load(conn, conversation_id)
+        participant = conn.execute("SELECT added_at FROM participants WHERE conversation_id = ? AND role = ?",
+                                    (conversation_id, role)).fetchone()
+        view_all = config is not None and board_read.sees_all(config, role)
+        if config is None:
+            allowed = participant is not None
+            condition = ("(m.recipient = :reader OR m.sender = :reader) AND EXISTS "
+                         "(SELECT 1 FROM participants p WHERE p.conversation_id = m.conversation_id "
+                         "AND p.role = :reader)")
+            values = {"reader": role}
+        else:
+            allowed = view_all or participant is not None
+            condition, values = board_read.message_condition(config, role)
+        if not allowed:
             raise NotAParticipant(f"{role} is not in {conversation_id}")
-        # The reader's copy of each message to it, and one copy of each it sent, which it holds none of.
-        # Reading backwards takes the newest ones before `before_seq`, so a page cut by size keeps those.
         backwards = before_seq is not None
-        rows = conn.execute("SELECT * FROM messages WHERE conversation_id = ? AND conversation_seq > ?"
-                            " AND conversation_seq < ? AND (recipient = ? OR sender = ?) GROUP BY conversation_seq"
-                            f" ORDER BY conversation_seq {'DESC' if backwards else ''} LIMIT ?",
-                            (conversation_id, after_seq, before_seq if backwards else 2 ** 62, role, role, limit)
-                            ).fetchall()
-        page = messages.as_page_for(conn, role, rows, _history_entry)
-    if backwards:
-        page.reverse()
-    return {"messages": page, "next_seq": page[-1]["seq"] if page else after_seq,
-            "prev_seq": page[0]["seq"] if page else (before_seq if backwards else after_seq)}
+        upper_seq = min(conversation["last_seq"], before_seq - 1) if backwards else conversation["last_seq"]
+        lower_seq = after_seq + 1
+        access_start = _access_start_seq(conn, conversation_id, role, participant, conversation, view_all)
+        known_lower = max(lower_seq, access_start) if access_start is not None else None
+        rows = conn.execute(f"SELECT m.* FROM messages m WHERE m.conversation_id = :conversation_id "
+                            "AND m.conversation_seq > :after_seq AND m.conversation_seq < :before_seq "
+                            f"AND {condition} GROUP BY m.conversation_seq "
+                            f"ORDER BY m.conversation_seq {'DESC' if backwards else ''} LIMIT :limit",
+                            {**values, "conversation_id": conversation_id, "after_seq": after_seq,
+                             "before_seq": before_seq if backwards else 2 ** 62, "limit": limit}).fetchall()
+        page = messages.as_page_for(conn, role, rows, _history_entry, config=config)
+        if backwards:
+            page.reverse()
+        seqs = [item["seq"] for item in page]
+        if seqs:
+            older = (known_lower is not None and _has_readable_seq(
+                conn, condition, values, conversation_id, known_lower, seqs[0] - 1))
+            newer = _has_readable_seq(conn, condition, values, conversation_id, seqs[-1] + 1, upper_seq)
+            gaps = _retention_gaps(page, known_lower if known_lower is not None and not older else None,
+                                   upper_seq if not newer else None, access_start,
+                                   participant["added_at"] if participant is not None else None)
+        elif known_lower is not None and upper_seq >= known_lower:
+            gaps = [{"from_seq": known_lower, "to_seq": upper_seq}]
+        else:
+            gaps = []
+    next_seq = page[-1]["seq"] if page else (max(after_seq, upper_seq) if not backwards else after_seq)
+    return {"messages": page, "next_seq": next_seq,
+            "prev_seq": page[0]["seq"] if page else (before_seq if backwards else after_seq),
+            "retention_gaps": gaps}
 
 
-def full_history(conn: sqlite3.Connection, conversation_id: str, after_seq: int = 0,
-                 limit: int = 50) -> dict[str, Any]:
-    """Every message in the conversation, oldest first, after `after_seq`, as `history` shapes them.
+def _access_start_seq(conn: sqlite3.Connection, conversation_id: str, role: str,
+                      participant: sqlite3.Row | None, conversation: sqlite3.Row, view_all: bool) -> int | None:
+    """Earliest sequence whose visibility is independently established, or None if unknown.
 
-    Only for a viewer the config lets see every conversation. Like `history`
-    it marks nothing read and moves no cursor. A message is gone once
-    retention has deleted every copy of it; a reply to such a message
-    gives its parent's `seq` as None, as `history` does for a parent its
-    reader can't see.
+    A client cursor is not proof that a role could read earlier messages. For late joiners, the retained
+    participant-added notice is the only sequence-level evidence available without a schema change.
     """
-    if not 1 <= limit <= messages.MAX_PAGE_MESSAGES or after_seq < 0:
-        raise InvalidRequest(f"limit must be 1-{messages.MAX_PAGE_MESSAGES} and after_seq at least 0")
-    with transaction(conn):
-        _load(conn, conversation_id)
-        rows = conn.execute("SELECT * FROM messages WHERE conversation_id = ? AND conversation_seq > ?"
-                            " GROUP BY conversation_seq ORDER BY conversation_seq LIMIT ?",
-                            (conversation_id, after_seq, limit)).fetchall()
-        parents = {row["reply_to"] for row in rows if row["reply_to"]}
-        kept = {found["id"]: found["conversation_seq"] for found in conn.execute(
-            f"SELECT id, conversation_seq FROM messages WHERE conversation_id = ? AND id IN"
-            f" ({', '.join('?' * len(parents))})", (conversation_id, *parents))} if parents else {}
-    references = {parent: {"message_id": parent, "seq": kept.get(parent)} for parent in parents}
-    page = messages.as_page(rows, lambda row: _history_entry(row, references.get(row["reply_to"])))
-    return {"messages": page, "next_seq": page[-1]["seq"] if page else after_seq}
+    if view_all or (participant is not None and participant["added_at"] == conversation["created_at"]):
+        return 1
+    if participant is None:
+        return None
+    rows = conn.execute("SELECT conversation_seq, notice FROM messages WHERE conversation_id = ? "
+                        "AND recipient = ? AND notice IS NOT NULL AND at >= ? ORDER BY conversation_seq",
+                        (conversation_id, role, participant["added_at"]))
+    for row in rows:
+        notice = json.loads(row["notice"])
+        if notice.get("event") == "participant_added" and notice.get("participant") == role:
+            return row["conversation_seq"]
+    return None
+
+
+def _has_readable_seq(conn: sqlite3.Connection, condition: str, values: dict[str, Any],
+                      conversation_id: str, start: int, end: int) -> bool:
+    if end < start:
+        return False
+    return conn.execute(f"SELECT 1 FROM messages m WHERE m.conversation_id = :conversation_id "
+                        "AND m.conversation_seq BETWEEN :start_seq AND :end_seq "
+                        f"AND {condition} LIMIT 1", {**values, "conversation_id": conversation_id,
+                                                       "start_seq": start, "end_seq": end}).fetchone() is not None
+
+
+def _retention_gaps(page: list[dict[str, Any]], lower_seq: int | None, upper_seq: int | None,
+                    access_start: int | None, joined_at: str | None) -> list[dict[str, int]]:
+    """Report only missing ranges after access is independently established."""
+    if not page:
+        return []
+    gaps = []
+    first_seq = page[0]["seq"]
+    if lower_seq is not None and first_seq > lower_seq:
+        gaps.append({"from_seq": lower_seq, "to_seq": first_seq - 1})
+    for previous, current in zip(page, page[1:], strict=False):
+        start = previous["seq"] + 1
+        if access_start is not None:
+            start = max(start, access_start)
+        elif joined_at is None or previous["at"] < joined_at:
+            continue
+        if current["seq"] > start:
+            gaps.append({"from_seq": start, "to_seq": current["seq"] - 1})
+    last = page[-1]
+    start = last["seq"] + 1
+    if access_start is not None:
+        start = max(start, access_start)
+    elif joined_at is None or last["at"] < joined_at:
+        return gaps
+    if upper_seq is not None and upper_seq >= start:
+        gaps.append({"from_seq": start, "to_seq": upper_seq})
+    return gaps
 
 
 def _fan_out(conn: sqlite3.Connection, conversation_id: str, recipients: list[str], *, sender: str | None,
@@ -446,7 +520,8 @@ def _check_attention(config: Config, attention: Any) -> list[str] | None:
     return roles
 
 
-def _check_reply_to(conn: sqlite3.Connection, conversation_id: str, sender: str, reply_to: Any) -> None:
+def _check_reply_to(conn: sqlite3.Connection, config: Config, conversation_id: str, sender: str,
+                    reply_to: Any) -> None:
     """A reply answers a message of this conversation that the sender can see, and nothing else.
 
     Refusing a parent the sender cannot see keeps a reply from pointing at a message that was never
@@ -454,9 +529,11 @@ def _check_reply_to(conn: sqlite3.Connection, conversation_id: str, sender: str,
     """
     if reply_to is None:
         return
+    condition, values = board_read.message_condition(config, sender)
     seen = isinstance(reply_to, str) and conn.execute(
-        "SELECT 1 FROM messages WHERE conversation_id = ? AND id = ? AND (recipient = ? OR sender = ?) LIMIT 1",
-        (conversation_id, reply_to, sender, sender)).fetchone() is not None
+        f"SELECT 1 FROM messages m WHERE m.conversation_id = :conversation_id AND m.id = :reply_to "
+        f"AND {condition} LIMIT 1", {**values, "conversation_id": conversation_id, "reply_to": reply_to}
+    ).fetchone() is not None
     if not seen:
         raise InvalidRequest(f"reply_to must be the message_id of a message in {conversation_id} that you can "
                              "see; this host has no such message for you")

@@ -22,7 +22,7 @@ import sqlite3
 import struct
 from typing import Any
 
-from baton import derived, messages
+from baton import board_read, derived, messages
 from baton.config import Config
 from baton.conversations import utc_iso
 from baton.errors import InvalidRequest, UnknownMessage, UnsupportedKind
@@ -44,16 +44,12 @@ def keyword_mode(conn: sqlite3.Connection) -> str:
 
 def readable(config: Config, role: str) -> tuple[str, dict[str, Any]]:
     """The SQL condition, on a `messages m` row, that `role` may read that copy; and its parameters."""
+    condition, values = board_read.message_condition(config, role)
     if role == "guest":
-        member = ("((m.recipient = :reader OR m.sender = :reader) AND EXISTS (SELECT 1 FROM participants p"
-                  " WHERE p.conversation_id = m.conversation_id AND p.role = :reader))")
-        conversations = "1" if config.roles[role].can_view_all_conversations else member
-        return f"(m.conversation_id IS NOT NULL AND {conversations})", {"reader": role}
-    view_all = config.roles[role].can_view_all_conversations
-    member = ("(m.recipient = :reader OR m.sender = :reader) AND EXISTS (SELECT 1 FROM participants p"
-              " WHERE p.conversation_id = m.conversation_id AND p.role = :reader)")
-    return (f"((m.conversation_id IS NULL AND (m.recipient = :reader OR m.sender = :reader))"
-            f" OR (m.conversation_id IS NOT NULL AND {'1' if view_all else member}))", {"reader": role})
+        # Guests may search retained board copies, but never direct messages,
+        # including copies left by an older configuration.
+        return f"(m.conversation_id IS NOT NULL AND ({condition}))", values
+    return condition, values
 
 
 def get_message(conn: sqlite3.Connection, config: Config, role: str, message_id: str) -> dict[str, Any]:
@@ -64,7 +60,7 @@ def get_message(conn: sqlite3.Connection, config: Config, role: str, message_id:
                        {**values, "message_id": str(message_id)}).fetchone()
     if row is None:
         raise UnknownMessage(f"there is no message {message_id} that you can read")
-    [shown] = messages.as_page_for(conn, role, [row])  # resolves what it replies to, as this reader sees it
+    [shown] = messages.as_page_for(conn, role, [row], config=config)
     if row["conversation_id"] is not None:
         shown["seq"] = row["conversation_seq"]  # conversation order, as read_history numbers it
     return shown

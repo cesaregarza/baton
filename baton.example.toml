@@ -30,7 +30,7 @@ description = "Picks up jobs and reports back"
 # Optional, with [conversations] enabled: what a role may do in group conversations (both default to false).
 # can_create_conversations = true
 # can_manage_participants = true
-# can_view_all_conversations = true   # lets the dashboard, viewing as this role, show every conversation
+# can_view_all_conversations = true   # grants retained board-wide reads; also lets the dashboard show every conversation
 
 # Optional: remove this role's permission to create or move jobs. Defaults to true for existing roles.
 # job_authority = false

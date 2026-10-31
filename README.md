@@ -171,9 +171,13 @@ usual with `read_messages` or `wait`. Each message carries its `conversation_id`
 
 **History is separate from delivery.** `read_history(conversation_id)` returns the conversation as you saw
 it, the messages you received and the ones you sent, numbered in conversation order. It marks nothing read, so
-`read_messages` and `wait` still hand over each unread message exactly once. Only current participants can
-read a conversation's history. A role added later sees it from its join on, and a removed role can't read it
-at all, though the messages it already received stay in its mailbox.
+`read_messages` and `wait` still hand over each unread message exactly once. Non-view-all roles can read
+history while they are participants, and only for retained copies they hold. A role with
+`can_view_all_conversations = true` can read the retained conversation from before it joined, even when it
+is not a participant. Direct messages remain private to sender and recipient. `retention_gaps` names missing
+sequence ranges as `{"from_seq": first_missing, "to_seq": last_missing}` only within a range the reader could
+have accessed; a late joiner's inaccessible pre-join history is not reported as retention loss. An ordinary
+page limit is not reported as lost history.
 
 **Threads.** A conversation message can answer another: pass `reply_to`, the `message_id` of a message in
 the same conversation that you can see. A reply is an ordinary message in every other way. Readers get
@@ -360,9 +364,10 @@ listen_port = 8766        # http://127.0.0.1:8766/
 # proxy_host = "dash.example.com:8443"   # optional; only behind an authenticating proxy, see below
 ```
 
-The view shows the conversations `viewer_role` is in, from when it joined, the same messages
-`read_history` returns. Each message shows its `from_role`, with relayed words and participant notices
-apart from the sender's own text. To show every conversation, set `can_view_all_conversations = true` on
+The view uses the same board-read rule as `read_history`; with `can_view_all_conversations`, it shows every
+retained conversation, including history from before the viewer joined. Each message shows its `from_role`,
+with relayed words and participant notices apart from the sender's own text. To show every conversation, set
+`can_view_all_conversations = true` on
 that role. Viewing marks nothing read and moves no cursor. There's no compose box and no way to write.
 
 The view has no login. Anyone, and any process, on the machine that can reach the port can read it, so on a
@@ -419,17 +424,21 @@ the role's other permissions.
 | `create_job(title, body?, request_id?)` | Open a job in the initial state |
 | `move_job(job_id, to_state, note?, request_id?, expected_revision?)` | Move a job along the state graph. A retry with the same `request_id` replays the original outcome. `expected_revision` refuses the move if the job's state has changed since you read it |
 | `get_job`, `list_jobs`, `read_job_events` | Read jobs and their history |
-| `create_conversation(title, participants, topic?, request_id?)`, `list_conversations(topic?, changed_since?)` | Open a conversation you take part in, or list yours, optionally only those on a topic or active since a time. Each entry carries its `revision`, `last_seq` and `last_activity_at`. Present when conversations are enabled |
-| `read_history(conversation_id, after_seq?, before_seq?, limit?)` | A conversation as you saw it, your own messages included. `before_seq` pages backwards. Marks nothing read |
+| `create_conversation(title, participants, topic?, request_id?)`, `list_conversations(topic?, changed_since?, limit?, cursor?)` | Open a conversation you take part in, or list those readable under the shared board rule. The result has a `conversations` array and a `next_cursor` field. When non-null, the cursor carries `created_at` and `conversation_id`; pass it back as `cursor` to continue. Each entry carries its `revision`, `last_seq` and `last_activity_at`. Present when conversations are enabled |
+| `read_history(conversation_id, after_seq?, before_seq?, limit?)` | A conversation readable under the shared board rule. `before_seq` pages backwards; `retention_gaps` names missing sequence ranges. Marks nothing read |
 | `set_topic(conversation_id, topic?)` | Set, rename or clear a conversation's topic. Needs `can_manage_participants` and membership |
 | `add_participant(conversation_id, participant)`, `remove_participant(...)` | Change who is in a conversation. Needs `can_manage_participants` |
 | `search(query, conversation_id?, topic?, kinds?, limit?, before?, producer?, query_vector?, model?)` | Messages you can read that contain every word of `query` (at most 8 words and 200 characters; a longer query is refused, not shortened), best first, one hit per message. `kinds` adds derived artifacts (`summary`, `decisions`, `open_questions`, `summary_recent`), which `producer` can narrow. With embeddings on, `query_vector` and `model` re-order the keyword matches you can read by similarity; they never add one. `before` is an ISO 8601 time with its UTC offset. Uses SQLite FTS5 when available, otherwise a slower scan; `keyword_index` says which. Present when `[search] enabled = true` |
 | `get_message(message_id)` | One message you can read. Present when search is enabled |
 | `read_artifacts(conversation_id, producer?)` | A conversation's derived summaries, decisions and open questions that you can read, each labelled derived, not authoritative, and `valid` or `behind`. Present when search is enabled |
 
-Search and `get_message` read only what `read_history` would show you, and filter before ranking, so a match
-you can't read never appears or displaces one you can. An artifact is shown to you only if you could read every
-message it was made from, and only its latest version while valid. None of these marks anything read.
+Search, `get_message`, `read_history`, listing and reply references use the same board-read rule. A role
+with `can_view_all_conversations` can read every retained conversation; other roles remain limited to their
+membership and retained copies. Direct messages stay sender/recipient-only. Search filters before ranking,
+so a match you can't read never appears or displaces one you can. An artifact is shown to you only if you
+could read every message it was made from, and only its latest version while valid. None of these marks anything read.
+This intentionally widens `read_history` and listing for existing view-all roles to match the conversation
+messages they could already reach through search; it does not enable the flag on any role.
 `[search] rolling_window_messages` (off by default) lets an indexer also write `summary_recent`, a summary of
 only the latest messages, which says which messages it starts from.
 

@@ -18,7 +18,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from baton import changes, derived, events
+from baton import board_read, changes, derived, events
 from baton.errors import InvalidRequest, MailboxFull, RequestTooOld
 from baton.store import transaction
 
@@ -160,13 +160,13 @@ def addressed_to(conn: sqlite3.Connection, recipient: str, seq: int) -> bool:
     return bool(row["needs_decision"]) or recipient in json.loads(row["attention"] or "[]")
 
 
-def reply_references(conn: sqlite3.Connection, reader: str,
-                     rows: list[sqlite3.Row]) -> dict[tuple[str | None, str], dict[str, Any]]:
+def reply_references(conn: sqlite3.Connection, reader: str, rows: list[sqlite3.Row], config: Any = None
+                     ) -> dict[tuple[str | None, str], dict[str, Any]]:
     """What `reader` may be told about each parent the rows answer, keyed by (conversation, parent id).
 
-    A reader may see a message it received or sent and retention has not taken. Where it may not, the
-    reference keeps the id the sender put on the reply but gives `seq` as None, so a reader can say the
-    parent is unavailable without learning its text or its author.
+    A parent is resolved only when it is retained and the shared board predicate allows the reader to see
+    it. Otherwise the reference keeps the id carried by the reply but gives `seq` as None, without revealing
+    its text or author.
 
     A parent counts only within the conversation of the reply that names it, so this answers correctly
     on its own rather than on the strength of the check `conversations.send` makes.
@@ -174,10 +174,15 @@ def reply_references(conn: sqlite3.Connection, reader: str,
     answered = {(row["conversation_id"], row["reply_to"]) for row in rows if row["reply_to"]}
     if not answered:
         return {}
-    places = ", ".join("?" * len(answered))
+    places = ", ".join(f":parent_{index}" for index in range(len(answered)))
+    if config is None:
+        condition, values = "(m.recipient = :reader OR m.sender = :reader)", {"reader": reader}
+    else:
+        condition, values = board_read.message_condition(config, reader)
+    params = {**values, **{f"parent_{index}": parent for index, (_, parent) in enumerate(answered)}}
     visible = {(found["conversation_id"], found["id"]): found["conversation_seq"] for found in conn.execute(
-        f"SELECT id, conversation_id, conversation_seq FROM messages WHERE id IN ({places})"
-        " AND (recipient = ? OR sender = ?)", (*(parent for _, parent in answered), reader, reader))}
+        f"SELECT m.id, m.conversation_id, m.conversation_seq FROM messages m WHERE m.id IN ({places})"
+        f" AND {condition}", params)}
     return {key: {"message_id": key[1], "seq": visible.get(key)} for key in answered}
 
 
@@ -225,7 +230,8 @@ def _zoned_time(value: str) -> bool:
         return False
 
 
-def read(conn: sqlite3.Connection, recipient: str, after_seq: int | None = None, limit: int = 50) -> dict[str, Any]:
+def read(conn: sqlite3.Connection, recipient: str, after_seq: int | None = None, limit: int = 50,
+         config: Any = None) -> dict[str, Any]:
     """The recipient's messages after `after_seq` (default: after the last one delivered), oldest first.
 
     `next_seq` is where the next page starts, so a short page is not the end.
@@ -240,7 +246,7 @@ def read(conn: sqlite3.Connection, recipient: str, after_seq: int | None = None,
         rows = conn.execute("SELECT * FROM messages WHERE recipient = ? AND seq > ? ORDER BY seq LIMIT ?",
                             (recipient, start, limit)).fetchall()
         oldest = conn.execute("SELECT MIN(seq) FROM messages WHERE recipient = ?", (recipient,)).fetchone()[0]
-        page = as_page_for(conn, recipient, rows)
+        page = as_page_for(conn, recipient, rows, config=config)
         if page:
             mark_read(conn, recipient, page[-1]["seq"])
         unread = last_seq - _mailbox(conn, recipient)[1]
@@ -306,9 +312,9 @@ def as_dict(row: sqlite3.Row, reply_to: dict[str, Any] | None = None) -> dict[st
 
 
 def as_page_for(conn: sqlite3.Connection, reader: str, rows: list[sqlite3.Row],
-                shape: Shape = as_dict) -> list[dict[str, Any]]:
+                shape: Shape = as_dict, config: Any = None) -> list[dict[str, Any]]:
     """A page of messages as `reader` sees them, with each reply's parent resolved in one query."""
-    references = reply_references(conn, reader, rows)
+    references = reply_references(conn, reader, rows, config)
     return as_page(rows, lambda row: shape(row, references.get((row["conversation_id"], row["reply_to"]))))
 
 

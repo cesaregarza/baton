@@ -130,7 +130,8 @@ def test_guest_policy_enumerates_every_registered_tool_and_allows_only_the_read_
             assert app_module.GUEST_TOOLS & registered == allowed
         assert allowed <= registered
         assert _call(host, "guest", "whoami", {})["role"] == "guest"
-        assert _call(host, "guest", "list_conversations", {}) == []
+        listed_conversations = _call(host, "guest", "list_conversations", {})
+        assert listed_conversations == {"conversations": [], "next_cursor": None}
         assert _call(host, "guest", "search", {"query": "needle"}).get("error") is None
         assert _call(host, "guest", "read_history", {"conversation_id": "missing"})["error"] == \
             "unknown_conversation"
