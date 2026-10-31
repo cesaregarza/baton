@@ -437,6 +437,21 @@ def test_history_does_not_infer_gap_boundaries_from_pre_rejoin_copies(db, config
     assert history["retention_gaps"] == []
 
 
+def test_empty_late_joiner_history_advances_to_listed_tip_without_inventing_gaps(db, config) -> None:
+    conversation_id = start(db, config)
+    say(db, config, "reviewer", conversation_id, "before the viewer joined")
+    say(db, config, "assistant", conversation_id, "still before the viewer joined")
+    conversations.add(db, config, conversation_id, "outsider", actor="orchestrator")
+    listed = conversations.list_readable(db, config, "outsider")[0]
+    db.execute("DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider'", (conversation_id,))
+
+    history = conversations.history(db, "outsider", conversation_id, config=config)
+    assert listed["last_seq"] == 3
+    assert history["messages"] == []
+    assert history["retention_gaps"] == []
+    assert history["next_seq"] == listed["last_seq"]
+
+
 def test_wait_reply_parent_uses_the_shared_board_predicate(db, config, monkeypatch) -> None:
     from baton.app import Tools
 

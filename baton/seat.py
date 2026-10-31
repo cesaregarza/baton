@@ -542,9 +542,10 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
     shown = {int(item["seq"]) for item in page["messages"]}
     items = "".join(_history_item(conversation_id, item, shown, session) for item in page["messages"])
     # A page can end early on its byte budget, so whether more follow is asked of the store, not the page's length.
-    more = conn.execute("SELECT 1 FROM messages WHERE conversation_id = ? AND conversation_seq > ?"
-                        " AND (recipient = ? OR sender = ?) LIMIT 1",
-                        (conversation_id, page["next_seq"], session.role, session.role)).fetchone()
+    readable_message, values = board_read.message_condition(config, session.role)
+    more = conn.execute(f"SELECT 1 FROM messages m WHERE m.conversation_id = :conversation_id "
+                        f"AND m.conversation_seq > :next_seq AND {readable_message} LIMIT 1",
+                        {**values, "conversation_id": conversation_id, "next_seq": page["next_seq"]}).fetchone()
     newer = (f'<p class="pager"><a href="/seat/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Newer</a></p>'
              if page["messages"] and more else "")
     parent = next((item for item in page["messages"] if item["message_id"] == reply), None) if reply else None

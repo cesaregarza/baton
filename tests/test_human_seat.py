@@ -518,3 +518,33 @@ def test_seat_inherits_board_visibility_for_history_and_listing(tmp_path: Path) 
     detail = get(host.config, f"/seat/c/{conversation_id}?after_seq=0", cookies=cookies)
     assert b"Readable conversations" in home.body and conversation_id.encode() in home.body
     assert b"retained before the seat joined" in detail.body
+
+
+def test_view_all_seat_shows_newer_page_without_a_recipient_copy(tmp_path: Path) -> None:
+    from seat_helpers import agent_says, conversation, get, log_in, make_seat_host
+
+    host = make_seat_host(tmp_path, operator_extra="human = true\ncan_view_all_conversations = true\n")
+    conversation_id = conversation(host, participants=("orchestrator", "reviewer"))
+    for index in range(51):
+        agent_says(host, conversation_id, f"post {index}")
+    _, cookies = log_in(host.config, host.seat_token)
+
+    first = get(host.config, f"/seat/c/{conversation_id}?after_seq=0", cookies=cookies)
+    second = get(host.config, f"/seat/c/{conversation_id}?after_seq=50", cookies=cookies)
+    assert f"/seat/c/{conversation_id}?after_seq=50".encode() in first.body
+    assert b"post 50" in second.body
+
+
+def test_participant_seat_still_shows_newer_page_from_its_retained_copy(tmp_path: Path) -> None:
+    from seat_helpers import agent_says, conversation, get, log_in, make_seat_host
+
+    host = make_seat_host(tmp_path)
+    conversation_id = conversation(host)
+    for index in range(51):
+        agent_says(host, conversation_id, f"post {index}")
+    _, cookies = log_in(host.config, host.seat_token)
+
+    first = get(host.config, f"/seat/c/{conversation_id}?after_seq=0", cookies=cookies)
+    second = get(host.config, f"/seat/c/{conversation_id}?after_seq=50", cookies=cookies)
+    assert f"/seat/c/{conversation_id}?after_seq=50".encode() in first.body
+    assert b"post 50" in second.body

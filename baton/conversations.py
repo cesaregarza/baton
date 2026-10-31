@@ -378,7 +378,7 @@ def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq
             gaps = [{"from_seq": known_lower, "to_seq": upper_seq}]
         else:
             gaps = []
-    next_seq = page[-1]["seq"] if page else (upper_seq if gaps and not backwards else after_seq)
+    next_seq = page[-1]["seq"] if page else (max(after_seq, upper_seq) if not backwards else after_seq)
     return {"messages": page, "next_seq": next_seq,
             "prev_seq": page[0]["seq"] if page else (before_seq if backwards else after_seq),
             "retention_gaps": gaps}
