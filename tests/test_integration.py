@@ -12,8 +12,9 @@ from conftest import Host
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
-TOOLS = {"whoami", "send_message", "read_messages", "wait", "create_job", "move_job", "get_job", "list_jobs",
-         "read_job_events"}
+# Explicit public contract, shared by the base-host and conversation-client integration checks.
+TOOLS = {"whoami", "alias_exists", "claim_alias", "send_message", "read_messages", "wait", "create_job",
+         "move_job", "get_job", "list_jobs", "read_job_events"}
 
 
 def payload(result: Any) -> Any:
