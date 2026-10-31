@@ -20,7 +20,7 @@ from baton import config as config_module
 from baton import messages as messages_module
 from baton.config import Role, StaticToken
 from baton.integrations import openai_mcp_events
-from baton.store import connect
+from baton.store import connect, transaction
 
 PROTOCOL = "2026-07-28"
 
@@ -296,6 +296,20 @@ def test_view_all_guest_reads_conversations_but_never_legacy_direct_messages(tmp
         _finish(server)
 
 
+def seed_legacy_guest_copy(config, message_id: str) -> None:
+    """Model a historical delivery explicitly; current conversation fanout must never create guest copies."""
+    conn = connect(config.db_path)
+    try:
+        with transaction(conn):
+            row = conn.execute("SELECT * FROM messages WHERE id = ? LIMIT 1", (message_id,)).fetchone()
+            assert row is not None
+            messages_module.store_copy(conn, message_id=row["id"], sender=row["sender"], recipient="guest",
+                                       text=row["text"], conversation_id=row["conversation_id"],
+                                       conversation_seq=row["conversation_seq"], author_kind=row["author_kind"])
+    finally:
+        conn.close()
+
+
 def test_legacy_guest_membership_reads_only_conversation_copies_it_holds(tmp_path) -> None:
     host, server = _host(tmp_path)
     try:
@@ -314,6 +328,8 @@ def test_legacy_guest_membership_reads_only_conversation_copies_it_holds(tmp_pat
 
         held = _call(host, "planner", "send_message", {
             "conversation_id": conversation_id, "text": "held guest needle"})
+        assert "guest" not in held["seqs"]
+        seed_legacy_guest_copy(host.config, held["message_id"])
         hits = _call(host, "guest", "search", {"query": "held guest needle"})["hits"]
         assert any(hit["message_id"] == held["message_id"] for hit in hits)
         assert _call(host, "guest", "get_message", {"message_id": held["message_id"]})["text"] == \
@@ -321,6 +337,12 @@ def test_legacy_guest_membership_reads_only_conversation_copies_it_holds(tmp_pat
 
         assert _call(host, "guest", "search", {"query": "prejoin hidden needle"})["hits"] == []
         assert _call(host, "guest", "get_message", {"message_id": pre_join["message_id"]})["error"] == \
+            "unknown_message"
+        current = _call(host, "planner", "send_message", {
+            "conversation_id": conversation_id, "text": "current fanout needle"})
+        assert "guest" not in current["seqs"]
+        assert _call(host, "guest", "search", {"query": "current fanout needle"})["hits"] == []
+        assert _call(host, "guest", "get_message", {"message_id": current["message_id"]})["error"] == \
             "unknown_message"
     finally:
         _finish(server)
