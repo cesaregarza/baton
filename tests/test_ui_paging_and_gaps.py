@@ -134,14 +134,58 @@ def _replies_with_a_gap(conn, config, cid: str) -> None:
     conn.execute("DELETE FROM messages WHERE conversation_id = ? AND conversation_seq = 3", (cid,))
 
 
-def test_the_dashboard_places_a_gap_among_nested_replies_in_order(tmp_path: Path) -> None:
-    config = page_config(tmp_path)
+def _thread_with(config, steps: list[tuple[str, int | None]], missing: set[int]) -> str:
+    """Send `steps` as (words, the step it replies to or None) in order, so step n is seq n; drop the `missing`
+    seqs; and return the dashboard's page for the conversation."""
     conn = connect(config.db_path)
-    cid = made(conn, config, "Replies with a gap", MINE)
-    _replies_with_a_gap(conn, config, cid)
+    cid = made(conn, config, "Threads with gaps", MINE)
+    ids = {}
+    for seq, (words, parent) in enumerate(steps, 1):
+        sent = conversations.send(conn, config, sender="reviewer", conversation_id=cid, text=words,
+                                  reply_to=ids[parent] if parent else None)
+        ids[seq] = sent["message_id"]
+    for seq in missing:
+        conn.execute("DELETE FROM messages WHERE conversation_id = ? AND conversation_seq = ?", (cid, seq))
     conn.close()
-    body = dashboard_get(config, f"/c/{cid}").body.decode()
-    assert "Message #3 is no longer kept" in _gap_between(body, "second note", "fourth note")
+    return dashboard_get(config, f"/c/{cid}").body.decode()
+
+
+def _assert_nothing_older_follows_a_notice(body: str, steps: list[tuple[str, int | None]], missing: set[int]):
+    """The policy: no retained message numbered below a gap is shown after that gap's notice."""
+    notices = [(m.start(), m.group(0)) for m in re.finditer(r"Messages? #\d+(?:–#\d+)? (?:is|are) no longer kept",
+                                                              body)]
+    assert notices, "no gap notice on the page"
+    for at, words in notices:
+        first = int(re.search(r"#(\d+)", words).group(1))
+        for seq, (text, _) in enumerate(steps, 1):
+            if seq not in missing and seq < first:
+                assert body.index(text) < at, f"#{seq} ({text!r}) is shown after the notice for #{first}"
+
+
+def test_a_gap_is_never_shown_above_an_older_top_level_message(tmp_path: Path) -> None:
+    """The reviewer's case: #1 has reply #4, #2 is top level, #3 is gone; the notice can't sit above #2."""
+    steps = [("one root", None), ("two top level", None), ("three gone", None), ("four reply to one", 1)]
+    body = _thread_with(page_config(tmp_path), steps, {3})
+    _assert_nothing_older_follows_a_notice(body, steps, {3})
+    assert body.index("two top level") < body.index("Message #3 is no longer kept")
+
+
+def test_a_gap_between_two_branches_sits_between_them(tmp_path: Path) -> None:
+    steps = [("one root", None), ("two reply to one", 1), ("three gone", None), ("four root", None),
+             ("five reply to four", 4)]
+    body = _thread_with(page_config(tmp_path), steps, {3})
+    _assert_nothing_older_follows_a_notice(body, steps, {3})
+    notice = body.index("Message #3 is no longer kept")
+    assert body.index("two reply to one") < notice < body.index("four root")
+
+
+def test_a_gap_inside_a_reply_branch_follows_the_branch(tmp_path: Path) -> None:
+    steps = [("one root", None), ("two reply to one", 1), ("three gone", 1), ("four reply to one", 1),
+             ("five root", None)]
+    body = _thread_with(page_config(tmp_path), steps, {3})
+    _assert_nothing_older_follows_a_notice(body, steps, {3})
+    notice = body.index("Message #3 is no longer kept")
+    assert body.index("four reply to one") < notice < body.index("five root")
 
 
 def test_the_seat_places_a_gap_among_replies_in_order(tmp_path: Path) -> None:
