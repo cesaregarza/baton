@@ -462,19 +462,19 @@ def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -
             found = read(seq - 1, 1)["messages"]
             if found and found[0]["seq"] == seq:
                 parents[seq] = found[0]
-    items = _thread(page["messages"], conversation_id, parents, page["retention_gaps"])
+    items = _thread(page["messages"], conversation_id, parents)
+    missing = _gap_summary(page["retention_gaps"])
     more = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
             if later else "")
     earlier = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={max(0, after - messages.MAX_PAGE_MESSAGES)}">'
                'Earlier messages</a></p>' if after > 0 else "")
-    return _page(200, title, f'<p><a href="/">All conversations</a></p><h1>{_e(title)}</h1>{earlier}'
+    return _page(200, title, f'<p><a href="/">All conversations</a></p><h1>{_e(title)}</h1>{earlier}{missing}'
                              f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{more}')
 
 
 def _thread(items: list[dict[str, Any]], conversation_id: str = "",
-            parents: dict[int, dict[str, Any]] | None = None, gaps: list[dict[str, int]] | None = None) -> str:
-    """The page's messages with each reply nested under its parent when the parent is on this page, and a notice
-    where messages are no longer kept."""
+            parents: dict[int, dict[str, Any]] | None = None) -> str:
+    """The page's messages with each reply nested under its parent when the parent is on this page."""
     on_page = {item["seq"] for item in items}
     replies: dict[int, list[dict[str, Any]]] = {}
     top = []
@@ -490,19 +490,18 @@ def _thread(items: list[dict[str, Any]], conversation_id: str = "",
         inner = f'<ul class="replies">{"".join(render(reply) for reply in nested)}</ul>' if nested else ""
         return _message(item, inner, on_page, conversation_id, parents or {})
 
-    # Policy: a gap's notice sits among top-level messages, before the first one numbered after the gap or at
-    # the end of the page, so nothing shown after a notice is older than the gap (a reply is numbered after its
-    # parent, so a branch is never split).
-    out, pending = [], sorted(gaps or [], key=lambda gap: gap["from_seq"])
-    for item in top:
-        while pending and pending[0]["to_seq"] < item["seq"]:
-            out.append(_gap_notice(pending.pop(0)))
-        out.append(render(item))
-    return "".join(out + [_gap_notice(gap) for gap in pending])
+    return "".join(render(item) for item in top)
 
 
-def _gap_notice(gap: dict[str, int]) -> str:
-    return f'<li class="notice">{_e(conversations.gap_words(gap))}</li>'
+def _gap_summary(gaps: list[dict[str, int]]) -> str:
+    """Policy: the threaded view groups replies under their parent, so it isn't in seq order; it states the page's
+    missing messages once, above the thread, never among the messages, where a notice's place would imply when."""
+    if not gaps:
+        return ""
+    ranges = ", ".join(f"#{gap['from_seq']}" if gap["from_seq"] == gap["to_seq"]
+                       else f"#{gap['from_seq']}–#{gap['to_seq']}"
+                       for gap in sorted(gaps, key=lambda gap: gap["from_seq"]))
+    return f'<p class="notice">Not kept any more on this page: messages {_e(ranges)}</p>'
 
 
 def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | set[int] = frozenset(),
