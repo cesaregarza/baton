@@ -30,7 +30,7 @@ description = "Picks up jobs and reports back"
 # Optional, with [conversations] enabled: what a role may do in group conversations (both default to false).
 # can_create_conversations = true
 # can_manage_participants = true
-# can_view_all_conversations = true   # lets the dashboard, viewing as this role, show every conversation
+# can_view_all_conversations = true   # grants retained board-wide reads; also lets the dashboard show every conversation
 
 # Optional: wake a role when something is waiting for it. Use one of: a webhook, a command, an integration.
 # [roles.worker.wake]

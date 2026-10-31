@@ -145,7 +145,8 @@ def test_12_two_oauth_clients_and_a_cli_agent_hold_one_conversation(group_host, 
             assert {t.name for t in (await reviewer.list_tools()).tools} == TOOLS | CONVERSATION_TOOLS
             assert payload(await reviewer.call_tool("whoami", {}))["role"] == "reviewer"
             listed = payload(await assistant.call_tool("list_conversations", {}))
-            assert [c["conversation_id"] for c in listed] == [conversation_id]
+            assert [c["conversation_id"] for c in listed["conversations"]] == [conversation_id]
+            assert listed["next_cursor"] is None
 
             assert cli_as(host, capsys, "message", "--conversation", conversation_id, "--text", "1 from cli")[0] == 0
             sent = payload(await reviewer.call_tool("send_message", {"conversation_id": conversation_id,

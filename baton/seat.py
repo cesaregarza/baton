@@ -48,7 +48,7 @@ from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlsplit
 from zoneinfo import ZoneInfo
 
-from baton import auth, conversations, messages
+from baton import auth, board_read, conversations, messages
 from baton.config import Config
 from baton.errors import (
     BatonError,
@@ -447,13 +447,14 @@ def _to_login() -> Response:
 
 def _home(config: Config, conn: sqlite3.Connection, session: _Session) -> Response:
     unread = messages.unread(conn, session.role)
-    listed = conversations.list_for(conn, session.role)
+    listed = conversations.list_readable(conn, config, session.role, limit=conversations.MAX_LISTED)
     items = "".join(f'<li><a href="/seat/c/{_e(c["conversation_id"])}">{_e(c["title"])}</a>'
                     f'{_topic(c.get("topic"))}</li>' for c in listed)
     inbox = f"{unread} unread" if unread else "Nothing unread"
+    heading = "Readable conversations" if board_read.sees_all(config, session.role) else "Your conversations"
     body = (f'{_nav(session)}<h1>{_e(config.roles[session.role].label)}</h1>{_banner(unread)}'
             f'<p><a href="/seat/inbox">Inbox</a> <span class="muted">{inbox}</span></p>'
-            f'<h2>Your conversations</h2><ul>{items or "<li class=muted>You are not in any conversation yet.</li>"}'
+            f'<h2>{heading}</h2><ul>{items or "<li class=muted>You are not in any conversation yet.</li>"}'
             '</ul>')
     return _page(200, "Seat", body)
 
@@ -533,7 +534,7 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
                   reply: str | None, *, status: int = 200, notice: str = "", text: str = "",
                   request_id: str | None = None) -> Response:
     try:
-        page = conversations.history(conn, session.role, conversation_id, after, HISTORY_PAGE)
+        page = conversations.history(conn, session.role, conversation_id, after, HISTORY_PAGE, config=config)
     except BatonError:
         return _not_in()
     title = conn.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,)).fetchone()["title"]
@@ -541,9 +542,10 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
     shown = {int(item["seq"]) for item in page["messages"]}
     items = "".join(_history_item(conversation_id, item, shown, session) for item in page["messages"])
     # A page can end early on its byte budget, so whether more follow is asked of the store, not the page's length.
-    more = conn.execute("SELECT 1 FROM messages WHERE conversation_id = ? AND conversation_seq > ?"
-                        " AND (recipient = ? OR sender = ?) LIMIT 1",
-                        (conversation_id, page["next_seq"], session.role, session.role)).fetchone()
+    readable_message, values = board_read.message_condition(config, session.role)
+    more = conn.execute(f"SELECT 1 FROM messages m WHERE m.conversation_id = :conversation_id "
+                        f"AND m.conversation_seq > :next_seq AND {readable_message} LIMIT 1",
+                        {**values, "conversation_id": conversation_id, "next_seq": page["next_seq"]}).fetchone()
     newer = (f'<p class="pager"><a href="/seat/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Newer</a></p>'
              if page["messages"] and more else "")
     parent = next((item for item in page["messages"] if item["message_id"] == reply), None) if reply else None

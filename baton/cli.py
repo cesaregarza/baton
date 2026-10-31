@@ -97,12 +97,12 @@ def _parser() -> argparse.ArgumentParser:
     read.add_argument("--after-seq", type=int, help="default: only messages not yet delivered")
     read.add_argument("--limit", type=int, default=50)
     read.set_defaults(handler=lambda config, args: _db(config, lambda conn: messages.read(
-        conn, args.role, args.after_seq, args.limit)))
+        conn, args.role, args.after_seq, args.limit, config=config)))
 
     wait = _with_role(commands.add_parser("wait", help="block until messages or job changes reach your role"))
     wait.add_argument("--timeout", type=float, help="seconds; default: wait indefinitely")
     wait.set_defaults(handler=lambda config, args: _db(config, lambda conn: inbox.wait(
-        conn, args.role, timeout_seconds=args.timeout)))
+        conn, args.role, timeout_seconds=args.timeout, config=config)))
 
     _add_job_commands(commands)
     _add_conversation_commands(commands)
@@ -249,13 +249,13 @@ def _message(config: Config, args: argparse.Namespace) -> dict[str, Any]:
 
 def _list_conversations(config: Config, args: argparse.Namespace) -> list[dict[str, Any]]:
     conversations.require_enabled(config)
-    return _db(config, lambda conn: conversations.list_for(conn, args.role, args.topic))
+    return _db(config, lambda conn: conversations.list_readable(conn, config, args.role, args.topic))
 
 
 def _history(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     conversations.require_enabled(config)
     return _db(config, lambda conn: conversations.history(conn, args.role, args.conversation_id, args.after_seq,
-                                                          args.limit))
+                                                          args.limit, config=config))
 
 
 def _new_token(config: Config, args: argparse.Namespace) -> dict[str, Any]:
@@ -322,7 +322,7 @@ def _remote(args: argparse.Namespace) -> Any:
                                                    "participants": args.participants.split(","),
                                                    "topic": args.topic, "request_id": args.request_id})
     if command == "conversation list":
-        return _call(args, "list_conversations", {"topic": args.topic})
+        return _conversation_list_result(_call(args, "list_conversations", {"topic": args.topic}))
     if command == "conversation topic":
         # `--clear` means null, which _call strips, and set_topic requires the argument: send it directly.
         return remote.call(args.host, remote.token(), "set_topic",
@@ -350,6 +350,13 @@ def _remote_wait(args: argparse.Namespace) -> Any:
 def _call(args: argparse.Namespace, tool: str, arguments: dict[str, Any]) -> Any:
     return remote.call(args.host, remote.token(), tool, {key: value for key, value in arguments.items()
                                                          if value is not None})
+
+
+def _conversation_list_result(result: Any) -> Any:
+    """Keep the CLI's bare-list output across hosts with either list response shape."""
+    if isinstance(result, dict) and isinstance(result.get("conversations"), list):
+        return result["conversations"]
+    return result
 
 
 def _revoke_all(config: Config, args: argparse.Namespace) -> dict[str, Any]:
