@@ -112,19 +112,6 @@ def test_the_seat_says_where_messages_are_no_longer_kept(tmp_path: Path) -> None
     assert "no longer kept" not in _gap_between(body, "fourth note", "fifth note")
 
 
-def test_the_dashboard_says_where_messages_are_no_longer_kept(tmp_path: Path) -> None:
-    config = page_config(tmp_path)
-    conn = connect(config.db_path)
-    cid = made(conn, config, "With a gap", MINE)
-    for word in ("first note", "second note", "third note", "fourth note"):
-        conversations.send(conn, config, sender="orchestrator", conversation_id=cid, text=word)
-    conn.execute("DELETE FROM messages WHERE conversation_id = ? AND conversation_seq = 3", (cid,))
-    conn.close()
-    body = dashboard_get(config, f"/c/{cid}").body.decode()
-    assert "Message #3 is no longer kept" in _gap_between(body, "second note", "fourth note")
-    assert "no longer kept" not in _gap_between(body, "first note", "second note")
-
-
 def _replies_with_a_gap(conn, config, cid: str) -> None:
     """A message, three replies to it, and the middle reply (seq 3) gone."""
     parent = conversations.send(conn, config, sender="orchestrator", conversation_id=cid, text="first note")
@@ -150,42 +137,37 @@ def _thread_with(config, steps: list[tuple[str, int | None]], missing: set[int])
     return dashboard_get(config, f"/c/{cid}").body.decode()
 
 
-def _assert_nothing_older_follows_a_notice(body: str, steps: list[tuple[str, int | None]], missing: set[int]):
-    """The policy: no retained message numbered below a gap is shown after that gap's notice."""
-    notices = [(m.start(), m.group(0)) for m in re.finditer(r"Messages? #\d+(?:–#\d+)? (?:is|are) no longer kept",
-                                                              body)]
-    assert notices, "no gap notice on the page"
-    for at, words in notices:
-        first = int(re.search(r"#(\d+)", words).group(1))
-        for seq, (text, _) in enumerate(steps, 1):
-            if seq not in missing and seq < first:
-                assert body.index(text) < at, f"#{seq} ({text!r}) is shown after the notice for #{first}"
+SUMMARY = "Not kept any more on this page: messages "
 
 
-def test_a_gap_is_never_shown_above_an_older_top_level_message(tmp_path: Path) -> None:
-    """The reviewer's case: #1 has reply #4, #2 is top level, #3 is gone; the notice can't sit above #2."""
+def _summary_only(body: str, ranges: str) -> None:
+    """The threaded view states the missing ranges once, for the page, and puts no notice among the messages."""
+    assert SUMMARY + ranges in body, f"no summary of {ranges}"
+    assert body.count(SUMMARY) == 1
+    assert "no longer kept" not in body  # the seat's inline wording never appears in the threaded view
+
+
+def test_the_dashboard_summarises_a_gap_above_an_older_top_level_message(tmp_path: Path) -> None:
+    """The reviewer's case: #1 has reply #4, #2 is top level, #3 is gone."""
     steps = [("one root", None), ("two top level", None), ("three gone", None), ("four reply to one", 1)]
-    body = _thread_with(page_config(tmp_path), steps, {3})
-    _assert_nothing_older_follows_a_notice(body, steps, {3})
-    assert body.index("two top level") < body.index("Message #3 is no longer kept")
+    _summary_only(_thread_with(page_config(tmp_path), steps, {3}), "#3")
 
 
-def test_a_gap_between_two_branches_sits_between_them(tmp_path: Path) -> None:
+def test_the_dashboard_summarises_a_gap_between_two_branches(tmp_path: Path) -> None:
     steps = [("one root", None), ("two reply to one", 1), ("three gone", None), ("four root", None),
              ("five reply to four", 4)]
-    body = _thread_with(page_config(tmp_path), steps, {3})
-    _assert_nothing_older_follows_a_notice(body, steps, {3})
-    notice = body.index("Message #3 is no longer kept")
-    assert body.index("two reply to one") < notice < body.index("four root")
+    _summary_only(_thread_with(page_config(tmp_path), steps, {3}), "#3")
 
 
-def test_a_gap_inside_a_reply_branch_follows_the_branch(tmp_path: Path) -> None:
+def test_the_dashboard_summarises_a_gap_inside_a_reply_branch(tmp_path: Path) -> None:
     steps = [("one root", None), ("two reply to one", 1), ("three gone", 1), ("four reply to one", 1),
              ("five root", None)]
-    body = _thread_with(page_config(tmp_path), steps, {3})
-    _assert_nothing_older_follows_a_notice(body, steps, {3})
-    notice = body.index("Message #3 is no longer kept")
-    assert body.index("four reply to one") < notice < body.index("five root")
+    _summary_only(_thread_with(page_config(tmp_path), steps, {3}), "#3")
+
+
+def test_the_dashboard_summary_lists_every_range_exactly(tmp_path: Path) -> None:
+    steps = [(f"note {n}", None) for n in range(1, 9)]
+    _summary_only(_thread_with(page_config(tmp_path), steps, {3, 5, 6}), "#3, #5–#6")
 
 
 def test_the_seat_places_a_gap_among_replies_in_order(tmp_path: Path) -> None:
