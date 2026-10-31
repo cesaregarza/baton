@@ -226,7 +226,7 @@ def add(conn: sqlite3.Connection, config: Config, conversation_id: str, particip
 def remove(conn: sqlite3.Connection, config: Config, conversation_id: str, participant: str, *,
            actor: str) -> dict[str, Any]:
     """Remove a participant and tell the ones who remain; it receives nothing from then on."""
-    _may_manage(config, actor, participant)
+    _may_manage(config, actor, participant, allow_guest=True)
     with transaction(conn):
         _load(conn, conversation_id)
         current = _participants(conn, conversation_id)
@@ -410,21 +410,22 @@ def _escalate(conn: sqlite3.Connection, settings: Conversations, conversation: s
                   data={"conversation_id": conversation["id"]})
 
 
-def _may_manage(config: Config, actor: str, participant: str) -> Conversations:
+def _may_manage(config: Config, actor: str, participant: str, *, allow_guest: bool = False) -> Conversations:
     settings = require_enabled(config)
     if not config.roles[actor].can_manage_participants:
         raise Forbidden(f"{actor} may not manage participants (roles.{actor}.can_manage_participants)")
-    _check_roles(config, [participant])
+    _check_roles(config, [participant], allow_guest=allow_guest)
     return settings
 
 
-def _check_roles(config: Config, roles: Any, field: str = "participants") -> list[str]:
+def _check_roles(config: Config, roles: Any, field: str = "participants", *,
+                 allow_guest: bool = False) -> list[str]:
     if not isinstance(roles, list) or not all(isinstance(role, str) for role in roles):
         raise InvalidRequest(f"{field} must be a list of role names")
     unknown = [role for role in roles if role not in config.roles]
     if unknown:
         raise UnknownRole(f"no role {unknown[0]!r}; call whoami for the list")
-    if "guest" in roles:
+    if "guest" in roles and not allow_guest:
         raise InvalidRequest("guest cannot be a conversation participant")
     if len(set(roles)) != len(roles):
         raise InvalidRequest(f"{field} lists a role twice")

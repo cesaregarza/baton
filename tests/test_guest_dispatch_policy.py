@@ -324,6 +324,44 @@ def test_legacy_guest_membership_reads_only_conversation_copies_it_holds(tmp_pat
         _finish(server)
 
 
+def test_fixed_role_removes_legacy_guest_before_later_conversation_fanout(tmp_path) -> None:
+    host, server = _host(tmp_path)
+    try:
+        conversation = _call(host, "planner", "create_conversation", {
+            "title": "remove legacy guest", "participants": ["planner", "worker"]})
+        conversation_id = conversation["conversation_id"]
+        conn = connect(host.config.db_path)
+        try:
+            conn.execute("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
+                         (conversation_id, "guest", datetime.now(UTC).isoformat()))
+            assert messages_module.unread(conn, "guest") == 0
+        finally:
+            conn.close()
+
+        removed = _call(host, "planner", "remove_participant", {
+            "conversation_id": conversation_id, "participant": "guest"})
+        assert removed.get("error") is None, f"legacy guest removal returned {removed!r}"
+        assert removed["changed"] is True
+        assert "guest" not in removed["participants"]
+
+        posted = _call(host, "planner", "send_message", {
+            "conversation_id": conversation_id, "text": "after guest removal"})
+        conn = connect(host.config.db_path)
+        try:
+            recipients = {row["recipient"] for row in conn.execute(
+                "SELECT recipient FROM messages WHERE id = ?", (posted["message_id"],))}
+            assert "guest" not in recipients
+            assert messages_module.unread(conn, "guest") == 0
+            assert conn.execute("SELECT 1 FROM participants WHERE conversation_id = ? AND role = 'guest'",
+                               (conversation_id,)).fetchone() is None
+        finally:
+            conn.close()
+        assert _call(host, "planner", "add_participant", {
+            "conversation_id": conversation_id, "participant": "guest"})["error"] == "invalid_request"
+    finally:
+        _finish(server)
+
+
 def test_config_job_authority_defaults_true_and_requires_a_boolean(tmp_path) -> None:
     host = make_config(tmp_path)
     assert host.config.roles["planner"].job_authority is True
