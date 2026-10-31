@@ -44,7 +44,12 @@ def keyword_mode(conn: sqlite3.Connection) -> str:
 
 def readable(config: Config, role: str) -> tuple[str, dict[str, Any]]:
     """The SQL condition, on a `messages m` row, that `role` may read that copy; and its parameters."""
-    return board_read.message_condition(config, role)
+    condition, values = board_read.message_condition(config, role)
+    if role == "guest":
+        # Guests may search retained board copies, but never direct messages,
+        # including copies left by an older configuration.
+        return f"(m.conversation_id IS NOT NULL AND ({condition}))", values
+    return condition, values
 
 
 def get_message(conn: sqlite3.Connection, config: Config, role: str, message_id: str) -> dict[str, Any]:

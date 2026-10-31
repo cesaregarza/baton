@@ -337,6 +337,8 @@ SEARCH_TOOLS = (
 ARTIFACT_TOOLS = (
     ("read_artifacts", auth.SCOPE_READ, True),
 )
+GUEST_TOOLS = frozenset({"whoami", "alias_exists", "claim_alias", "list_conversations", "read_history",
+                         "get_message", "search"})
 AUDITED_IDS = ("to", "conversation_id", "participant", "topic", "job_id", "reply_to", "request_id",
                "to_state", "expected_revision")
 
@@ -345,6 +347,7 @@ class Guard:
     """Scope check, hourly limit and audit line around every tool call; binds the caller's role."""
 
     def __init__(self, config: Config) -> None:
+        self._config = config
         self._audit_path = config.audit_path
         self._calls: dict[tuple[str, str], deque[float]] = {}
         self._lock = threading.Lock()
@@ -352,16 +355,37 @@ class Guard:
     def wrap(self, name: str, scope: str, body: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(body)
         def guarded(**kwargs: Any) -> Any:
+            def refuse(role: str | None, code: str, detail: str) -> Any:
+                refusal = self._refuse(name, role, kwargs, code, detail)
+                if name in {"list_conversations", "list_jobs"}:
+                    return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))],
+                                           is_error=True)
+                return refusal
+
             token = get_access_token()
             role = auth.role_of(token)
             if token is None or role is None or scope not in token.scopes:
-                return self._refuse(name, role, kwargs, "insufficient_scope", f"{name} needs {scope}")
+                return refuse(role, "insufficient_scope", f"{name} needs {scope}")
+            if role == "guest":
+                if name not in GUEST_TOOLS:
+                    return refuse(role, "forbidden", f"guest may not call {name}")
+                if name == "search" and (kwargs.get("producer") is not None or kwargs.get("query_vector") is not None
+                                          or kwargs.get("model") is not None or
+                                          (kwargs.get("kinds") is not None and
+                                           (not isinstance(kwargs["kinds"], list) or
+                                            not all(kind == "message" for kind in kwargs["kinds"])) )):
+                    return refuse(role, "forbidden", "guest search is limited to messages")
+            if name in {"create_job", "move_job"} and not self._config.roles[role].job_authority:
+                return refuse(role, "forbidden", f"role {role} may not mutate jobs")
+            if name == "send_message" and role != "guest" and kwargs.get("to") == "guest":
+                return refuse(role, "forbidden", "direct messages to guest are not allowed")
             if not self._within_limit(role, name, HOURLY_LIMITS[scope]):
-                return self._refuse(name, role, kwargs, "rate_limited", f"{name} is over its hourly limit")
+                return refuse(role, "rate_limited", f"{name} is over its hourly limit")
             try:
                 result = body(role, **kwargs)
             except BatonError as error:
-                return {**self._refuse(name, role, kwargs, error.code, str(error)), **error.extra}
+                refusal = refuse(role, error.code, str(error))
+                return {**refusal, **error.extra} if isinstance(refusal, dict) else refusal
             self._audit(name, role, kwargs, "ok")
             return result
 

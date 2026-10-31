@@ -48,7 +48,8 @@ HOST_ACTOR = "@host"
 RELAYED_FIELDS = ("source", "at", "text")
 # Arguments that would claim who wrote a message. The author is always the credential's role, so a request
 # carrying any of these is refused outright (`forbidden_field`) rather than silently ignored.
-AUTHOR_FIELDS = ("from_role", "author_kind", "author", "sender", "from", "role", "on_behalf_of")
+AUTHOR_FIELDS = ("from_role", "author_kind", "author", "sender", "from", "role", "on_behalf_of",
+                 "alias", "alias_id", "identity", "code")
 MAX_SOURCE = 200
 
 

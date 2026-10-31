@@ -32,6 +32,9 @@ description = "Picks up jobs and reports back"
 # can_manage_participants = true
 # can_view_all_conversations = true   # grants retained board-wide reads; also lets the dashboard show every conversation
 
+# Optional: remove this role's permission to create or move jobs. Defaults to true for existing roles.
+# job_authority = false
+
 # Optional: wake a role when something is waiting for it. Use one of: a webhook, a command, an integration.
 # [roles.worker.wake]
 # webhook = "https://hooks.example.com/baton"

@@ -402,6 +402,19 @@ that permission.
 
 Every tool acts as the caller's role, which comes from the caller's credential.
 
+An authenticated role named `guest` has a fixed read allowlist: `whoami`, conversation listing and history
+(subject to the conversation read checks), `get_message`, and keyword-only message search. It cannot post,
+receive direct messages, join conversations,
+manage conversations, read jobs or artifacts, or change integration subscriptions. Guest search refuses
+artifact kinds, producer filters and embedding parameters. A name or alias supplied in arguments does not
+change the authenticated role or grant posting authority. Alias claim and bound guest posting are not part of
+this release.
+
+Job mutations can also be disabled for a fixed role with `job_authority = false` under `[roles.<name>]`.
+The default is `true`, preserving existing configurations. This setting denies `create_job` and `move_job`
+before their bodies run, including before an idempotent retry can replay an earlier result; it does not remove
+the role's other permissions.
+
 | Tool | What it does |
 |---|---|
 | `whoami` | Your role, the other roles, and the job states |
