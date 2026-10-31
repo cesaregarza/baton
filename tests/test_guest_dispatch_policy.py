@@ -125,7 +125,8 @@ def test_guest_policy_enumerates_every_registered_tool_and_allows_only_the_read_
     try:
         listed = _rpc(host, "guest", "tools/list", {})["result"]["tools"]
         registered = {tool["name"] for tool in listed}
-        allowed = {"whoami", "list_conversations", "read_history", "get_message", "search"}
+        allowed = {"whoami", "alias_exists", "claim_alias", "list_conversations", "read_history",
+                   "get_message", "search"}
         if hasattr(app_module, "GUEST_TOOLS"):
             assert app_module.GUEST_TOOLS & registered == allowed
         assert allowed <= registered

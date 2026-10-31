@@ -19,9 +19,9 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -111,6 +111,7 @@ _ADDED_TABLES = {
          "commit_requests"),
     # Vectors a producer supplies for a generation's artifacts and messages, and the items it skipped.
     11: ("vectors", "vector_skips"),
+    12: ("aliases", "alias_bindings", "alias_claims"),
 }
 _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys()))
 
@@ -118,6 +119,26 @@ _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.k
 # the transaction that creates the schema.
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)",
+    # Permanent ownership; only salted scrypt verifiers, never passphrases. The random id is attribution.
+    """CREATE TABLE IF NOT EXISTS aliases (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        skeleton TEXT NOT NULL UNIQUE,
+        verifier TEXT NOT NULL,
+        created_at REAL NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS alias_bindings (
+        digest TEXT PRIMARY KEY,
+        alias_id TEXT NOT NULL REFERENCES aliases(id),
+        expires_at REAL NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS alias_bindings_by_alias ON alias_bindings (alias_id, expires_at)",
+    # Admitted attempts, successful or refused; bounded by the global hourly claim limit.
+    """CREATE TABLE IF NOT EXISTS alias_claims (
+        credential TEXT NOT NULL,
+        name TEXT NOT NULL,
+        at REAL NOT NULL
+    )""",
     _MESSAGE_REQUESTS,
     _MESSAGES,
     "CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation_id, conversation_seq)",

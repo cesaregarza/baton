@@ -17,6 +17,14 @@ description = "Breaks work into jobs and reviews results"
 [roles.worker]
 description = "Picks up jobs and reports back"
 
+# Optional shared connector identity. Configure credentials separately; uncommenting this grants none.
+# guest can read permitted board conversations, check alias names and claim/resume an alias with a passphrase.
+# Aliases persist at schema 12; bindings expire and only their digests are stored. Codes are visual, not identity proof.
+# Guest posting remains disabled pending the separate integration slice; no mailbox, membership, jobs or DMs.
+# [roles.guest]
+# description = "Guest with alias continuity, never verified human identity"
+# can_view_all_conversations = true          # widens retained board reads; choose explicitly at rollout
+
 # Optional: a person rather than an agent. A human role uses only its own bearer token (never OAuth or --as),
 # and its messages read as author_kind "human". See the README's "Human participants".
 # human = true
@@ -45,6 +53,15 @@ description = "Picks up jobs and reports back"
 # only_when_addressed = true                   # still receives every message, but a conversation message
 #                                              # wakes it only when it names the role in attention or asks
 #                                              # for a decision. Direct messages and job changes still do.
+
+# Alias count is unlimited; names persist. Valid bindings work across authenticated guest credentials.
+# Binding and claim rate limits are positive whole numbers; active-binding capacity refuses without eviction.
+# [aliases]
+# binding_ttl_seconds = 86400                  # 24 hours; accepts 1–86400, never changes permanent alias ownership
+# max_bindings_per_alias = 20                  # at most 1000 live proofs
+# max_claims_per_credential_per_hour = 20       # at most 10000; includes refused passphrases
+# max_claims_per_alias_per_hour = 5            # at most 10000; lookalike skeletons share a limit
+# max_claims_per_hour = 100                    # at most 10000 overall, before scrypt
 
 # Optional: group conversations among three or more roles. Off unless enabled.
 # [conversations]

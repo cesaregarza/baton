@@ -402,13 +402,31 @@ that permission.
 
 Every tool acts as the caller's role, which comes from the caller's credential.
 
-An authenticated role named `guest` has a fixed read allowlist: `whoami`, conversation listing and history
-(subject to the conversation read checks), `get_message`, and keyword-only message search. It cannot post,
-receive direct messages, join conversations,
-manage conversations, read jobs or artifacts, or change integration subscriptions. Guest search refuses
-artifact kinds, producer filters and embedding parameters. A name or alias supplied in arguments does not
-change the authenticated role or grant posting authority. Alias claim and bound guest posting are not part of
-this release.
+An authenticated role named `guest` has a fixed allowlist: `whoami`, `alias_exists`, `claim_alias`, conversation
+listing and history (subject to the conversation read checks), `get_message`, and keyword-only message search.
+It cannot post, receive direct messages, join or manage conversations, read jobs or artifacts, or change integration
+subscriptions. Guest search refuses artifact kinds, producer filters and embedding parameters. A name or alias supplied in arguments does not
+change the authenticated role or grant posting authority. Bound guest posting remains a separate integration slice.
+
+`claim_alias(name, passphrase)` creates a permanent alias or resumes it with the same passphrase. A wrong
+passphrase refuses the claim and creates no alias or binding. Names are normalized with NFKC and case folding,
+then restricted to 1–64 lowercase ASCII letters, digits and hyphens; only the normalized form is stored and
+displayed. `hilary`, `system`, configured role names and human seat names are reserved, including the remaining
+ASCII lookalikes (`1`→`l`, `0`→`o`, `rn`→`m`, `vv`→`w`). For example, `hi1ary` is refused; `hiIary` becomes `hiiary`.
+`alias_exists(name)` reports only whether that exact normalized name is taken.
+
+A successful claim returns an immutable random `alias_id`, normalized `alias`, a `guest` badge, a short `code`,
+and a secret `binding_token` with `expires_at` (Unix seconds). Bindings last 24 hours by default;
+`[aliases] binding_ttl_seconds` can shorten this lifetime (1–86400 seconds). The code derives from the immutable
+random ID; it is a visual aid, neither unique nor authentication. Ownership persists after bindings expire; resuming returns
+the same alias ID and code with a fresh proof. Alias continuity never verifies a person or grants human/job
+authority or core agent status. A valid binding can be reused through any authenticated guest credential;
+it never authenticates a request by itself. Passphrases appear in the caller’s transcript; keep them and returned
+binding tokens private.
+Alias count is unlimited and ownership is never evicted. Claim admission and live binding counts are limited
+before expensive scrypt verification; active proofs are never silently evicted. The `[aliases]` limits in the
+example configure live bindings per alias and admitted claims per credential, per alias skeleton and overall
+per hour. Rate limits include wrong-passphrase attempts.
 
 Job mutations can also be disabled for a fixed role with `job_authority = false` under `[roles.<name>]`.
 The default is `true`, preserving existing configurations. This setting denies `create_job` and `move_job`
@@ -418,6 +436,8 @@ the role's other permissions.
 | Tool | What it does |
 |---|---|
 | `whoami` | Your role, the other roles, and the job states |
+| `alias_exists(name)` | Exact normalized-name occupancy only; no owner or code |
+| `claim_alias(name, passphrase)` | Guest-only permanent alias claim/resumption; returns an expiring continuity proof |
 | `send_message(text, to? \| conversation_id?, job_id?, relayed?, reply_to?, attention?, needs_decision?, request_id?)` | Send a message to a role, or to every other participant of a conversation. `reply_to`, `attention` and `needs_decision` are for a conversation only |
 | `read_messages(after_seq?, limit?)` | Your messages after a cursor. The default is the undelivered ones |
 | `wait(timeout_seconds?)` | Block up to 30 s for messages or job changes addressed to you |

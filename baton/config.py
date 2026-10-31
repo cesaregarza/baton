@@ -130,6 +130,22 @@ class Conversations:
 
 
 @dataclass(frozen=True)
+class Aliases:
+    """Guest alias storage and hourly admission bounds; continuity never grants role authority."""
+
+    binding_ttl_seconds: int = 86400
+    max_bindings_per_alias: int = 20
+    max_claims_per_credential_per_hour: int = 20
+    max_claims_per_alias_per_hour: int = 5
+    max_claims_per_hour: int = 100
+
+
+ALIAS_LIMITS = {"binding_ttl_seconds": (1, 86400), "max_bindings_per_alias": (1, 1000),
+                "max_claims_per_credential_per_hour": (1, 10000), "max_claims_per_alias_per_hour": (1, 10000),
+                "max_claims_per_hour": (1, 10000)}
+
+
+@dataclass(frozen=True)
 class Search:
     """Keyword search over messages for roles, off unless enabled. Each role finds only what it may read."""
 
@@ -232,6 +248,7 @@ class Config:
     seat: Seat = field(default_factory=Seat)
     search: Search = field(default_factory=Search)
     indexer: Indexer = field(default_factory=Indexer)
+    aliases: Aliases = field(default_factory=Aliases)
 
     @property
     def resource_url(self) -> str:
@@ -338,7 +355,16 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         seat=_seat(raw.get("seat", {}), roles, public_url, dashboard),
         search=search,
         indexer=indexer,
+        aliases=_aliases(raw.get("aliases", {})),
     )
+
+
+def _aliases(table: dict[str, Any]) -> Aliases:
+    if not isinstance(table, dict):
+        raise ConfigError("aliases must be a table of limits")
+    defaults = Aliases()
+    return Aliases(**{key: _number(table, key, getattr(defaults, key), f"aliases.{key}", low, high, integer=True)
+                      for key, (low, high) in ALIAS_LIMITS.items()})
 
 
 def _indexer(table: dict[str, Any], roles: dict[str, Role]) -> Indexer:

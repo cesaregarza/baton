@@ -31,7 +31,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
 from starlette.types import ASGIApp
 
-from baton import __version__, auth, conversations, dashboard, datadir, inbox, jobs, messages, seat
+from baton import __version__, aliases, auth, conversations, dashboard, datadir, inbox, jobs, messages, seat
 from baton import search as search_module
 from baton.config import Config
 from baton.errors import BatonError, InvalidRequest, UnknownRole
@@ -76,6 +76,19 @@ class Tools:
             **({"search": {"enabled": True, "keyword_index": self._keyword_mode()}}
                if self._config.search.enabled else {}),
         }
+
+    def alias_exists(self, role: str, name: str) -> dict[str, bool]:
+        """Whether an exact normalized alias name is taken; reveals no owner, code or binding."""
+        with self._conn() as conn:
+            return {"exists": aliases.exists(conn, name)}
+
+    def claim_alias(self, role: str, name: str, passphrase: str) -> dict[str, Any]:
+        """Claim or resume a permanent guest alias with a passphrase; return a fresh expiring continuity proof.
+
+        Proofs work on any authenticated guest credential. Alias names/codes grant no role or human authority.
+        """
+        with self._conn() as conn:
+            return aliases.claim(conn, self._config, get_access_token(), name, passphrase)
 
     def send_message(
         self, role: str, text: str, to: str | None = None,
@@ -310,6 +323,8 @@ class Tools:
 # (tool, scope, read-only)
 TOOLS = (
     ("whoami", auth.SCOPE_READ, True),
+    ("alias_exists", auth.SCOPE_READ, True),
+    ("claim_alias", auth.SCOPE_WRITE, False),
     ("send_message", auth.SCOPE_WRITE, False),
     ("read_messages", auth.SCOPE_READ, False),
     ("wait", auth.SCOPE_READ, False),
@@ -410,6 +425,22 @@ class Guard:
                                f"{named[0]} is not accepted: a message's author is always your credential's role")
         return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))], is_error=True)
 
+    async def refuse_claim_validation(self, ctx: Any, call_next: Any) -> Any:
+        """Prevent SDK validation from echoing a claim's passphrase, even if another argument is missing."""
+        params = ctx.params if isinstance(getattr(ctx, "params", None), dict) else {}
+        if getattr(ctx, "method", None) != "tools/call" or params.get("name") != "claim_alias":
+            return await call_next(ctx)
+        arguments = params.get("arguments")
+        # A missing field's SDK error can include the entire input object, including the passphrase.
+        try:
+            if not isinstance(arguments, dict) or not isinstance(arguments.get("name"), str):
+                raise InvalidRequest("claim_alias requires a name and a passphrase of 1-1024 characters")
+            aliases.validate_passphrase(arguments.get("passphrase"))
+        except InvalidRequest as error:
+            refusal = self._refuse("claim_alias", auth.role_of(get_access_token()), {}, error.code, str(error))
+            return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))], is_error=True)
+        return await call_next(ctx)
+
     def _within_limit(self, role: str, name: str, per_hour: int) -> bool:
         now = time.monotonic()
         with self._lock:
@@ -426,7 +457,8 @@ class Guard:
         return {"error": code, "detail": detail}
 
     def _audit(self, name: str, role: str | None, kwargs: dict[str, Any], outcome: str) -> None:
-        ids = {key: kwargs[key] for key in AUDITED_IDS if kwargs.get(key) is not None}
+        ids = ({key: kwargs[key] for key in AUDITED_IDS if kwargs.get(key) is not None}
+               if name != "claim_alias" else {})
         line = {"at": datetime.now(UTC).isoformat(), "role": role, "tool": name, **ids, "outcome": outcome}
         directory = self._audit_path.parent
         with self._lock, datadir.opened(directory) as dir_fd:
@@ -450,7 +482,7 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
     if integrations is None:
         integrations = load_enabled(config)
     tools, guard = Tools(config), Guard(config)
-    middleware = [guard.refuse_author_fields,
+    middleware = [guard.refuse_author_fields, guard.refuse_claim_validation,
                   *(item for integration in integrations.values() for item in integration.middleware())]
     settings = auth.auth_settings(config)
     common = {"name": "baton", "version": __version__, "instructions": INSTRUCTIONS, "auth": settings,
