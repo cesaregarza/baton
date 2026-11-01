@@ -182,7 +182,9 @@ def test_an_ended_grant_stops_delivery_at_once_and_its_target_is_swept(host, rec
 
 def test_guest_subscriptions_belong_to_their_grant(host, receiver):
     url = receiver.url("/hooks/g")
-    first = subscribe(host, "grant", url, new_secret())["result"]["id"]
+    subscribed = subscribe(host, "grant", url, new_secret())
+    assert "result" in subscribed, f"a guest OAuth grant can subscribe: {subscribed}"
+    first = subscribed["result"]["id"]
     host.tokens["other"] = authorize(host, role="guest")["access_token"]
     other = subscribe(host, "other", url, new_secret())
     assert other["result"]["id"] != first, "a subscription's id comes from its grant, not the guest role"
