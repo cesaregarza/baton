@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 
 import pytest
 from conftest import make_config
@@ -268,6 +269,27 @@ def test_replay_keys_on_the_effective_role_and_rechecks_authorization(host):
         await claim(client, host, passphrase=OTHER)
         stale = await call(client, host, "send_message", {**body, "token": proof})
         assert stale.get("error") == "forbidden", "a stale proof is refused before any cached result"
+    dispatch(host, scenario)
+
+
+def test_a_replayed_conversation_post_rechecks_membership_first(host):
+    config = host.config
+    planner = replace(config.roles["planner"], can_create_conversations=True, can_manage_participants=True)
+    host.config = replace(config, conversations=replace(config.conversations, enabled=True),
+                          roles={**config.roles, "planner": planner})
+
+    async def scenario(client):
+        await enrol(client, host)
+        proof = (await claim(client, host))["binding_token"]
+        conv = (await call(client, host, "create_conversation", {
+            "title": "Design", "participants": ["planner", "hilary", "worker"]}, role="planner"))["conversation_id"]
+        body = {"conversation_id": conv, "text": "posted", "request_id": rid("member"), "token": proof}
+        assert (await call(client, host, "send_message", body)).get("created") is True
+        removed = await call(client, host, "remove_participant", {"conversation_id": conv, "participant": "hilary"},
+                             role="planner")
+        assert "error" not in removed, removed
+        replayed = await call(client, host, "send_message", body)
+        assert replayed.get("error") == "not_a_participant", "a cached result goes only to a current participant"
     dispatch(host, scenario)
 
 
