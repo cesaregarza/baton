@@ -27,7 +27,7 @@ MINE = ["orchestrator", "reviewer", "operator"]
 
 
 def seeded(tmp_path: Path, *, view_all: bool = True) -> tuple[Config, sqlite3.Connection]:
-    config = page_config(tmp_path, view_all=view_all)
+    config = page_config(tmp_path, view_all=view_all, guest=True)
     conn = connect(config.db_path)
     with conn:
         conn.execute("INSERT INTO aliases (id, name, skeleton, verifier, created_at)"

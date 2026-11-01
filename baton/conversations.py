@@ -246,7 +246,8 @@ def _admit_guest_thread(config: Config, identity: dict[str, str] | None) -> None
     """
     if not identity or not identity.get("alias_id"):
         raise Forbidden("alias binding is missing, invalid or expired")
-    if not config.roles["guest"].can_view_all_conversations:
+    role = config.roles.get("guest")
+    if role is None or not role.can_view_all_conversations:
         raise Forbidden("this host's guests do not read board conversations "
                         "(roles.guest.can_view_all_conversations), so they cannot start a thread either")
 

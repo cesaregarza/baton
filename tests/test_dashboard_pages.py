@@ -38,10 +38,17 @@ JOB_STATES = {"initial": "open", "states": {
 
 
 def page_config(tmp_path: Path, *, view_all: bool = False, port: int | None = None, viewer: str = "operator",
-                **dashboard_keys: Any) -> Config:
-    """Generic roles; `operator` is the viewer by default, and sees every conversation only with the flag."""
-    roles = {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
+                guest: bool = False, **dashboard_keys: Any) -> Config:
+    """Generic roles; `operator` is the viewer by default, and sees every conversation only with the flag.
+
+    `guest` adds a board-reading guest role, for the pages that show a thread a guest started. It is
+    opt-in so that every other page test keeps the role set it was written against.
+    """
+    roles = {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True,
+                              "can_create_topics": True},
              "reviewer": {}, "assistant": {}, "operator": {"can_view_all_conversations": view_all}}
+    if guest:
+        roles["guest"] = {"can_view_all_conversations": True}
     roles[viewer] = {**roles[viewer], "display_only": True}  # the view's identity never holds a credential
     return config_module.parse({
         "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
