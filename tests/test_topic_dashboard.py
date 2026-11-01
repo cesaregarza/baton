@@ -317,3 +317,15 @@ def test_a_bad_request_page_offers_a_way_back(tmp_path):
     finally:
         conn.close()
 
+def test_the_directory_counts_a_roots_subtree(tmp_path):
+    """A root whose threads all sit in a subtopic showed 0, which read as an empty topic."""
+    config, conn = subtree(tmp_path, view_all=False, where="child")
+    try:
+        page = text(get(config, "/"))
+        entry = page[page.index('href="/t/work"'):]
+        entry = entry[:entry.index("</li>")]
+        assert "1 thread" in entry, f"the root should count its subtree: {entry}"
+        assert "0 thread" not in entry
+    finally:
+        conn.close()
+

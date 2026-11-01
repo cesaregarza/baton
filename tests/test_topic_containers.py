@@ -771,3 +771,59 @@ def test_get_topic_lists_only_the_subtopics_the_reader_can_open(db, config):
     assert topics.get(db, config, reader="orchestrator", path="work")["subtopics"] == \
         ["work/open", "work/shut"], "a board reader sees both"
 
+# A topic's count is what its page lists, which is the whole subtree: the page has always filtered by
+# whole-segment prefix, so a count of only the threads filed exactly there contradicted it.
+
+def nested(db: sqlite3.Connection, config: Config) -> None:
+    """`work` with one unreadable thread of its own, `work/open` with one readable and one unreadable."""
+    make_topic(db, config, "work")
+    make_topic(db, config, "work/open")
+    conversations.create(db, config, actor="orchestrator", title="Parent, hidden",
+                         participants=["orchestrator", "assistant"], topic="work")
+    conversations.create(db, config, actor="orchestrator", title="Child, readable",
+                         participants=["orchestrator", "reviewer"], topic="work/open")
+    conversations.create(db, config, actor="orchestrator", title="Child, hidden",
+                         participants=["orchestrator", "assistant"], topic="work/open")
+
+
+def listed_by_path(db: sqlite3.Connection, config: Config, reader: str) -> dict[str, dict]:
+    return {entry["path"]: entry for entry in topics.listing(db, config, reader=reader)}
+
+
+def test_a_topics_count_covers_its_subtree(db, config):
+    """A root whose own threads are all unreadable still counts what its subtopic holds for this reader."""
+    nested(db, config)
+    listed = listed_by_path(db, config, "reviewer")
+    assert listed["work"]["threads"] == 1, "the readable thread under work/open counts towards work"
+    assert listed["work/open"]["threads"] == 1
+
+
+def test_a_subtree_count_still_excludes_what_the_reader_cannot_read(db, config):
+    nested(db, config)
+    listed = listed_by_path(db, config, "orchestrator")
+    assert listed["work"]["threads"] == 3, "a board reader counts all three"
+    assert listed["work/open"]["threads"] == 2
+    assert listed_by_path(db, config, "assistant")["work"]["threads"] == 2, "its own two, not the other"
+
+
+def test_the_subtree_activity_time_comes_from_the_same_threads(db, config):
+    """The count and the time are one query, so widening one widens the other and no more."""
+    nested(db, config)
+    rows = db.execute("SELECT id, title FROM conversations ORDER BY title").fetchall()
+    stamps = {"Child, hidden": "2026-11-03T10:00:00+00:00", "Child, readable": "2026-11-02T10:00:00+00:00",
+              "Parent, hidden": "2026-11-01T10:00:00+00:00"}
+    with db:
+        for row in rows:
+            db.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?",
+                       (stamps[row["title"]], row["id"]))
+    assert listed_by_path(db, config, "reviewer")["work"]["last_activity_at"] == \
+        "2026-11-02T10:00:00+00:00", "the readable child's time, not the newer hidden one"
+    assert listed_by_path(db, config, "orchestrator")["work"]["last_activity_at"] == \
+        "2026-11-03T10:00:00+00:00"
+
+
+def test_get_topic_counts_the_same_subtree_its_page_lists(db, config):
+    nested(db, config)
+    assert topics.get(db, config, reader="reviewer", path="work")["threads"] == 1
+    assert topics.get(db, config, reader="orchestrator", path="work")["threads"] == 3
+
