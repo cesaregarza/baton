@@ -140,11 +140,11 @@ details[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: .
   visibility: hidden; }
 body:has(li:target) .gap-dismiss:not(:checked) { visibility: visible; }
 body:has(li:target) .gap-dismiss:not(:checked) + .gap-bar { display: block; position: fixed; bottom: 0; left: 0;
-  right: 0; margin: 0; padding: .5rem 1rem; background: #fff; border-top: 1px solid #c4c7c5; color: #5f6368;
-  font-size: .85rem; text-align: center; }
+  right: 0; margin: 0; padding: .5rem 1rem; background: var(--bg); border-top: 1px solid var(--line-strong);
+  color: var(--muted); font-size: .85rem; text-align: center; }
 body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 4rem; }
-.gap-bar label { margin-left: .6rem; color: #0b57d0; text-decoration: underline; cursor: pointer; }
-.gap-dismiss:focus-visible + .gap-bar label { outline: 2px solid #0b57d0; outline-offset: 2px; }
+.gap-bar label { margin-left: .6rem; color: var(--link); text-decoration: underline; cursor: pointer; }
+.gap-dismiss:focus-visible + .gap-bar label { outline: 2px solid var(--focus); outline-offset: 2px; }
 /* primary links are at least 44px tall: an item that opens with its link lets the link carry the item's top space */
 h2 a { display: inline-block; padding: .7rem 0; }
 h2:has(> a) { margin: 1rem 0 0; }
