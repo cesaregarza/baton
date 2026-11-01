@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 from seat_helpers import agent_says, conversation, log_in, make_seat_host
 from seat_helpers import get as seat_get
 from test_dashboard_pages import MINE, made, page_config
@@ -144,7 +145,7 @@ def _summary_only(body: str, ranges: str) -> None:
     """The threaded view states the missing ranges once, for the page, and puts no notice among the messages."""
     assert SUMMARY + ranges in body, f"no summary of {ranges}"
     assert body.count(SUMMARY) == 1
-    assert "no longer kept" not in body  # the seat's inline wording never appears in the threaded view
+    assert "no longer kept" not in body[body.index("<ul>"):]  # the seat's inline wording never appears among them
 
 
 def test_the_dashboard_summarises_a_gap_above_an_older_top_level_message(tmp_path: Path) -> None:
@@ -179,3 +180,52 @@ def test_the_seat_places_a_gap_among_replies_in_order(tmp_path: Path) -> None:
     _, cookies = log_in(host.config, host.seat_token)
     body = seat_get(host.config, f"/seat/c/{cid}", cookies=cookies).body.decode()
     assert "Message #3 is no longer kept" in _gap_between(body, "second note", "fourth note")
+
+
+# Arriving by a message link on a page with a gap: a bar at the bottom says so and links to the summary --------
+
+BAR = "Some messages on this page are no longer kept"
+CROSS_BRANCH = [("one root", None), ("two top level", None), ("three gone", None), ("four reply to one", 1)]
+INTERLEAVED = [("one root", None), ("two reply to one", 1), ("three gone", 1), ("four root", None),
+               ("five reply to one", 1), ("six reply to four", 4)]
+
+
+@pytest.mark.parametrize("steps", [CROSS_BRANCH, INTERLEAVED], ids=["cross-branch", "interleaved"])
+def test_a_page_with_a_gap_carries_the_arrival_bar(tmp_path: Path, steps) -> None:
+    body = _thread_with(page_config(tmp_path), steps, {3})
+    bar = re.search(r'<p class="gap-bar"[^>]*>(.*?)</p>', body, re.S)
+    assert bar, "no arrival bar on a page with a gap"
+    assert BAR in bar.group(1) and re.search(r'<a href="#missing">view ranges</a>', bar.group(1))
+    assert re.search(r'<p class="notice" id="missing">Not kept any more on this page: messages #3</p>', body)
+    dismiss = re.search(r'<input type="checkbox" id="([\w-]+)" class="gap-dismiss"', body)
+    assert dismiss and f'<label for="{dismiss.group(1)}">' in bar.group(1)
+    assert body.index(dismiss.group(0)) < body.index(bar.group(0))  # the CSS reaches the bar from the checkbox
+    assert "no longer kept" not in body[body.index("<ul>"):]  # still no inline notice among the messages
+    for seq, _ in enumerate(steps, 1):  # every retained message keeps its anchor
+        assert (seq == 3) != (f'id="m-{seq}"' in body)
+
+
+def test_a_page_without_a_gap_has_no_bar(tmp_path: Path) -> None:
+    body = _thread_with(page_config(tmp_path), CROSS_BRANCH, set())
+    assert "gap-bar" not in body.split("<body>", 1)[1] and BAR not in body and 'id="missing"' not in body
+
+
+def _rules(selector_part: str) -> list[str]:
+    from baton import dashboard
+
+    return [rule for rule in re.findall(r"([^{}]+\{[^}]*\})", dashboard.STYLE) if selector_part in rule.split("{")[0]]
+
+
+def test_the_bar_shows_only_on_arrival_at_a_message_and_never_covers_the_top() -> None:
+    assert any(rule.split("{")[0].strip() == ".gap-bar" and "display: none" in rule for rule in _rules(".gap-bar"))
+    shown = [rule for rule in _rules(".gap-bar") if re.search(r"display: (?!none)", rule)]
+    assert len(shown) == 1, "the bar has more than one way to show"
+    selector, declarations = shown[0].split("{", 1)
+    assert "li:target" in selector and ".gap-dismiss:not(:checked)" in selector  # arrival, and not dismissed
+    assert "position: fixed" in declarations and "bottom: 0" in declarations
+    assert not re.search(r"(^|[;\s])top:", declarations), "pinned to the top, where it covers the anchored message"
+
+
+def test_the_dismiss_control_stays_reachable_by_keyboard() -> None:
+    rules = _rules(".gap-dismiss")
+    assert rules and not any("display: none" in rule for rule in rules), "a display:none checkbox can't be focused"
