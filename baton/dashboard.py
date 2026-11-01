@@ -4,10 +4,13 @@ Off unless `[dashboard] enabled = true`. It is served from the host's own
 store by a small standard-library HTTP server beside the MCP server, on a
 loopback address only, and it never sees a token.
 
-Conversations are grouped by their topic, with the untagged in a group of
-their own, so a topic organises the view without becoming a requirement.
-`/t/<project>` and `/t/<project>/<subtopic>` show one topic and everything
-under it, by whole segments, with the same filter as `list_conversations`.
+`/` is a directory of the topics a core role has opened, each with its
+description, its subtopics and how many threads in it this viewer may read;
+the conversations with no topic follow in a group of their own, so none is
+hidden. `/t/<project>` and `/t/<project>/<subtopic>` show one topic, headed by
+its own details, with the same whole-segment filter as `list_conversations`. A
+path that is not a topic is a missing page, because a topic is a container
+rather than a label. A thread a guest started names the alias behind it.
 
 `/needs` collects the retained signals that single the viewer out: messages
 it could read whose `attention` names it or that ask for a decision, newest
@@ -43,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from baton import board_read, conversations, jobs, messages
+from baton import board_read, conversations, jobs, messages, topics
 from baton.config import Config
 from baton.errors import BatonError
 from baton.store import connect
@@ -132,6 +135,10 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
             body = _needs(config, conn, _needs_topic(url.query), pages)
             return _page(200, f"Needs {_attention_label(config)}", body)
         if topic is not None:
+            # A topic is a container, so one nobody opened is a missing page rather than an empty list.
+            # The grammar check above still answers 400 first, which keeps a malformed path distinct.
+            if not topics.exists(conn, topic):
+                return _not_found()
             return _page(200, topic, _index(config, conn, topic, pages["page"]))
         if match is None:
             return _page(200, "Conversations", _index(config, conn, None, pages["page"]))
@@ -274,16 +281,72 @@ def _visible(config: Config, conn: Any, topic: str | None = None) -> tuple[list[
     return found, "every conversation" if every else f"the conversations {viewer} is in", every
 
 
+def _topic_header(config: Config, conn: Any, topic: str) -> str:
+    """A topic's own details, above its threads: what it is, who opened it, and who a thread here reaches."""
+    try:
+        details = topics.get(conn, config, reader=config.dashboard.viewer_role, path=topic)
+    except BatonError:
+        return ""
+    title = f'<h2>{_e(details["title"])}</h2>' if details["title"] != topic else ""
+    description = f'<p>{_e(details["description"])}</p>' if details["description"] else ""
+    members = ", ".join(details["members"]) or "none yet"
+    return (f'{title}{description}<p class="meta">Opened by {_e(details["created_by"])} · members '
+            f'{_e(members)}</p>' + _subtopics(details["subtopics"]))
+
+
+def _subtopics(paths: list[str]) -> str:
+    if not paths:
+        return ""
+    return ('<h3>Subtopics</h3><ul>'
+            + "".join(f'<li>{_topic_link(path)}</li>' for path in paths) + "</ul>")
+
+
+def _directory(config: Config, conn: Any) -> str:
+    """The topics, each with its description, its subtopics and this viewer's own thread count.
+
+    A viewer that does not read the whole board is offered only the topics it can see a thread in,
+    which is the rule this page has always followed: a topic whose only thread is hidden from the
+    viewer is not named here either, so the directory discloses nothing the listing would not. A
+    board-reading viewer sees every topic, including one still empty, which is what makes the
+    directory usable as a directory.
+    """
+    viewer = config.dashboard.viewer_role
+    every = board_read.sees_all(config, viewer)
+    listed = [entry for entry in topics.listing(conn, config, reader=viewer)
+              if every or entry["threads"]]
+    children: dict[str, list[str]] = {}
+    for entry in listed:
+        if "/" in entry["path"]:
+            children.setdefault(entry["path"].split("/")[0], []).append(entry["path"])
+    # A parent is kept when a subtopic of it is visible, so a visible subtopic is never orphaned by a
+    # parent the viewer cannot see into.
+    roots = {entry["path"]: entry for entry in listed if "/" not in entry["path"]}
+    items = []
+    for path in sorted(set(roots) | set(children)):
+        entry = roots.get(path)
+        shown = _subtopics(children.get(path, []))
+        if entry is None:
+            items.append(f'<li>{_topic_link(path)}{shown}</li>')
+            continue
+        description = f'<p>{_e(entry["description"])}</p>' if entry["description"] else ""
+        activity = f' · last {_time(entry["last_activity_at"])}' if entry["last_activity_at"] else ""
+        counted = f'{entry["threads"]} thread{"" if entry["threads"] == 1 else "s"}'
+        items.append(f'<li><a href="/t/{_e(path)}">{_e(entry["title"])}</a>{description}'
+                     f'<div class="meta">{_e(path)} · {counted}{activity}</div>{shown}</li>')
+    return "<h2>Topics</h2><ul>" + "".join(items) + "</ul>" if items else ""
+
+
 def _index(config: Config, conn: Any, topic: str | None = None, page: int = 1) -> str:
     viewer = config.dashboard.viewer_role
     listed, scope, _ = _visible(config, conn, topic)
     needs = f"Needs {_e(_attention_label(config))}"
     heading = (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}. '
-               f'<a href="/needs">{needs}</a></p>')
+               f'<a href="/needs">{needs}</a></p>' + _directory(config, conn))
     if topic is not None:
         heading = (f'<p><a href="/">All conversations</a> · {_e(" › ".join(topic.split("/")))}</p>'
                    f'<h1>{_e(topic)}</h1><p class="muted">Read-only. Showing {_e(scope)} under this topic, as '
-                   f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">{needs} here</a></p>')
+                   f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">{needs} here</a></p>'
+                   + _topic_header(config, conn, topic))
     if not listed:
         return heading + f'<ul><li class=muted>{"None yet." if topic is None else "None under this topic."}</li></ul>'
     shown = _slice(listed, page, MAX_LISTED)
@@ -449,10 +512,10 @@ def _job(job: dict[str, Any]) -> str:
 
 
 def _by_topic(listed: list[dict[str, Any]]) -> list[tuple[str | None, list[dict[str, Any]]]]:
-    """The conversations under each topic, topics in order, and the untagged in a group of their own last.
+    """The conversations under each topic, topics in order, and the untopiced in a group of their own last.
 
-    Untagged conversations are shown rather than dropped: a view that hid them would make a topic a
-    requirement instead of a label.
+    A thread has to be filed in a topic that exists, but a thread may still have none at all, and those
+    are shown rather than dropped: the index is the one place every conversation is reachable from.
     """
     groups: dict[str | None, list[dict[str, Any]]] = {}
     for item in listed:
@@ -462,9 +525,13 @@ def _by_topic(listed: list[dict[str, Any]]) -> list[tuple[str | None, list[dict[
 
 
 def _listing(item: dict[str, Any]) -> str:
+    # A thread a guest started says so, with the alias and its code, exactly as a guest's posts are
+    # attributed. A role's thread carries no alias, so it reads as it always did.
+    alias = (f' · started by {_e(item["created_by_alias"])} ({_e(item["created_by_alias_code"])})'
+             if item.get("created_by_alias") else "")
     return (f'<li><a href="/c/{_e(item["conversation_id"])}">{_e(item["title"])}</a>'
             f'<div class="meta">{_e(", ".join(item["participants"]))} · started '
-            f'{_time(item["created_at"])}</div></li>')
+            f'{_time(item["created_at"])}{alias}</div></li>')
 
 
 def _after_seq(value: str) -> int | None:

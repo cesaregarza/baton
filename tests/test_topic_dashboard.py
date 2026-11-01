@@ -130,3 +130,31 @@ def test_a_topic_with_no_threads_still_has_a_page(host):
     answer = get(config, "/t/baton/development")
     assert answer.status == 200
     assert "None under this topic." in text(answer)
+
+def test_the_directory_offers_a_restricted_viewer_only_what_it_can_see_into(tmp_path):
+    """A topic whose only thread is hidden from the viewer is not named on the index either.
+
+    The page has always shown what the viewer may see, and a directory built from the topics table
+    could have widened that by naming a topic the viewer has no thread in. A board-reading viewer is
+    different: it can see every thread anyway, so an empty topic is safe to list for it and is what
+    makes the directory usable.
+    """
+    config, conn = seeded(tmp_path, view_all=False)
+    try:
+        topics.create(conn, config, actor="orchestrator", path="hidden", members=MINE)
+        conversations.create(conn, config, actor="orchestrator", title="Not mine",
+                             participants=["orchestrator", "assistant"], topic="hidden")
+        conversations.create(conn, config, actor="orchestrator", title="Mine", participants=MINE,
+                             topic="baton")
+        page = text(get(config, "/"))
+        assert "/t/baton" in page
+        assert "/t/hidden" not in page, "a topic the viewer sees no thread in is not offered"
+        assert "Not mine" not in page
+    finally:
+        conn.close()
+
+    opened, board = seeded(tmp_path / "board", view_all=True)
+    try:
+        assert "/t/baton/development" in text(get(opened, "/")), "a board reader sees an empty topic"
+    finally:
+        board.close()
