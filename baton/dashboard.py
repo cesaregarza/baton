@@ -70,41 +70,104 @@ MAX_NEEDS_JOBS = 50
 # How many conversations a list page shows, newest first; it says so when there are more.
 MAX_LISTED = conversations.MAX_LISTED
 STYLE = """\
-body { font: 15px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 52rem; padding: 1rem; color: #1d1d1f; }
-a { color: #0b57d0; }
-ul { list-style: none; padding: 0; }
-li { border-bottom: 1px solid #e3e3e3; padding: .6rem 0; }
-.meta, .notice, .source, .muted { color: #5f6368; font-size: .85rem; }
-.role { font-weight: 600; color: #1d1d1f; }
-h2 { font-size: 1rem; margin: 1.2rem 0 .2rem; color: #5f6368; font-weight: 600; }
-.badge { border: 1px solid #c4c7c5; border-radius: .6rem; padding: 0 .4rem; margin-left: .3rem; }
-.text { white-space: pre-wrap; margin: .3rem 0; }
-.relayed { border-left: 3px solid #c4c7c5; margin: .4rem 0 .4rem .6rem; padding-left: .6rem; }
-.relayed-text { white-space: pre-wrap; margin: .2rem 0; }
-.notice { font-style: italic; }
-.replies { margin: .4rem 0 0 1.2rem; border-left: 2px solid #e3e3e3; padding-left: .6rem; }
-.reply-to { color: #5f6368; font-size: .85rem; margin: .2rem 0; }
-h2 a { color: inherit; }
-h1, a, li, .text, .relayed-text, .meta, .reply-to { overflow-wrap: anywhere; }
+/* tokens: one palette, so the dark one only restates the values */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff; --surface: #f4f6f8; --text: #1b1f24; --muted: #565e68;
+  --link: #0b57d0; --link-hover: #083f9c; --link-line: #8fb0ea; --focus: #0b57d0;
+  --line: #e1e5ea; --line-strong: #c3c9d1;
+  --accent-bg: #e6eefc; --accent-text: #0a4aa6; --accent-line: #a9c2ee; --target-bg: #e6eefc;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b; --surface: #1d2127; --text: #e7e9ec; --muted: #a4acb6;
+    --link: #8ab4f8; --link-hover: #b9d2fc; --link-line: #4d6a9c; --focus: #8ab4f8;
+    --line: #2b3038; --line-strong: #434a54;
+    --accent-bg: #1d2e4a; --accent-text: #b4cdfa; --accent-line: #3f5a8a; --target-bg: #1d2e4a;
+  }
+}
+/* base: 16px text, a 42rem column, and a type scale of 13, 14, 16, 18, 24 and 28px */
+*, ::before, ::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { font: 1rem/1.55 var(--font); margin: 0 auto; max-width: 42rem; padding: 1rem 1rem 3rem;
+       background: var(--bg); color: var(--text); }
+h1, h2, h3 { line-height: 1.25; text-wrap: balance; }
+h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -.01em; margin: .25rem 0 .5rem; }
+h2 { font-size: 1.125rem; font-weight: 600; margin: 2rem 0 .25rem; }
+h3 { font-size: 1rem; font-weight: 600; margin: 1.25rem 0 .25rem; }
+p { margin: .6rem 0; }
+a { color: var(--link); text-decoration: underline; text-decoration-color: var(--link-line);
+    text-decoration-thickness: 1px; text-underline-offset: .2em; }
+a:hover { color: var(--link-hover); text-decoration-color: currentColor; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+h2 a { color: inherit; text-decoration-color: var(--line-strong); }
+h1, h2, h3, a, li, p, summary, .text, .relayed-text, .meta, .reply-to { overflow-wrap: anywhere; }
+/* lists and messages */
+ul { list-style: none; margin: 0; padding: 0; }
+li { border-bottom: 1px solid var(--line); padding: .85rem 0; }
+li:last-child, li li, li.muted { border-bottom: 0; }
 li { min-width: 0; }
-.id { font-family: ui-monospace, monospace; }
-details { margin: 1.2rem 0 .2rem; }
-summary { cursor: pointer; color: #5f6368; font-weight: 600; }
-.pager { margin: .6rem 0; }
+.meta, .notice, .source, .muted, .reply-to { color: var(--muted); }
+.meta, .notice, .source, .reply-to { font-size: .8125rem; }
+.muted { font-size: .875rem; }
+.role { font-weight: 600; color: var(--text); }
+.badge { display: inline-block; border: 1px solid var(--line-strong); border-radius: 999px; padding: 0 .45rem;
+         margin-left: .35rem; font-size: .75rem; line-height: 1.5; color: var(--muted); vertical-align: 1px; }
+.badge.human { background: var(--accent-bg); border-color: var(--accent-line); color: var(--accent-text); }
+.text { white-space: pre-wrap; margin: .25rem 0 .1rem; }
+.relayed { border-left: 3px solid var(--line-strong); background: var(--surface); border-radius: 0 .375rem .375rem 0;
+           margin: .6rem 0; padding: .5rem .8rem; }
+.relayed .source { margin: 0 0 .2rem; }
+.relayed-text { white-space: pre-wrap; margin: 0; }
+.notice { font-style: italic; }
+p.notice { background: var(--surface); border-radius: .375rem; padding: .5rem .8rem; margin: .75rem 0; }
+.replies { margin: .6rem 0 0 .25rem; border-left: 2px solid var(--line); padding-left: .85rem; }
+.replies > li { padding: .6rem 0 0; }
+.reply-to { margin: .1rem 0; }
+.message { scroll-margin-top: 1rem; }
+.message:target > .meta { background: var(--target-bg);
+                          box-shadow: -.5rem 0 0 var(--target-bg), .5rem 0 0 var(--target-bg); }
+.id { font-family: var(--mono); font-size: .8125rem; box-sizing: content-box; background: var(--surface);
+      border-radius: .25rem; padding: 0 .3rem; }
+details { margin: 1.75rem 0 .5rem; border: 1px solid var(--line); border-radius: .5rem; padding: 0 1rem; }
+summary { cursor: pointer; padding: .75rem 0; font-weight: 600; }
+details[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: .25rem; }
+.pager { margin: .5rem 0; }
 .gap-bar { display: none; }
 .gap-dismiss { position: fixed; bottom: 0; left: 0; width: 1px; height: 1px; margin: 0; opacity: 0;
   visibility: hidden; }
 body:has(li:target) .gap-dismiss:not(:checked) { visibility: visible; }
 body:has(li:target) .gap-dismiss:not(:checked) + .gap-bar { display: block; position: fixed; bottom: 0; left: 0;
-  right: 0; margin: 0; padding: .5rem 1rem; background: #fff; border-top: 1px solid #c4c7c5; color: #5f6368;
-  font-size: .85rem; text-align: center; }
+  right: 0; margin: 0; padding: .5rem 1rem; background: var(--bg); border-top: 1px solid var(--line-strong);
+  color: var(--muted); font-size: .85rem; text-align: center; }
 body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 4rem; }
-.gap-bar label { margin-left: .6rem; color: #0b57d0; text-decoration: underline; cursor: pointer; }
-.gap-dismiss:focus-visible + .gap-bar label { outline: 2px solid #0b57d0; outline-offset: 2px; }
+.gap-bar label { margin-left: .6rem; color: var(--link); text-decoration: underline; cursor: pointer; }
+.gap-dismiss:focus-visible + .gap-bar label { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* primary links are at least 44px tall: an item that opens with its link lets the link carry the item's top space */
+h2 a { display: inline-block; padding: .7rem 0; }
+h2:has(> a) { margin: 1rem 0 0; }
+li > a:first-child, .meta > a:first-child { display: flex; align-items: flex-end; min-height: 2.75rem;
+                                           padding-bottom: .15rem; font-size: 1rem; font-weight: 600;
+                                           text-decoration: none; }
+li > a:first-child:hover, .meta > a:first-child:hover { text-decoration: underline; }
+li:has(> a:first-child), li:has(> .meta > a:first-child) { padding-top: 0; }
+.sep { display: none; }
+.pager a, .crumbs a { display: inline-block; padding: .7rem .15rem; margin-left: -.15rem; }
+.crumbs { margin: 0; font-size: .875rem; }
+.lead { font-size: 1.125rem; margin: 2.5rem 0; }
+.lead a { display: inline-block; padding: .5rem 0; }
+/* narrow screens shorten ids and tighten threads; wide ones get a larger title and deeper threads */
 @media (max-width: 480px) {
   .id { display: inline-block; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         vertical-align: bottom; }
-  body { padding: .6rem; }
+  .replies { margin-left: 0; padding-left: .6rem; }
+}
+@media (min-width: 40rem) {
+  body { padding: 1.5rem 1.5rem 4rem; }
+  h1 { font-size: 1.75rem; }
+  .replies { margin-left: .5rem; padding-left: 1rem; }
 }
 """
 
@@ -372,7 +435,8 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
         job_block = (f'<h2 id="jobs">Jobs waiting on {_e(you)}</h2><ul>' + ("".join(_job(job) for job in waiting)
                      or "<li class=muted>None.</li>") + "</ul>" + job_pager)
     needs = f"Needs {_e(you)}"
-    crumbs = '<p><a href="/">All conversations</a>' + (f' · <a href="/needs">{needs}</a>' if topic else "") + "</p>"
+    crumbs = ('<p class="crumbs"><a href="/">All conversations</a>'
+              + (f' · <a href="/needs">{needs}</a>' if topic else "") + "</p>")
     if projected:
         head = (f'<h1>{needs}{where}</h1><p class="muted">{needs}, read-only view, as visible to {_e(viewer)}. '
                 f'{count}{other_count}{job_count}.</p>'
@@ -449,7 +513,8 @@ def _signal(subject: str, you: str, conversation: dict[str, Any], item: dict[str
         labels.append(f"{you} replied")
     why = " · ".join(labels)
     return (f'<li><div class="meta"><a href="{_e(message_path(conversation["conversation_id"], seq))}">'
-            f'{_e(conversation["title"])}</a> · <span class="role">{_e(messages.author_label(item))}</span> · '
+            f'{_e(conversation["title"])}</a><span class="sep"> · </span>'
+            f'<span class="role">{_e(messages.author_label(item))}</span> · '
             f'{_time(item["at"])} · #{seq} · {_e(why)}</div><p class="text">{_e(item["text"])}</p></li>')
 
 
@@ -507,11 +572,13 @@ def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -
                 parents[seq] = found[0]
     items = _thread(page["messages"], conversation_id, parents)
     missing = _gap_summary(page["retention_gaps"])
-    more = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
+    more = (f'<p class="pager"><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
             if later else "")
-    earlier = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={max(0, after - messages.MAX_PAGE_MESSAGES)}">'
-               'Earlier messages</a></p>' if after > 0 else "")
-    return _page(200, title, f'<p><a href="/">All conversations</a></p><h1>{_e(title)}</h1>{earlier}{missing}'
+    earlier = (f'<p class="pager"><a href="/c/{_e(conversation_id)}'
+               f'?after_seq={max(0, after - messages.MAX_PAGE_MESSAGES)}">Earlier messages</a></p>'
+               if after > 0 else "")
+    return _page(200, title, '<p class="crumbs"><a href="/">All conversations</a></p>'
+                             f'<h1>{_e(title)}</h1>{earlier}{missing}'
                              f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{more}')
 
 
@@ -604,7 +671,7 @@ def _page(status: int, title: str, body: str) -> Response:
 
 
 def _not_found() -> Response:
-    return _page(404, "Not found", '<p>Nothing here. <a href="/">All conversations</a></p>')
+    return _page(404, "Not found", '<p class="lead">Nothing here. <a href="/">All conversations</a></p>')
 
 
 def _e(value: Any) -> str:
