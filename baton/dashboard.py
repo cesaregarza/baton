@@ -70,31 +70,73 @@ MAX_NEEDS_JOBS = 50
 # How many conversations a list page shows, newest first; it says so when there are more.
 MAX_LISTED = conversations.MAX_LISTED
 STYLE = """\
-body { font: 15px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 52rem; padding: 1rem; color: #1d1d1f; }
-a { color: #0b57d0; }
-ul { list-style: none; padding: 0; }
-li { border-bottom: 1px solid #e3e3e3; padding: .6rem 0; }
-.meta, .notice, .source, .muted { color: #5f6368; font-size: .85rem; }
-.role { font-weight: 600; color: #1d1d1f; }
-h2 { font-size: 1rem; margin: 1.2rem 0 .2rem; color: #5f6368; font-weight: 600; }
-.badge { border: 1px solid #c4c7c5; border-radius: .6rem; padding: 0 .4rem; margin-left: .3rem; }
-.text { white-space: pre-wrap; margin: .3rem 0; }
-.relayed { border-left: 3px solid #c4c7c5; margin: .4rem 0 .4rem .6rem; padding-left: .6rem; }
-.relayed-text { white-space: pre-wrap; margin: .2rem 0; }
-.notice { font-style: italic; }
-.replies { margin: .4rem 0 0 1.2rem; border-left: 2px solid #e3e3e3; padding-left: .6rem; }
-.reply-to { color: #5f6368; font-size: .85rem; margin: .2rem 0; }
-h2 a { color: inherit; }
-h1, a, li, .text, .relayed-text, .meta, .reply-to { overflow-wrap: anywhere; }
+/* tokens: one palette, so the dark one only restates the values */
+:root {
+  color-scheme: light;
+  --bg: #ffffff; --surface: #f4f6f8; --text: #1b1f24; --muted: #565e68;
+  --link: #0b57d0; --link-hover: #083f9c; --link-line: #8fb0ea; --focus: #0b57d0;
+  --line: #e1e5ea; --line-strong: #c3c9d1;
+  --accent-bg: #e6eefc; --accent-text: #0a4aa6; --accent-line: #a9c2ee; --target-bg: #e6eefc;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+/* base: 16px text, a 42rem column, and a type scale of 13, 14, 16, 18, 24 and 28px */
+*, ::before, ::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { font: 1rem/1.55 var(--font); margin: 0 auto; max-width: 42rem; padding: 1rem 1rem 3rem;
+       background: var(--bg); color: var(--text); }
+h1, h2, h3 { line-height: 1.25; text-wrap: balance; }
+h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -.01em; margin: .25rem 0 .5rem; }
+h2 { font-size: 1.125rem; font-weight: 600; margin: 2rem 0 .25rem; }
+h3 { font-size: 1rem; font-weight: 600; margin: 1.25rem 0 .25rem; }
+p { margin: .6rem 0; }
+a { color: var(--link); text-decoration: underline; text-decoration-color: var(--link-line);
+    text-decoration-thickness: 1px; text-underline-offset: .2em; }
+a:hover { color: var(--link-hover); text-decoration-color: currentColor; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+h2 a { color: inherit; text-decoration-color: var(--line-strong); }
+h1, h2, h3, a, li, p, summary, .text, .relayed-text, .meta, .reply-to { overflow-wrap: anywhere; }
+/* lists and messages */
+ul { list-style: none; margin: 0; padding: 0; }
+li { border-bottom: 1px solid var(--line); padding: .85rem 0; }
+li:last-child, li li, li.muted { border-bottom: 0; }
 li { min-width: 0; }
-.id { font-family: ui-monospace, monospace; }
-details { margin: 1.2rem 0 .2rem; }
-summary { cursor: pointer; color: #5f6368; font-weight: 600; }
-.pager { margin: .6rem 0; }
+.meta, .notice, .source, .muted, .reply-to { color: var(--muted); }
+.meta, .notice, .source, .reply-to { font-size: .8125rem; }
+.muted { font-size: .875rem; }
+.role { font-weight: 600; color: var(--text); }
+.badge { display: inline-block; border: 1px solid var(--line-strong); border-radius: 999px; padding: 0 .45rem;
+         margin-left: .35rem; font-size: .75rem; line-height: 1.5; color: var(--muted); vertical-align: 1px; }
+.badge.human { background: var(--accent-bg); border-color: var(--accent-line); color: var(--accent-text); }
+.text { white-space: pre-wrap; margin: .25rem 0 .1rem; }
+.relayed { border-left: 3px solid var(--line-strong); background: var(--surface); border-radius: 0 .375rem .375rem 0;
+           margin: .6rem 0; padding: .5rem .8rem; }
+.relayed .source { margin: 0 0 .2rem; }
+.relayed-text { white-space: pre-wrap; margin: 0; }
+.notice { font-style: italic; }
+p.notice { background: var(--surface); border-radius: .375rem; padding: .5rem .8rem; margin: .75rem 0; }
+.replies { margin: .6rem 0 0 .25rem; border-left: 2px solid var(--line); padding-left: .85rem; }
+.replies > li { padding: .6rem 0 0; }
+.reply-to { margin: .1rem 0; }
+.message { scroll-margin-top: 1rem; }
+.message:target > .meta { background: var(--target-bg);
+                          box-shadow: -.5rem 0 0 var(--target-bg), .5rem 0 0 var(--target-bg); }
+.id { font-family: var(--mono); font-size: .8125rem; box-sizing: content-box; background: var(--surface);
+      border-radius: .25rem; padding: 0 .3rem; }
+details { margin: 1.75rem 0 .5rem; border: 1px solid var(--line); border-radius: .5rem; padding: 0 1rem; }
+summary { cursor: pointer; padding: .75rem 0; font-weight: 600; }
+details[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: .25rem; }
+.pager { margin: .5rem 0; }
+/* narrow screens shorten ids and tighten threads; wide ones get a larger title and deeper threads */
 @media (max-width: 480px) {
   .id { display: inline-block; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         vertical-align: bottom; }
-  body { padding: .6rem; }
+  .replies { margin-left: 0; padding-left: .6rem; }
+}
+@media (min-width: 40rem) {
+  body { padding: 1.5rem 1.5rem 4rem; }
+  h1 { font-size: 1.75rem; }
+  .replies { margin-left: .5rem; padding-left: 1rem; }
 }
 """
 
