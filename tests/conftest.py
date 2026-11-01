@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import sqlite3
 import textwrap
@@ -52,13 +53,13 @@ class Host:
 
 
 def make_config(tmp_path: Path, *, port: int = 8765, oauth: bool = False, extra: str = "",
-                data_dir: Path | None = None) -> Host:
+                data_dir: Path | None = None, oauth_roles: tuple[str, ...] = ("planner",)) -> Host:
     tokens = {role: new_token() for role in ("planner", "worker")}
     oauth_table = textwrap.dedent(f"""
         [auth.oauth]
         enabled = true
         passphrase_hash = "{hash_passphrase(PASSPHRASE)}"
-        roles = ["planner"]
+        roles = {json.dumps(list(oauth_roles))}
         redirect_uris = ["{REDIRECT}"]
     """) if oauth else ""
     entries = "".join(f'[[auth.tokens]]\nname = "{role}-token"\nrole = "{role}"\nsha256 = "{digest}"\n'

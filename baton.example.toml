@@ -58,6 +58,7 @@ description = "Picks up jobs and reports back"
 # Binding and claim rate limits are positive whole numbers; active-binding capacity refuses without eviction.
 # [aliases]
 # binding_ttl_seconds = 86400                  # 24 hours; accepts 1–86400, never changes permanent alias ownership
+# mapped_binding_ttl_seconds = 604800          # an alias enrolled as a role: 7 days; accepts 1–604800
 # max_bindings_per_alias = 20                  # at most 1000 live proofs
 # max_posts_per_alias_per_hour = 30             # at most 10000 admitted proof-bearing calls, including retries
 # max_posts_per_credential_per_hour = 300       # at most 10000; existing role/conversation limits also apply
