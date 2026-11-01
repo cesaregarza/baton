@@ -147,8 +147,10 @@ _SCHEMA = (
         at REAL NOT NULL
     )""",
     # An owner's single-use arm: `enrol` names a role that may enrol itself, `rekey` an alias whose next claim
-    # with a new passphrase replaces its verifier. Each expires on its own.
+    # with a new passphrase replaces its verifier. Each expires on its own; a new arm for a target replaces the
+    # old one under a new `id`, so a claim spends only the arm it checked.
     """CREATE TABLE IF NOT EXISTS alias_arms (
+        id TEXT NOT NULL UNIQUE,
         kind TEXT NOT NULL CHECK (kind IN ('enrol', 'rekey')),
         target TEXT NOT NULL,
         expires_at REAL NOT NULL,

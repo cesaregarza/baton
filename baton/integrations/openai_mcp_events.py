@@ -583,8 +583,9 @@ class McpEvents:
             if outcome in FINAL_OUTCOMES:
                 entry = state["outcomes"].setdefault(wake_id, {"at": time.time(), "destinations": {}})
                 entry["destinations"][sub["id"]] = outcome
-            state["receipts"].append({"at": time.time(), "wake_id": wake_id, "subscription": sub["id"],
-                                      "owner": _shown_owner(sub), "outcome": outcome})
+            state["receipts"] = _recent([*state["receipts"], {
+                "at": time.time(), "wake_id": wake_id, "subscription": sub["id"], "owner": _shown_owner(sub),
+                "outcome": outcome}])
 
     def _deactivate(self, sub_id: str) -> None:
         with self._state() as state:
@@ -618,7 +619,7 @@ class McpEvents:
                 state["subscriptions"] = {key: sub for key, sub in state["subscriptions"].items() if _unexpired(sub)}
                 for sub in state["subscriptions"].values():
                     sub["previous_secrets"] = [p for p in sub.get("previous_secrets", []) if p["until"] > now]
-                state["receipts"] = [r for r in state["receipts"] if r["at"] > now - RECEIPT_SECONDS][-MAX_RECEIPTS:]
+                state["receipts"] = _recent(state["receipts"])
                 if state["outcomes"]:
                     # A wake's outcomes and occurrence time live exactly as long as the core wake: they are
                     # dropped once the core reports it delivered, failed or superseded, and not before.
@@ -658,6 +659,12 @@ def _owner_of(sub: dict[str, Any]) -> str:
     return sub.get("owner", sub["role"])
 
 
+def _recent(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The receipts inside the window, newest MAX_RECEIPTS of them; applied on every write and on display."""
+    since = time.time() - RECEIPT_SECONDS
+    return [receipt for receipt in receipts if receipt["at"] > since][-MAX_RECEIPTS:]
+
+
 def _shown_owner(sub: dict[str, Any]) -> str:
     return _owner_of(sub) if sub.get("grant") else f"role:{sub['role']}"
 
@@ -670,7 +677,7 @@ def status(config: Config) -> dict[str, Any]:
     state = _shape(json.loads(found[1]) if found else {})
     return {"subscriptions": [{"id": sub["id"], "owner": _shown_owner(sub), "expires_at": sub["expires_at"],
                                "active": sub["active"]} for sub in state["subscriptions"].values()],
-            "receipts": state["receipts"]}
+            "receipts": _recent(state["receipts"])}
 
 
 async def _advertise_events(ctx: Any, call_next: Any) -> Any:

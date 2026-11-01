@@ -585,6 +585,7 @@ class Guard:
                proof: object = None) -> None:
         """One line: the credential, the role the call ran as, any alias by id and code, and the ids it named."""
         role, identity = call["role"], call["identity"]
+        proof = kwargs.get("token") if proof is None else proof  # a refusal before Guard sees the raw arguments
         ids = ({key: kwargs[key] for key in AUDITED_IDS if kwargs.get(key) is not None}
                if name != "claim_alias" and not (name == "send_message" and role == "guest") else {})
         if isinstance(proof, str) and proof:
