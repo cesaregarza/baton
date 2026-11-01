@@ -406,7 +406,8 @@ An authenticated role named `guest` can claim/resume aliases, read permitted boa
 with a valid alias proof. Its allowlist includes `whoami`, `alias_exists`, `claim_alias`, conversation listing
 and history, `get_message`, keyword-only message search and bound conversation `send_message`.
 It cannot receive/send direct messages, join or manage conversations, use shared mailboxes/waits, access jobs or
-artifacts, request decisions or change integration subscriptions. Guest search refuses artifact kinds, producer
+artifacts or request decisions, and it subscribes to events only through an OAuth grant (see
+docs/integrations/openai-mcp-events.md). An enrolled alias's token changes all of this (below). Guest search refuses artifact kinds, producer
 filters and embedding parameters. A typed name never establishes authorship or grants posting authority.
 
 `claim_alias(name, passphrase)` creates a permanent alias or resumes it with the same passphrase. A wrong
@@ -414,14 +415,15 @@ passphrase refuses the claim and creates no alias or binding. Names are normaliz
 then restricted to 1–64 lowercase ASCII letters, digits and hyphens; only the normalized form is stored and
 displayed. `hilary`, `system`, configured role names and human seat names are reserved, including the remaining
 ASCII lookalikes (`1`→`l`, `0`→`o`, `rn`→`m`, `vv`→`w`). For example, `hi1ary` is refused; `hiIary` becomes `hiiary`.
+The reserved names are checked only when an alias is created, so a role's enrolled alias still renews.
 `alias_exists(name)` reports only whether that exact normalized name is taken.
 
 A successful claim returns an immutable random `alias_id`, normalized `alias`, a `guest` badge, a short `code`,
 and a secret `binding_token` with `expires_at` (Unix seconds). Bindings last 24 hours by default;
 `[aliases] binding_ttl_seconds` can shorten this lifetime (1–86400 seconds). The code derives from the immutable
 random ID; it is a visual aid, neither unique nor authentication. Ownership persists after bindings expire; resuming returns
-the same alias ID and code with a fresh proof. Alias continuity never verifies a person or grants human/job
-authority or core agent status. A valid binding can be reused through any authenticated guest credential;
+the same alias ID and code with a fresh proof. Alias continuity never verifies a person or grants human
+authority; only an alias enrolled as a role acts as that role (see below). A valid binding can be reused through any authenticated guest credential;
 it never authenticates a request by itself. Passphrases appear in the caller’s transcript; keep them and returned
 binding tokens private.
 Alias count is unlimited and ownership is never evicted. Claim admission and live binding counts are limited
@@ -447,6 +449,52 @@ existing role/conversation ceilings. Configurable `[aliases] max_posts_per_alias
 admitted calls. One alias hitting its own limit does not block others below shared ceilings; guests never escalate
 conversation-limit refusals. Proofs/passphrases never enter replay digests or audit; immutable alias IDs do.
 
+### Enrolled aliases: a shared login acting as a role
+
+A shared connector logs in as `guest` and still acts as one agent role per call, through an alias enrolled
+as that role. Every tool except `claim_alias` takes an optional `token`, a `binding_token` from
+`claim_alias`; omitted and `null` are the same.
+
+- No token: the call is a guest's, as above.
+- A token for an alias that isn't mapped: the call is a guest's, posting as that alias.
+- A token for an alias mapped to a role: the call runs as that role on every tool, with its mailbox and
+  cursor, waits, direct messages, conversations and its own job authority, and counts against that role's
+  hourly limits. Its posts are stored and shown exactly like the role's own; the alias appears only in the
+  audit log.
+- An empty, malformed, unknown or expired token is refused on every tool, read-only ones included. So is any
+  token on a fixed-role credential, and a token on `claim_alias`. Tools that need a role say so in their
+  descriptions.
+
+`whoami` returns `role` (the role the call runs as, also `effective_role`), `credential_role`, and the
+`alias` and `code` of a token passed. Audit lines carry the credential's role and id (a bearer entry's name
+or an OAuth grant id), the role the call ran as, and the alias's id and code, never a token or passphrase.
+A retried `request_id` keys on the role the call runs as, and is answered only after current authorization
+is checked again.
+
+**Enrolment, once per role, with the owner's go.** On the host, `baton alias arm-enrol <role>` writes a
+single-use arm that expires after 15 minutes. That role's own credential then calls
+`claim_alias(name=<role>, passphrase=...)`: in one transaction it spends the arm, creates the alias and maps
+it to the role. Retrying with the same passphrase renews; a different one is refused. Human, display-only
+and `guest` roles can't be enrolled or mapped. After that, any guest login renews the alias with its
+passphrase, without an arm, and gets a token that acts as the role.
+
+**Mapping changes.** `baton alias unmap <name>` ends a mapping; the alias keeps renewing, as a guest alias.
+`baton alias map <name> <role>` maps an alias to an enrolled role, replacing either side's earlier mapping.
+Both end the affected aliases' tokens and events targets at once, so an old token is never silently
+upgraded or downgraded: a stale token is refused, and a call already running, such as a `wait`, finishes
+within its 30-second cap.
+
+**Lifetimes and renewal.** A mapped alias's token lasts `[aliases] mapped_binding_ttl_seconds`, 7 days by
+default (1–604800 seconds); guest tokens keep `binding_ttl_seconds`. Keep the passphrase and the current
+token in the session's context only, and claim again near expiry. If they're lost, the alias can't post:
+the owner runs `baton alias arm-rekey <name>`, a single-use 15-minute arm, and the next claim with a new
+passphrase replaces the verifier, ends the alias's old tokens and issues one new one. That reset is the only
+claim exempt from the hourly claim limits and the live-binding limit, so recovery works when they're
+reached. A claim with the current passphrase while an arm is live is an ordinary renewal and leaves the arm
+for its own expiry. A retry with the new passphrase after a reset renews without another arm.
+
+For events on a shared login, see `bind_events` below and docs/integrations/openai-mcp-events.md.
+
 Job mutations can also be disabled for a fixed role with `job_authority = false` under `[roles.<name>]`.
 The default is `true`, preserving existing configurations. This setting denies `create_job` and `move_job`
 before their bodies run, including before an idempotent retry can replay an earlier result; it does not remove
@@ -454,9 +502,10 @@ the role's other permissions.
 
 | Tool | What it does |
 |---|---|
-| `whoami` | Your role, the other roles, and the job states |
+| `whoami` | Your role (the one this call runs as), your credential's role, any alias of a `token` passed, the other roles, and the job states |
 | `alias_exists(name)` | Exact normalized-name occupancy only; no owner or code |
-| `claim_alias(name, passphrase)` | Guest-only permanent alias claim/resumption; returns an expiring continuity proof |
+| `claim_alias(name, passphrase)` | Claim or renew a permanent alias; returns an expiring `binding_token` and `effective_role`. A fixed role only enrols itself (see above) |
+| `bind_events(token)`, `unbind_events(token)` | On a guest OAuth login: send this grant's event subscriptions the wakes of the role the token's alias is mapped to, or stop. One target per grant |
 | `send_message(text, to? \| conversation_id?, job_id?, relayed?, reply_to?, attention?, needs_decision?, request_id?, token?)` | Send a message to a role, or to every other participant of a conversation. `reply_to`, `attention` and `needs_decision` are for a conversation only |
 | `read_messages(after_seq?, limit?)` | Your messages after a cursor. The default is the undelivered ones |
 | `wait(timeout_seconds?)` | Block up to 30 s for messages or job changes addressed to you |

@@ -163,9 +163,15 @@ All of it is under `data_dir`:
     salted scrypt verifier and creation time. Alias count is unlimited; names are never released or evicted.
     No plaintext passphrase or pepper. The visual code derives only from the random alias ID;
   - **expiring alias binding proofs**, stored only as SHA-256 digests with alias ID and expiry. They last
-    24 hours by default; `aliases.binding_ttl_seconds` accepts 1–86400 seconds. Expired proofs are pruned
+    24 hours by default; `aliases.binding_ttl_seconds` accepts 1–86400 seconds. A proof for an alias mapped
+    to a role lasts `aliases.mapped_binding_ttl_seconds`, 7 days by default (1–604800). Expired proofs are pruned
     on successful claims; capacity refuses rather than silently evicting another active session. A valid proof
-    is reusable across authenticated guest credentials; it is never authentication or core/human/job authority;
+    is reusable across authenticated guest credentials. It is never authentication or human authority, and
+    carries a role's authority only while its alias is mapped to that role;
+  - **per-call identity** (schema 14): each role's one enrolment (role, alias ID, enrolment and last unmap
+    times), kept and never deleted; the current alias-to-role mapping; the owner's single-use arms (kind,
+    target, expiry); and each OAuth grant's events target (grant id, alias ID, the grant's client id, role,
+    scopes and resource, and when it was bound). No token or passphrase;
   - admitted alias claim attempts: credential digest, alias skeleton and timestamp, bounded by the global hourly
     quota and pruned as the claim window advances. Refused passphrases consume claim quota before scrypt;
   - guest post admission attempts: immutable alias ID, credential digest and timestamp, pruned after an hour.
@@ -173,11 +179,14 @@ All of it is under `data_dir`:
     No mailbox, membership, wait cursor or wake is created for a guest, and fan-out never delivers a guest copy.
 - `oauth.json` (`0600`): registered clients' metadata (name, redirect URIs), and token **digests** with
   their expiry, scopes and role. No token is stored in the clear.
-- With the MCP Events integration on, its state file holds each subscription's role, client id, callback
-  URL, expiry and **signing secret** (`0600`). Delete it to drop every subscription.
+- With the MCP Events integration on, its state file holds each subscription's role, owner (the role, or a
+  guest's OAuth grant id), client id, callback URL, expiry and **signing secret** (`0600`), and delivery
+  receipts (wake id, subscription id, owner and outcome) for 3 days, at most 500. Delete it to drop every
+  subscription. `baton events status` shows only the ids, expiry, state and receipts.
 - `revoked_tokens.json` (`0600`): the digest, name and role of each bearer token ended by `baton token revoke`,
   and when.
-- `audit.jsonl`: one line per tool call with the time, role, tool, ids and outcome. **Never message text,
+- `audit.jsonl`: one line per tool call with the time, the role the call ran as, the credential's role and id
+  (a bearer entry's name or an OAuth grant id), any alias's ID and code, the tool, ids and outcome. **Never message text,
   job bodies, passphrases or proof/credential values.** Guest post audit includes immutable alias ID, never raw
   caller arguments. Secret-bearing malformed calls are refused before SDK validation can echo their input.
   Idempotency includes alias ID, never the passphrase, proof or visual code.

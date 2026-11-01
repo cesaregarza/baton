@@ -273,3 +273,61 @@ def admit_post(conn: sqlite3.Connection, config: Config, principal: AccessToken,
             if count >= cap:
                 raise LimitExceeded("guest posting is over its hourly limit", limit)
         conn.execute("INSERT INTO alias_posts VALUES (?, ?, ?)", (identity["alias_id"], credential, now))
+
+
+def bind_events(conn: sqlite3.Connection, authority: dict, identity: dict | None) -> dict:
+    """Route this OAuth grant's event subscriptions to the role its alias is mapped to, checked on every wake."""
+    grant = _grant(authority)
+    if identity is None or identity["effective_role"] == "guest":
+        raise Forbidden("bind_events needs the token of an alias mapped to a role")
+    with transaction(conn):
+        row = conn.execute("SELECT alias_id FROM events_targets WHERE grant_id = ?", (grant,)).fetchone()
+        if row is not None and row["alias_id"] != identity["alias_id"]:
+            raise Forbidden("this grant's events are bound to another alias; unbind them first")
+        if row is None:
+            conn.execute("INSERT INTO events_targets VALUES (?, ?, ?, ?)",
+                         (grant, identity["alias_id"], json.dumps(authority, sort_keys=True), time.time()))
+    return {"bound": True, "alias": identity["alias"], "code": identity["code"], "grant_id": grant}
+
+
+def unbind_events(conn: sqlite3.Connection, authority: dict, identity: dict | None) -> dict:
+    """Drop this grant's events target, with the token of the alias it is bound to. No target is a no-op."""
+    grant = _grant(authority)
+    if identity is None:
+        raise Forbidden("unbind_events needs the token of the alias the grant is bound to")
+    with transaction(conn):
+        row = conn.execute("SELECT alias_id FROM events_targets WHERE grant_id = ?", (grant,)).fetchone()
+        if row is not None and row["alias_id"] != identity["alias_id"]:
+            raise Forbidden("this grant's events are bound to another alias")
+        conn.execute("DELETE FROM events_targets WHERE grant_id = ?", (grant,))
+    return {"unbound": row is not None, "grant_id": grant}
+
+
+def unbind_grant(conn: sqlite3.Connection, grant: str) -> dict:
+    """Owner: drop a grant's events target, for when its alias's token is lost."""
+    with transaction(conn):
+        dropped = conn.execute("DELETE FROM events_targets WHERE grant_id = ?", (grant,)).rowcount
+    return {"unbound": dropped == 1, "grant_id": grant}
+
+
+def mapped_grants(conn: sqlite3.Connection, role: str) -> set[str]:
+    """The grants whose events target is an alias currently mapped to `role`."""
+    return {row[0] for row in conn.execute("SELECT t.grant_id FROM events_targets t JOIN alias_roles r"
+                                           " ON r.alias_id = t.alias_id WHERE r.role = ?", (role,))}
+
+
+def sweep_events_targets(conn: sqlite3.Connection, config: Config) -> int:
+    """Drop targets whose grant has ended. Cleanup only: delivery already checks each grant's liveness."""
+    ended = [row["grant_id"] for row in conn.execute("SELECT grant_id, authority FROM events_targets")
+             if not auth.authority_live(config, json.loads(row["authority"]))]
+    with transaction(conn):
+        for grant in ended:
+            conn.execute("DELETE FROM events_targets WHERE grant_id = ?", (grant,))
+    return len(ended)
+
+
+def _grant(authority: dict) -> str:
+    if authority.get("kind") != "oauth" or not authority.get("grant"):
+        raise Forbidden("events binding needs an OAuth grant; a bearer token has none")
+    return authority["grant"]
+

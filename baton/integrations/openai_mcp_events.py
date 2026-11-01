@@ -15,6 +15,9 @@ Defences, all of them on every request:
 
 * the subscriber's role comes only from its credential, and its subscriptions
   belong to that role: it can't subscribe, unsubscribe or receive for another.
+  A guest subscribes through its OAuth grant, and its subscriptions belong to
+  that grant; they receive the wakes of the role the grant's events target
+  (`bind_events`) is mapped to, checked on every delivery, and nothing before.
   Each delivery needs that same credential to still hold that role;
 * a callback URL must already be canonical (no `.` or `..` segments, encoded periods,
   slashes or backslashes, empty segments, userinfo, query or fragment), and is
@@ -69,7 +72,7 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver import MCPServer
 from mcp.shared.exceptions import MCPError
 
-from baton import auth, datadir, wakes
+from baton import aliases, auth, datadir, wakes
 from baton.config import Config, ConfigError
 from baton.store import connect
 
@@ -87,6 +90,11 @@ RESOLVER_WORKERS = 4
 RESOLVER_QUEUE = 4
 # Answers after which a destination is done with a wake: accepted, gone, or a body it will never take.
 FINAL_STATUSES = (410, 413)
+FINAL_OUTCOMES = ("accepted", "gone", "too_large")
+# Delivery receipts outlive a wake's outcomes, which go once the core finishes the wake, so an owner can match
+# one with what a client saw (`status`). Bounded both ways.
+RECEIPT_SECONDS = 3 * 86400
+MAX_RECEIPTS = 500
 # The fields of a core wake that may appear in an event. Anything else stays out.
 WAKE_FIELDS = ("role", "reason", "first_unread_seq", "job_id", "event_seq")
 
@@ -315,6 +323,7 @@ class McpEvents:
         }, separators=(",", ":")).encode()
         if len(event) > MAX_BODY_BYTES:
             raise ValueError("an event body exceeds the 256 KiB contract limit")
+        self._sweep_targets()
         done = self._outcomes(wake_id)
         for sub_id in [sub["id"] for sub in self._live_subscriptions(role) if sub["id"] not in done]:
             # Rechecked right before each attempt: a subscription removed, deactivated, expired or whose
@@ -327,11 +336,12 @@ class McpEvents:
                                        want_body=False)
             except CallbackError as error:
                 log.warning("wake %s to %s failed: %s", wake_id, sub["id"], error.reason)
+                self._record(wake_id, sub, f"failed: {error.reason}")
                 continue
             if 200 <= status < 300:
-                self._record(wake_id, sub["id"], "accepted")
+                self._record(wake_id, sub, "accepted")
             elif status in FINAL_STATUSES:
-                self._record(wake_id, sub["id"], "gone" if status == 410 else "too_large")
+                self._record(wake_id, sub, "gone" if status == 410 else "too_large")
                 if status == 410:
                     self._deactivate(sub["id"])
                     log.info("subscription %s answered 410 and is now inactive", sub["id"])
@@ -339,6 +349,7 @@ class McpEvents:
                     log.warning("wake %s to %s answered 413; not retried", wake_id, sub["id"])
             else:
                 log.warning("wake %s to %s answered %d", wake_id, sub["id"], status)
+                self._record(wake_id, sub, f"answered {status}")
         done = self._outcomes(wake_id)
         live_ids = {sub["id"] for sub in self._live_subscriptions(role)}
         return all(sub_id in done for sub_id in live_ids) and "accepted" in done.values()
@@ -351,11 +362,11 @@ class McpEvents:
 
     async def _subscribe(self, ctx: Any, params: SubscribeParams) -> dict[str, Any]:
         token, role = _principal()
-        _refuse_guest_mutation(role)
+        owner, grant = _owner(token, role)
         callback, secret = self._validated(params)
-        sub_id = subscription_id(role, callback.url, params.name, {})
+        sub_id = subscription_id(owner, callback.url, params.name, {})
         expires_at = self._expiry(params)
-        self._check_caps(self._read(), role, sub_id)
+        self._check_caps(self._read(), owner, sub_id)
         self._check_rotation(self._read(), sub_id, secret)
         try:
             await anyio.to_thread.run_sync(self._verify, callback.url, secret, sub_id)
@@ -364,7 +375,7 @@ class McpEvents:
                            {"reason": error.reason}) from None
         now = time.time()
         with self._state() as state:
-            self._check_caps(state, role, sub_id)  # both again, under the lock
+            self._check_caps(state, owner, sub_id)  # both again, under the lock
             self._check_rotation(state, sub_id, secret)
             existing = state["subscriptions"].get(sub_id)
             if existing and existing["secret"] != secret:
@@ -376,21 +387,22 @@ class McpEvents:
                             if p["until"] > now and p["secret"] != secret]
                 rotated_at = (existing or {}).get("rotated_at")
             state["subscriptions"][sub_id] = {
-                "id": sub_id, "role": role, "authority": auth.credential_authority(token), "url": callback.url,
+                "id": sub_id, "role": role, "owner": owner, "grant": grant,
+                "authority": auth.credential_authority(token), "url": callback.url,
                 "secret": secret, "previous_secrets": previous, "rotated_at": rotated_at,
                 "expires_at": expires_at, "active": True,
             }
-        log.info("subscription %s active for role %s", sub_id, role)
+        log.info("subscription %s active for %s", sub_id, "a guest grant" if grant else f"role {role}")
         return {"id": sub_id, "refreshBefore": datetime.fromtimestamp(expires_at, UTC).isoformat(),
                 "cursor": None, "truncated": False}
 
     async def _unsubscribe(self, ctx: Any, params: UnsubscribeParams) -> dict[str, Any]:
-        _, role = _principal()
-        _refuse_guest_mutation(role)
-        sub_id = subscription_id(role, str(params.delivery.get("url", "")), params.name, dict(params.arguments))
+        token, role = _principal()
+        owner, _ = _owner(token, role)
+        sub_id = subscription_id(owner, str(params.delivery.get("url", "")), params.name, dict(params.arguments))
         with self._state() as state:
             sub = state["subscriptions"].get(sub_id)
-            if sub is not None and sub["role"] == role:
+            if sub is not None and _owner_of(sub) == owner:
                 del state["subscriptions"][sub_id]
         return {}
 
@@ -441,12 +453,13 @@ class McpEvents:
             raise MCPError(INVALID_PARAMS, "this subscription's secret was rotated less than "
                                            f"{self.settings.rotation_overlap_seconds} seconds ago; retry later")
 
-    def _check_caps(self, state: dict[str, Any], role: str, sub_id: str) -> None:
+    def _check_caps(self, state: dict[str, Any], owner: str, sub_id: str) -> None:
+        """`max_per_role` counts a fixed role's subscriptions, or a guest grant's."""
         live = [sub for sub in state["subscriptions"].values() if _unexpired(sub)]
         if sub_id in {sub["id"] for sub in live}:
             return  # a refresh of an existing subscription
-        if sum(sub["role"] == role for sub in live) >= self.settings.max_per_role:
-            raise MCPError(INVALID_PARAMS, f"role {role} already has {self.settings.max_per_role} subscriptions")
+        if sum(_owner_of(sub) == owner for sub in live) >= self.settings.max_per_role:
+            raise MCPError(INVALID_PARAMS, f"this subscriber already has {self.settings.max_per_role} subscriptions")
         if len(live) >= self.settings.max_total:
             raise MCPError(INVALID_PARAMS, "the host has as many subscriptions as it allows")
 
@@ -528,9 +541,25 @@ class McpEvents:
     # --- state --------------------------------------------------------------------------------
 
     def _live_subscriptions(self, role: str) -> list[dict[str, Any]]:
+        """`role`'s own subscriptions, and those of guest grants bound to an alias mapped to it right now."""
+        grants = self._mapped_grants(role)
         return [sub for sub in self._read()["subscriptions"].values()
-                if sub["role"] == role and sub["active"] and _unexpired(sub)
-                and auth.authority_live(self.config, sub.get("authority", {}))]
+                if (sub["grant"] in grants if sub.get("grant") else sub["role"] == role)
+                and sub["active"] and _unexpired(sub) and auth.authority_live(self.config, sub.get("authority", {}))]
+
+    def _mapped_grants(self, role: str) -> set[str]:
+        conn = connect(self.config.db_path)
+        try:
+            return aliases.mapped_grants(conn, role)
+        finally:
+            conn.close()
+
+    def _sweep_targets(self) -> None:
+        conn = connect(self.config.db_path)
+        try:
+            aliases.sweep_events_targets(conn, self.config)
+        finally:
+            conn.close()
 
     def _signing_secrets(self, sub: dict[str, Any]) -> list[str]:
         """The current secret, then any replaced one still inside its rotation overlap."""
@@ -548,10 +577,14 @@ class McpEvents:
     def _outcomes(self, wake_id: str) -> dict[str, str]:
         return self._read()["outcomes"].get(wake_id, {}).get("destinations", {})
 
-    def _record(self, wake_id: str, sub_id: str, outcome: str) -> None:
+    def _record(self, wake_id: str, sub: dict[str, Any], outcome: str) -> None:
+        """A final outcome, which ends this wake for this destination; every outcome is also a receipt."""
         with self._state() as state:
-            entry = state["outcomes"].setdefault(wake_id, {"at": time.time(), "destinations": {}})
-            entry["destinations"][sub_id] = outcome
+            if outcome in FINAL_OUTCOMES:
+                entry = state["outcomes"].setdefault(wake_id, {"at": time.time(), "destinations": {}})
+                entry["destinations"][sub["id"]] = outcome
+            state["receipts"].append({"at": time.time(), "wake_id": wake_id, "subscription": sub["id"],
+                                      "owner": _shown_owner(sub), "outcome": outcome})
 
     def _deactivate(self, sub_id: str) -> None:
         with self._state() as state:
@@ -585,6 +618,7 @@ class McpEvents:
                 state["subscriptions"] = {key: sub for key, sub in state["subscriptions"].items() if _unexpired(sub)}
                 for sub in state["subscriptions"].values():
                     sub["previous_secrets"] = [p for p in sub.get("previous_secrets", []) if p["until"] > now]
+                state["receipts"] = [r for r in state["receipts"] if r["at"] > now - RECEIPT_SECONDS][-MAX_RECEIPTS:]
                 if state["outcomes"]:
                     # A wake's outcomes and occurrence time live exactly as long as the core wake: they are
                     # dropped once the core reports it delivered, failed or superseded, and not before.
@@ -610,10 +644,33 @@ def _principal() -> tuple[Any, str]:
     return token, role
 
 
-def _refuse_guest_mutation(role: str) -> None:
-    """Guests may discover the event definition, but cannot create or change subscriptions."""
-    if role == "guest":
-        raise MCPError(-32600, "guest credentials cannot subscribe to or modify integration events")
+def _owner(token: Any, role: str) -> tuple[str, str | None]:
+    """Who owns a subscription: a fixed role, or a guest's OAuth grant (also returned). A static guest has no grant."""
+    if role != "guest":
+        return role, None
+    authority = auth.credential_authority(token)
+    if authority["kind"] != "oauth" or not authority.get("grant"):
+        raise MCPError(-32600, "a guest subscribes only through an OAuth grant; a bearer token has none")
+    return f"grant:{authority['grant']}", authority["grant"]
+
+
+def _owner_of(sub: dict[str, Any]) -> str:
+    return sub.get("owner", sub["role"])
+
+
+def _shown_owner(sub: dict[str, Any]) -> str:
+    return _owner_of(sub) if sub.get("grant") else f"role:{sub['role']}"
+
+
+def status(config: Config) -> dict[str, Any]:
+    """The owner's view: subscription and owner ids, expiry and recent receipts. Never URLs, headers or secrets."""
+    directory = config.data_dir
+    with datadir.opened(directory) as dir_fd:
+        found = datadir.read_file(dir_fd, STATE_FILE, directory=directory)
+    state = _shape(json.loads(found[1]) if found else {})
+    return {"subscriptions": [{"id": sub["id"], "owner": _shown_owner(sub), "expires_at": sub["expires_at"],
+                               "active": sub["active"]} for sub in state["subscriptions"].values()],
+            "receipts": state["receipts"]}
 
 
 async def _advertise_events(ctx: Any, call_next: Any) -> Any:
@@ -625,7 +682,8 @@ async def _advertise_events(ctx: Any, call_next: Any) -> Any:
 
 
 def _shape(state: dict[str, Any]) -> dict[str, Any]:
-    return {"subscriptions": state.get("subscriptions", {}), "outcomes": state.get("outcomes", {})}
+    return {"subscriptions": state.get("subscriptions", {}), "outcomes": state.get("outcomes", {}),
+            "receipts": state.get("receipts", [])}
 
 
 def _valid_secret(secret: str) -> bool:

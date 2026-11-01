@@ -90,15 +90,30 @@ class Tools:
                if self._config.search.enabled else {}),
         }
 
+    def bind_events(self, role: str, call: dict[str, Any]) -> dict[str, Any]:
+        """Send this OAuth grant's event subscriptions the wakes of the role your token's alias is mapped to.
+
+        Needs the token of an alias mapped to a role, on a guest OAuth login. A grant has one target: unbind it
+        before binding another. Mapping changes and the grant's end drop it.
+        """
+        with self._conn() as conn:
+            return aliases.bind_events(conn, call["authority"], call["identity"])
+
+    def unbind_events(self, role: str, call: dict[str, Any]) -> dict[str, Any]:
+        """Stop this grant's event subscriptions receiving a role's wakes. Needs the bound alias's token."""
+        with self._conn() as conn:
+            return aliases.unbind_events(conn, call["authority"], call["identity"])
+
     def alias_exists(self, role: str, name: str) -> dict[str, Any]:
         """Whether an exact normalized alias name is taken; reveals no owner, code or binding."""
         with self._conn() as conn:
             return {"exists": aliases.exists(conn, name)}
 
     def claim_alias(self, role: str, name: str, passphrase: str) -> dict[str, Any]:
-        """Claim or resume a permanent guest alias with a passphrase; return a fresh expiring continuity proof.
+        """Claim or renew a permanent alias with a passphrase; return a fresh expiring `binding_token`.
 
-        Proofs work on any authenticated guest credential. Alias names/codes grant no role or human authority.
+        Tokens work on any guest login. An alias enrolled as a role returns that `effective_role`, and its token
+        makes a call run as the role; any other alias's names and codes grant no role or human authority.
         """
         with self._conn() as conn:
             return aliases.claim(conn, self._config, get_access_token(), name, passphrase)
@@ -340,6 +355,8 @@ TOOLS = (
     ("whoami", auth.SCOPE_READ, True),
     ("alias_exists", auth.SCOPE_READ, True),
     ("claim_alias", auth.SCOPE_WRITE, False),
+    ("bind_events", auth.SCOPE_WRITE, False),
+    ("unbind_events", auth.SCOPE_WRITE, False),
     ("send_message", auth.SCOPE_WRITE, False),
     ("read_messages", auth.SCOPE_READ, False),
     ("wait", auth.SCOPE_READ, False),
@@ -369,6 +386,8 @@ ARTIFACT_TOOLS = (
 )
 GUEST_TOOLS = frozenset({"whoami", "alias_exists", "claim_alias", "list_conversations", "read_history",
                          "get_message", "search", "send_message"})
+# Tools whose bodies read the call context itself, not only the role it runs as.
+CALL_TOOLS = frozenset({"whoami", "bind_events", "unbind_events"})
 TOKEN_ARGUMENT = Annotated[str | None, Field(description=(
     "A binding_token from claim_alias, for a shared guest login only. An enrolled alias's token makes this call "
     "run as its mapped role; any other alias's token posts as that alias. Omitted and null are the same; an "
@@ -420,7 +439,7 @@ class Guard:
                 return refuse(error.code, str(error), error.extra)
             if not self._within_limit(call["role"], name, HOURLY_LIMITS[scope]):
                 return refuse("rate_limited", f"{name} is over its hourly limit")
-            if name == "whoami":
+            if name in CALL_TOOLS:
                 kwargs["call"] = call
             try:
                 result = body(call["role"], **kwargs)
@@ -588,7 +607,7 @@ def _call_context(principal: Any) -> dict[str, Any]:
     role = auth.role_of(principal)
     authority = auth.credential_authority(principal) if principal is not None else {}
     return {"credential_role": role, "credential_id": authority.get("name") or authority.get("grant"),
-            "role": role, "identity": None}
+            "authority": authority, "role": role, "identity": None}
 
 
 def _tool_signature(name: str, body: Callable[..., Any]) -> inspect.Signature:
