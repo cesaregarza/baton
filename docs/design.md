@@ -457,7 +457,9 @@ membership alone isn't that permission. Turning it on is an exposure decision of
   the config enables it. It accepts only HTTPS URLs under an operator allowlist, verifies each one with a
   signed challenge, resolves the name once per request and connects only to global addresses, follows no
   redirects, signs every event, and keeps role isolation.
-- **Push to phones or chat.** Point a wake webhook at whatever notification service you use.
+- **A built-in phone or chat client.** A configured wake webhook or command can notify an operator's
+  service, and the optional decision-push integration can send a content-free decision notice. Baton does
+  not provide the phone or chat client itself.
 - **A web dashboard in the core.** `baton job list`, `baton wakes` and the database itself are the core's
   views. An optional, read-only dashboard module is allowed (see [Dashboard](#dashboard)): it is off unless
   the config enables it and changes nothing when it is on.
