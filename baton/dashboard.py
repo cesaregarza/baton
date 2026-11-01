@@ -60,6 +60,8 @@ HEADERS = {
     "Referrer-Policy": "no-referrer",
 }
 READS = ("GET", "HEAD")
+# Every refusal offers the way back that the not-found page does, so none of them is a dead end.
+BACK = ' <a href="/">All conversations</a>'
 CONVERSATION_PATH = re.compile(r"/c/([A-Za-z0-9_-]{1,64})")
 # A page number: 1-6 ASCII digits, no leading zero.
 PAGE = re.compile(r"[1-9][0-9]{0,5}")
@@ -80,6 +82,7 @@ li { border-bottom: 1px solid #e3e3e3; padding: .6rem 0; }
 .meta, .notice, .source, .muted { color: #5f6368; font-size: .85rem; }
 .role { font-weight: 600; color: #1d1d1f; }
 h2 { font-size: 1rem; margin: 1.2rem 0 .2rem; color: #5f6368; font-weight: 600; }
+h3 { font-size: .85rem; margin: .6rem 0 .2rem; color: #5f6368; font-weight: 600; }
 .badge { border: 1px solid #c4c7c5; border-radius: .6rem; padding: 0 .4rem; margin-left: .3rem; }
 .text { white-space: pre-wrap; margin: .3rem 0; }
 .relayed { border-left: 3px solid #c4c7c5; margin: .4rem 0 .4rem .6rem; padding-left: .6rem; }
@@ -123,10 +126,10 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
     topic = _topic_route(url.path) if url.path.startswith("/t/") else None
     if (url.path.startswith("/t/") and topic is None) or (url.path == "/needs" and _needs_topic(url.query) is False):
         return _page(400, "Bad request", "<p>A topic is one or two lowercase slug segments, such as project or "
-                                         "project/subtopic, given once.</p>")
+                                         "project/subtopic, given once." + BACK + "</p>")
     pages = _pages(url.query)
     if pages is None:
-        return _page(400, "Bad request", "<p>A page number is a whole number from 1, given once.</p>")
+        return _page(400, "Bad request", "<p>A page number is a whole number from 1, given once." + BACK + "</p>")
     if url.path not in ("/", "/needs") and not match and topic is None:
         return _not_found()
     conn = connect(config.db_path)
@@ -148,7 +151,8 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
             return _page(200, "Conversations", _index(config, conn, None, pages["page"]))
         after = _after_seq(parse_qs(url.query, keep_blank_values=True).get("after_seq", ["0"])[-1])
         if after is None:
-            return _page(400, "Bad request", "<p>after_seq must be a whole number of at most 19 digits.</p>")
+            return _page(400, "Bad request",
+                         "<p>after_seq must be a whole number of at most 19 digits." + BACK + "</p>")
         return _conversation(config, conn, match.group(1), after)
     finally:
         conn.close()
@@ -335,8 +339,11 @@ def _directory(config: Config, conn: Any) -> str:
         description = f'<p>{_e(entry["description"])}</p>' if entry["description"] else ""
         activity = f' · last {_time(entry["last_activity_at"])}' if entry["last_activity_at"] else ""
         counted = f'{entry["threads"]} thread{"" if entry["threads"] == 1 else "s"}'
+        # A topic titled after its own path would otherwise print that word as the link and again as
+        # metadata; the path earns its place in the line only when it says something the title did not.
+        named = f'{_e(path)} · ' if entry["title"] != path else ""
         items.append(f'<li><a href="/t/{_e(path)}">{_e(entry["title"])}</a>{description}'
-                     f'<div class="meta">{_e(path)} · {counted}{activity}</div>{shown}</li>')
+                     f'<div class="meta">{named}{counted}{activity}</div>{shown}</li>')
     return "<h2>Topics</h2><ul>" + "".join(items) + "</ul>" if items else ""
 
 
