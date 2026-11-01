@@ -210,7 +210,8 @@ def get(conn: sqlite3.Connection, config: Config, *, reader: str, path: Any) -> 
     row = _row(conn, checked)
     if row is None:
         raise UnknownTopic(f"no topic {checked!r}")
-    return {**_summary(row), "threads": _readable(conn, config, reader, checked),
+    threads, _ = _readable(conn, config, reader, checked)
+    return {**_summary(row), "threads": threads,
             "subtopics": [entry[0] for entry in conn.execute(
                 "SELECT path FROM topics WHERE path LIKE ? ORDER BY path", (f"{checked}/%",))]}
 
@@ -224,19 +225,27 @@ def listing(conn: sqlite3.Connection, config: Config, *, reader: str,
         checked = _check_path(parent, field="parent")
         rows = conn.execute("SELECT * FROM topics WHERE path LIKE ? ORDER BY path",
                             (f"{checked}/%",)).fetchall()
-    return [{**_summary(row), "threads": _readable(conn, config, reader, row["path"]),
-             "last_activity_at": _last_activity(conn, row["path"])} for row in rows]
+    listed = []
+    for row in rows:
+        threads, last_activity_at = _readable(conn, config, reader, row["path"])
+        listed.append({**_summary(row), "threads": threads, "last_activity_at": last_activity_at})
+    return listed
 
 
-def _readable(conn: sqlite3.Connection, config: Config, reader: str, path: str) -> int:
-    """How many threads filed exactly here the reader may see; the board rule decides, not membership."""
+def _readable(conn: sqlite3.Connection, config: Config, reader: str,
+              path: str) -> tuple[int, str | None]:
+    """How many threads filed exactly here the reader may see, and the newest activity among those same ones.
+
+    Both come from one query on purpose. They were two, and only the count was filtered by reader, so a
+    newer conversation the reader is not in lent the topic its timestamp -- which disclosed that
+    something had happened there, and when. Asking once makes that divergence impossible rather than
+    merely fixed. The board rule decides what counts as readable, not topic membership.
+    """
     if board_read.sees_all(config, reader):
-        return conn.execute("SELECT COUNT(*) FROM conversations WHERE topic = ?", (path,)).fetchone()[0]
-    return conn.execute("SELECT COUNT(*) FROM conversations c WHERE c.topic = ? AND EXISTS"
-                        " (SELECT 1 FROM participants p WHERE p.conversation_id = c.id AND p.role = ?)",
-                        (path, reader)).fetchone()[0]
-
-
-def _last_activity(conn: sqlite3.Connection, path: str) -> str | None:
-    return conn.execute("SELECT MAX(last_activity_at) FROM conversations WHERE topic = ?",
-                        (path,)).fetchone()[0]
+        row = conn.execute("SELECT COUNT(*), MAX(last_activity_at) FROM conversations WHERE topic = ?",
+                           (path,)).fetchone()
+    else:
+        row = conn.execute("SELECT COUNT(*), MAX(c.last_activity_at) FROM conversations c"
+                           " WHERE c.topic = ? AND EXISTS (SELECT 1 FROM participants p"
+                           " WHERE p.conversation_id = c.id AND p.role = ?)", (path, reader)).fetchone()
+    return row[0], row[1]
