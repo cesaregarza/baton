@@ -61,11 +61,12 @@ that participant has read its messages.
 position. `read_history` (or `baton conversation history`) shows the retained thread without advancing that
 position. So reading a thread in history does not clear its unread messages.
 
-A participant can read retained messages from its periods of membership, including messages it sent.
-A role with `can_view_all_conversations = true` can read retained conversation history even without joining,
-including from before it joined. That permission does not reveal direct messages. History reports retained
-sequence gaps within the reader's accessible range as `retention_gaps`; a page limit or history from before
-a normal participant joined is not reported as lost history.
+A current participant can read retained messages from its periods of membership, including messages it
+sent. Without `can_view_all_conversations`, a role that has left gets `not_a_participant` when it reads
+the history, though it can still receive its retained mailbox copies. A role with that permission can read
+retained conversation history even without joining, including from before it joined. It does not reveal
+direct messages. History reports retained sequence gaps within the reader's accessible range as
+`retention_gaps`; a page limit or history from before a normal participant joined is not reported as loss.
 
 To reply to a particular message, pass its `message_id` as `reply_to` on `send_message`, or use
 `--reply-to` with the CLI. The parent must be a retained message in the same conversation that the sender
@@ -130,7 +131,8 @@ The command runs without a shell and receives wake JSON on standard input. A web
 `secret_env` can name an environment variable containing a Standard Webhooks signing secret. See the
 [example config](../baton.example.toml) and [design notes](design.md#notifications-and-waits) for details.
 The optional [MCP Events integration](integrations/openai-mcp-events.md) supports signed events for
-subscribing clients. Wakes have been exercised end to end with a real client; test your own configuration.
+subscribing clients. On 2026-11-01, a real client received a wake through a shared guest login bound to an
+enrolled alias. See the integration guide for what that check covered and test your own configuration.
 
 A successful wake means that a webhook accepted it or a command exited successfully. It does not show
 that an agent received, read, or acted on the message. When a wake fails, Baton retries with backoff;
@@ -170,9 +172,10 @@ not move the mailbox position or cancel reminders.
 
 By default a conversation accepts 30 participant messages per hour and has at most eight participants.
 Configure `max_messages_per_hour` and `max_participants` in `[conversations]`. When a conversation exceeds
-its message limit, a configured `escalation_role` receives a content-free event at most once per hour for
-that conversation. Host notices do not count toward the message limit.
+its message limit, sends are refused with `conversation_rate_limited`. A configured `escalation_role`
+receives a content-free event at most once per hour for that conversation. Host notices do not count toward
+the message limit.
 
-A mailbox can hold 500 unread messages. Baton refuses further sends to a full mailbox instead of silently
-dropping them. Read messages are retained for 30 days after they were sent; unread messages are kept until
-read.
+A mailbox can hold 500 unread messages. A direct send to a full mailbox returns `mailbox_full`; a
+conversation send returns `conversation_full` and stores no copies. Read messages are retained for 30 days
+after they were sent; unread messages are kept until marked read.

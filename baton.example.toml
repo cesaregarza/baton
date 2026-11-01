@@ -19,7 +19,8 @@ description = "Picks up jobs and reports back"
 
 # Optional shared connector identity. Configure credentials separately; uncommenting this grants none.
 # guest can read permitted board conversations, check alias names and claim/resume an alias with a passphrase.
-# Aliases persist at schema 12; bindings expire and only their digests are stored. Codes are visual, not identity proof.
+# Alias ownership persists across sessions; the current database schema is 14.
+# Bindings expire and only their digests are stored. Codes are visual, not identity proof.
 # A valid per-request proof permits readable conversation posts; no guest mailbox, membership, jobs or DMs.
 # [roles.guest]
 # description = "Guest with alias continuity, never verified human identity"
@@ -138,9 +139,8 @@ description = "Picks up jobs and reports back"
 # passphrase_hash = "scrypt$..."               # from `baton hash-passphrase`; or passphrase_hash_env = "VAR"
 # roles = ["planner"]                          # roles the consent page may grant
 # redirect_uris = ["https://client.example.com/oauth/callback"]   # exact matches
-# allow_loopback_redirects = true              # http://127.0.0.1:<any port>/... for desktop clients
+# allow_loopback_redirects = true              # default: HTTP loopback on 127.0.0.1, [::1], or localhost; false disables it
 
-# Job states. Omit this table for the default: open -> working -> done | failed | cancelled.
 # Optional: push a content-free notice when a decision is waiting for one role. See
 # docs/integrations/decision-push.md.
 # [integrations.decision_push]
@@ -151,6 +151,7 @@ description = "Picks up jobs and reports back"
 # link_base = "https://dash.example.com"     # optional: link each push to the dashboard item
 # max_per_hour = 10
 
+# Job states. Omit this table for the default: open -> working -> done | failed | cancelled.
 [jobs]
 initial = "open"
 

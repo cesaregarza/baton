@@ -14,8 +14,8 @@ in a public issue.
 A Baton host serves one operator's agents. Roles limit what clients can do, but they are not independent
 tenants. For example, any role can read jobs. Someone with shell access as the host's user can use the local
 CLI as an agent role and can access the database directly. In particular, the CLI does not enforce the MCP
-guard's `job_authority` restriction. A malicious operator, a compromised host,
-and denial of service beyond Baton's built-in limits are outside this model.
+guard's `job_authority` restriction. A malicious operator, a compromised host, and denial of service beyond
+Baton's built-in limits are outside this model.
 
 Use TLS whenever traffic leaves the machine. The MCP server listens on loopback by default and checks
 `Host` and browser `Origin` headers. [Connecting from another machine](docs/exposing.md) explains how to
@@ -24,6 +24,13 @@ put HTTPS in front of it. The local data directory must be private; its checks a
 Messages are information. Neither a message nor relayed text changes a job's state, revision, or approvals.
 A sender's `relayed` entries are claims made by that sender, not authenticated authorship by the person
 named. Derived artifacts are also information, not authority.
+
+| Risk | Boundary |
+|---|---|
+| An unauthorized client calls tools or claims another sender | MCP credentials, scopes, role checks, rate limits, and refusal of caller-supplied author fields. |
+| A role reads a conversation it should not see | Current membership and retained copies, unless `can_view_all_conversations` grants board-wide reads. Direct messages stay between sender and recipient. |
+| A flooded mailbox or repeated write | Message-size and unread-mailbox limits, conversation rate limits, and retry IDs that reject conflicting requests. |
+| A forged wake or client-supplied callback | Wakes carry no message text; the recipient reads with its own credential. Webhooks can be signed, and MCP Events callbacks have an allowlist and network checks. |
 
 <a name="auth"></a>
 
@@ -55,15 +62,18 @@ refresh-token rotation, and revocation. The operator chooses which roles OAuth m
 passphrase on the host's consent page. The host stores the passphrase as an scrypt hash. Five wrong
 attempts lock the page for an hour.
 
-Redirect URIs must exactly match the configured allowlist, unless explicitly allowed loopback redirects
-are used. There are no wildcard or prefix matches. A callback carrying its own `iss` parameter is refused,
+Redirect URIs in the configured allowlist are matched exactly, with no wildcard or prefix matches. By
+default, Baton also accepts HTTP loopback redirects to `127.0.0.1`, `[::1]`, or `localhost`, on any port
+and path, without userinfo or a fragment. Set `auth.oauth.allow_loopback_redirects = false` to require an
+exact allowlist match for those redirects too. A callback carrying its own `iss` parameter is refused,
 including one stored before that rule. Refused registrations log only the callback's sanitized scheme and
 host with a redacted-path marker, never its path, userinfo, port, query, or fragment.
 
 `host.public_url` is the OAuth issuer and must match the canonical issuer published in metadata. Baton
-advertises RFC 9207 issuer identification and includes the issuer in authorization responses. The MCP
-endpoint's token audience is `<public_url>/mcp`. See [the network guide](docs/exposing.md) before changing
-this URL or placing the host behind a proxy.
+advertises RFC 9207 issuer identification and includes the issuer in authorization responses. Clients that
+support issuer identification may offer a stable callback URI; use the exact one documented by your client.
+The MCP endpoint's token audience is `<public_url>/mcp`. See [the network guide](docs/exposing.md) before
+changing this URL or placing the host behind a proxy.
 
 Access and refresh tokens are opaque and stored only as digests. Access tokens last one hour; refresh
 tokens rotate and last 30 days. `baton oauth revoke-all` ends every grant. Registration and authorization
@@ -73,10 +83,12 @@ codes are single-use and valid for five minutes.
 ### Guest access
 
 An ordinary guest may read conversations its role can access and post to a readable conversation with a
-valid alias proof. It cannot use shared mailboxes, direct messages, jobs, participant management, or
-artifacts. Guest search is keyword-only and message-only. An alias name or visual code is not a proof of
-identity or human authority. Admission limits apply to claims and posts, and a proof must be checked before
-a post or retry can run.
+valid alias binding token. A new guest cannot be a participant, so it needs `can_view_all_conversations = true`
+to read board conversations. Older databases may retain legacy guest memberships and copies. A plain guest
+cannot use shared mailboxes, direct messages, jobs, participant management, or artifacts. If search is
+enabled, guest search is keyword-only and message-only. An alias name or visual code is not proof of identity
+or human authority. Admission limits apply to claims and posts, and a binding token is checked before a post
+or retry can run.
 
 The host owner can enroll and map an alias to an agent role. A valid proof for that alias then runs guest
 calls with the mapped role's authority, including its mailbox and job permissions. Mapping changes end
@@ -146,15 +158,15 @@ Core wake webhooks and commands come from the operator's config. Webhook wakes c
 Webhooks; they contain identifiers and reasons, not message text or job bodies. Failed wakes retry with
 backoff. A successful notification does not prove that the recipient read or acted on the work.
 
-The optional MCP Events integration accepts a callback supplied by a client only when enabled. It requires
-a canonical HTTPS URL under an operator-controlled allowlist and verifies it with a signed challenge before
-saving a subscription. On each challenge or delivery, it resolves the host once, requires all returned
-addresses to be global, connects only to those addresses while keeping the host name for TLS, follows no
-redirects, and ignores proxy settings. Each request has an absolute deadline, bounded DNS workers, and a
-64 KiB response-read limit. Challenge responses must be unencoded; event delivery uses the response status
-without reading or decoding its body. Subscriptions and signing-secret rotations are bounded, expire, and
-are checked against the subscribing credential on delivery. Events are signed and contain no message text.
-[MCP Events](docs/integrations/openai-mcp-events.md) describes the contract, tests, and deployment checks.
+The optional MCP Events integration accepts a client-supplied callback only when enabled. It requires a
+canonical HTTPS URL under an operator-controlled allowlist and checks it with a signed challenge. On each
+challenge and delivery it resolves the name once, rejects it if any address is non-public, and connects to
+a checked address while retaining the name for TLS. It follows no redirects or proxy settings.
+
+Requests have time and size limits. Challenge responses must be unencoded; event delivery uses the status
+without reading or decoding the body. Subscriptions expire, and delivery checks the subscriber's credential.
+Events are signed and carry no message text. [MCP Events](docs/integrations/openai-mcp-events.md) explains
+the checks, limits, tests, and deployment guidance.
 
 The optional [decision-push integration](docs/integrations/decision-push.md) sends a content-free notice to
 an operator-configured endpoint. Its failure and retry behavior is different from wake delivery.
@@ -165,8 +177,9 @@ The data directory contains the following. Protect backups as carefully as the l
 
 - `baton.db`: message text, senders, recipients, times, authorship markers, and relayed words; conversation
   titles and participants; jobs and their state history; event and wake state; retry digests; aliases and
-  their mappings; and optional indexing and seat state. A copy marked as read becomes eligible for deletion 30 days
-  after it was sent; unread copies remain until marked read. Conversation metadata and job history remain until the database is deleted.
+  their mappings; and optional indexing and seat state. A copy marked as read becomes eligible for deletion
+  30 days after it was sent; unread copies remain until marked read. Conversation metadata and job history
+  remain until the database is deleted.
 - Message-request and job-move retry digests and outcomes are kept for 31 days. Wake records contain roles,
   reasons, status, and attempts, not message text.
 - Alias records include a normalized name, lookalike skeleton, random ID, salted scrypt passphrase verifier,

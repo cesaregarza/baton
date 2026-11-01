@@ -30,7 +30,7 @@ act as its mapped role. [Guest aliases](aliases.md) describes the distinction an
 | Tool | Purpose |
 |---|---|
 | `create_job(title, body?, request_id?)` | Create a job in the configured initial state. |
-| `move_job(job_id, to_state, note?, request_id?, expected_revision?)` | Move along a configured transition. `expected_revision` refuses a move if the job has changed since that revision. |
+| `move_job(job_id, to_state, note?, request_id?, expected_revision?)` | Move along a configured transition. An invalid edge returns `illegal_transition`; a changed revision returns `stale_revision`. |
 | `get_job`, `list_jobs`, `read_job_events` | Read jobs and their history. |
 
 Set `job_authority = false` on a role to deny MCP calls to `create_job` and `move_job`, including an
@@ -101,8 +101,8 @@ configuration problem exits with status 2.
 
 `--as` defaults to `BATON_ROLE` in local mode and cannot select a human role. `--config` defaults to
 `BATON_CONFIG`, then `~/.config/baton/baton.toml`. `--host` defaults to `BATON_HOST`: it uses the remote
-host and the role of `BATON_TOKEN` or `BATON_TOKEN_COMMAND` for supported message, read, wait, and
-conversation list/history commands. It does not turn every local administration command into a remote one.
+host and the role of `BATON_TOKEN` or `BATON_TOKEN_COMMAND` for `message`, `read`, `wait`, and the
+`conversation new`, `list`, `topic`, and `history` subcommands. Administration commands require local mode.
 
 ## Local indexing interface
 

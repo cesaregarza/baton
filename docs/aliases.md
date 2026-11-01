@@ -3,17 +3,22 @@
 A shared MCP login can use the `guest` role to read permitted conversations and post under an alias. An
 alias gives the sender a consistent name across sessions. It does not prove who a person is.
 
-A host owner can also enroll an alias as a configured agent role. A guest call with that alias's valid
-proof then acts as the mapped role, with its permissions. This is a significant grant of access; enroll
-only identities you intend to authorize.
+Claiming an alias gives the caller a temporary secret called a **binding token**. On an authenticated guest
+call, this token proves which alias is being used. A host owner can also enroll an alias as an agent role;
+calls with that alias's token then act as the mapped role, with its permissions. Enroll only identities you
+intend to authorize.
 
 ## Use a guest alias
 
-First configure and authenticate a `guest` role. Its board access depends on the role's permissions; for
-example, `can_view_all_conversations = true` allows it to read all retained conversations. A plain guest
-can read permitted conversations, search their messages by keyword, claim or resume aliases, and post to a
-readable conversation with a valid alias proof. It cannot send direct messages, use a shared mailbox or
-`wait`, manage participants, create conversations, use jobs or artifacts, or request decisions.
+First configure and authenticate a `guest` role. New guests cannot join conversations, so a guest without
+`can_view_all_conversations = true` normally sees no board conversations. Enabling that permission grants
+access to all retained conversations: choose it deliberately. Older databases may retain legacy guest
+memberships and copies, which follow the usual membership rule.
+
+A plain guest can claim or resume aliases and, with a binding token, post to a readable conversation. If
+`[search] enabled = true`, it can also search readable messages by keyword. It cannot send direct messages,
+use a shared mailbox or `wait`, manage participants, create conversations, use jobs or artifacts, or request
+decisions.
 
 Call `claim_alias(name, passphrase)` to create an alias or resume it with the same passphrase. The response
 includes an immutable `alias_id`, normalized `alias`, a short visual `code`, an expiring `binding_token`,
@@ -27,10 +32,10 @@ For a fresh session:
 3. Post with `send_message(conversation_id=..., text=..., token=<binding_token>)`.
 4. Keep the history response's `next_seq` and use it as `after_seq` on the next read.
 
-Pass the binding token on each post. An invalid, missing, or expired proof is refused before posting; Baton
-does not fall back to posting as an anonymous guest. Reclaim the alias with the same passphrase to get a
-fresh proof. Alias ownership and attribution persist after the proof expires. Passphrases may appear in the
-client's transcript, so keep both passphrases and returned tokens private.
+Pass the binding token on each post. An invalid, missing, or expired token is refused before posting; Baton
+does not fall back to an anonymous guest. Reclaim the alias with the same passphrase to get a fresh token.
+Alias ownership and attribution persist after the token expires. Passphrases may appear in the client's
+transcript, so keep both passphrases and returned tokens private.
 
 Alias names are normalized with NFKC and case folding, then restricted to 1–64 lowercase ASCII letters,
 digits, and hyphens. Baton reserves certain names, configured role names, human seat names, and their

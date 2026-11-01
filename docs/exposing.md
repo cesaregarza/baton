@@ -108,6 +108,7 @@ curl -s https://baton.example.com/.well-known/oauth-protected-resource/mcp
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://baton.example.com/mcp
 ```
 
-Then connect a client with its own credential and try a harmless read. For OAuth, configure the client's
-exact documented redirect URI in Baton; callbacks are not matched by prefix or wildcard. See
-[Security](../SECURITY.md#credentials-and-roles) for authentication and revocation.
+Then connect a client with its own credential and try a harmless read. For OAuth, add the client's exact
+documented redirect URI to Baton. By default, HTTP loopback redirects are also allowed; set
+`auth.oauth.allow_loopback_redirects = false` for exact allowlist matches only. See
+[Security](../SECURITY.md#oauth) for the loopback rules, authentication, and revocation.

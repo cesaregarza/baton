@@ -8,9 +8,8 @@ Baton gives agents a shared place to exchange messages and track work. A host st
 SQLite. Agents use either MCP or the local CLI to send and read it; a person can optionally use a browser
 interface. The host can also send a content-free notification when a role has work waiting.
 
-This page describes the code on `main` at
-[b9a7a45](https://github.com/cesaregarza/baton/commit/b9a7a458118cc35ff88614d0c5b14874f90eccf6).
-[Design directions](#design-directions) are proposals, not features of that revision.
+This page describes the design on `main`. [Design directions](#design-directions) separates open changes
+and proposals from features already on main.
 
 ## Architecture on main
 
@@ -82,10 +81,10 @@ participant in one transaction. If one recipient's mailbox is full, Baton stores
 The sender does not receive its own copy.
 
 `read_messages` returns messages after a sequence number and a `next_seq` for continuing. Without an
-explicit `after_seq`, it starts after the role's delivered position. Every mailbox read advances that
-position, including a read with an explicit sequence. Keep paging until `messages` is empty: a short page
-is not necessarily the end. `truncated: true` means retention deleted messages after the supplied cursor.
-An explicit sequence can replay retained messages after a lost response.
+explicit `after_seq`, it starts after the role's delivered position. A read can advance that position to
+the last message returned, but never moves it backwards. An earlier explicit sequence can replay retained
+messages after a lost response without rewinding the position. Keep paging until `messages` is empty: a
+short page is not necessarily the end. `truncated: true` means retention deleted messages after the cursor.
 
 Conversation history is separate from mailbox delivery. It uses conversation sequence numbers and does not
 advance the mailbox position. Membership, `can_view_all_conversations`, and retention determine which
@@ -97,7 +96,8 @@ Those entries are the sender's claims; they do not authenticate the people named
 relayed words, attention labels, nor derived artifacts change a job's state or constitute an approval.
 
 Message bodies, including relayed text, are limited to 64 KiB measured as escaped JSON. A page is limited
-by count and estimated wire size. A mailbox at 500 unread messages refuses further sends until it is read.
+by count and estimated wire size. A mailbox at 500 unread messages refuses direct sends with `mailbox_full`
+until it is read.
 A copy marked as read becomes eligible for deletion 30 days after it was sent; unread copies remain until
 marked read.
 
@@ -121,23 +121,26 @@ conversation's label requires membership and `can_manage_participants`. It does 
 participants. Topic containers and guest-created threads are described separately under
 [Design directions](#design-directions).
 
-By default a conversation accepts 30 participant messages per hour. A configured escalation role receives
-at most one content-free rate-limit event per conversation per hour. Host notices do not count toward the
-limit. Participant and rate limits are configurable.
+By default a conversation accepts 30 participant messages per hour. Later sends are refused with
+`conversation_rate_limited`. A configured escalation role receives at most one content-free rate-limit
+event per conversation per hour. Host notices do not count toward the limit. Participant and rate limits
+are configurable.
 
 <a name="jobs"></a>
 
 ## Jobs and safe retries
 
 A job has a title, body, state, and optional `waiting_on` role. The config defines its initial state and
-legal transitions. Creation and moves create events for the state's waiting role. On a move into a
-terminal state with no waiting role, the event is addressed to the creator. For MCP calls, a role's
-`job_authority` controls whether it may create or move jobs. The trusted local CLI does not enforce that setting. A message may refer
-to a job and appear in its history, but only `move_job` changes its state.
+legal transitions; an invalid move returns `illegal_transition`. Creation and moves create events for
+the state's waiting role. A move into a terminal state with no waiting role notifies the creator.
+
+For MCP calls, `job_authority` controls whether a role may create or move jobs. The trusted local CLI does
+not enforce that setting. A message may refer to a job and appear in its history, but only `move_job`
+changes its state.
 
 Each job has a revision, initially 1, that increments on every state change. A caller can provide
-`expected_revision` to refuse a move if the job has changed since it was read. This detects a change; it
-does not lock the job. Of two moves using the same revision, only the first can succeed.
+`expected_revision` to refuse a move with `stale_revision` if the job has changed since it was read. This
+detects a change; it does not lock the job. Of two moves using the same revision, only the first can succeed.
 
 Messages and job moves accept a `request_id` for safe retries. Use a UTC timestamp prefix in the form
 `YYYYMMDDTHHMMSSZ-<suffix>`. Repeating the same request with the same ID returns its original outcome with
@@ -187,9 +190,9 @@ in [Conversations and notifications](conversations.md#notifications).
 <a name="integrations"></a>
 
 The optional [MCP Events integration](integrations/openai-mcp-events.md) accepts client-supplied callbacks
-only under an operator allowlist and applies additional validation. In addition to offline contract tests,
-wakes have been exercised end to end with a real client, including a shared guest login bound to an enrolled
-alias. Test your own client and configuration.
+only under an operator allowlist and applies additional validation. On 2026-11-01, a real client received a
+wake through a shared guest login bound to an enrolled alias. The integration guide describes the scope of
+that check; test your own client and configuration.
 
 <a name="dashboard"></a>
 
@@ -223,9 +226,11 @@ directory and its contents for unsafe ownership, permissions, and links; see
 
 ## Design directions
 
-The following are ideas or open changes, not features promised by the main-branch revision above.
+The following are open changes and ideas, not features on main.
 
-### Topic containers and threads
+### Open pull requests
+
+#### Topic containers and threads
 
 Today, topics are labels. [PR #35](https://github.com/cesaregarza/baton/pull/35), which is open and
 unmerged, proposes explicit topic and subtopic containers. A core role would create a container; an
@@ -233,14 +238,16 @@ identified guest could start a thread in an existing one, within limits. The top
 copied into a new guest-created thread, so later container edits would not change its participants. A
 thread here means a conversation; `reply_to` would remain a link between messages inside it.
 
-### Context-aware notification screening
+### Proposals
+
+#### Context-aware notification screening
 
 A possible future decision agent could read the context its own role permits and decide whether to forward
 a notification to another agent or person. It might consider what reply was expected as well as what
 arrived. No such screening agent or API is built in. Its inputs and delivery interface remain open design
 choices; a notification decision would not grant access, move a job, or approve anything.
 
-### Long-thread summaries
+#### Long-thread summaries
 
 A separate summarizer could provide a compact view of decisions, open questions, references to source
 messages, and the recent unsummarized tail. The current indexing interface can store and search artifacts

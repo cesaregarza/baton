@@ -5,10 +5,10 @@ role. The client subscribes through MCP; Baton then sends signed, content-free e
 callback. The client still needs to read the message or job with its own credential.
 
 The integration implements the server side of OpenAI's
-[MCP Events contract](https://developers.openai.com/plugins/build/mcp-events). It has delivered wakes to a
-real client end to end, including through an enrolled alias on a shared guest login, and is also covered by
-offline tests. A callback accepting an event does not by itself show that the client read or acted on the
-message. Test your own client and configuration: behavior can differ between deployments.
+[MCP Events contract](https://developers.openai.com/plugins/build/mcp-events) and has offline tests. On
+2026-11-01, a real MCP Events client received a wake through a shared guest login bound to an enrolled
+alias. A callback accepting an event does not by itself show that the client read or acted on the message.
+Test your own client and configuration: behavior can differ between deployments.
 
 It is included in `baton/integrations/openai_mcp_events.py` and loaded only when enabled in the config.
 
@@ -46,9 +46,10 @@ callback_prefixes = ["https://callbacks.example.com/"]
 ```
 
 The callback prefix is an allowlist: a callback must use HTTPS and the same host and port, and begin with
-the prefix's path segments. There are no wildcards. It is separate from the OAuth redirect URI, which must
-match its allowlist exactly. Restart `baton serve` after changing the config. Unknown settings, wrong types,
-and values outside the allowed ranges are refused.
+the prefix's path segments. There are no wildcards. OAuth redirects use a separate exact allowlist, plus
+HTTP loopback redirects by default. See [OAuth security](../../SECURITY.md#oauth) for that exception and how
+to disable it. Restart `baton serve` after changing the config. Unknown settings, wrong types, and values
+outside the allowed ranges are refused.
 
 A callback must already be canonical: a lowercase ASCII host, no port for 443, and no empty, `.` or `..`
 path segments. Userinfo, query strings, fragments, whitespace, backslashes, and encoded dot, slash,
@@ -177,9 +178,10 @@ Baton's implementation choices include:
   each attempt gets a fresh webhook timestamp and signature.
 - A one-hour default secret-rotation overlap, configurable from 60 seconds to one day. A challenge is
   signed only with the new secret.
-- `-32015` reasons `invalid_url`, `not_allowed`, `private_address`, `unreachable`, `timeout`, and
-  `challenge_failed`. The occurrence time is when the host first handles the wake.
+- `-32015` reasons `invalid_url`, `not_allowed`, `private_address`, `unreachable`, `timeout`,
+  `challenge_failed`, `encoded_response`, and `response_too_large`. The occurrence time is when the host
+  first handles the wake.
 
-Real-client wake delivery has been exercised end to end, including a shared guest login bound to an enrolled
-alias. Check the callback and OAuth settings, subscription refresh, and delivery with your own client;
-those details can vary by deployment. Baton accepts and ignores a supplied cursor.
+The live check described above did not cover discovery of the client's callback host or path, subscription
+refresh, secret-rotation overlap, or cursor behavior. Check these details with your own client and
+deployment. Baton accepts and ignores a supplied cursor.
