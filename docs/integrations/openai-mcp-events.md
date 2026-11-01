@@ -1,86 +1,28 @@
 # OpenAI MCP Events integration
 
-An optional integration that wakes a remote MCP client, such as a ChatGPT connector, when something on
-the host is addressed to its role. It implements the server side of OpenAI's
-[MCP Events](https://developers.openai.com/plugins/build/mcp-events) contract: the client subscribes to an
-event over its authenticated MCP session, and the host POSTs a signed webhook to the client's callback
-each time it should look.
+This optional integration can notify an MCP client when a message or job change is waiting for its Baton
+role. The client subscribes through MCP; Baton then sends signed, content-free events to the client's HTTPS
+callback. The client still needs to read the message or job with its own credential.
 
-The code is `baton/integrations/openai_mcp_events.py`, and it ships with baton. The core never imports it
-unless the config enables it.
+The integration implements the server side of OpenAI's
+[MCP Events contract](https://developers.openai.com/plugins/build/mcp-events). It has delivered wakes to a
+real client end to end, including through an enrolled alias on a shared guest login, and is also covered by
+offline tests. A callback accepting an event does not by itself show that the client read or acted on the
+message. Test your own client and configuration: behavior can differ between deployments.
 
-## What it does
+It is included in `baton/integrations/openai_mcp_events.py` and loaded only when enabled in the config.
 
-1. The client calls `events/list` and sees one event, `baton.attention`.
-2. It calls `events/subscribe` with an HTTPS callback URL and a `whsec_` signing secret. The host requires
-   the URL to be canonical, checks it against your allowlist, verifies it with a signed challenge, and then
-   stores the subscription. The subscription belongs to the role of the credential that made it. The host
-   also records that credential's identity, so it can check later that the same credential still holds
-   that role.
-3. When a message or job change is addressed to that role, the core's wake dispatcher hands the wake to
-   the integration. The integration POSTs one event to each live subscription of the role:
+<a name="setup"></a>
 
-   ```json
-   {"eventId": "wake_…", "name": "baton.attention", "timestamp": "2026-01-01T00:00:00+00:00",
-    "data": {"role": "assistant", "reason": "message", "first_unread_seq": 4}, "cursor": null}
-   ```
+## Set it up
 
-   The event names what to look at and nothing else. The client then calls `read_messages` or `wait`
-   with its own credential. For a job change, `reason` is the event kind (`job.created`, `job.moved`),
-   and `data` carries `job_id` and `event_seq`. `timestamp` is when the host first handled the wake, and
-   it stays the same on every retry. `webhook-timestamp` is the send time of each attempt.
-4. **Outcomes, per destination.** The integration keeps an outcome for each (wake, subscription) pair:
-   - **accepted:** the destination answered 2xx;
-   - **gone:** it answered `410`, and the subscription becomes inactive;
-   - **too large:** it answered `413`.
-
-   Each of these is final for that destination, which is never sent that wake again. A wake counts as
-   delivered when every live subscription of the role has a final outcome and at least one accepted it.
-   Until then the core's backoff retries it, sending only to the destinations without a final outcome.
-   Outcomes and the occurrence time are kept exactly as long as the core wake: they are dropped once the
-   core reports the wake delivered, failed or superseded, and never by age, so a restart days later still
-   resends only to unfinished destinations, with the original `timestamp`. Before each attempt, the
-   subscription is checked again: it must still exist, be active and unexpired, and its credential must
-   still hold its role.
-5. The core still owns everything else about the wake: one wake per unread batch, supersession by a read,
-   leases, backoff, attempts, and `baton wakes`. If no destination ever accepts a wake, the core marks it
-   `failed` after its attempts. Nothing is sent anywhere else.
-
-## Shared guest logins
-
-A shared connector that logs in as `guest` acts as a role only through an alias enrolled as that role (see
-the README's MCP tools section). Its events work the same way:
-
-1. The guest subscribes with no arguments, over its OAuth grant. The subscription belongs to that grant,
-   not to a role: its id comes from the grant, the callback and the event, and only that grant can
-   unsubscribe it. A refresh is the same call and needs no alias token. A static guest token has no grant,
-   so it can't subscribe.
-2. `bind_events(token=<an enrolled alias's binding_token>)` sets the grant's one events target, the alias.
-   The alias must be mapped to a role when it binds. Binding the same alias again changes nothing;
-   binding another alias is refused until `unbind_events` with the bound alias's token removes it.
-   Subscribing and binding work in either order.
-3. A wake for role R goes to R's own subscriptions, and to every guest-grant subscription whose grant is
-   bound to the alias mapped to R at that moment. The mapping and the grant's liveness are checked on
-   every delivery, so a grant that ends stops receiving at once.
-4. `baton alias map` and `unmap` drop the affected aliases' targets; a rekey keeps them. A grant that ended
-   has its target swept later, as cleanup only. `baton events unbind <grant>` is the owner's recovery
-   when the alias's token is lost.
-
-One events target per grant is a documented limit. The payload is unchanged.
-
-`baton events status` is the owner's view on the host: each subscription's id, owner (`role:<name>` or
-`grant:<id>`), expiry and state, and the delivery receipts of the last 3 days (at most 500), each with its
-subscription, `wake_id` and outcome. Receipts outlive a wake's outcomes, so a server-side acceptance can
-be matched with the event a client actually received. It never prints callback URLs, headers, secrets or
-tokens.
-
-## Setup
-
-Synthetic values throughout. Use your client's real callback location.
+The following values are examples. Use the actual callback prefix and exact OAuth redirect URI documented
+for your client, and expose the host over HTTPS as described in
+[Connecting from another machine](../exposing.md).
 
 ```toml
 [host]
-public_url = "https://baton.example.com"      # must be reachable by the client over HTTPS
+public_url = "https://baton.example.com"
 
 [roles.assistant]
 wake = { integration = "openai_mcp_events" }
@@ -89,127 +31,155 @@ wake = { integration = "openai_mcp_events" }
 enabled = true
 passphrase_hash = "scrypt$<from baton hash-passphrase>"
 roles = ["assistant"]
-redirect_uris = ["https://client.example.com/oauth/callback"]   # the client's stable callback, exactly
+redirect_uris = ["https://client.example.com/oauth/callback"]
 
 [integrations.openai_mcp_events]
 enabled = true
-# Callbacks must fall under one of these: same scheme (https), exact host, same port, and the
-# prefix's path segments first, compared segment by segment. No wildcards.
 callback_prefixes = ["https://callbacks.example.com/"]
-# Optional, shown with their defaults:
-# default_ttl_seconds = 604800   # 7 days, when the client doesn't ask
-# min_ttl_seconds = 300
-# max_ttl_seconds = 2592000      # 30 days; a request for "no expiry" gets this
+# default_ttl_seconds = 604800      # 7 days
+# min_ttl_seconds = 300             # 5 minutes
+# max_ttl_seconds = 2592000         # 30 days
 # max_per_role = 5
 # max_total = 20
-# timeout_seconds = 10           # one absolute deadline for each request: DNS, connect, TLS, every write and read
-# rotation_overlap_seconds = 3600  # 60 to 86400: how long a replaced secret still signs, and the least time
-#                                  # between two rotations of one subscription
+# timeout_seconds = 10
+# rotation_overlap_seconds = 3600   # 60–86400; also the minimum time between rotations
 ```
 
-Every setting is checked: booleans must be TOML booleans (`true`, not `"true"`), and every number has a
-type and a range. Unknown settings are refused.
+The callback prefix is an allowlist: a callback must use HTTPS and the same host and port, and begin with
+the prefix's path segments. There are no wildcards. It is separate from the OAuth redirect URI, which must
+match its allowlist exactly. Restart `baton serve` after changing the config. Unknown settings, wrong types,
+and values outside the allowed ranges are refused.
 
-**Canonical callbacks.** A callback URL is refused unless it is already in canonical form:
-- `https`, a lowercase ASCII host, and a port only if it isn't 443;
-- a path of non-empty segments, none of them `.` or `..`;
-- no `%2e`, `%2f`, `%5c` or `%25` in any case, no backslash, no whitespace;
-- no userinfo, query or fragment.
+A callback must already be canonical: a lowercase ASCII host, no port for 443, and no empty, `.` or `..`
+path segments. Userinfo, query strings, fragments, whitespace, backslashes, and encoded dot, slash,
+backslash, or percent characters (`%2e`, `%2f`, `%5c`, `%25`, in any case) are refused. Baton stores and
+sends the same URL it validated. A `not_allowed` refusal logs the callback's scheme and host, but not its
+path. Add a prefix only if you trust the host.
 
-Rebuilding the URL from its parts must give back exactly the input. The string that is checked is the
-string that is stored, and it is sent unchanged.
+Two constructor settings used by offline tests, `allow_private_callbacks` and `ca_file`, cannot be set in
+the config parser.
 
-If a subscribe is refused as `not_allowed`, the host log names the callback's scheme and host, and nothing
-else. Add a matching prefix only if you trust that host. Restart `baton serve` after changing the config.
+<a name="what-it-does"></a>
 
-The offline tests also use two test-only settings, `allow_private_callbacks` and `ca_file`, for a
-loopback receiver with its own certificate. The config parser refuses both, so they can only be set by
-test code, through the constructor.
+## How a notification arrives
 
-## Security model
+1. An authenticated client calls `events/list` and finds `baton.attention`.
+2. The client calls `events/subscribe` with an HTTPS callback and a `whsec_` signing secret. Baton checks
+   the callback, sends a signed challenge, and stores the subscription only after a successful response.
+   The subscription is tied to the subscribing credential and role.
+3. When a wake is due for that role, Baton POSTs an event to each live subscription:
 
-| Concern | Defence |
-|---|---|
-| A client subscribing, unsubscribing or receiving for another role | The role comes only from the credential. Subscription ids are derived from the role, or for a guest from its OAuth grant, and delivery filters by role, or by the role the grant's bound alias is mapped to right now. Arguments are refused. |
-| The host made to call arbitrary URLs (SSRF) | HTTPS only, canonical URLs only (no `.` or `..` segments, or encoded separators that a server might read differently), under an operator allowlist compared segment by segment. The allowlist is rechecked on every request, and the checked string is the one sent. |
-| DNS rebinding to internal addresses | On every request (challenge and delivery), the name is resolved once, every address must be global, and the connection goes only to those addresses. TLS SNI and `Host` keep the name. A name re-pointed at a private, loopback, link-local or metadata address is refused at the next request. |
-| Redirects and proxies | Requests go through httpcore, which follows no redirects and reads no proxy settings. A redirect fails the challenge or the delivery. |
-| Callback takeover | A signed, single-use challenge must be echoed by a 2xx response (compared in constant time) before anything is stored. A refused subscribe keeps no state. |
-| Forged or replayed events at the client | Standard Webhooks signatures over `id.timestamp.body` with the subscription's secret. Each attempt gets a fresh `webhook-timestamp`. When a refresh brings a new secret, events are signed with both secrets for the rotation overlap, then with the new one only. |
-| Unbounded key rotation | A subscription keeps at most one previous secret, never a duplicate, so an event carries at most 2 signatures. A second rotation inside one overlap window is refused, and the overlap is at least 60 seconds. |
-| Leaking content through a wake | Events carry only `role`, `reason`, and a sequence number or job key. Never message text or job bodies. |
-| Unbounded state from public calls | Caps per role (per grant for guests) and overall, TTL bounds, expired subscriptions dropped, outcomes dropped with their finished core wake, receipts bounded by age and count, and a 256 KiB cap on event bodies. |
-| A slow or hostile callback | One absolute deadline per request. Every blocking step, the connect, the TLS handshake, each write and each read (headers included), gets only what is left of it, so a trickled or stalled response can't stretch it. DNS runs on a fixed pool of 4 resolver threads with a queue of 4: a lookup that times out keeps its slot until it returns, no thread is ever added, and a full pool fails at once as unreachable. `Accept-Encoding: identity` is sent, and any other `Content-Encoding` fails without decoding. Each read asks the socket for no more than what is left of a 64 KiB cap on the whole response, headers included, so nothing past it is read. |
-| Revoked access | Each delivery attempt needs the subscribing credential to still exist with the same role: the same bearer token (name, digest, role), or the same OAuth grant, still unexpired, for the same resource, and for a role OAuth may still grant. A normal refresh keeps the grant. Replacing the token, `baton oauth revoke-all`, or removing the role from `auth.oauth.roles` ends delivery, as do expiry, `events/unsubscribe` and a `410`. |
-| Secret exposure | Secrets live only in `<data_dir>/openai-mcp-events.json` (`0600`, checked like every file in the data directory). They are never logged, never written to the audit log or a wake, and never returned. |
+   ```json
+   {"eventId":"wake_…","name":"baton.attention","timestamp":"2026-01-01T00:00:00+00:00",
+    "data":{"role":"assistant","reason":"message","first_unread_seq":4},"cursor":null}
+   ```
 
-Remaining risk:
+4. The client checks the signature and reads the waiting work. For a job change, `reason` is `job.created`
+   or `job.moved` and the data includes `job_id` and `event_seq` instead. No message text or job body is
+   included.
 
-- An allowlisted host that you trust can still receive the content-free events for its role.
-- The challenge proves control of the callback, not who operates it. Keep the allowlist to hosts you
-  intend.
+The event's `timestamp` is when Baton first handled the wake and stays stable across retries. The
+`webhook-timestamp` header is the send time of each attempt.
 
-## The contract: what was verified, and what is pending
+### Delivery outcomes
 
-**Source:** OpenAI, "MCP Events", `https://developers.openai.com/plugins/build/mcp-events`, read on
-2026-10-27. The page carries no version or date other than the MCP protocol version `2026-07-28`.
+Baton keeps an outcome for each wake and subscription. A `2xx` response is accepted; `410` marks the
+subscription inactive; and `413` is a final too-large outcome. Those destinations are not sent that wake
+again. The core considers the wake delivered when every live destination has a final outcome and at least
+one accepted it. Otherwise, the core retries only destinations without a final outcome and eventually
+marks the wake failed if none accepts it.
 
-Verified against that page, and covered by the offline tests:
+Per-destination outcomes and the original occurrence time remain until the core wake is delivered, failed,
+or superseded. This preserves retry behavior across a restart. Before each attempt, Baton checks that the
+subscription is still active and unexpired and that its credential still holds the role. The core also
+handles wake coalescing, leases, backoff, and supersession by a read. `baton wakes` shows wake outcomes.
 
-- `events: {}` in `server/discover` capabilities; `events/list`, `events/subscribe` and `events/unsubscribe`
-  on the same authenticated endpoint.
-- The event-definition fields: `name`, `description`, `delivery: ["webhook"]`, `inputSchema` and
+`baton events status` shows subscription IDs, owners, expiry and state, plus recent delivery receipts
+(three days, at most 500). Receipts outlive a wake's per-destination outcomes and can help match a
+server-side acceptance with an event the client actually received. The command does not print callback
+URLs, headers, tokens, or secrets.
+
+## Shared guest logins
+
+An alias enrolled as an agent role lets a shared `guest` login act as that role; see
+[Guest aliases](../aliases.md#enroll-an-alias-as-a-role). Event subscriptions on a shared login need a
+separate binding:
+
+1. The guest subscribes over its OAuth grant with no arguments. The subscription belongs to that grant.
+   A static guest bearer token has no grant and cannot subscribe.
+2. Call `bind_events(token=<binding_token>)` with an alias that is currently mapped to a role. This sets
+   the grant's one event target. Subscribing and binding can happen in either order.
+3. A wake for that role goes to its own subscriptions and to live guest-grant subscriptions bound to the
+   alias currently mapped to it. Baton rechecks the mapping and grant on every delivery.
+4. To change targets, first call `unbind_events` with the bound alias's token. Binding the same alias twice
+   has no effect; binding a different one while a target exists is refused.
+
+`baton alias map` and `unmap` drop affected event targets; a rekey keeps them. The owner can use
+`baton events unbind <grant>` to recover when an alias token is lost. Expired grant targets are swept as
+cleanup. Each grant has at most one event target, and its event payload is unchanged.
+
+<a name="security-model"></a>
+
+## Security
+
+The callback allowlist limits which hosts may receive events, but an allowed host can receive the
+content-free event for its role. A signed challenge proves control of a callback, not who operates it.
+Keep the allowlist narrow.
+
+Baton applies these checks on both challenge and delivery:
+
+- It resolves the callback host once per request and requires every result to be globally routable. It
+  connects only to a validated address, while retaining the host name for TLS and the `Host` header.
+- It follows no redirects and does not use proxy settings for these outbound requests.
+- It uses one absolute deadline for DNS, connect, TLS, writes, and reads. DNS uses a fixed pool of four
+  workers and a queue of four; a timed-out lookup keeps its slot until it returns.
+- It requests identity encoding and limits response reads, including headers, to 64 KiB. Challenge responses
+  must be unencoded; for event delivery, Baton uses the response status and does not read or decode the
+  response body. Event bodies are limited to 256 KiB.
+- It signs events using Standard Webhooks over the exact transmitted bytes. During secret rotation, the
+  old and new secrets both sign for the configured overlap. A subscription keeps at most one previous
+  secret and cannot rotate again during that overlap.
+
+Subscriptions are bounded per role (per grant for guests) and overall, have bounded lifetimes, and stop
+when their credential no longer has access. Replacing a bearer token, revoking OAuth grants, removing a
+role from `auth.oauth.roles`, expiry, `events/unsubscribe`, and a `410` all end delivery as applicable.
+Signing secrets are stored only in the integration's `0600` data-directory state file; they are not logged,
+audited, returned, or placed in wakes.
+
+<a name="the-contract-what-was-verified-and-what-is-pending"></a>
+
+## Contract and verification
+
+The offline tests cover the implementation against OpenAI's published
+[MCP Events documentation](https://developers.openai.com/plugins/build/mcp-events), as read on 2026-10-27,
+including:
+
+- Discovery with `events: {}` and `events/list`, `events/subscribe`, and `events/unsubscribe` on the
+  authenticated endpoint. Event definitions provide `name`, `description`, `delivery`, `inputSchema`, and
   `payloadSchema`.
-- Subscribe:
-  - the params are `name`, `arguments`, `delivery {mode, url, secret}`, `cursor` and `ttlMs`;
-  - the result is `id`, `refreshBefore`, `cursor: null` and `truncated: false`;
-  - the id is deterministic, from principal, URL, name and canonical arguments;
-  - a repeat subscribe refreshes.
-- The secret format: `whsec_` and 24–64 decoded bytes. HTTPS callbacks.
-- Verification:
-  - the body is `type: "verification"` plus a fresh challenge;
-  - it is signed, with `X-MCP-Subscription-Id`;
-  - a 2xx response must echo the challenge, compared in constant time;
-  - failure is JSON-RPC `-32015` with `data.reason`.
-- Delivery:
-  - the body fields are `eventId`, `name`, `timestamp`, `data` and `cursor`, with no top-level `type`;
-  - the headers are `webhook-id` (= `eventId`), `webhook-timestamp`, `webhook-signature` and
-    `X-MCP-Subscription-Id`;
-  - Standard Webhooks signing over the exact bytes sent;
-  - bodies are at most 256 KiB;
-  - 2xx acknowledges, and `410` and `413` are not retried;
-  - `timestamp` is the occurrence time, stable across retries;
-  - during a secret rotation, both secrets sign, as space-separated signatures;
-  - a 10-second timeout.
-- The security rules: resolve and validate at connection time, connect to the validated address while
-  keeping the name for TLS, block non-public addresses, follow no redirects, apply all of this to
-  verification and delivery alike, and stop delivery on expiry or revoked access.
-- State is kept across restarts.
+- Subscribe parameters `name`, `arguments`, `delivery {mode, url, secret}`, `cursor`, and `ttlMs`; a result
+  with `id`, `refreshBefore`, `cursor: null`, and `truncated: false`; deterministic subscription IDs; and
+  repeat subscribe as refresh. Secrets use `whsec_` and decode to 24–64 bytes.
+- A signed verification request with `X-MCP-Subscription-Id` and a body containing
+  `type: "verification"` and a fresh challenge. A `2xx` response must echo the challenge, which Baton
+  compares in constant time; failures use JSON-RPC `-32015` and a `data.reason`.
+- Delivery fields `eventId`, `name`, `timestamp`, `data`, and `cursor`, without a top-level `type`;
+  headers `webhook-id`, `webhook-timestamp`, `webhook-signature`, and `X-MCP-Subscription-Id`; and
+  Standard Webhooks signatures. `2xx` acknowledges; `410` and `413` are final for that destination.
+- Callback validation, global-address checks, no redirects, revocation checks, and state across restarts.
 
-Choices the page leaves to the server, made here:
+Baton's implementation choices include:
 
-- `ttlMs: null` ("no expiration") is granted the maximum TTL, so `refreshBefore` is never null.
-- The page gives no default TTL. Here it is 7 days, bounded to 5 minutes – 30 days.
-- **A deliberate deviation from the contract:** every subscribe is verified with a fresh challenge. The page
-  says a successful verification may be cached for a bounded period, by principal and callback URL. This
-  integration never caches one, so a refresh costs one more signed request to the callback.
-- Retries use the core's backoff (1 minute doubling to 1 hour, 8 attempts), and go only to destinations
-  without a final outcome. Each attempt keeps `eventId` and gets a fresh `webhook-timestamp` and
-  signature.
-- The page asks for "a short rotation window" without a length. Here it is one hour
-  (`rotation_overlap_seconds`, from 60 seconds to a day), and a subscription may rotate at most once per
-  window. A challenge is signed with the new secret only.
-- The occurrence time is when the host first handled the wake, usually within a second of the message or
-  job change.
-- The `-32015` reasons used are `invalid_url`, `not_allowed`, `private_address`, `unreachable`,
-  `timeout` and `challenge_failed`. The page names `challenge_failed` and `timeout` as examples.
+- A default subscription lifetime of seven days, bounded to five minutes through 30 days. A request for
+  no expiration receives the maximum lifetime, so `refreshBefore` is not null.
+- A fresh challenge on every subscribe, including refresh; successful challenges are not cached.
+- Core wake retries from one minute up to one hour, with eight attempts. The event ID remains stable and
+  each attempt gets a fresh webhook timestamp and signature.
+- A one-hour default secret-rotation overlap, configurable from 60 seconds to one day. A challenge is
+  signed only with the new secret.
+- `-32015` reasons `invalid_url`, `not_allowed`, `private_address`, `unreachable`, `timeout`, and
+  `challenge_failed`. The occurrence time is when the host first handles the wake.
 
-**Pending: not verified. It needs a live acceptance test with a real client, which hasn't been run.**
-
-- That a real ChatGPT connector discovers, subscribes, passes the challenge, accepts the signed events and
-  refreshes before `refreshBefore`, end to end against this host.
-- The callback host and path a real client uses, so the right `callback_prefixes` can be set.
-- Whether the client sends `cursor` values, or rotates secrets on refresh, in practice. This integration
-  accepts and ignores `cursor`, and handles a rotation as described above.
-
-Until then, treat compatibility as unconfirmed. Only the offline tests have exercised this code.
+Real-client wake delivery has been exercised end to end, including a shared guest login bound to an enrolled
+alias. Check the callback and OAuth settings, subscription refresh, and delivery with your own client;
+those details can vary by deployment. Baton accepts and ignores a supplied cursor.

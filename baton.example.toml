@@ -26,7 +26,7 @@ description = "Picks up jobs and reports back"
 # can_view_all_conversations = true          # widens retained board reads; choose explicitly at rollout
 
 # Optional: a person rather than an agent. A human role uses only its own bearer token (never OAuth or --as),
-# and its messages read as author_kind "human". See the README's "Human participants".
+# and its messages read as author_kind "human". See docs/people.md for human roles.
 # human = true
 # display_name = "Alex Rivera"   # how pages name the role, such as a person's name; the role name when unset
 
@@ -35,7 +35,7 @@ description = "Picks up jobs and reports back"
 # [roles.viewer]
 # display_only = true
 
-# Optional, with [conversations] enabled: what a role may do in group conversations (both default to false).
+# Optional, with [conversations] enabled: what a role may do in group conversations (all default to false).
 # can_create_conversations = true
 # can_manage_participants = true
 # can_view_all_conversations = true   # grants retained board-wide reads; also lets the dashboard show every conversation
@@ -66,7 +66,7 @@ description = "Picks up jobs and reports back"
 # max_claims_per_alias_per_hour = 5            # at most 10000; lookalike skeletons share a limit
 # max_claims_per_hour = 100                    # at most 10000 overall, before scrypt
 
-# Optional: group conversations among three or more roles. Off unless enabled.
+# Optional: group conversations among two or more roles. Off unless enabled.
 # [conversations]
 # enabled = true
 # max_participants = 8                        # per conversation, at least 2
@@ -87,7 +87,7 @@ description = "Picks up jobs and reports back"
 #                                             # widens what the view's audience sees
 
 # Optional: a browser seat, where one human role logs in with its own token to read and reply. Off unless enabled.
-# It binds to loopback only, behind a proxy that terminates TLS at `origin`. See the README's "Browser seat".
+# It binds to loopback only, behind a proxy that terminates TLS at `origin`. See docs/people.md for the browser seat.
 # [seat]
 # enabled = true
 # role = "operator"                           # a human role, not display_only, and not the dashboard's viewer
