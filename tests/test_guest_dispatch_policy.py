@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import uvicorn
 from conftest import Host, free_port, make_config
+from topic_backing import back_topics
 
 from baton import app as app_module
 from baton import auth, jobs
@@ -126,7 +127,8 @@ def test_guest_policy_enumerates_every_registered_tool_and_allows_only_the_read_
         listed = _rpc(host, "guest", "tools/list", {})["result"]["tools"]
         registered = {tool["name"] for tool in listed}
         allowed = {"whoami", "alias_exists", "claim_alias", "list_conversations", "read_history",
-                   "get_message", "search", "send_message"}
+                   "get_message", "search", "send_message", "create_conversation",
+                   "list_topics", "get_topic"}
         if hasattr(app_module, "GUEST_TOOLS"):
             assert app_module.GUEST_TOOLS & registered == allowed
         assert allowed <= registered
@@ -199,6 +201,7 @@ def test_job_authority_false_blocks_before_replay_and_keeps_hilary_other_tools(t
         conversation = _call(host, "hilary", "create_conversation", {
             "title": "ordinary conversation", "participants": ["hilary", "planner"]})
         assert conversation.get("error") is None
+        back_topics(host.config.db_path, "policy")  # a topic is a container now, so the target must exist
         assert _call(host, "hilary", "set_topic", {"conversation_id": conversation["conversation_id"],
                                                      "topic": "policy"}).get("error") is None
     finally:

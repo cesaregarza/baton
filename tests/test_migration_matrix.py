@@ -181,7 +181,8 @@ WHOLE_TABLES = {8: {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_req
                 11: {"vectors", "vector_skips"},  # embeddings a producer supplies, per generation
                 12: {"aliases", "alias_bindings", "alias_claims"},
                 13: {"alias_posts"},  # guest continuity
-                14: {"alias_arms", "core_enrolment", "alias_roles", "events_targets"}}  # per-call identity
+                14: {"alias_arms", "core_enrolment", "alias_roles", "events_targets"},  # per-call identity
+                15: {"topics"}}  # topics as containers
 
 
 @pytest.mark.parametrize("version", FIXTURE_VERSIONS)

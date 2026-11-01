@@ -24,6 +24,7 @@ from mcp.client.streamable_http import streamable_http_client
 from test_dashboard import get, text, view_config
 from test_human_seat import SeatHost, local, remote
 from test_integration import payload
+from topic_backing import back_topics
 
 from baton import config as config_module
 from baton import conversations
@@ -77,6 +78,9 @@ def topic_host(tmp_path: Path) -> Iterator[SeatHost]:
     threading.Thread(target=server.run, daemon=True).start()
     while not server.started:
         time.sleep(0.02)
+    # These surfaces are about carrying a topic through the tools, the CLI and the dashboard, so the
+    # paths they use are backed here rather than opened: who may open one is tested elsewhere.
+    back_topics(config.db_path, "project", "project/alpha", "project/renamed", "projectile")
     yield SeatHost(config, path, f"http://127.0.0.1:{port}", {role: token for role, (token, _) in tokens.items()})
     server.should_exit = True
 
@@ -261,6 +265,7 @@ def test_the_dashboard_groups_by_topic_and_still_shows_the_untagged(tmp_path) ->
     config = view_config(tmp_path, view_all=True)
     conn = connect(config.db_path)
     try:
+        back_topics(conn, "project", "project/alpha", "projectile")
         for title, topic in (("the project", "project"), ("a subtopic", "project/alpha"),
                              ("a longer word", "projectile"), ("untagged", None)):
             conversations.create(conn, config, actor="orchestrator", title=title,

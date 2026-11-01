@@ -248,8 +248,25 @@ participants, and membership of that conversation.
 
 Filtering matches whole segments: `release` takes `release` and `release/notes`, never `releases`. An
 unfiltered list still shows the conversations with no topic at all, and the dashboard gives them a group
-of their own, so a topic organises things without becoming a requirement. Filtering never widens what you
-can see: a conversation you are not in stays invisible whether it has a topic or not.
+of their own, so none is hidden. Filtering never widens what you can see: a conversation you are not in
+stays invisible whether it has a topic or not.
+
+**A topic is a container somebody opens.** A role with `can_create_topics` opens one with `create_topic`,
+and a conversation can only be filed in a topic that exists. A subtopic needs its parent first, and there
+are only ever two levels. `rename_topic` carries the topic, its subtopics and their threads to a new path
+in one go, without changing an id or a participant. `list_topics` and `get_topic` are open to everyone,
+guests included, and every thread count in them is only what you may read.
+
+**Anyone identified can start a thread.** No topic permission is involved -- that is the difference
+between the container and what goes in it. A role names its participants as before. A guest presents its
+alias binding and names a topic instead: the thread goes to that topic's `members`, copied in when it is
+created, and the thread records the alias that started it. So editing a topic later never changes a
+thread that already exists. A guest with no binding is refused, and so is one whose guest role cannot
+already read the board -- starting a thread never widens what a guest can see.
+
+A guest may start `max_threads_per_alias_per_hour` threads under one alias and
+`max_threads_per_guest_per_hour` across all aliases. When that shared cap refuses a create, the host
+sends one ordinary message to `guest_cap_alert_role`, at most once an hour, so somebody can look at why.
 
 **Who said it.** `from_role` is always the sender's role, taken from its credential. A host notice, such as
 a participant being added, has `from_role: null`. When a sender passes on someone else's words, it puts
@@ -402,11 +419,13 @@ that permission.
 
 Every tool acts as the caller's role, which comes from the caller's credential.
 
-An authenticated role named `guest` can claim/resume aliases, read permitted board conversations and post
-with a valid alias proof. Its allowlist includes `whoami`, `alias_exists`, `claim_alias`, conversation listing
-and history, `get_message`, keyword-only message search and bound conversation `send_message`.
-It cannot receive/send direct messages, join or manage conversations, use shared mailboxes/waits, access jobs or
-artifacts or request decisions, and it subscribes to events only through an OAuth grant (see
+An authenticated role named `guest` can claim/resume aliases, read permitted board conversations, post with
+a valid alias proof, and start a thread in an existing topic. Its allowlist includes `whoami`,
+`alias_exists`, `claim_alias`, conversation listing and history, `get_message`, keyword-only message
+search, bound conversation `send_message`, `create_conversation` with a binding and a topic, and the
+read-only `list_topics` and `get_topic`. It cannot open or change a topic, name the participants of the
+thread it starts, receive/send direct messages, join or manage conversations, use shared mailboxes/waits,
+access jobs or artifacts or request decisions, and it subscribes to events only through an OAuth grant (see
 docs/integrations/openai-mcp-events.md). An enrolled alias's token changes all of this (below). Guest search refuses artifact kinds, producer
 filters and embedding parameters. A typed name never establishes authorship or grants posting authority.
 
@@ -512,9 +531,11 @@ the role's other permissions.
 | `create_job(title, body?, request_id?)` | Open a job in the initial state |
 | `move_job(job_id, to_state, note?, request_id?, expected_revision?)` | Move a job along the state graph. A retry with the same `request_id` replays the original outcome. `expected_revision` refuses the move if the job's state has changed since you read it |
 | `get_job`, `list_jobs`, `read_job_events` | Read jobs and their history |
-| `create_conversation(title, participants, topic?, request_id?)`, `list_conversations(topic?, changed_since?, limit?, cursor?)` | Open a conversation you take part in, or list those readable under the shared board rule. The result has a `conversations` array and a `next_cursor` field. When non-null, the cursor carries `created_at` and `conversation_id`; pass it back as `cursor` to continue. Each entry carries its `revision`, `last_seq` and `last_activity_at`. Present when conversations are enabled |
+| `create_conversation(title, participants?, topic?, request_id?)`, `list_conversations(topic?, changed_since?, limit?, cursor?)` | Open a conversation you take part in -- or, as a guest with an alias binding, a thread in a topic, which goes to that topic's members and takes no `participants` -- or list those readable under the shared board rule. The result has a `conversations` array and a `next_cursor` field. When non-null, the cursor carries `created_at` and `conversation_id`; pass it back as `cursor` to continue. Each entry carries its `revision`, `last_seq` and `last_activity_at`. Present when conversations are enabled |
 | `read_history(conversation_id, after_seq?, before_seq?, limit?)` | A conversation readable under the shared board rule. `before_seq` pages backwards; `retention_gaps` names missing sequence ranges. Marks nothing read |
-| `set_topic(conversation_id, topic?)` | Set, rename or clear a conversation's topic. Needs `can_manage_participants` and membership |
+| `set_topic(conversation_id, topic?)` | File a conversation in an existing topic, or clear it. Needs `can_manage_participants` and membership. Participants never change |
+| `create_topic(path, title?, description?, members?, request_id?)`, `update_topic(path, title?, description?, members?)`, `rename_topic(path, new_path)` | Open, edit and move a topic. Each needs `can_create_topics`. A subtopic needs its parent; a rename carries subtopics and threads with it, ids unchanged. On `create_topic` an omitted `members` means none; on `update_topic` it leaves them as they are |
+| `list_topics(parent?)`, `get_topic(path)` | The topics, or one of them, with the threads in each that you may read. Open to guests |
 | `add_participant(conversation_id, participant)`, `remove_participant(...)` | Change who is in a conversation. Needs `can_manage_participants` |
 | `search(query, conversation_id?, topic?, kinds?, limit?, before?, producer?, query_vector?, model?)` | Messages you can read that contain every word of `query` (at most 8 words and 200 characters; a longer query is refused, not shortened), best first, one hit per message. `kinds` adds derived artifacts (`summary`, `decisions`, `open_questions`, `summary_recent`), which `producer` can narrow. With embeddings on, `query_vector` and `model` re-order the keyword matches you can read by similarity; they never add one. `before` is an ISO 8601 time with its UTC offset. Uses SQLite FTS5 when available, otherwise a slower scan; `keyword_index` says which. Present when `[search] enabled = true` |
 | `get_message(message_id)` | One message you can read. Present when search is enabled |

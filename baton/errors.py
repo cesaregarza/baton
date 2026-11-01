@@ -65,6 +65,10 @@ class UnknownConversation(BatonError):
     code = "unknown_conversation"
 
 
+class UnknownTopic(BatonError):
+    code = "unknown_topic"
+
+
 class NotAParticipant(BatonError):
     code = "not_a_participant"
 
