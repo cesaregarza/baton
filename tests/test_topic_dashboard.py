@@ -182,3 +182,82 @@ def test_the_directory_never_renders_an_unreadable_threads_activity(tmp_path):
     finally:
         conn.close()
 
+# The direct topic route, and what a page a restricted viewer CAN open may say about one it cannot.
+
+def subtree(tmp_path, *, view_all: bool, where: str):
+    """A parent topic and a subtopic, with one readable thread filed in `where` and one unreadable
+    thread filed in the other. The reader is the dashboard's viewer."""
+    config, conn = seeded(tmp_path, view_all=view_all)
+    topics.create(conn, config, actor="orchestrator", path="work", members=MINE)
+    topics.create(conn, config, actor="orchestrator", path="work/open", members=MINE)
+    readable_in, hidden_in = ("work", "work/open") if where == "parent" else ("work/open", "work")
+    conversations.create(conn, config, actor="orchestrator", title="Readable", participants=MINE,
+                         topic=readable_in)
+    conversations.create(conn, config, actor="orchestrator", title="Hidden",
+                         participants=["orchestrator", "assistant"], topic=hidden_in)
+    return config, conn
+
+
+def test_a_topic_with_nothing_readable_in_it_is_not_found(tmp_path):
+    """Least disclosure: the page a restricted viewer cannot see into does not exist for it, so not even
+    the topic's existence, description or membership is readable by guessing the path."""
+    config, conn = seeded(tmp_path, view_all=False)
+    try:
+        topics.create(conn, config, actor="orchestrator", path="secret", description="Vendor deal",
+                      members=MINE)
+        conversations.create(conn, config, actor="orchestrator", title="Not mine",
+                             participants=["orchestrator", "assistant"], topic="secret")
+        answer = get(config, "/t/secret")
+        assert answer.status == 404
+        assert "Vendor deal" not in text(answer)
+    finally:
+        conn.close()
+
+
+def test_a_board_reader_still_opens_an_empty_topic(tmp_path):
+    """The directory has to stay usable for the viewer it is built for."""
+    config, conn = seeded(tmp_path, view_all=True)
+    try:
+        assert get(config, "/t/baton/development").status == 200
+    finally:
+        conn.close()
+
+
+def test_a_restricted_viewer_opens_a_topic_it_has_a_thread_in(tmp_path):
+    config, conn = seeded(tmp_path, view_all=False)
+    try:
+        conversations.create(conn, config, actor="orchestrator", title="Mine", participants=MINE,
+                             topic="baton")
+        answer = get(config, "/t/baton")
+        assert answer.status == 200
+        assert "Mine" in text(answer)
+    finally:
+        conn.close()
+
+
+def test_a_parent_is_openable_when_only_its_subtopic_is_readable(tmp_path):
+    """Otherwise the directory, which keeps such a parent so its subtopic is not orphaned, would link
+    to a page that refuses. Opening it says only that something in the subtree is readable, which the
+    subtopic itself already says."""
+    config, conn = subtree(tmp_path, view_all=False, where="child")
+    try:
+        assert get(config, "/t/work").status == 200
+        assert get(config, "/t/work/open").status == 200
+        parent = text(get(config, "/t/work"))
+        assert "Hidden" not in parent, "the parent's own unreadable thread stays hidden"
+        assert "/t/work/open" in parent, "its readable subtopic is still offered"
+    finally:
+        conn.close()
+
+
+def test_a_page_never_links_a_subtopic_the_viewer_cannot_open(tmp_path):
+    """The subtopic list is the remaining way a topic page could name something unreadable."""
+    config, conn = subtree(tmp_path, view_all=False, where="parent")
+    try:
+        page = text(get(config, "/t/work"))
+        assert "Readable" in page
+        assert "/t/work/open" not in page, "a subtopic with nothing readable must not be linked"
+        assert get(config, "/t/work/open").status == 404
+    finally:
+        conn.close()
+

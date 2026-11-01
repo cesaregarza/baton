@@ -758,3 +758,16 @@ def test_a_topic_the_reader_sees_nothing_in_reports_no_activity(db, config):
     assert entry["threads"] == 0
     assert entry["last_activity_at"] is None, "no readable thread means nothing to report"
 
+def test_get_topic_lists_only_the_subtopics_the_reader_can_open(db, config):
+    """The tool is the other way a subtopic could be named, so it filters the same way the page does."""
+    make_topic(db, config, "work")
+    make_topic(db, config, "work/open")
+    make_topic(db, config, "work/shut")
+    conversations.create(db, config, actor="orchestrator", title="Readable",
+                         participants=["orchestrator", "reviewer"], topic="work/open")
+    conversations.create(db, config, actor="orchestrator", title="Hidden",
+                         participants=["orchestrator", "assistant"], topic="work/shut")
+    assert topics.get(db, config, reader="reviewer", path="work")["subtopics"] == ["work/open"]
+    assert topics.get(db, config, reader="orchestrator", path="work")["subtopics"] == \
+        ["work/open", "work/shut"], "a board reader sees both"
+
