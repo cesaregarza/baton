@@ -135,6 +135,16 @@ details { margin: 1.75rem 0 .5rem; border: 1px solid var(--line); border-radius:
 summary { cursor: pointer; padding: .75rem 0; font-weight: 600; }
 details[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: .25rem; }
 .pager { margin: .5rem 0; }
+.gap-bar { display: none; }
+.gap-dismiss { position: fixed; bottom: 0; left: 0; width: 1px; height: 1px; margin: 0; opacity: 0;
+  visibility: hidden; }
+body:has(li:target) .gap-dismiss:not(:checked) { visibility: visible; }
+body:has(li:target) .gap-dismiss:not(:checked) + .gap-bar { display: block; position: fixed; bottom: 0; left: 0;
+  right: 0; margin: 0; padding: .5rem 1rem; background: #fff; border-top: 1px solid #c4c7c5; color: #5f6368;
+  font-size: .85rem; text-align: center; }
+body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 4rem; }
+.gap-bar label { margin-left: .6rem; color: #0b57d0; text-decoration: underline; cursor: pointer; }
+.gap-dismiss:focus-visible + .gap-bar label { outline: 2px solid #0b57d0; outline-offset: 2px; }
 /* primary links are at least 44px tall: an item that opens with its link lets the link carry the item's top space */
 h2 a { display: inline-block; padding: .7rem 0; }
 h2:has(> a) { margin: 1rem 0 0; }
@@ -601,7 +611,12 @@ def _gap_summary(gaps: list[dict[str, int]]) -> str:
     ranges = ", ".join(f"#{gap['from_seq']}" if gap["from_seq"] == gap["to_seq"]
                        else f"#{gap['from_seq']}–#{gap['to_seq']}"
                        for gap in sorted(gaps, key=lambda gap: gap["from_seq"]))
-    return f'<p class="notice">Not kept any more on this page: messages {_e(ranges)}</p>'
+    # Arriving by a message link skips the summary, so a bar at the bottom, where it can't cover the anchored message,
+    # points back to it. It is CSS only (the page runs no scripts): shown under :target, dismissed by the checkbox.
+    return (f'<p class="notice" id="missing">Not kept any more on this page: messages {_e(ranges)}</p>'
+            '<input type="checkbox" id="gap-dismiss" class="gap-dismiss">'
+            '<p class="gap-bar">Some messages on this page are no longer kept · <a href="#missing">view ranges</a>'
+            '<label for="gap-dismiss">Dismiss</label></p>')
 
 
 def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | set[int] = frozenset(),
