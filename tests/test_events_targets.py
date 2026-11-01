@@ -6,10 +6,12 @@ Synthetic and offline: a real loopback host with OAuth, the loopback receiver an
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 
 import httpx
 import pytest
+from conftest import make_config
 from test_aliases import payload
 from test_auth import authorize
 from test_openai_mcp_events import (
@@ -25,7 +27,7 @@ from test_openai_mcp_events import (
 )
 from test_per_call_identity import OTHER, SECRET, db, owner
 
-from baton import auth
+from baton import auth, store
 from baton.integrations import openai_mcp_events as integration
 
 ROLES = """
@@ -221,3 +223,31 @@ def test_the_owner_status_shows_receipts_but_no_secrets_and_unbind_recovers(host
     assert owner(host, "events", "unbind", grant) == 0
     assert targets(host) == []
 
+
+@pytest.fixture
+def offline_events(tmp_path):
+    """An events integration with no server or receiver, for checks on its own state."""
+    table = '[integrations.openai_mcp_events]\nenabled = true\ncallback_prefixes = ["https://callback.test/hooks/"]\n'
+    config = make_config(tmp_path, extra=table).config
+    store.connect(config.db_path).close()
+    return integration.McpEvents(config, integration.parse_settings(config.integrations["openai_mcp_events"]))
+
+
+def receipt(at):
+    return {"at": at, "wake_id": "wake_synthetic", "subscription": "sub", "owner": "role:worker",
+            "outcome": "accepted"}
+
+
+def test_receipts_never_exceed_their_cap(offline_events):
+    with offline_events._state() as state:
+        state["receipts"] = [receipt(time.time()) for _ in range(integration.MAX_RECEIPTS)]
+    offline_events._record("wake_new", {"id": "sub", "role": "worker"}, "answered 500")
+    assert len(offline_events._read()["receipts"]) == integration.MAX_RECEIPTS
+    assert offline_events._read()["receipts"][-1]["wake_id"] == "wake_new"
+
+
+def test_status_never_shows_a_receipt_older_than_its_window(offline_events):
+    with offline_events._state() as state:
+        state["receipts"] = [receipt(time.time() - integration.RECEIPT_SECONDS - 60), receipt(time.time())]
+    shown = integration.status(offline_events.config)["receipts"]
+    assert len(shown) == 1 and shown[0]["at"] > time.time() - integration.RECEIPT_SECONDS

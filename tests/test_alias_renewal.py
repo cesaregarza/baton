@@ -195,3 +195,44 @@ def test_the_mapped_lifetime_is_bounded_in_config(tmp_path, value, accepted):
     else:
         with pytest.raises(ConfigError):
             config_module.load(path)
+
+
+def claims(host):
+    with db(host) as conn:
+        return conn.execute("SELECT COUNT(*) FROM alias_claims").fetchone()[0]
+
+
+def test_a_reset_never_spends_an_arm_that_replaced_the_one_it_checked(host, monkeypatch):
+    enrolled_and_armed(host)
+    original, replaced = auth.check_passphrase, []
+
+    def check_then_rearm(passphrase, verifier):
+        matched = original(passphrase, verifier)
+        if not replaced:
+            replaced.append(True)
+            assert owner(host, "alias", "arm-rekey", "hilary") == 0
+        return matched
+
+    monkeypatch.setattr(auth, "check_passphrase", check_then_rearm)
+    with pytest.raises(Forbidden):
+        direct_claim(host, OTHER)
+    monkeypatch.undo()
+    assert arms(host) == [("rekey", "hilary")], "the replacement arm is still there"
+    assert direct_claim(host, SECRET)["effective_role"] == "hilary", "the verifier is unchanged"
+
+
+def test_a_reset_that_loses_its_arm_still_counts_as_a_claim(host, monkeypatch):
+    enrolled_and_armed(host)
+    before = claims(host)
+    original = auth.check_passphrase
+
+    def check_then_lose_the_arm(passphrase, verifier):
+        matched = original(passphrase, verifier)
+        with db(host) as conn:
+            conn.execute("DELETE FROM alias_arms")
+        return matched
+
+    monkeypatch.setattr(auth, "check_passphrase", check_then_lose_the_arm)
+    with pytest.raises(Forbidden):
+        direct_claim(host, OTHER)
+    assert claims(host) == before + 1, "only a successful reset skips claim admission"

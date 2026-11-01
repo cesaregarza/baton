@@ -371,3 +371,84 @@ def test_a_token_on_claim_alias_is_refused_and_redacted(host):
         assert (await call(client, host, "claim_alias", {"name": "lane-t", "passphrase": SECRET, "token": None})
                 ).get("effective_role") == "guest", "null is the same as omitted"
     dispatch(host, scenario)
+
+
+def test_a_refused_author_field_never_writes_the_token_to_audit(host):
+    async def scenario(client):
+        proof = (await claim(client, host, "lane-a"))["binding_token"]
+        refused = await rpc(client, host, "tools/call", {"name": "read_messages", "arguments": {
+            "token": proof, "from_role": "synthetic", "request_id": proof}})
+        assert payload(refused).get("error") == "forbidden_field"
+        assert proof not in host.config.audit_path.read_text()
+    dispatch(host, scenario)
+
+
+def test_bind_events_rechecks_the_mapping_inside_its_transaction(host):
+    from baton import aliases
+    from baton.errors import Forbidden
+
+    async def scenario(client):
+        await enrol(client, host)
+        proof = (await claim(client, host))["binding_token"]
+        with db(host) as conn:
+            resolved = aliases.resolve_binding(conn, proof)
+        assert resolved["effective_role"] == "hilary"
+        assert owner(host, "alias", "unmap", "hilary") == 0
+        conn = store.connect(host.config.db_path)
+        try:
+            with pytest.raises(Forbidden):
+                aliases.bind_events(conn, {"kind": "oauth", "grant": "synthetic-grant"}, resolved)
+            assert conn.execute("SELECT COUNT(*) FROM events_targets").fetchone()[0] == 0
+        finally:
+            conn.close()
+    dispatch(host, scenario)
+
+
+class Interleaved:
+    """A connection that runs `between` right after the first query that reads alias_bindings, its rows already
+    read. Resolution must answer from one consistent read, so a change landing there can't mix two states."""
+
+    def __init__(self, conn, between):
+        self._conn, self._between = conn, between
+
+    def execute(self, sql, *args):
+        cursor = self._conn.execute(sql, *args)
+        if "alias_bindings" not in sql or self._between is None:
+            return cursor
+        rows = Rows(cursor.fetchall())
+        between, self._between = self._between, None
+        between()
+        return rows
+
+
+class Rows(list):
+    def fetchone(self):
+        return self[0] if self else None
+
+
+def resolve_while(host, proof, between):
+    from baton import aliases
+
+    conn = store.connect(host.config.db_path)
+    try:
+        return aliases.resolve_binding(Interleaved(conn, between), proof)
+    finally:
+        conn.close()
+
+
+def test_a_map_landing_mid_resolution_never_upgrades_a_guest_proof(host):
+    async def scenario(client):
+        await enrol(client, host)
+        guest = (await claim(client, host, "lane-m"))["binding_token"]
+        resolved = resolve_while(host, guest, lambda: owner(host, "alias", "map", "lane-m", "hilary"))
+        assert resolved["effective_role"] == "guest", "resolved from the state in which the proof was live"
+    dispatch(host, scenario)
+
+
+def test_an_unmap_landing_mid_resolution_never_downgrades_a_mapped_proof(host):
+    async def scenario(client):
+        await enrol(client, host)
+        mapped = (await claim(client, host))["binding_token"]
+        resolved = resolve_while(host, mapped, lambda: owner(host, "alias", "unmap", "hilary"))
+        assert resolved["effective_role"] == "hilary", "resolved from the state in which the proof was live"
+    dispatch(host, scenario)
