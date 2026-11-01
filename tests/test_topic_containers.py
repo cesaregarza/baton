@@ -309,6 +309,32 @@ def test_a_guest_may_not_name_participants(db, config):
     assert "participants" in detail
 
 
+# 7b. `participants` became optional for the guest path, so what each role owes is pinned here.
+
+def test_a_core_role_that_omits_participants_is_refused(db, config):
+    """Optional in the schema, still required of a role: the guest path is the only one without it."""
+    detail = refused("invalid_request", conversations.create, db, config, actor="orchestrator",
+                     title="No participants", participants=None)
+    assert "participants" in detail
+
+
+def test_a_guests_empty_participants_list_reads_as_omitting_it(db, config):
+    """An empty list asks for nobody, which is what leaving it out means, so it is not a refusal."""
+    make_topic(db, config, "baton")
+    made = conversations.create(db, config, actor="guest", title="Empty list", participants=[],
+                                topic="baton", identity=ALIAS)
+    assert made["created"] is True
+    assert participants_of(db, made["conversation_id"]) == sorted(MEMBERS)
+
+
+def test_a_guests_non_empty_participants_list_is_refused(db, config):
+    """Naming even one role is the guest choosing its own audience, which the topic decides."""
+    make_topic(db, config, "baton")
+    detail = refused("invalid_request", conversations.create, db, config, actor="guest", title="One role",
+                     participants=["orchestrator"], topic="baton", identity=ALIAS)
+    assert "participants" in detail
+
+
 # 8. Caps.
 
 def test_the_per_alias_cap_holds(db, config):
