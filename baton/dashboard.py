@@ -137,7 +137,11 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
         if topic is not None:
             # A topic is a container, so one nobody opened is a missing page rather than an empty list.
             # The grammar check above still answers 400 first, which keeps a malformed path distinct.
-            if not topics.exists(conn, topic):
+            # A topic this viewer can see nothing under is missing too: the page carries the topic's
+            # description, creator and members, so answering 200 would hand those to anyone who guessed
+            # the path. 404 rather than a bare header also keeps the topic's existence out of it.
+            if not topics.exists(conn, topic) or not topics.may_open(
+                    conn, config, config.dashboard.viewer_role, topic):
                 return _not_found()
             return _page(200, topic, _index(config, conn, topic, pages["page"]))
         if match is None:

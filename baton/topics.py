@@ -204,16 +204,34 @@ def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, n
         return {**_summary(_row(conn, target)), "renamed_from": checked, "subtopics": len(children)}
 
 
+def may_open(conn: sqlite3.Connection, config: Config, reader: str, path: str) -> bool:
+    """Whether this reader may be shown `path` at all: the board rule, or a readable thread in its subtree.
+
+    The subtree, not the topic alone, because a parent whose only readable thread sits in a subtopic has
+    to stay reachable: the directory keeps such a parent so its subtopic is not orphaned, and a link to
+    a page that refuses would be worse than useless. Opening it discloses only that something under it
+    is readable, which the subtopic already says.
+    """
+    if board_read.sees_all(config, reader):
+        return True
+    return conn.execute("SELECT 1 FROM conversations c WHERE (c.topic = ? OR c.topic LIKE ?)"
+                        " AND EXISTS (SELECT 1 FROM participants p WHERE p.conversation_id = c.id"
+                        " AND p.role = ?) LIMIT 1", (path, f"{path}/%", reader)).fetchone() is not None
+
+
 def get(conn: sqlite3.Connection, config: Config, *, reader: str, path: Any) -> dict[str, Any]:
-    """One topic, with the number of threads in it this reader may see."""
+    """One topic, with the number of threads in it this reader may see and the subtopics it may open."""
     checked = _check_path(path)
     row = _row(conn, checked)
     if row is None:
         raise UnknownTopic(f"no topic {checked!r}")
     threads, _ = _readable(conn, config, reader, checked)
+    # Filtered, because the subtopic list is the other way this could name a topic the reader may not
+    # see into -- the page renders these as links, and the tool hands them to whoever called it.
+    children = [entry[0] for entry in conn.execute(
+        "SELECT path FROM topics WHERE path LIKE ? ORDER BY path", (f"{checked}/%",))]
     return {**_summary(row), "threads": threads,
-            "subtopics": [entry[0] for entry in conn.execute(
-                "SELECT path FROM topics WHERE path LIKE ? ORDER BY path", (f"{checked}/%",))]}
+            "subtopics": [child for child in children if may_open(conn, config, reader, child)]}
 
 
 def listing(conn: sqlite3.Connection, config: Config, *, reader: str,
