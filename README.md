@@ -32,8 +32,15 @@ The core is product-neutral. Roles, job states, paths and credentials all come f
 Code for one particular kind of client lives apart, in `baton/integrations/`, and loads only when the
 config enables it.
 
+See the [architecture diagram](docs/design.md#architecture-on-main) for the host's data and notification
+paths, and [design directions](docs/design.md#design-directions) for ideas that are not features of `main`.
+
 > **Install from GitHub, not PyPI.** The `baton` package on PyPI is an unrelated project.
 > `pip install baton` installs that package, not this one.
+
+`pyproject.toml` declares version `0.1.0`, but that source version does not establish release readiness or
+publish a release. As of 2026-11-01, this repository has no Git tag or
+[GitHub release](https://github.com/cesaregarza/baton/releases).
 
 ## Quickstart
 
@@ -605,6 +612,8 @@ name, such as `toy-embed@256`.
 ## Documentation
 
 - [docs/design.md](docs/design.md): how it works.
+- [Design directions](docs/design.md#design-directions): proposed topic containers, notification screening,
+  and long-thread summaries, separate from the behavior on `main`.
 - [docs/exposing.md](docs/exposing.md): reaching the host from other machines.
 - [SECURITY.md](SECURITY.md): auth, the threat model, and what the host stores.
 - [baton.example.toml](baton.example.toml): every config option.
