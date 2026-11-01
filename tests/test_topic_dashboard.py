@@ -15,7 +15,7 @@ import pytest
 from test_dashboard import text
 from test_dashboard_pages import get, page_config
 
-from baton import conversations, topics
+from baton import conversations, dashboard, topics
 from baton.config import Config
 from baton.store import connect
 
@@ -258,6 +258,54 @@ def test_a_page_never_links_a_subtopic_the_viewer_cannot_open(tmp_path):
         assert "Readable" in page
         assert "/t/work/open" not in page, "a subtopic with nothing readable must not be linked"
         assert get(config, "/t/work/open").status == 404
+    finally:
+        conn.close()
+
+# Presentation: a heading that outranks the one above it, a name printed twice, and a dead end.
+
+def rule_size(selector: str) -> float | None:
+    """The font-size a stylesheet rule sets, in rem, or None when the rule sets none."""
+    import re
+    block = re.search(rf"(?:^|\n|\s){re.escape(selector)}\s*\{{([^}}]*)\}}", dashboard.STYLE)
+    if block is None:
+        return None
+    size = re.search(r"font-size:\s*([0-9.]+)rem", block.group(1))
+    return float(size.group(1)) if size else None
+
+
+def test_a_subtopics_heading_does_not_outrank_the_heading_above_it(tmp_path):
+    """h3 sits under h2, so it must not render larger: unstyled, it falls back to the browser's own
+    1.17rem bold black and reads as the more important of the two."""
+    assert rule_size("h2") is not None, "h2 is styled, so the comparison is meaningful"
+    assert rule_size("h3") is not None, "h3 needs a rule of its own"
+    assert rule_size("h3") <= rule_size("h2")
+
+
+def test_a_topic_named_only_by_its_path_shows_that_name_once(tmp_path):
+    """A topic whose title is just its last segment printed the same word as link and as metadata."""
+    config, conn = seeded(tmp_path, view_all=True)
+    try:
+        topics.create(conn, config, actor="orchestrator", path="plain", members=MINE)
+        conversations.create(conn, config, actor="orchestrator", title="A thread", participants=MINE,
+                             topic="plain")
+        page = text(get(config, "/"))
+        entry = page[page.index('href="/t/plain"'):]
+        entry = entry[:entry.index("</li>")]
+        # The visible words only: the href has to carry the path, and that is not what reads as repetition.
+        import re
+        shown = re.sub(r"<[^>]*>", " ", entry[entry.index(">") + 1:])
+        assert shown.count("plain") == 1, f"the name is shown {shown.count('plain')} times: {shown.strip()}"
+    finally:
+        conn.close()
+
+
+def test_a_bad_request_page_offers_a_way_back(tmp_path):
+    """A refusal with no link is a dead end; the not-found page already offers one."""
+    config, conn = seeded(tmp_path, view_all=True)
+    try:
+        for target in ("/t/Bad", "/?page=x", f"/c/{'x' * 10}?after_seq=nope"):
+            body = text(get(config, target))
+            assert 'href="/"' in body, f"{target} gives no way back: {body[-200:]}"
     finally:
         conn.close()
 
