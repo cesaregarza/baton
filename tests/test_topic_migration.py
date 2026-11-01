@@ -15,13 +15,12 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from test_topic_containers import ALIAS, refused, topic_config
 
-from baton import store
+from baton import conversations, store
 from baton.config import Config
 from baton.errors import BatonError
 from baton.store import connect
-
-from test_topic_containers import topic_config
 
 V14_SCHEMA = (Path(__file__).parent / "fixtures" / "schema_v14.sql").read_text()
 V14_VERSION = 14  # the version the fixture dump holds, not an assertion about the current one
@@ -88,12 +87,22 @@ def test_members_come_from_direct_threads_only(tmp_path: Path) -> None:
         db.close()
 
 
-def test_a_member_the_config_no_longer_has_is_dropped(tmp_path: Path) -> None:
+def test_a_member_the_config_no_longer_has_is_kept_and_refused_at_admission(tmp_path: Path) -> None:
+    """The upgrade records what the data says; the config-dependent check belongs to admission.
+
+    The ratified design put "kept only if still in the config" in the migration. `connect()` takes a
+    path and no config, and six call sites rely on that, so a config-aware migration would make the
+    same database upgrade differently for two hosts reading it. Recording the roles the threads
+    actually had, and refusing a guest thread whose topic names a role the config has lost, keeps the
+    schema independent of any one config and loses nothing: the refusal names the role, and a core
+    role fixes the membership with `update_topic`. Admission is covered by
+    test_topic_containers.test_a_guest_thread_is_refused_when_a_member_role_is_gone.
+    """
     config = topic_config(tmp_path)
     v14_database(config, [("conv_1", "baton", ["orchestrator", "reviewer", "departed"])])
     db = connect(config.db_path)
     try:
-        assert topics_in(db)["baton"]["members"] == ["orchestrator", "reviewer"]
+        assert topics_in(db)["baton"]["members"] == ["departed", "orchestrator", "reviewer"]
     finally:
         db.close()
 
@@ -119,12 +128,16 @@ def test_a_membership_below_two_is_left_empty(tmp_path: Path) -> None:
         db.close()
 
 
-def test_a_membership_above_the_maximum_is_left_empty(tmp_path: Path) -> None:
+def test_a_membership_above_the_maximum_is_kept_and_refused_at_admission(tmp_path: Path) -> None:
+    """Same reason as the departed role above: `max_participants` is config, which the upgrade cannot see."""
     config = topic_config(tmp_path, max_participants=2)
     v14_database(config, [("conv_1", "baton", ["orchestrator", "reviewer", "assistant"])])
     db = connect(config.db_path)
     try:
-        assert topics_in(db)["baton"]["members"] == [], "three members cannot fit a maximum of two"
+        assert len(topics_in(db)["baton"]["members"]) == 3
+        detail = refused("invalid_request", conversations.create, db, config, actor="guest", title="Too many",
+                         participants=None, topic="baton", identity=ALIAS)
+        assert "members" in detail
     finally:
         db.close()
 

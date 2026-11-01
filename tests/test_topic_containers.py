@@ -60,9 +60,24 @@ def config(tmp_path: Path) -> Config:
     return topic_config(tmp_path)
 
 
+def seed_aliases(conn: sqlite3.Connection, *identities: dict) -> None:
+    """The alias rows a guest thread's attribution refers to.
+
+    `conversations.created_by_alias_id` references `aliases(id)`, the same way a guest post's does, so
+    a synthetic identity needs its row: the foreign key is the thing that stops attribution pointing
+    at an alias nobody ever claimed.
+    """
+    with conn:
+        conn.executemany("INSERT OR IGNORE INTO aliases (id, name, skeleton, verifier, created_at)"
+                         " VALUES (?, ?, ?, 'synthetic-verifier', 0.0)",
+                         [(one["alias_id"], one["alias"], one["alias"]) for one in identities])
+
+
 @pytest.fixture
 def db(config: Config) -> sqlite3.Connection:
     connection = connect(config.db_path)
+    seed_aliases(connection, ALIAS, OTHER_ALIAS,
+                 {"alias_id": "al_0000000000000003", "alias": "lane-c"})
     yield connection
     connection.close()
 
@@ -95,8 +110,9 @@ def row_for(db: sqlite3.Connection, conversation_id: str) -> sqlite3.Row:
 
 
 def alerts(db: sqlite3.Connection, role: str = "orchestrator") -> list[sqlite3.Row]:
-    return db.execute("SELECT * FROM messages WHERE recipient = ? AND sender IS NULL ORDER BY seq",
-                      (role,)).fetchall()
+    """The cap alerts in a role's mailbox, identified by their notice rather than by being senderless."""
+    return db.execute("SELECT * FROM messages WHERE recipient = ? AND sender IS NULL"
+                      " AND notice LIKE '%guest_threads.cap_reached%' ORDER BY seq", (role,)).fetchall()
 
 
 def fill_guest_cap(db: sqlite3.Connection, config: Config) -> None:
@@ -207,6 +223,7 @@ def test_a_guest_that_cannot_read_the_board_is_refused(tmp_path):
         "conversations": {"enabled": True},
     })
     connection = connect(blind.db_path)
+    seed_aliases(connection, ALIAS)
     try:
         topics.create(connection, blind, actor="orchestrator", path="baton", members=MEMBERS)
         detail = refused("forbidden", conversations.create, connection, blind, actor="guest", title="Blind",
@@ -253,6 +270,7 @@ def test_a_guest_thread_is_refused_when_a_member_role_is_gone(tmp_path):
         "conversations": {"enabled": True},
     })
     connection = connect(shrunk.db_path)
+    seed_aliases(connection, ALIAS)
     try:
         detail = refused("invalid_request", conversations.create, connection, shrunk, actor="guest",
                          title="Gone", participants=None, topic="baton", identity=ALIAS)
@@ -317,6 +335,7 @@ def test_a_refusal_with_both_caps_full_names_both(db, config):
 def test_concurrent_creates_at_the_limit_cannot_both_succeed(config):
     """SQLite's write lock serialises admission, so the cap is not a read-then-write race."""
     setup = connect(config.db_path)
+    seed_aliases(setup, ALIAS)
     try:
         topics.create(setup, config, actor="orchestrator", path="baton", members=MEMBERS)
         conversations.create(setup, config, actor="guest", title="one", participants=None, topic="baton",
@@ -391,6 +410,7 @@ def test_the_alert_reports_the_configured_limit_not_a_constant(tmp_path):
     config = topic_config(tmp_path, aliases={"max_threads_per_guest_per_hour": 7,
                                              "max_threads_per_alias_per_hour": 7})
     connection = connect(config.db_path)
+    seed_aliases(connection, ALIAS, OTHER_ALIAS)
     try:
         topics.create(connection, config, actor="orchestrator", path="baton", members=MEMBERS)
         for index in range(7):
@@ -444,6 +464,7 @@ def test_a_full_alert_mailbox_stores_nothing_and_leaves_the_timestamp_unset(db, 
 def test_no_alert_role_means_no_alert(tmp_path):
     config = topic_config(tmp_path, aliases={"guest_cap_alert_role": None})
     connection = connect(config.db_path)
+    seed_aliases(connection, ALIAS, OTHER_ALIAS)
     try:
         topics.create(connection, config, actor="orchestrator", path="baton", members=MEMBERS)
         for identity in (ALIAS, ALIAS, OTHER_ALIAS):
@@ -482,7 +503,9 @@ def test_a_replay_returns_the_thread_as_it_now_stands(db, config):
     first = guest_thread(db, config, request_id="20261101T120000Z-cccc")
     topics.update(db, config, actor="orchestrator", path="baton", members=["orchestrator", "assistant"])
     topics.rename(db, config, actor="orchestrator", path="baton", new_path="relay")
-    again = guest_thread(db, config, topic="relay", request_id="20261101T120000Z-cccc")
+    # A retry resends the original request, naming the path it used; what comes back is the thread as
+    # it now stands, so the rename shows in the result rather than being required in the request.
+    again = guest_thread(db, config, request_id="20261101T120000Z-cccc")
     assert again["created"] is False
     assert again["conversation_id"] == first["conversation_id"]
     assert again["topic"] == "relay"
@@ -501,6 +524,7 @@ def test_a_replay_is_refused_once_the_role_lost_its_flag(tmp_path):
     """Authority is checked before the replay lookup, so a withdrawn flag stops a retry."""
     config = topic_config(tmp_path)
     connection = connect(config.db_path)
+    seed_aliases(connection, ALIAS, OTHER_ALIAS)
     try:
         topics.create(connection, config, actor="orchestrator", path="baton", members=MEMBERS,
                       request_id="20261101T120000Z-eeee")
@@ -645,7 +669,7 @@ def test_get_topic_is_open_to_a_guest(db, config):
 
 
 def test_get_an_absent_topic_is_not_found(db, config):
-    refused("not_found", topics.get, db, config, reader="orchestrator", path="absent")
+    refused("unknown_topic", topics.get, db, config, reader="orchestrator", path="absent")
 
 
 # The schema assertion is against the constant, never a literal.

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from conftest import free_port
 from test_dashboard import PAYLOAD, snapshot, text
+from topic_backing import back_topics
 
 from baton import config as config_module
 from baton import conversations, jobs, messages
@@ -57,6 +58,9 @@ def get(config: Config, target: str, *, method: str = "GET", host: str | None = 
 
 
 def made(conn: Any, config: Config, title: str, participants: list[str], topic: str | None = None) -> str:
+    # These pages are about what the viewer may see, so the label's topic is backed rather than opened.
+    if topic:
+        back_topics(conn, topic)
     return conversations.create(conn, config, actor="orchestrator", title=title, participants=participants,
                                 topic=topic)["conversation_id"]
 
