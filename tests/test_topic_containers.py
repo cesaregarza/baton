@@ -156,7 +156,7 @@ def test_an_enrolled_alias_is_judged_by_its_mapped_role(db, config):
 
 
 def test_an_omitted_members_list_means_empty(db, config):
-    """halcyon's note: an omitted `members` on create is an empty list, not a default membership."""
+    """An omitted `members` on create is an empty list, not a default membership."""
     assert topics.create(db, config, actor="orchestrator", path="baton")["members"] == []
 
 
@@ -406,7 +406,7 @@ def test_the_alert_wakes_its_recipient_as_an_ordinary_message(db, config):
 
 
 def test_the_alert_reports_the_configured_limit_not_a_constant(tmp_path):
-    """halcyon's note: the text reports the configured guest-wide limit."""
+    """The text reports the configured guest-wide limit, never a constant."""
     config = topic_config(tmp_path, aliases={"max_threads_per_guest_per_hour": 7,
                                              "max_threads_per_alias_per_hour": 7})
     connection = connect(config.db_path)
@@ -566,7 +566,7 @@ def test_update_topic_changes_no_existing_thread(db, config):
 
 
 def test_an_omitted_members_on_update_keeps_the_current_list(db, config):
-    """halcyon's note: omitted on update means unchanged, unlike omitted on create."""
+    """Omitted on update means unchanged, unlike omitted on create, which means none."""
     make_topic(db, config, "baton")
     topics.update(db, config, actor="orchestrator", path="baton", title="Renamed")
     assert topics.get(db, config, reader="orchestrator", path="baton")["members"] == MEMBERS
