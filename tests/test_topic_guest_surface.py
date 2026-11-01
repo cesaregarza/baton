@@ -43,7 +43,13 @@ def topic_host(guest_host):  # noqa: F811 -- imported pytest fixture
 
 
 async def call(client, host, name, arguments=None, role="guest"):
-    return payload(await rpc(client, host, "tools/call", {"name": name, "arguments": arguments or {}}, role=role))
+    """The tool's result, or the refusal as given. The shared parser expects JSON, and a refusal is text,
+    so catching that here is what lets a test assert on the refusal rather than die parsing it."""
+    response = await rpc(client, host, "tools/call", {"name": name, "arguments": arguments or {}}, role=role)
+    try:
+        return payload(response)
+    except (ValueError, KeyError, IndexError):
+        return {"unparsed": str(response)}
 
 
 async def make_topic(client, host, path=TOPIC, members=("planner", "worker")):
@@ -92,11 +98,11 @@ def test_an_aliased_guest_starts_a_thread_and_is_attributed(topic_host):
         bound = await claim(client, topic_host)
         made = await call(client, topic_host, "create_conversation",
                           {"title": "A guest thread", "topic": TOPIC, "token": bound["binding_token"]})
-        assert made["created"] is True
-        assert made["topic"] == TOPIC
-        assert made["created_by"] == "guest"
-        assert made["created_by_alias"] == "lane-a"
-        assert made["created_by_alias_code"] == bound["code"]
+        assert made.get("created") is True, refusal(made)
+        assert made.get("topic") == TOPIC, refusal(made)
+        assert made.get("created_by") == "guest", refusal(made)
+        assert made.get("created_by_alias") == "lane-a", refusal(made)
+        assert made.get("created_by_alias_code") == bound["code"], refusal(made)
 
     dispatch(topic_host, scenario)
 
@@ -118,7 +124,8 @@ def test_a_guest_cannot_create_a_topic_over_the_wire(topic_host):
         bound = await claim(client, topic_host)
         result = await call(client, topic_host, "create_topic",
                             {"path": "mine", "members": ["planner", "worker"], "token": bound["binding_token"]})
-        assert "create_topic" in refusal(result), refusal(result)
+        assert result.get("error") == "forbidden", refusal(result)
+        assert "guest may not call create_topic" in refusal(result), refusal(result)
 
     dispatch(topic_host, scenario)
 
@@ -127,9 +134,9 @@ def test_a_guest_can_read_the_topic_directory(topic_host):
     async def scenario(client):
         await make_topic(client, topic_host)
         listed = await call(client, topic_host, "list_topics")
-        assert [entry["path"] for entry in listed["topics"]] == [TOPIC]
+        assert [e["path"] for e in listed.get("topics", [])] == [TOPIC], refusal(listed)
         seen = await call(client, topic_host, "get_topic", {"path": TOPIC})
-        assert seen["path"] == TOPIC
+        assert seen.get("path") == TOPIC, refusal(seen)
 
     dispatch(topic_host, scenario)
 
@@ -140,7 +147,7 @@ def test_a_core_role_still_names_participants(topic_host):
     async def scenario(client):
         made = await call(client, topic_host, "create_conversation",
                           {"title": "Core", "participants": ["planner", "worker"]}, role="planner")
-        assert made["created"] is True
+        assert made.get("created") is True, refusal(made)
         assert made.get("topic") is None
 
     dispatch(topic_host, scenario)
