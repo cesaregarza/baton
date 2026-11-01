@@ -158,3 +158,27 @@ def test_the_directory_offers_a_restricted_viewer_only_what_it_can_see_into(tmp_
         assert "/t/baton/development" in text(get(opened, "/")), "a board reader sees an empty topic"
     finally:
         board.close()
+
+def test_the_directory_never_renders_an_unreadable_threads_activity(tmp_path):
+    """The rendered page must not date a topic from a thread this viewer cannot read.
+
+    The directory prints the time `topics.listing` gives it, so a time aggregated over every thread
+    would tell a restricted viewer that something happened in a conversation it is not in, and when.
+    """
+    config, conn = seeded(tmp_path, view_all=False)
+    try:
+        mine = conversations.create(conn, config, actor="orchestrator", title="Mine",
+                                    participants=MINE, topic="baton")
+        theirs = conversations.create(conn, config, actor="orchestrator", title="Not mine",
+                                      participants=["orchestrator", "assistant"], topic="baton")
+        with conn:
+            conn.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?",
+                         ("2026-11-01T10:00:00+00:00", mine["conversation_id"]))
+            conn.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?",
+                         ("2026-11-02T10:00:00+00:00", theirs["conversation_id"]))
+        page = text(get(config, "/"))
+        assert "2026-11-01T10:00:00+00:00" in page, "the readable thread's time is what dates the topic"
+        assert "2026-11-02T10:00:00+00:00" not in page, "the unreadable thread's time must not appear"
+    finally:
+        conn.close()
+

@@ -706,3 +706,55 @@ def test_the_topics_table_is_part_of_the_current_schema(db, config):
     assert {"path", "title", "description", "members", "created_by", "created_at"} <= columns
     conversation_columns = {row["name"] for row in db.execute("PRAGMA table_info(conversations)")}
     assert {"created_by_alias_id", "created_by_alias", "created_by_alias_code"} <= conversation_columns
+
+# A count and a timestamp must be taken over the same threads: the reader's own.
+
+def dated(db: sqlite3.Connection, conversation_id: str, when: str) -> None:
+    """Set a thread's activity time directly. What is under test is which rows are aggregated, not how
+    the column comes to be written, and a fixed value keeps the assertion off the clock."""
+    with db:
+        db.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?", (when, conversation_id))
+
+
+def test_the_listed_activity_time_covers_only_the_readable_threads(db, config):
+    """A newer thread the reader cannot see must not lend the topic its timestamp.
+
+    The thread count was already the reader's own, so a time taken over every thread disclosed that
+    something had happened in a conversation the reader is not in, and when.
+    """
+    make_topic(db, config, "baton")
+    mine = conversations.create(db, config, actor="orchestrator", title="Mine",
+                                participants=["orchestrator", "reviewer"], topic="baton")
+    theirs = conversations.create(db, config, actor="orchestrator", title="Not mine",
+                                  participants=["orchestrator", "assistant"], topic="baton")
+    dated(db, mine["conversation_id"], "2026-11-01T10:00:00+00:00")
+    dated(db, theirs["conversation_id"], "2026-11-02T10:00:00+00:00")   # newer, and unreadable
+
+    [entry] = topics.listing(db, config, reader="reviewer")
+    assert entry["threads"] == 1, "the count was already the reader's own"
+    assert entry["last_activity_at"] == "2026-11-01T10:00:00+00:00", \
+        "the time must come from the same threads the count did"
+
+
+def test_a_board_reader_still_sees_the_newest_of_everything(db, config):
+    make_topic(db, config, "baton")
+    mine = conversations.create(db, config, actor="orchestrator", title="Mine",
+                                participants=["orchestrator", "reviewer"], topic="baton")
+    theirs = conversations.create(db, config, actor="orchestrator", title="Theirs",
+                                  participants=["orchestrator", "assistant"], topic="baton")
+    dated(db, mine["conversation_id"], "2026-11-01T10:00:00+00:00")
+    dated(db, theirs["conversation_id"], "2026-11-02T10:00:00+00:00")
+    [entry] = topics.listing(db, config, reader="orchestrator")
+    assert entry["threads"] == 2
+    assert entry["last_activity_at"] == "2026-11-02T10:00:00+00:00"
+
+
+def test_a_topic_the_reader_sees_nothing_in_reports_no_activity(db, config):
+    make_topic(db, config, "baton")
+    theirs = conversations.create(db, config, actor="orchestrator", title="Not mine",
+                                  participants=["orchestrator", "assistant"], topic="baton")
+    dated(db, theirs["conversation_id"], "2026-11-02T10:00:00+00:00")
+    [entry] = topics.listing(db, config, reader="reviewer")
+    assert entry["threads"] == 0
+    assert entry["last_activity_at"] is None, "no readable thread means nothing to report"
+
