@@ -6,11 +6,12 @@ from dataclasses import replace
 
 import pytest
 from test_aliases import dispatch
-from test_per_call_identity import OTHER, build_host, call, claim, db, enrol, owner
+from test_per_call_identity import OTHER, SECRET, build_host, call, claim, db, enrol, owner
 
-from baton import aliases, auth
+from baton import aliases, auth, store
 from baton import config as config_module
 from baton.config import ConfigError
+from baton.errors import Forbidden
 
 THIRD = "synthetic third secret"
 ARM_SECONDS = 15 * 60  # the contract's arm lifetime
@@ -129,20 +130,36 @@ def test_a_reset_after_a_renewal_ends_the_renewals_proof(host):
     dispatch(host, scenario)
 
 
-def test_an_arm_that_expires_after_the_early_check_is_not_spent(host, monkeypatch):
+def enrolled_and_armed(host):
     async def scenario(client):
         await enrol(client, host)
-        assert owner(host, "alias", "arm-rekey", "hilary") == 0
-        start = time.time()
-        clock = iter([start])
-        monkeypatch.setattr(aliases.time, "time", lambda: next(clock, start + ARM_SECONDS + 1))
-        assert (await claim(client, host, passphrase=OTHER)).get("error") == "forbidden"
-        monkeypatch.undo()
-        assert (await claim(client, host)).get("effective_role") == "hilary", "the verifier is unchanged"
     dispatch(host, scenario)
+    assert owner(host, "alias", "arm-rekey", "hilary") == 0
+
+
+def direct_claim(host, passphrase):
+    """A claim straight through `aliases.claim`, so a patched clock or check sees only the claim's own calls."""
+    conn = store.connect(host.config.db_path)
+    try:
+        return aliases.claim(conn, host.config, auth.static_token(host.config, host.tokens["guest"]), "hilary",
+                             passphrase)
+    finally:
+        conn.close()
+
+
+def test_an_arm_that_expires_after_the_early_check_is_not_spent(host, monkeypatch):
+    enrolled_and_armed(host)
+    start = time.time()
+    clock = iter([start])
+    monkeypatch.setattr(aliases.time, "time", lambda: next(clock, start + ARM_SECONDS + 1))
+    with pytest.raises(Forbidden):
+        direct_claim(host, OTHER)
+    monkeypatch.undo()
+    assert direct_claim(host, SECRET)["effective_role"] == "hilary", "the verifier is unchanged"
 
 
 def test_an_arm_spent_by_a_concurrent_call_after_the_early_check_resets_nothing(host, monkeypatch):
+    enrolled_and_armed(host)
     original = auth.check_passphrase
 
     def check_then_lose_the_arm(passphrase, verifier):
@@ -151,14 +168,11 @@ def test_an_arm_spent_by_a_concurrent_call_after_the_early_check_resets_nothing(
             conn.execute("DELETE FROM alias_arms")
         return matched
 
-    async def scenario(client):
-        await enrol(client, host)
-        assert owner(host, "alias", "arm-rekey", "hilary") == 0
-        monkeypatch.setattr(auth, "check_passphrase", check_then_lose_the_arm)
-        assert (await claim(client, host, passphrase=OTHER)).get("error") == "forbidden"
-        monkeypatch.undo()
-        assert (await claim(client, host)).get("effective_role") == "hilary", "the verifier is unchanged"
-    dispatch(host, scenario)
+    monkeypatch.setattr(auth, "check_passphrase", check_then_lose_the_arm)
+    with pytest.raises(Forbidden):
+        direct_claim(host, OTHER)
+    monkeypatch.undo()
+    assert direct_claim(host, SECRET)["effective_role"] == "hilary", "the verifier is unchanged"
 
 
 def test_mapped_bindings_last_the_mapped_lifetime_and_guest_bindings_stay_short(host):
