@@ -160,12 +160,14 @@ def test_an_arm_that_expires_after_the_early_check_is_not_spent(host, monkeypatc
 
 def test_an_arm_spent_by_a_concurrent_call_after_the_early_check_resets_nothing(host, monkeypatch):
     enrolled_and_armed(host)
-    original = auth.check_passphrase
+    original, lost = auth.check_passphrase, []
 
     def check_then_lose_the_arm(passphrase, verifier):
         matched = original(passphrase, verifier)
-        with db(host) as conn:
-            conn.execute("DELETE FROM alias_arms")
+        if not lost:  # one concurrent call, right after the early check
+            lost.append(True)
+            with db(host) as conn:
+                conn.execute("DELETE FROM alias_arms")
         return matched
 
     monkeypatch.setattr(auth, "check_passphrase", check_then_lose_the_arm)
@@ -224,12 +226,14 @@ def test_a_reset_never_spends_an_arm_that_replaced_the_one_it_checked(host, monk
 def test_a_reset_that_loses_its_arm_still_counts_as_a_claim(host, monkeypatch):
     enrolled_and_armed(host)
     before = claims(host)
-    original = auth.check_passphrase
+    original, lost = auth.check_passphrase, []
 
     def check_then_lose_the_arm(passphrase, verifier):
         matched = original(passphrase, verifier)
-        with db(host) as conn:
-            conn.execute("DELETE FROM alias_arms")
+        if not lost:  # one concurrent call, right after the early check
+            lost.append(True)
+            with db(host) as conn:
+                conn.execute("DELETE FROM alias_arms")
         return matched
 
     monkeypatch.setattr(auth, "check_passphrase", check_then_lose_the_arm)
