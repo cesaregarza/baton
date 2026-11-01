@@ -151,17 +151,49 @@ stored topic can carry neither of SQL's `LIKE` metacharacters, so a prefix filte
 with nothing to escape. `null` is how no topic arrives and how one is cleared. A topic is validated whole
 when it is written, and a filter is validated the same way before it is used.
 
-It is a label for people, not an identifier: the `conversation_id` is unchanged by a rename, so nothing
-that refers to the conversation moves. Setting, renaming or clearing one takes `can_manage_participants`
-*and* membership of that conversation -- a label on a conversation is the conversation's own business, so
-a role with the permission that is not in it is refused like any non-participant.
+It is a container, not an identifier: the `conversation_id` is unchanged by a rename, so nothing that
+refers to the conversation moves. Setting or clearing a conversation's own topic takes
+`can_manage_participants` *and* membership of that conversation -- which thread goes where is the
+conversation's own business, so a role with the permission that is not in it is refused like any
+non-participant -- and the path it names has to be a topic that exists.
+
+**A topic is a record a core role opens.** `can_create_topics` (default false) is what `create_topic`,
+`update_topic` and `rename_topic` need; `list_topics` and `get_topic` are open, guests included, with
+every thread count filtered to what the caller may read. A subtopic needs its parent to exist first and
+depth stays at two. A `rename_topic` moves the topic, its subtopics and every thread filed under them in
+one transaction, refusing a collision, a move into its own subtree, a missing parent or a third level
+before it writes anything; ids and participants never change.
+
+A topic carries `members`: the roles a *guest's* thread in it is delivered to. They are read once, when
+the thread is created, and copied into that thread's participants, so editing a topic later never adds
+or removes anybody from a thread that already exists and never changes who may read one. A role starting
+its own thread still names its participants itself.
+
+**Starting a thread needs no topic permission.** That is what separates the container from its contents:
+anyone identified may start one. A role does it as before, naming participants, with an optional topic
+that must exist. A guest presents an alias binding and names a topic, takes no `participants`, and is
+recorded by alias id, name and code the way its posts are. An anonymous guest is refused, and so is one
+whose guest role does not already read board conversations -- starting a thread never widens what a
+guest can see. A topic with fewer than two members, or one naming a role this host no longer configures,
+refuses a guest thread and says which.
+
+**Guest thread caps.** `max_threads_per_alias_per_hour` (5) and `max_threads_per_guest_per_hour` (50)
+are counted from the conversations themselves inside the write lock the create already holds, so two
+concurrent creates cannot both pass the same cap. A refusal with both full names both limits. When the
+guest-wide cap refuses a create, the host stores one direct message to `guest_cap_alert_role`, carrying
+`{"event": "guest_threads.cap_reached", "limit", "window"}` and the configured limit in its text, at most
+once an hour by a timestamp persisted in the same transaction. It is an ordinary message, so it wakes its
+recipient with `reason: message` and needs nothing new on the receiving side. The refusal is raised after
+that transaction commits, so it cannot roll the alert back; if the recipient's mailbox is full nothing is
+stored and the timestamp is left unset, so the next refusal tries again rather than the hour passing in
+silence. Unset `guest_cap_alert_role` means nobody is told.
 
 Filtering is whole-segment: a topic matches itself and anything one separator deeper, so `project` takes
 `project/alpha` and never `projectile`. It narrows and never widens -- `list_conversations` still joins on
 membership, so a filter cannot surface a conversation the caller could not already list. An unfiltered
-list keeps the conversations with no topic, and the dashboard groups by topic with the untagged in a group
-of their own, so a topic organises the view without becoming a requirement. Threads are unchanged: a
-subtopic is not a thread, and replies are still `reply_to`.
+list keeps the conversations with no topic, and the dashboard groups by topic with those in a group of
+their own, so none is hidden -- a thread may still have no topic at all, even though a topic it does
+name has to exist. Threads are unchanged: a subtopic is not a thread, and replies are still `reply_to`.
 
 **Limits.** A conversation accepts `max_messages_per_hour` messages from its participants (default 30;
 host notices don't count). Past that, sends are refused as `conversation_rate_limited`, and the host

@@ -38,6 +38,8 @@ description = "Picks up jobs and reports back"
 # Optional, with [conversations] enabled: what a role may do in group conversations (both default to false).
 # can_create_conversations = true
 # can_manage_participants = true
+# can_create_topics = true            # open, edit and rename a topic. Starting a thread inside one needs no
+#                                     # flag, which is how a guest with an alias binding starts one.
 # can_view_all_conversations = true   # grants retained board-wide reads; also lets the dashboard show every conversation
 
 # Optional: remove this role's permission to create or move jobs. Defaults to true for existing roles.
@@ -65,6 +67,11 @@ description = "Picks up jobs and reports back"
 # max_claims_per_credential_per_hour = 20       # at most 10000; includes refused passphrases
 # max_claims_per_alias_per_hour = 5            # at most 10000; lookalike skeletons share a limit
 # max_claims_per_hour = 100                    # at most 10000 overall, before scrypt
+# max_threads_per_alias_per_hour = 5           # new threads one alias may start; at most 10000
+# max_threads_per_guest_per_hour = 50          # new threads all guests together may start; at most 10000
+# guest_cap_alert_role = "planner"             # told once an hour that the guest-wide thread cap filled.
+#                                              # Unset means nobody is told. Must name a configured non-guest
+#                                              # role, so the notice cannot fail where it matters.
 
 # Optional: group conversations among three or more roles. Off unless enabled.
 # [conversations]
