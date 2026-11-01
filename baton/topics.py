@@ -212,11 +212,7 @@ def may_open(conn: sqlite3.Connection, config: Config, reader: str, path: str) -
     a page that refuses would be worse than useless. Opening it discloses only that something under it
     is readable, which the subtopic already says.
     """
-    if board_read.sees_all(config, reader):
-        return True
-    return conn.execute("SELECT 1 FROM conversations c WHERE (c.topic = ? OR c.topic LIKE ?)"
-                        " AND EXISTS (SELECT 1 FROM participants p WHERE p.conversation_id = c.id"
-                        " AND p.role = ?) LIMIT 1", (path, f"{path}/%", reader)).fetchone() is not None
+    return board_read.sees_all(config, reader) or _readable(conn, config, reader, path)[0] > 0
 
 
 def get(conn: sqlite3.Connection, config: Config, *, reader: str, path: Any) -> dict[str, Any]:
@@ -252,18 +248,24 @@ def listing(conn: sqlite3.Connection, config: Config, *, reader: str,
 
 def _readable(conn: sqlite3.Connection, config: Config, reader: str,
               path: str) -> tuple[int, str | None]:
-    """How many threads filed exactly here the reader may see, and the newest activity among those same ones.
+    """The threads in this topic's subtree the reader may see, and the newest activity among those same ones.
 
-    Both come from one query on purpose. They were two, and only the count was filtered by reader, so a
-    newer conversation the reader is not in lent the topic its timestamp -- which disclosed that
-    something had happened there, and when. Asking once makes that divergence impossible rather than
-    merely fixed. The board rule decides what counts as readable, not topic membership.
+    The subtree, because a topic's page has always listed itself and everything one separator deeper: a
+    count of only the threads filed exactly there contradicted the list printed beside it, and showed a
+    root as empty when its subtopics held the work.
+
+    Both numbers come from one query on purpose. They were two, and only the count was filtered by
+    reader, so a newer conversation the reader is not in lent the topic its timestamp -- which disclosed
+    that something had happened there, and when. Asking once makes that divergence impossible rather
+    than merely fixed. The board rule decides what counts as readable, not topic membership. A stored
+    path carries neither `LIKE` metacharacter, so the prefix matches literally with nothing to escape.
     """
     if board_read.sees_all(config, reader):
-        row = conn.execute("SELECT COUNT(*), MAX(last_activity_at) FROM conversations WHERE topic = ?",
-                           (path,)).fetchone()
+        row = conn.execute("SELECT COUNT(*), MAX(last_activity_at) FROM conversations"
+                           " WHERE topic = ? OR topic LIKE ?", (path, f"{path}/%")).fetchone()
     else:
         row = conn.execute("SELECT COUNT(*), MAX(c.last_activity_at) FROM conversations c"
-                           " WHERE c.topic = ? AND EXISTS (SELECT 1 FROM participants p"
-                           " WHERE p.conversation_id = c.id AND p.role = ?)", (path, reader)).fetchone()
+                           " WHERE (c.topic = ? OR c.topic LIKE ?) AND EXISTS"
+                           " (SELECT 1 FROM participants p WHERE p.conversation_id = c.id"
+                           " AND p.role = ?)", (path, f"{path}/%", reader)).fetchone()
     return row[0], row[1]

@@ -327,16 +327,12 @@ def _directory(config: Config, conn: Any) -> str:
     for entry in listed:
         if "/" in entry["path"]:
             children.setdefault(entry["path"].split("/")[0], []).append(entry["path"])
-    # A parent is kept when a subtopic of it is visible, so a visible subtopic is never orphaned by a
-    # parent the viewer cannot see into.
+    # A root's count covers its subtree, so a root with a visible subtopic is itself visible and there
+    # is no orphan case left to carry: the entry and its children are always rendered together.
     roots = {entry["path"]: entry for entry in listed if "/" not in entry["path"]}
     items = []
-    for path in sorted(set(roots) | set(children)):
-        entry = roots.get(path)
+    for path, entry in sorted(roots.items()):
         shown = _subtopics(children.get(path, []))
-        if entry is None:
-            items.append(f'<li>{_topic_link(path)}{shown}</li>')
-            continue
         description = f'<p>{_e(entry["description"])}</p>' if entry["description"] else ""
         activity = f' · last {_time(entry["last_activity_at"])}' if entry["last_activity_at"] else ""
         counted = f'{entry["threads"]} thread{"" if entry["threads"] == 1 else "s"}'
