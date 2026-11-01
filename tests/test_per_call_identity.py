@@ -298,3 +298,76 @@ def test_reserved_names_are_still_refused_to_new_guest_aliases(host):
         assert (await claim(client, host, "hilary")).get("error") == "forbidden"
         assert (await claim(client, host, "p1anner")).get("error") == "forbidden"
     dispatch(host, scenario)
+
+
+def test_unmap_ends_mapped_proofs_and_the_alias_renews_as_a_guest(host):
+    async def scenario(client):
+        await enrol(client, host)
+        proof = (await claim(client, host))["binding_token"]
+        assert owner(host, "alias", "unmap", "hilary") == 0
+        assert (await call(client, host, "whoami", {"token": proof})).get("error") == "forbidden"
+        renewed = await claim(client, host)
+        assert renewed.get("effective_role") == "guest", "after unmap the reserved alias renews as guest continuity"
+        with db(host) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM alias_roles").fetchone()[0] == 0
+            assert conn.execute("SELECT unmapped_at FROM core_enrolment WHERE role = 'hilary'").fetchone()[0]
+    dispatch(host, scenario)
+
+
+def test_map_restores_an_enrolled_role_and_remapping_ends_every_affected_proof(host):
+    async def scenario(client):
+        await enrol(client, host)
+        assert owner(host, "alias", "unmap", "hilary") == 0
+        guest_proof = (await claim(client, host))["binding_token"]
+        assert owner(host, "alias", "map", "hilary", "hilary") == 0
+        assert (await call(client, host, "whoami", {"token": guest_proof})).get("error") == "forbidden", \
+            "an old guest proof is never silently upgraded"
+        mapped = (await claim(client, host))["binding_token"]
+        other = await claim(client, host, "lane-m")
+        assert owner(host, "alias", "map", "lane-m", "hilary") == 0
+        for stale in (mapped, other["binding_token"]):
+            assert (await call(client, host, "whoami", {"token": stale})).get("error") == "forbidden"
+        assert (await claim(client, host, "lane-m"))["effective_role"] == "hilary"
+        assert (await claim(client, host))["effective_role"] == "guest", "a role maps to one alias at a time"
+    dispatch(host, scenario)
+
+
+@pytest.mark.parametrize("role", ["planner", "person", "nobody"])
+def test_map_works_only_for_an_enrolled_role(host, role):
+    async def scenario(client):
+        await claim(client, host, "lane-n")
+        assert owner(host, "alias", "map", "lane-n", role) == 1
+        with db(host) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM alias_roles").fetchone()[0] == 0
+    dispatch(host, scenario)
+
+
+def test_mapped_posts_use_the_roles_budget_not_the_guest_post_caps(host):
+    config = host.config
+    host.config = replace(config, aliases=replace(config.aliases, max_posts_per_alias_per_hour=1,
+                                                  max_posts_per_credential_per_hour=1))
+
+    async def scenario(client):
+        await enrol(client, host)
+        proof = (await claim(client, host))["binding_token"]
+        for text in ("one", "two"):
+            sent = await call(client, host, "send_message", {"to": "worker", "text": text, "token": proof})
+            assert sent.get("created") is True, sent
+        with db(host) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM alias_posts").fetchone()[0] == 0
+    dispatch(host, scenario)
+
+
+def test_a_token_on_claim_alias_is_refused_and_redacted(host):
+    async def scenario(client):
+        proof = "synthetic-claim-token-value"
+        refused = await rpc(client, host, "tools/call", {"name": "claim_alias", "arguments": {
+            "name": "lane-t", "passphrase": SECRET, "token": proof}})
+        assert payload(refused).get("error") == "invalid_request", refused
+        assert proof not in json.dumps(refused) and SECRET not in json.dumps(refused)
+        assert proof not in host.config.audit_path.read_text()
+        with db(host) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM aliases").fetchone()[0] == 0
+        assert (await call(client, host, "claim_alias", {"name": "lane-t", "passphrase": SECRET, "token": None})
+                ).get("effective_role") == "guest", "null is the same as omitted"
+    dispatch(host, scenario)
