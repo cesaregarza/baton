@@ -121,6 +121,8 @@ def _parser() -> argparse.ArgumentParser:
     seat_commands.add_parser("logout-all", help="end every browser seat session at once").set_defaults(
         handler=_seat_logout_all)
 
+    _add_owner_alias_commands(commands)
+
     commands.add_parser("hash-passphrase", help="hash an OAuth consent passphrase for the config")
     oauth = commands.add_parser("oauth", help="OAuth grants").add_subparsers(dest="oauth_command", required=True)
     oauth.add_parser("revoke-all", help="end every OAuth access and refresh grant").set_defaults(handler=_revoke_all)
@@ -128,6 +130,39 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("wakes", help="show recent wakes and how they ended").set_defaults(
         handler=lambda config, args: _db(config, wakes.recent))
     return parser
+
+
+def _add_owner_alias_commands(commands: Any) -> None:
+    """The owner's commands for enrolled aliases and their events targets, run on the host."""
+    alias = commands.add_parser("alias", help="owner commands for enrolled aliases").add_subparsers(
+        dest="alias_command", required=True)
+    enrol = alias.add_parser("arm-enrol", help="let a role's own credential enrol it once, within 15 minutes")
+    enrol.add_argument("enrol_role", metavar="role")
+    enrol.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.arm_enrol(
+        conn, config, args.enrol_role)))
+    rekey = alias.add_parser("arm-rekey", help="let the next claim with a new passphrase reset an alias, "
+                                               "within 15 minutes")
+    rekey.add_argument("name")
+    rekey.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.arm_rekey(
+        conn, args.name)))
+    mapping = alias.add_parser("map", help="make an alias act as an enrolled role; ends both sides' old proofs")
+    mapping.add_argument("name")
+    mapping.add_argument("map_role", metavar="role")
+    mapping.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.map_alias(
+        conn, args.name, args.map_role)))
+    unmap = alias.add_parser("unmap", help="end an alias's mapping and its proofs; it renews as a guest alias")
+    unmap.add_argument("name")
+    unmap.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.unmap_alias(
+        conn, args.name)))
+
+    events = commands.add_parser("events", help="owner commands for event subscriptions").add_subparsers(
+        dest="events_command", required=True)
+    events.add_parser("status", help="subscriptions and recent delivery receipts, without URLs or secrets"
+                      ).set_defaults(handler=_events_status)
+    unbind = events.add_parser("unbind", help="drop an OAuth grant's events target, when its alias's token is lost")
+    unbind.add_argument("grant")
+    unbind.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.unbind_grant(
+        conn, args.grant)))
 
 
 def _add_job_commands(commands: Any) -> None:
@@ -217,6 +252,18 @@ def _db(config: Config, operation: Any) -> Any:
         return operation(conn)
     finally:
         conn.close()
+
+
+def _aliases(config: Config, operation: Any) -> Any:
+    from baton import aliases  # lazily: it imports the MCP SDK, slow for one-shot commands
+
+    return _db(config, lambda conn: operation(aliases, conn))
+
+
+def _events_status(config: Config, args: argparse.Namespace) -> dict[str, Any]:
+    from baton.integrations import openai_mcp_events  # lazily, like the aliases
+
+    return openai_mcp_events.status(config)
 
 
 def _attention(args: argparse.Namespace) -> list[str] | None:

@@ -293,18 +293,17 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
                                             **({"attention": attention} if attention else {}),
                                             **({"needs_decision": True} if needs_decision else {})})
     with transaction(conn):
-        if guest:
-            _load(conn, conversation_id)
-            if not board_read.may_read_conversation(conn, config, sender, conversation_id):
-                raise Forbidden("guest may post only to a readable board conversation")
+        # Current authorization first, so a retry never returns a cached result to a sender who lost it.
+        conversation = _load(conn, conversation_id)
+        participants = _participants(conn, conversation_id)
+        if guest and not board_read.may_read_conversation(conn, config, sender, conversation_id):
+            raise Forbidden("guest may post only to a readable board conversation")
+        if not guest and sender not in participants:
+            raise NotAParticipant(f"{sender} is not in {conversation_id}")
         existing = events.replayed(conn, "message_requests", request_id, digest)
         if existing is not None:
             return {"message_id": existing["message_id"], "conversation_id": conversation_id,
                     "seqs": json.loads(existing["seqs"]), "request_id": request_id, "created": False}
-        conversation = _load(conn, conversation_id)
-        participants = _participants(conn, conversation_id)
-        if not guest and sender not in participants:
-            raise NotAParticipant(f"{sender} is not in {conversation_id}")
         recipients = [role for role in participants if role not in (sender, "guest")]
         if not recipients:
             raise InvalidRequest("conversation has no eligible delivery recipients; no message was stored")

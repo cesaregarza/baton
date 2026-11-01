@@ -46,6 +46,34 @@ unless the config enables it.
    leases, backoff, attempts, and `baton wakes`. If no destination ever accepts a wake, the core marks it
    `failed` after its attempts. Nothing is sent anywhere else.
 
+## Shared guest logins
+
+A shared connector that logs in as `guest` acts as a role only through an alias enrolled as that role (see
+the README's MCP tools section). Its events work the same way:
+
+1. The guest subscribes with no arguments, over its OAuth grant. The subscription belongs to that grant,
+   not to a role: its id comes from the grant, the callback and the event, and only that grant can
+   unsubscribe it. A refresh is the same call and needs no alias token. A static guest token has no grant,
+   so it can't subscribe.
+2. `bind_events(token=<an enrolled alias's binding_token>)` sets the grant's one events target, the alias.
+   The alias must be mapped to a role when it binds. Binding the same alias again changes nothing;
+   binding another alias is refused until `unbind_events` with the bound alias's token removes it.
+   Subscribing and binding work in either order.
+3. A wake for role R goes to R's own subscriptions, and to every guest-grant subscription whose grant is
+   bound to the alias mapped to R at that moment. The mapping and the grant's liveness are checked on
+   every delivery, so a grant that ends stops receiving at once.
+4. `baton alias map` and `unmap` drop the affected aliases' targets; a rekey keeps them. A grant that ended
+   has its target swept later, as cleanup only. `baton events unbind <grant>` is the owner's recovery
+   when the alias's token is lost.
+
+One events target per grant is a documented limit. The payload is unchanged.
+
+`baton events status` is the owner's view on the host: each subscription's id, owner (`role:<name>` or
+`grant:<id>`), expiry and state, and the delivery receipts of the last 3 days (at most 500), each with its
+subscription, `wake_id` and outcome. Receipts outlive a wake's outcomes, so a server-side acceptance can
+be matched with the event a client actually received. It never prints callback URLs, headers, secrets or
+tokens.
+
 ## Setup
 
 Synthetic values throughout. Use your client's real callback location.
@@ -102,7 +130,7 @@ test code, through the constructor.
 
 | Concern | Defence |
 |---|---|
-| A client subscribing, unsubscribing or receiving for another role | The role comes only from the credential. Subscription ids are derived from the role, and delivery filters by role. Arguments are refused. |
+| A client subscribing, unsubscribing or receiving for another role | The role comes only from the credential. Subscription ids are derived from the role, or for a guest from its OAuth grant, and delivery filters by role, or by the role the grant's bound alias is mapped to right now. Arguments are refused. |
 | The host made to call arbitrary URLs (SSRF) | HTTPS only, canonical URLs only (no `.` or `..` segments, or encoded separators that a server might read differently), under an operator allowlist compared segment by segment. The allowlist is rechecked on every request, and the checked string is the one sent. |
 | DNS rebinding to internal addresses | On every request (challenge and delivery), the name is resolved once, every address must be global, and the connection goes only to those addresses. TLS SNI and `Host` keep the name. A name re-pointed at a private, loopback, link-local or metadata address is refused at the next request. |
 | Redirects and proxies | Requests go through httpcore, which follows no redirects and reads no proxy settings. A redirect fails the challenge or the delivery. |
@@ -110,7 +138,7 @@ test code, through the constructor.
 | Forged or replayed events at the client | Standard Webhooks signatures over `id.timestamp.body` with the subscription's secret. Each attempt gets a fresh `webhook-timestamp`. When a refresh brings a new secret, events are signed with both secrets for the rotation overlap, then with the new one only. |
 | Unbounded key rotation | A subscription keeps at most one previous secret, never a duplicate, so an event carries at most 2 signatures. A second rotation inside one overlap window is refused, and the overlap is at least 60 seconds. |
 | Leaking content through a wake | Events carry only `role`, `reason`, and a sequence number or job key. Never message text or job bodies. |
-| Unbounded state from public calls | Caps per role and overall, TTL bounds, expired subscriptions dropped, outcomes dropped with their finished core wake, and a 256 KiB cap on event bodies. |
+| Unbounded state from public calls | Caps per role (per grant for guests) and overall, TTL bounds, expired subscriptions dropped, outcomes dropped with their finished core wake, receipts bounded by age and count, and a 256 KiB cap on event bodies. |
 | A slow or hostile callback | One absolute deadline per request. Every blocking step, the connect, the TLS handshake, each write and each read (headers included), gets only what is left of it, so a trickled or stalled response can't stretch it. DNS runs on a fixed pool of 4 resolver threads with a queue of 4: a lookup that times out keeps its slot until it returns, no thread is ever added, and a full pool fails at once as unreachable. `Accept-Encoding: identity` is sent, and any other `Content-Encoding` fails without decoding. Each read asks the socket for no more than what is left of a 64 KiB cap on the whole response, headers included, so nothing past it is read. |
 | Revoked access | Each delivery attempt needs the subscribing credential to still exist with the same role: the same bearer token (name, digest, role), or the same OAuth grant, still unexpired, for the same resource, and for a role OAuth may still grant. A normal refresh keeps the grant. Replacing the token, `baton oauth revoke-all`, or removing the role from `auth.oauth.roles` ends delivery, as do expiry, `events/unsubscribe` and a `410`. |
 | Secret exposure | Secrets live only in `<data_dir>/openai-mcp-events.json` (`0600`, checked like every file in the data directory). They are never logged, never written to the audit log or a wake, and never returned. |
