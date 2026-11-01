@@ -82,7 +82,6 @@ li { border-bottom: 1px solid #e3e3e3; padding: .6rem 0; }
 .meta, .notice, .source, .muted { color: #5f6368; font-size: .85rem; }
 .role { font-weight: 600; color: #1d1d1f; }
 h2 { font-size: 1rem; margin: 1.2rem 0 .2rem; color: #5f6368; font-weight: 600; }
-h3 { font-size: .85rem; margin: .6rem 0 .2rem; color: #5f6368; font-weight: 600; }
 .badge { border: 1px solid #c4c7c5; border-radius: .6rem; padding: 0 .4rem; margin-left: .3rem; }
 .text { white-space: pre-wrap; margin: .3rem 0; }
 .relayed { border-left: 3px solid #c4c7c5; margin: .4rem 0 .4rem .6rem; padding-left: .6rem; }
@@ -305,7 +304,9 @@ def _topic_header(config: Config, conn: Any, topic: str) -> str:
 def _subtopics(paths: list[str]) -> str:
     if not paths:
         return ""
-    return ('<h3>Subtopics</h3><ul>'
+    # Styled by the existing .meta rule rather than a new one for h3: a bare h3 falls back to the
+    # browser's larger, darker default and reads as outranking the h2 above it.
+    return ('<h3 class="meta">Subtopics</h3><ul>'
             + "".join(f'<li>{_topic_link(path)}</li>' for path in paths) + "</ul>")
 
 

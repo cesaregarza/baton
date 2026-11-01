@@ -274,11 +274,19 @@ def rule_size(selector: str) -> float | None:
 
 
 def test_a_subtopics_heading_does_not_outrank_the_heading_above_it(tmp_path):
-    """h3 sits under h2, so it must not render larger: unstyled, it falls back to the browser's own
-    1.17rem bold black and reads as the more important of the two."""
+    """h3 sits under h2, so it must not render larger.
+
+    Unstyled it falls back to the browser's 1.17rem bold black and reads as the more important of the
+    two. It is held down by a class the stylesheet already defines, not by a new rule for h3, so a
+    restyle of the sheet elsewhere has nothing of this to merge.
+    """
+    config, conn = seeded(tmp_path, view_all=True)
+    try:
+        assert '<h3 class="meta">Subtopics</h3>' in text(get(config, "/t/baton"))
+    finally:
+        conn.close()
     assert rule_size("h2") is not None, "h2 is styled, so the comparison is meaningful"
-    assert rule_size("h3") is not None, "h3 needs a rule of its own"
-    assert rule_size("h3") <= rule_size("h2")
+    assert rule_size(".meta, .notice, .source, .muted") <= rule_size("h2")
 
 
 def test_a_topic_named_only_by_its_path_shows_that_name_once(tmp_path):
