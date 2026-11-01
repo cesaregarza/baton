@@ -10,12 +10,10 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any
 
 import pytest
 from test_dashboard import text
 from test_dashboard_pages import get, page_config
-from topic_backing import back_topics
 
 from baton import conversations, topics
 from baton.config import Config
