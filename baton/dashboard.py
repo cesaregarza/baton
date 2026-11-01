@@ -127,6 +127,19 @@ details { margin: 1.75rem 0 .5rem; border: 1px solid var(--line); border-radius:
 summary { cursor: pointer; padding: .75rem 0; font-weight: 600; }
 details[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: .25rem; }
 .pager { margin: .5rem 0; }
+/* primary links are at least 44px tall: an item that opens with its link lets the link carry the item's top space */
+h2 a { display: inline-block; padding: .7rem 0; }
+h2:has(> a) { margin: 1rem 0 0; }
+li > a:first-child, .meta > a:first-child { display: flex; align-items: flex-end; min-height: 2.75rem;
+                                           padding-bottom: .15rem; font-size: 1rem; font-weight: 600;
+                                           text-decoration: none; }
+li > a:first-child:hover, .meta > a:first-child:hover { text-decoration: underline; }
+li:has(> a:first-child), li:has(> .meta > a:first-child) { padding-top: 0; }
+.sep { display: none; }
+.pager a, .crumbs a { display: inline-block; padding: .7rem .15rem; margin-left: -.15rem; }
+.crumbs { margin: 0; font-size: .875rem; }
+.lead { font-size: 1.125rem; margin: 2.5rem 0; }
+.lead a { display: inline-block; padding: .5rem 0; }
 /* narrow screens shorten ids and tighten threads; wide ones get a larger title and deeper threads */
 @media (max-width: 480px) {
   .id { display: inline-block; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -404,7 +417,8 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
         job_block = (f'<h2 id="jobs">Jobs waiting on {_e(you)}</h2><ul>' + ("".join(_job(job) for job in waiting)
                      or "<li class=muted>None.</li>") + "</ul>" + job_pager)
     needs = f"Needs {_e(you)}"
-    crumbs = '<p><a href="/">All conversations</a>' + (f' · <a href="/needs">{needs}</a>' if topic else "") + "</p>"
+    crumbs = ('<p class="crumbs"><a href="/">All conversations</a>'
+              + (f' · <a href="/needs">{needs}</a>' if topic else "") + "</p>")
     if projected:
         head = (f'<h1>{needs}{where}</h1><p class="muted">{needs}, read-only view, as visible to {_e(viewer)}. '
                 f'{count}{other_count}{job_count}.</p>'
@@ -481,7 +495,8 @@ def _signal(subject: str, you: str, conversation: dict[str, Any], item: dict[str
         labels.append(f"{you} replied")
     why = " · ".join(labels)
     return (f'<li><div class="meta"><a href="{_e(message_path(conversation["conversation_id"], seq))}">'
-            f'{_e(conversation["title"])}</a> · <span class="role">{_e(messages.author_label(item))}</span> · '
+            f'{_e(conversation["title"])}</a><span class="sep"> · </span>'
+            f'<span class="role">{_e(messages.author_label(item))}</span> · '
             f'{_time(item["at"])} · #{seq} · {_e(why)}</div><p class="text">{_e(item["text"])}</p></li>')
 
 
@@ -539,11 +554,13 @@ def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -
                 parents[seq] = found[0]
     items = _thread(page["messages"], conversation_id, parents)
     missing = _gap_summary(page["retention_gaps"])
-    more = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
+    more = (f'<p class="pager"><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
             if later else "")
-    earlier = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={max(0, after - messages.MAX_PAGE_MESSAGES)}">'
-               'Earlier messages</a></p>' if after > 0 else "")
-    return _page(200, title, f'<p><a href="/">All conversations</a></p><h1>{_e(title)}</h1>{earlier}{missing}'
+    earlier = (f'<p class="pager"><a href="/c/{_e(conversation_id)}'
+               f'?after_seq={max(0, after - messages.MAX_PAGE_MESSAGES)}">Earlier messages</a></p>'
+               if after > 0 else "")
+    return _page(200, title, '<p class="crumbs"><a href="/">All conversations</a></p>'
+                             f'<h1>{_e(title)}</h1>{earlier}{missing}'
                              f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{more}')
 
 
@@ -631,7 +648,7 @@ def _page(status: int, title: str, body: str) -> Response:
 
 
 def _not_found() -> Response:
-    return _page(404, "Not found", '<p>Nothing here. <a href="/">All conversations</a></p>')
+    return _page(404, "Not found", '<p class="lead">Nothing here. <a href="/">All conversations</a></p>')
 
 
 def _e(value: Any) -> str:
