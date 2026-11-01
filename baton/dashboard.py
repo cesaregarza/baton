@@ -72,13 +72,21 @@ MAX_LISTED = conversations.MAX_LISTED
 STYLE = """\
 /* tokens: one palette, so the dark one only restates the values */
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   --bg: #ffffff; --surface: #f4f6f8; --text: #1b1f24; --muted: #565e68;
   --link: #0b57d0; --link-hover: #083f9c; --link-line: #8fb0ea; --focus: #0b57d0;
   --line: #e1e5ea; --line-strong: #c3c9d1;
   --accent-bg: #e6eefc; --accent-text: #0a4aa6; --accent-line: #a9c2ee; --target-bg: #e6eefc;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b; --surface: #1d2127; --text: #e7e9ec; --muted: #a4acb6;
+    --link: #8ab4f8; --link-hover: #b9d2fc; --link-line: #4d6a9c; --focus: #8ab4f8;
+    --line: #2b3038; --line-strong: #434a54;
+    --accent-bg: #1d2e4a; --accent-text: #b4cdfa; --accent-line: #3f5a8a; --target-bg: #1d2e4a;
+  }
 }
 /* base: 16px text, a 42rem column, and a type scale of 13, 14, 16, 18, 24 and 28px */
 *, ::before, ::after { box-sizing: border-box; }
