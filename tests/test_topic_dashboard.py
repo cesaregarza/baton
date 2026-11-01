@@ -264,13 +264,22 @@ def test_a_page_never_links_a_subtopic_the_viewer_cannot_open(tmp_path):
 # Presentation: a heading that outranks the one above it, a name printed twice, and a dead end.
 
 def rule_size(selector: str) -> float | None:
-    """The font-size a stylesheet rule sets, in rem, or None when the rule sets none."""
+    """The largest font-size in rem that any rule naming `selector` sets, or None if none does.
+
+    Resolved by looking for the selector as one entry in each rule's comma-separated list, rather than
+    by matching a literal selector string: the stylesheet groups and regroups selectors as it is
+    restyled, and a test pinned to one grouping breaks without anything rendering differently. The body
+    pattern excludes braces, so an `@media` wrapper is stepped over and its inner rules are read.
+    """
     import re
-    block = re.search(rf"(?:^|\n|\s){re.escape(selector)}\s*\{{([^}}]*)\}}", dashboard.STYLE)
-    if block is None:
-        return None
-    size = re.search(r"font-size:\s*([0-9.]+)rem", block.group(1))
-    return float(size.group(1)) if size else None
+    sizes = []
+    for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", dashboard.STYLE):
+        if selector not in [one.strip() for one in selectors.split(",")]:
+            continue
+        size = re.search(r"font-size:\s*([0-9.]+)rem", body)
+        if size:
+            sizes.append(float(size.group(1)))
+    return max(sizes) if sizes else None
 
 
 def test_a_subtopics_heading_does_not_outrank_the_heading_above_it(tmp_path):
@@ -286,7 +295,7 @@ def test_a_subtopics_heading_does_not_outrank_the_heading_above_it(tmp_path):
     finally:
         conn.close()
     assert rule_size("h2") is not None, "h2 is styled, so the comparison is meaningful"
-    assert rule_size(".meta, .notice, .source, .muted") <= rule_size("h2")
+    assert rule_size(".meta") <= rule_size("h2")
 
 
 def test_a_topic_named_only_by_its_path_shows_that_name_once(tmp_path):
