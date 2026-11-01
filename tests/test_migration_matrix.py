@@ -180,7 +180,8 @@ WHOLE_TABLES = {8: {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_req
                      "artifact_depends_on", "commit_requests"},  # the local indexing writer's derived data
                 11: {"vectors", "vector_skips"},  # embeddings a producer supplies, per generation
                 12: {"aliases", "alias_bindings", "alias_claims"},
-                13: {"alias_posts"}}  # guest continuity
+                13: {"alias_posts"},  # guest continuity
+                14: {"alias_arms", "core_enrolment", "alias_roles"}}  # per-call identity
 
 
 @pytest.mark.parametrize("version", FIXTURE_VERSIONS)

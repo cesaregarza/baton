@@ -121,6 +121,18 @@ def _parser() -> argparse.ArgumentParser:
     seat_commands.add_parser("logout-all", help="end every browser seat session at once").set_defaults(
         handler=_seat_logout_all)
 
+    alias = commands.add_parser("alias", help="owner commands for enrolled aliases").add_subparsers(
+        dest="alias_command", required=True)
+    enrol = alias.add_parser("arm-enrol", help="let a role's own credential enrol it once, within 15 minutes")
+    enrol.add_argument("enrol_role", metavar="role")
+    enrol.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.arm_enrol(
+        conn, config, args.enrol_role)))
+    rekey = alias.add_parser("arm-rekey", help="let the next claim with a new passphrase reset an alias, "
+                                               "within 15 minutes")
+    rekey.add_argument("name")
+    rekey.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.arm_rekey(
+        conn, args.name)))
+
     commands.add_parser("hash-passphrase", help="hash an OAuth consent passphrase for the config")
     oauth = commands.add_parser("oauth", help="OAuth grants").add_subparsers(dest="oauth_command", required=True)
     oauth.add_parser("revoke-all", help="end every OAuth access and refresh grant").set_defaults(handler=_revoke_all)
@@ -217,6 +229,12 @@ def _db(config: Config, operation: Any) -> Any:
         return operation(conn)
     finally:
         conn.close()
+
+
+def _aliases(config: Config, operation: Any) -> Any:
+    from baton import aliases  # lazily: it imports the MCP SDK, slow for one-shot commands
+
+    return _db(config, lambda conn: operation(aliases, conn))
 
 
 def _attention(args: argparse.Namespace) -> list[str] | None:

@@ -19,9 +19,9 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -117,6 +117,8 @@ _ADDED_TABLES = {
     11: ("vectors", "vector_skips"),
     12: ("aliases", "alias_bindings", "alias_claims"),
     13: ("alias_posts",),
+    # Per-call identity (`baton.aliases`): owner arms, core enrolment and the current alias-to-role mapping.
+    14: ("alias_arms", "core_enrolment", "alias_roles"),
 }
 _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys()))
 
@@ -143,6 +145,26 @@ _SCHEMA = (
         credential TEXT NOT NULL,
         name TEXT NOT NULL,
         at REAL NOT NULL
+    )""",
+    # An owner's single-use arm: `enrol` names a role that may enrol itself, `rekey` an alias whose next claim
+    # with a new passphrase replaces its verifier. Each expires on its own.
+    """CREATE TABLE IF NOT EXISTS alias_arms (
+        kind TEXT NOT NULL CHECK (kind IN ('enrol', 'rekey')),
+        target TEXT NOT NULL,
+        expires_at REAL NOT NULL,
+        PRIMARY KEY (kind, target)
+    )""",
+    # Each role's one enrolment, kept as history and never deleted.
+    """CREATE TABLE IF NOT EXISTS core_enrolment (
+        role TEXT PRIMARY KEY,
+        alias_id TEXT NOT NULL UNIQUE REFERENCES aliases(id),
+        enrolled_at REAL NOT NULL,
+        unmapped_at REAL
+    )""",
+    # The current mapping: a proof for `alias_id` makes a call run as `role`. Unique both ways.
+    """CREATE TABLE IF NOT EXISTS alias_roles (
+        role TEXT PRIMARY KEY,
+        alias_id TEXT NOT NULL UNIQUE REFERENCES aliases(id)
     )""",
     # Admitted guest post attempts, bounded by hourly alias/credential limits; never proof values.
     """CREATE TABLE IF NOT EXISTS alias_posts (

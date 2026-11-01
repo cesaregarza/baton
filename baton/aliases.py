@@ -1,7 +1,12 @@
-"""Permanent guest alias ownership; short-lived proofs carry continuity, never authority.
+"""Permanent alias ownership; short-lived proofs carry continuity, and an enrolled alias's proof carries its role.
 
 Callers supply the authenticated AccessToken from MCP middleware, never a typed role or session alias.
 Claim admission commits separately so a refused passphrase still consumes its quota.
+
+A role enrols once, on an owner's arm, as an alias of its own name (`arm_enrol`, then that role's own
+credential claims it). The alias is then mapped to the role: a proof for it, on any guest credential, makes a
+call run as the role (`resolve_binding`'s `effective_role`). An owner's rekey arm (`arm_rekey`) lets the next
+claim with a new passphrase replace the alias's verifier and end its proofs.
 """
 from __future__ import annotations
 
@@ -23,6 +28,7 @@ from baton.store import transaction
 MAX_NAME = 64
 MAX_PASSPHRASE = 1024
 CLAIM_WINDOW = 3600
+ARM_SECONDS = 900
 
 
 def normalize(name: str) -> str:
@@ -55,8 +61,8 @@ def _reserved(config: Config, name: str) -> bool:
 
 
 def _credential(principal: AccessToken | None) -> str:
-    if principal is None or auth.role_of(principal) != "guest":
-        raise Forbidden("alias continuity requires an authenticated guest credential")
+    if principal is None or auth.role_of(principal) is None:
+        raise Forbidden("alias continuity requires an authenticated credential")
     # Stable across OAuth access-token refresh; no raw bearer value is stored.
     authority = auth.credential_authority(principal)
     return auth.token_digest(json.dumps(authority, sort_keys=True, separators=(",", ":")))
@@ -79,14 +85,20 @@ def _admit(conn: sqlite3.Connection, limits: Aliases, credential: str, name: str
         conn.execute("INSERT INTO alias_claims VALUES (?, ?, ?)", (credential, skeleton(name), now))
 
 
-def _identity(row: sqlite3.Row) -> dict:
+def _identity(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     code = hashlib.sha256(b"baton-alias-code-v1\x00" + row["id"].encode()).hexdigest()[:4]
-    return {"alias_id": row["id"], "alias": row["name"], "badge": "guest", "code": code}
+    mapped = conn.execute("SELECT role FROM alias_roles WHERE alias_id = ?", (row["id"],)).fetchone()
+    return {"alias_id": row["id"], "alias": row["name"], "badge": "guest", "code": code,
+            "effective_role": mapped["role"] if mapped else "guest"}
 
 
 def claim(conn: sqlite3.Connection, config: Config, principal: AccessToken | None, name: str,
           passphrase: str) -> dict:
-    credential = _credential(principal)
+    """Validate, then renew on the current passphrase, else reset on a live rekey arm, else refuse.
+
+    A name nobody holds is created: by a guest unless it is reserved, or by a fixed role enrolling itself.
+    """
+    credential, role = _credential(principal), auth.role_of(principal)
     binding_ttl = config.aliases.binding_ttl_seconds
     if type(binding_ttl) is not int or not 1 <= binding_ttl <= 86400:
         raise InvalidRequest("binding lifetime must be a whole number from 1 to 86400 seconds")
@@ -94,28 +106,78 @@ def claim(conn: sqlite3.Connection, config: Config, principal: AccessToken | Non
     validate_passphrase(passphrase)
     now = time.time()
     _admit(conn, config.aliases, credential, name, now)
-    if _reserved(config, name):
-        raise Forbidden("alias name is reserved")
     with transaction(conn):
         row = conn.execute("SELECT * FROM aliases WHERE name = ?", (name,)).fetchone()
-        if row is None and conn.execute("SELECT 1 FROM aliases WHERE skeleton = ?", (skeleton(name),)).fetchone():
-            raise Forbidden("alias name conflicts with an existing alias")
-        if row is not None and conn.execute("SELECT COUNT(*) FROM alias_bindings WHERE alias_id = ? AND expires_at > ?",
-                                            (row["id"], now)).fetchone()[0] >= config.aliases.max_bindings_per_alias:
-            raise LimitExceeded("alias has reached its live binding capacity", "bindings_per_alias")
         if row is None:
-            alias_id = secrets.token_urlsafe(24)
-            verifier = auth.hash_passphrase(passphrase)
-            conn.execute("INSERT INTO aliases VALUES (?, ?, ?, ?, ?)",
-                         (alias_id, name, skeleton(name), verifier, now))
-            row = conn.execute("SELECT * FROM aliases WHERE id = ?", (alias_id,)).fetchone()
-        elif not auth.check_passphrase(passphrase, row["verifier"]):
+            row = _create(conn, config, role, name, passphrase, now)
+        elif conn.execute("SELECT COUNT(*) FROM alias_bindings WHERE alias_id = ? AND expires_at > ?",
+                          (row["id"], now)).fetchone()[0] >= config.aliases.max_bindings_per_alias:
+            raise LimitExceeded("alias has reached its live binding capacity", "bindings_per_alias")
+        elif auth.check_passphrase(passphrase, row["verifier"]):
+            if role != "guest" and not conn.execute("SELECT 1 FROM core_enrolment WHERE role = ? AND alias_id = ?",
+                                                    (role, row["id"])).fetchone():
+                raise Forbidden("a fixed-role credential renews only its own enrolled alias")
+        elif _take_arm(conn, "rekey", name, now):
+            conn.execute("UPDATE aliases SET verifier = ? WHERE id = ?", (auth.hash_passphrase(passphrase), row["id"]))
+            conn.execute("DELETE FROM alias_bindings WHERE alias_id = ?", (row["id"],))
+        else:
             raise Forbidden("alias is taken; passphrase did not match")
         conn.execute("DELETE FROM alias_bindings WHERE expires_at <= ?", (now,))
         proof = secrets.token_urlsafe(32)
         expires_at = now + binding_ttl
         conn.execute("INSERT INTO alias_bindings VALUES (?, ?, ?)", (auth.token_digest(proof), row["id"], expires_at))
-        return {**_identity(row), "binding_token": proof, "expires_at": expires_at}
+        return {**_identity(conn, row), "binding_token": proof, "expires_at": expires_at}
+
+
+def _create(conn: sqlite3.Connection, config: Config, role: str, name: str, passphrase: str,
+            now: float) -> sqlite3.Row:
+    """A new guest alias, or a fixed role's one enrolment, which also maps the alias to the role."""
+    if role == "guest":
+        if _reserved(config, name):
+            raise Forbidden("alias name is reserved")
+    elif name != role or not _take_arm(conn, "enrol", role, now):
+        raise Forbidden("a fixed-role credential only enrols its own role, once, on an owner's arm")
+    if conn.execute("SELECT 1 FROM aliases WHERE skeleton = ?", (skeleton(name),)).fetchone():
+        raise Forbidden("alias name conflicts with an existing alias")
+    alias_id = secrets.token_urlsafe(24)
+    conn.execute("INSERT INTO aliases VALUES (?, ?, ?, ?, ?)",
+                 (alias_id, name, skeleton(name), auth.hash_passphrase(passphrase), now))
+    if role != "guest":
+        conn.execute("INSERT INTO core_enrolment VALUES (?, ?, ?, NULL)", (role, alias_id, now))
+        conn.execute("INSERT INTO alias_roles VALUES (?, ?)", (role, alias_id))
+    return conn.execute("SELECT * FROM aliases WHERE id = ?", (alias_id,)).fetchone()
+
+
+def _take_arm(conn: sqlite3.Connection, kind: str, target: str, now: float) -> bool:
+    """Spend a live arm. The caller's transaction rolls this back if the claim fails later."""
+    conn.execute("DELETE FROM alias_arms WHERE expires_at <= ?", (now,))
+    return conn.execute("DELETE FROM alias_arms WHERE kind = ? AND target = ?", (kind, target)).rowcount == 1
+
+
+def arm_enrol(conn: sqlite3.Connection, config: Config, role: str) -> dict:
+    """Owner: let `role`'s own credential enrol it, once, within ARM_SECONDS."""
+    entry = config.roles.get(role)
+    if entry is None or role == "guest" or entry.human or entry.display_only or role != normalize(role):
+        raise Forbidden(f"{role!r} is not an agent role that can be mapped")
+    with transaction(conn):
+        if conn.execute("SELECT 1 FROM core_enrolment WHERE role = ?", (role,)).fetchone():
+            raise Forbidden(f"{role} is already enrolled")
+        return _arm(conn, "enrol", role)
+
+
+def arm_rekey(conn: sqlite3.Connection, name: str) -> dict:
+    """Owner: let the next claim of alias `name` with a new passphrase replace its verifier, within ARM_SECONDS."""
+    name = normalize(name)
+    with transaction(conn):
+        if not conn.execute("SELECT 1 FROM aliases WHERE name = ?", (name,)).fetchone():
+            raise Forbidden(f"no alias {name!r}")
+        return _arm(conn, "rekey", name)
+
+
+def _arm(conn: sqlite3.Connection, kind: str, target: str) -> dict:
+    expires_at = time.time() + ARM_SECONDS
+    conn.execute("INSERT OR REPLACE INTO alias_arms VALUES (?, ?, ?)", (kind, target, expires_at))
+    return {"armed": kind, "target": target, "expires_at": expires_at}
 
 
 def validate_proof(proof: object) -> None:
@@ -123,15 +185,14 @@ def validate_proof(proof: object) -> None:
         raise Forbidden("alias binding is missing, invalid or expired")
 
 
-def resolve_binding(conn: sqlite3.Connection, principal: AccessToken | None, proof: str | None) -> dict:
-    """Resolve a portable proof on any authenticated guest credential; PR4 owns posting integration."""
-    _credential(principal)
+def resolve_binding(conn: sqlite3.Connection, proof: str | None) -> dict:
+    """The alias a live proof binds, with the role its calls run as (`guest` when unmapped)."""
     validate_proof(proof)
     row = conn.execute("SELECT a.* FROM alias_bindings b JOIN aliases a ON a.id = b.alias_id"
                        " WHERE b.digest = ? AND b.expires_at > ?", (auth.token_digest(proof), time.time())).fetchone()
     if row is None:
         raise Forbidden("alias binding is missing, invalid or expired")
-    return _identity(row)
+    return _identity(conn, row)
 
 
 def admit_post(conn: sqlite3.Connection, config: Config, principal: AccessToken, identity: dict) -> None:
