@@ -497,7 +497,10 @@ class Guard:
         return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))], is_error=True)
 
     async def refuse_claim_validation(self, ctx: Any, call_next: Any) -> Any:
-        """Prevent SDK validation from echoing a claim's passphrase, even if another argument is missing."""
+        """Prevent SDK validation from echoing a claim's passphrase, even if another argument is missing.
+
+        A token is refused here too: claim_alias's schema has none, and the SDK would otherwise drop it silently.
+        """
         params = ctx.params if isinstance(getattr(ctx, "params", None), dict) else {}
         if getattr(ctx, "method", None) != "tools/call" or params.get("name") != "claim_alias":
             return await call_next(ctx)
@@ -506,6 +509,8 @@ class Guard:
         try:
             if not isinstance(arguments, dict) or not isinstance(arguments.get("name"), str):
                 raise InvalidRequest("claim_alias requires a name and a passphrase of 1-1024 characters")
+            if arguments.get("token") is not None:
+                raise InvalidRequest("claim_alias takes no token: claim with a name and passphrase only")
             aliases.validate_passphrase(arguments.get("passphrase"))
         except InvalidRequest as error:
             refusal = self._refuse("claim_alias", _call_context(get_access_token()), {}, error.code, str(error))

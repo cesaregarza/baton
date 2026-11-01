@@ -132,6 +132,15 @@ def _parser() -> argparse.ArgumentParser:
     rekey.add_argument("name")
     rekey.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.arm_rekey(
         conn, args.name)))
+    mapping = alias.add_parser("map", help="make an alias act as an enrolled role; ends both sides' old proofs")
+    mapping.add_argument("name")
+    mapping.add_argument("map_role", metavar="role")
+    mapping.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.map_alias(
+        conn, args.name, args.map_role)))
+    unmap = alias.add_parser("unmap", help="end an alias's mapping and its proofs; it renews as a guest alias")
+    unmap.add_argument("name")
+    unmap.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.unmap_alias(
+        conn, args.name)))
 
     commands.add_parser("hash-passphrase", help="hash an OAuth consent passphrase for the config")
     oauth = commands.add_parser("oauth", help="OAuth grants").add_subparsers(dest="oauth_command", required=True)

@@ -134,6 +134,8 @@ class Aliases:
     """Guest alias storage and hourly admission bounds; continuity never grants role authority."""
 
     binding_ttl_seconds: int = 86400
+    # For an alias mapped to a role: re-arming costs the owner a go, so at most weekly by default.
+    mapped_binding_ttl_seconds: int = 604800
     max_bindings_per_alias: int = 20
     max_posts_per_alias_per_hour: int = 30
     max_posts_per_credential_per_hour: int = 300
@@ -143,7 +145,8 @@ class Aliases:
 
 
 ALIAS_LIMITS = {"max_posts_per_alias_per_hour": (1, 10000), "max_posts_per_credential_per_hour": (1, 10000),
-                "binding_ttl_seconds": (1, 86400), "max_bindings_per_alias": (1, 1000),
+                "binding_ttl_seconds": (1, 86400), "mapped_binding_ttl_seconds": (1, 604800),
+                "max_bindings_per_alias": (1, 1000),
                 "max_claims_per_credential_per_hour": (1, 10000), "max_claims_per_alias_per_hour": (1, 10000),
                 "max_claims_per_hour": (1, 10000)}
 

@@ -118,7 +118,7 @@ _ADDED_TABLES = {
     12: ("aliases", "alias_bindings", "alias_claims"),
     13: ("alias_posts",),
     # Per-call identity (`baton.aliases`): owner arms, core enrolment and the current alias-to-role mapping.
-    14: ("alias_arms", "core_enrolment", "alias_roles"),
+    14: ("alias_arms", "core_enrolment", "alias_roles", "events_targets"),
 }
 _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys()))
 
@@ -165,6 +165,14 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS alias_roles (
         role TEXT PRIMARY KEY,
         alias_id TEXT NOT NULL UNIQUE REFERENCES aliases(id)
+    )""",
+    # Where an OAuth grant's event subscriptions deliver: the role its alias is mapped to, checked on every wake.
+    # `authority` is the grant's `auth.credential_authority`, so a sweep can drop rows whose grant has ended.
+    """CREATE TABLE IF NOT EXISTS events_targets (
+        grant_id TEXT PRIMARY KEY,
+        alias_id TEXT NOT NULL REFERENCES aliases(id),
+        authority TEXT NOT NULL,
+        bound_at REAL NOT NULL
     )""",
     # Admitted guest post attempts, bounded by hourly alias/credential limits; never proof values.
     """CREATE TABLE IF NOT EXISTS alias_posts (
