@@ -662,9 +662,11 @@ class Guard:
     def _topic_fields(self, name: str, kwargs: dict[str, Any], outcome: str) -> dict[str, Any]:
         if name not in topics.AUDIT_TOOLS:
             return {}
+        if outcome != "ok":
+            return topics.named_fields(name, kwargs)
         conn = connect(self._config.db_path)
         try:
-            return topics.audit_fields(conn, name, kwargs, outcome)
+            return topics.audit_fields(conn, name, kwargs)
         finally:
             conn.close()
 
@@ -675,11 +677,12 @@ class Guard:
         proof = kwargs.get("token") if proof is None else proof  # a refusal before Guard sees the raw arguments
         ids = ({key: kwargs[key] for key in AUDITED_IDS if kwargs.get(key) is not None}
                if name != "claim_alias" and not (name == "send_message" and role == "guest") else {})
+        ids.update(self._topic_fields(name, kwargs, outcome))
+        # The binding token must never reach the line, whichever argument carried it, topic fields included.
         if isinstance(proof, str) and proof:
             ids = {key: value for key, value in ids.items() if proof not in json.dumps(value)}
         line = {"at": datetime.now(UTC).isoformat(), "role": role, "credential_role": call["credential_role"],
-                "credential_id": call["credential_id"], "tool": name, **ids,
-                **self._topic_fields(name, kwargs, outcome), "outcome": outcome,
+                "credential_id": call["credential_id"], "tool": name, **ids, "outcome": outcome,
                 **({"alias_id": identity["alias_id"], "alias_code": identity["code"]} if identity else {})}
         directory = self._audit_path.parent
         with self._lock, datadir.opened(directory) as dir_fd:

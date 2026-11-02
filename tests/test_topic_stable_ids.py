@@ -257,6 +257,13 @@ def test_an_update_that_leaves_a_field_out_still_records_the_whole_before_and_af
     assert decoded(row, "after")["title"] == "Baton relay"
 
 
+def test_an_update_that_changes_no_field_writes_no_row(db, config):  # GUARD
+    make_topic(db, config, "baton", title="Baton", description="kept", members=[O, "reviewer"])
+    topics.update(db, config, actor=O, path="baton")
+    topics.update(db, config, actor=O, path="baton", title="Baton", description="kept", members=[O, "reviewer"])
+    assert len(history(db)) == 1, "an update that changed nothing wrote a history row"
+
+
 def test_rename_topic_writes_one_row_with_the_old_and_new_path(db, config):  # FAILS-ON-MAIN
     make_topic(db, config, "baton")
     topics.rename(db, config, actor=O, path="baton", new_path="platform")

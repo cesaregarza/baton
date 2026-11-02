@@ -241,6 +241,24 @@ def test_a_refused_create_topic_names_the_path_it_was_asked_for(host):  # FAILS-
     run(host, scenario)
 
 
+def test_a_guest_refusal_never_audits_its_binding_token_in_a_topic_field(host):  # FAILS-ON-MAIN
+    async def scenario(client):
+        conversation = await seed(client, host)
+        token = (await claim(client, host, "lane-a"))["binding_token"]
+        refusals = [
+            await call(client, host, "set_topic", {"conversation_id": conversation, "topic": token, "token": token},
+                       role="guest"),
+            await call(client, host, "create_topic", {"path": token, "token": token}, role="guest"),
+            await call(client, host, "rename_topic", {"path": "baton", "new_path": token, "token": token},
+                       role="guest"),
+        ]
+        assert [refusal["error"] for refusal in refusals] == ["forbidden"] * 3, refusals
+        assert [line["tool"] for line in audit_lines(host)[-3:]] == ["set_topic", "create_topic", "rename_topic"]
+        leaked = [line["tool"] for line in audit_lines(host) if token in json.dumps(line)]
+        assert not leaked, f"the binding token reached the audit line of {leaked}"
+    run(host, scenario)
+
+
 # 2. The actor in the history --------------------------------------------------------------------------------
 
 def test_a_direct_credentials_changes_name_exactly_its_role(host):  # FAILS-ON-MAIN

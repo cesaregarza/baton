@@ -164,21 +164,24 @@ PATH_TOOLS = frozenset({"create_topic", "update_topic", "rename_topic", "get_top
 AUDIT_TOOLS = PATH_TOOLS | {"set_topic", "create_conversation", "list_conversations"}
 
 
-def audit_fields(conn: sqlite3.Connection, tool: str, arguments: dict[str, Any], outcome: str) -> dict[str, Any]:
-    """What a tool's audit line adds about its topic: the path it named, and on success that topic's id.
-
-    The body returns no id, so the line looks it up here. A refusal names the path and no id, since the topic
-    may not exist. A successful rename names the new path, which is where the topic's id now is.
-    """
+def named_fields(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """The path a refused call named, for its audit line. The argument is unvalidated, so only a string is kept."""
     named = arguments.get("path" if tool in PATH_TOOLS else "topic")
-    if named is None:
+    return {"topic": named} if isinstance(named, str) else {}
+
+
+def audit_fields(conn: sqlite3.Connection, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """What a successful call's audit line adds about its topic: the path it named, and that topic's id.
+
+    The body returns no id, so the line looks it up here. A successful rename names the new path, which is
+    where the topic's id now is.
+    """
+    fields = named_fields(tool, arguments)
+    if "topic" not in fields:
         return {}
-    fields: dict[str, Any] = {"topic": named}
-    if outcome != "ok":
-        return fields
-    if tool == "rename_topic":
-        fields["new_path"] = arguments["new_path"]
-        named = arguments["new_path"]
+    named = fields["topic"]
+    if tool == "rename_topic" and isinstance(arguments.get("new_path"), str):
+        named = fields["new_path"] = arguments["new_path"]
     found = id_of(conn, named)
     return {**fields, **({"topic_id": found} if found is not None else {})}
 
