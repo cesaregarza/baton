@@ -164,9 +164,12 @@ def _append(conn: sqlite3.Connection, *, doc_id: str, number: int, body: str, ac
                   request_id, digest, number - 1, events.now()))
 
 
-def _revision(conn: sqlite3.Connection, doc_id: str, number: int) -> sqlite3.Row | None:
-    """A revision with its text, or None. Every answer about one is read back from here, so an edit, its retry and
-    a later read cannot describe it differently."""
+def _revision(conn: sqlite3.Connection, doc_id: str, number: int) -> sqlite3.Row:
+    """A revision with its text. Revisions are exactly 1 to the current one, so a caller within that has its row.
+
+    Every answer about a revision is read back from here, so an edit, its retry and a later read cannot describe it
+    differently.
+    """
     return conn.execute(f"SELECT {_DESCRIBED}, body FROM reference_revisions WHERE doc_id = ? AND revision = ?",
                         (doc_id, number)).fetchone()
 
@@ -257,10 +260,12 @@ def read(conn: sqlite3.Connection, *, topic: Any, name: Any = None, revision: An
         if name is None:
             return {"topic": path, "topic_id": topic_row["id"], "references": _listing(conn, topic_row["id"])}
         doc_id, current = _existing(conn, topic_row["id"], path, name)
-        found = _revision(conn, doc_id, current if revision is None else revision)
-        if found is None:
+        # Compared here, not asked of the database: it cannot take a number beyond its integers, and every number up
+        # to the current revision has a row.
+        if revision is not None and revision > current:
             raise UnknownReference(f"reference {name!r} in {path!r} has no revision {revision}; "
                                    f"its current revision is {current}")
+        found = _revision(conn, doc_id, current if revision is None else revision)
         return {"topic": path, "topic_id": topic_row["id"], "name": name, "current_revision": current,
                 "body": found["body"], **_summary(found)}
 
@@ -280,8 +285,10 @@ def history(conn: sqlite3.Connection, *, topic: Any, name: Any, after_revision: 
         topic_row = topics.require_topic(conn, path)
         topics.record_seen(seen, path, topic_row, reference=name)
         doc_id, current = _existing(conn, topic_row["id"], path, name)
-        rows = conn.execute(f"SELECT {_DESCRIBED} FROM reference_revisions WHERE doc_id = ? AND revision > ?"
-                            " ORDER BY revision LIMIT ?", (doc_id, after_revision, limit)).fetchall()
+        # A cursor at or past the last revision reads nothing, and one beyond the database's integers cannot be bound.
+        rows = [] if after_revision >= current else conn.execute(
+            f"SELECT {_DESCRIBED} FROM reference_revisions WHERE doc_id = ? AND revision > ? ORDER BY revision LIMIT ?",
+            (doc_id, after_revision, limit)).fetchall()
         return {"topic": path, "topic_id": topic_row["id"], "name": name, "current_revision": current,
                 "revisions": [_summary(row) for row in rows],
                 "next_revision": rows[-1]["revision"] if rows else after_revision}
