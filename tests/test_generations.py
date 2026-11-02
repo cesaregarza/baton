@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from test_artifact_reads import reads_config, shown
-from test_index_writer import artifacts_for, commit, converse, expire, read_all, say
+from test_index_writer import artifacts_for, commit, converse, lose, read_all, say
 
 from baton import changes, derived, store
 from baton.errors import BatonError
@@ -151,7 +151,7 @@ def test_19_a_pair_held_by_the_provenance_bound_keeps_activation_incomplete(tmp_
     config = reads_config(tmp_path, max_input_segments=2)
     db = connect(config.db_path)
     conversation_id, sent = converse(db, config, 6)
-    expire(db, sent[1], sent[3])  # inputs 1, 3, 5-6 would take three ranges
+    lose(db, sent[1], sent[3])  # inputs 1, 3, 5-6 would take three ranges
     new = create(db, config)
     fill(db, config, conversation_id, generation=new)  # covers 1-4 within two ranges, then can't go on
     error = refused("generation_incomplete", activate, db, config, new)
@@ -201,7 +201,7 @@ def test_an_empty_log_never_reads_as_complete(db, config) -> None:
 
 
 def age_out_the_watermark(db) -> None:
-    """Retention has pruned everything logged so far. A watermark is aged out only if a change after it was
+    """An earlier prune has removed everything logged so far. A watermark is aged out only if a change after it was
     pruned too, so each caller makes one first; one sitting exactly at the floor has lost nothing."""
     floor = db.execute("SELECT MAX(change_seq) FROM change_log").fetchone()[0]
     db.execute("DELETE FROM change_log WHERE change_seq <= ?", (floor,))
@@ -274,9 +274,8 @@ def test_a_conversation_emptied_before_activation_is_required_by_nothing(db, con
     conversation_id, sent = converse(db, config, 2)
     new = create(db, config)
     fill(db, config, conversation_id, generation=new)  # valid versions of all three kinds
-    expire(db, *sent)  # every copy goes
-    assert {row[0] for row in db.execute("SELECT state FROM artifact_versions WHERE generation = ?", (new,))} \
-        == {"invalid"}
+    lose(db, *sent)  # every copy goes
+    db.execute("UPDATE artifact_versions SET state = 'invalid' WHERE generation = ?", (new,))  # as losing them did
     assert not [key for key in pairs(db, config, generation=new) if key[0] == conversation_id]
     refused("nothing_to_index", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"],
             generation=new)
@@ -297,7 +296,7 @@ def test_a_new_message_makes_an_emptied_conversation_required_again(db, config) 
     conversation_id, sent = converse(db, config, 2)
     new = create(db, config)
     fill(db, config, conversation_id, generation=new)
-    expire(db, *sent)
+    lose(db, *sent)
     say(db, config, conversation_id, "back again")
     refused("generation_behind", activate, db, config, new)
     fill(db, config, conversation_id, generation=new)
@@ -309,7 +308,7 @@ def test_trailing_seqs_with_no_copy_are_covered_by_a_window_of_holes(db, config)
     new = create(db, config)
     fill(db, config, conversation_id, generation=new)  # covers 1-4
     tail = [say(db, config, conversation_id, f"tail {n}") for n in (5, 6)]
-    expire(db, *tail)  # the newest seqs have no copy; earlier ones still do
+    lose(db, *tail)  # the newest seqs have no copy; earlier ones still do
     manifest = derived.begin_batch(db, config, "alpha", conversation_id, list(derived.KINDS), generation=new)
     assert manifest["item_count"] == 0 and manifest["window"] == {"from_seq": 5, "to_seq": 6}
     read_all(db, config, manifest)
@@ -346,8 +345,8 @@ def test_a_dropped_generation_takes_no_batch_and_its_open_batches_close(db, conf
     refused("generation_dropped", activate, db, config, new)
 
 
-def test_a_dropped_generation_s_rows_go_in_bounded_sweeps_and_receipts_say_invalid(tmp_path: Path) -> None:
-    config = reads_config(tmp_path, cleanup_batch=1)
+def test_a_dropped_generation_s_rows_stay_and_receipts_say_invalid(tmp_path: Path) -> None:
+    config = reads_config(tmp_path)
     db = connect(config.db_path)
     conversation_id, _ = converse(db, config, 2)
     new = create(db, config)
@@ -358,8 +357,8 @@ def test_a_dropped_generation_s_rows_go_in_bounded_sweeps_and_receipts_say_inval
                               (new,)).fetchone()[0]
     assert held() == 3
     other, _ = converse(db, config, 1)
-    derived.begin_batch(db, config, "alpha", other, ["summary"])  # one writer call sweeps at most one version
-    assert held() == 2
+    derived.begin_batch(db, config, "alpha", other, ["summary"])  # a writer call deletes nothing
+    assert held() == 3
     replay = commit(db, config, {"batch_id": batch_id, "kinds": {}}, [
         {"kind": kind, "body": f"{kind} of the release plan", "citations": [], "expected_version": 0}
         for kind in derived.KINDS], request_id="r-drop")
@@ -375,7 +374,7 @@ def receipt_batch(db, request_id: str) -> str:
     return db.execute("SELECT batch_id FROM artifact_versions WHERE id = ?", (version_id,)).fetchone()[0]
 
 
-def test_retention_sweeps_a_replaced_generation_and_never_the_active_one(tmp_path: Path) -> None:
+def test_retention_retires_a_replaced_generation_keeping_its_rows_and_never_the_active_one(tmp_path: Path) -> None:
     config = reads_config(tmp_path, generation_retention_days=1)
     db = connect(config.db_path)
     conversation_id, _ = converse(db, config, 2)
@@ -388,8 +387,9 @@ def test_retention_sweeps_a_replaced_generation_and_never_the_active_one(tmp_pat
     db.execute("UPDATE generations SET deactivated_at = ? WHERE id = ?", (old, implicit))
     db.execute("UPDATE generations SET created_at = ?", (old,))
     other, _ = converse(db, config, 1)
-    fill(db, config, other)  # a writer call sweeps
-    assert db.execute("SELECT COUNT(*) FROM artifact_versions WHERE generation = ?", (implicit,)).fetchone()[0] == 0
+    fill(db, config, other)  # a writer call retires it
+    assert db.execute("SELECT dropped_at FROM generations WHERE id = ?", (implicit,)).fetchone()[0] is not None
+    assert db.execute("SELECT COUNT(*) FROM artifact_versions WHERE generation = ?", (implicit,)).fetchone()[0] > 0
     assert db.execute("SELECT active FROM generations WHERE id = ?", (new,)).fetchone()[0] == 1
     assert served_generation(db, config, conversation_id) == {new}
     db.close()
@@ -401,7 +401,7 @@ def test_retention_sweeps_a_replaced_generation_and_never_the_active_one(tmp_pat
 def test_dirty_for_a_generation_creates_nothing_and_omits_empty_conversations(db, config) -> None:
     conversation_id, sent = converse(db, config, 2)
     emptied, gone = converse(db, config, 1)
-    expire(db, *gone)
+    lose(db, *gone)
     new = create(db, config)
     before = db.execute("SELECT COUNT(*) FROM generations").fetchone()[0]
     listed = pairs(db, config, generation=new)
@@ -425,14 +425,14 @@ def test_step_11_adds_the_generation_columns_and_the_vector_tables(db) -> None:
     assert set(store._ADDED_TABLES[11]) == {"vectors", "vector_skips"}
 
 
-def test_a_drop_frees_the_slot_before_its_rows_are_gone(tmp_path: Path) -> None:
-    config = reads_config(tmp_path, max_generations=1, cleanup_batch=1)
+def test_a_drop_frees_the_slot_and_keeps_its_rows(tmp_path: Path) -> None:
+    config = reads_config(tmp_path, max_generations=1)
     db = connect(config.db_path)
     conversation_id, _ = converse(db, config, 2)
     full = create(db, config)
-    fill(db, config, conversation_id, generation=full)  # three versions, more than one sweep removes
+    fill(db, config, conversation_id, generation=full)  # three versions
     derived.generation_drop(db, config, "alpha", full)
-    create(db, config)  # the slot is free at once, though the dropped rows are still being swept
+    create(db, config)  # the slot is free at once, and the dropped rows stay as a tombstone
     assert db.execute("SELECT COUNT(*) FROM artifact_versions WHERE generation = ?", (full,)).fetchone()[0] > 0
     db.close()
 
@@ -593,17 +593,26 @@ def test_a_conversation_created_after_the_watermark_is_behind_not_incomplete(db,
 
 def test_a_conversation_empty_at_the_watermark_and_refilled_after_is_behind(db, config) -> None:
     emptied, sent = converse(db, config, 2)
-    expire(db, *sent)  # no copy left: required by nothing at the watermark
+    lose(db, *sent)  # no copy left: required by nothing at the watermark
     new = create(db, config)
     say(db, config, emptied, "back after the watermark")
     error = refused("generation_behind", activate, db, config, new)
     assert {p["conversation_id"] for p in error.extra["pairs"]} == {emptied}
 
 
+def logged_expiry(db, conversation_id: str, message_id: str) -> None:
+    """A `message_expired` row as an earlier version of baton wrote it when a copy expired by retention."""
+    at = datetime.now(UTC).isoformat()
+    db.execute("INSERT INTO change_log (conversation_id, revision, kind, message_id, role, at)"
+               " VALUES (?, 0, 'message_expired', ?, 'reviewer', ?)", (conversation_id, message_id, at))
+
+
 def test_an_obligation_owed_at_the_watermark_stays_incomplete_after_its_copies_expire(db, config) -> None:
     owed, sent = converse(db, config, 2)  # a copy existed at the watermark, and nothing was filled for it
     new = create(db, config)
-    expire(db, *sent)  # every copy from then goes after the watermark; only the log shows it existed
+    lose(db, *sent)  # every copy from then goes after the watermark; only the log shows it existed
+    for message_id in sent:
+        logged_expiry(db, owed, message_id)
     say(db, config, owed, "a new message")
     error = refused("generation_incomplete", activate, db, config, new)
     assert {p["conversation_id"] for p in error.extra["pairs"]} == {owed}

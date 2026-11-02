@@ -199,11 +199,10 @@ The data directory contains the following. Protect backups as carefully as the l
 
 - `baton.db`: message text, senders, recipients, times, authorship markers, and relayed words; conversation
   titles and participants; jobs and their state history; event and wake state; retry digests; aliases and
-  their mappings; and optional indexing and seat state. A copy marked as read becomes eligible for deletion
-  30 days after it was sent; unread copies remain until marked read. Conversation metadata and job history
-  remain until the database is deleted.
-- Message-request and job-move retry digests and outcomes are kept for 31 days. Wake records contain roles,
-  reasons, status, and attempts, not message text.
+  their mappings; and optional indexing and seat state. Message copies, read or unread, and conversation
+  metadata and job history remain until the database is deleted.
+- Message-request and job-move retry digests and outcomes are kept until the database is deleted. Wake
+  records contain roles, reasons, status, and attempts, not message text.
 - Alias records include a normalized name, lookalike skeleton, random ID, salted scrypt passphrase verifier,
   and creation time. Ownership is not evicted. Binding tokens are stored as digests with expiry. Admission
   attempts are retained for their hourly windows. Guest post copies include alias attribution; a mapped

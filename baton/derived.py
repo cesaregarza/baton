@@ -2,9 +2,9 @@
 
 The worker supplies only text, each artifact's body and the messages it cites. Everything else is Baton's: the
 producer (a name listed in `[indexer] producers`), which messages a batch covers (the manifest Baton issued),
-the version a write builds on, and the provenance recorded with it. A version is valid until a message it was
-made from loses its last copy, which flips it to invalid in that same transaction (`invalidate_lost`); an
-invalid kind is rebuilt by a rebase, a fresh first version from seq 1.
+the version a write builds on, and the provenance recorded with it. Baton deletes no messages, so nothing here
+invalidates a version. A kind that an earlier version of Baton invalidated, when a message it was made from lost
+its last copy, is rebuilt by a rebase, a fresh first version from seq 1.
 
 Every writer runs in one transaction and checks its producer before anything else. Nothing here logs a
 change, adds an event or wakes anyone, and nothing here is authority: an artifact is a derived reading of
@@ -77,8 +77,8 @@ def begin_batch(conn: sqlite3.Connection, config: Config, producer: str, convers
         raise InvalidRequest(f"kinds is a non-empty list of distinct kinds from {', '.join(KINDS)}")
     limits = config.indexer
     with transaction(conn):
-        _cleanup(conn, config)
-        if generation is not None:  # after the sweep, so a generation it just retired fails closed
+        _retire_generations(conn, config)
+        if generation is not None:  # after retiring, so a generation it just retired fails closed
             generation = _owned_generation(conn, producer, generation)["id"]
         conversation = conn.execute("SELECT last_seq, revision FROM conversations WHERE id = ?",
                                     (str(conversation_id),)).fetchone()
@@ -160,16 +160,19 @@ def commit_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_
     digest = _digest(request)
     limits = config.indexer
     with transaction(conn):
-        receipt = conn.execute("SELECT * FROM commit_requests WHERE producer = ? AND request_id = ?"
-                               " AND expires_at > ?", (producer, request_id, _now())).fetchone()
+        # A request_id names one commit forever, so an aged-out receipt still refuses a different commit.
+        receipt = conn.execute("SELECT * FROM commit_requests WHERE producer = ? AND request_id = ?",
+                               (producer, request_id)).fetchone()
         if receipt is not None:
             if receipt["digest"] != digest:
                 raise IdempotencyConflict(f"request_id {request_id} was used for a different commit")
-            return _replay(conn, receipt)
+            if receipt["expires_at"] > _now():
+                return _replay(conn, receipt)
+            # Aged out: the batch this commit made is committed, so the checks below refuse it as batch_closed.
         _require_producer(config, producer)
         _open_batch(conn, producer, batch_id)
-        _cleanup(conn, config)
-        batch = _open_batch(conn, producer, batch_id)  # again: the sweep may have closed it
+        _retire_generations(conn, config)
+        batch = _open_batch(conn, producer, batch_id)  # again: retiring may have closed it
         manifest = json.loads(batch["manifest"])
         hour_ago = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
         recent = conn.execute("SELECT COUNT(*) FROM commit_requests WHERE producer = ? AND committed_at > ?",
@@ -276,7 +279,7 @@ def generation_create(conn: sqlite3.Connection, config: Config, producer: str,
     _require_producer(config, producer)
     profile = _profile(config, profile)
     with transaction(conn):
-        _cleanup(conn, config)
+        _retire_generations(conn, config)
         _require_slot(conn, config, producer)
         epoch, seq = _log_position(conn)
         generation = "gen_" + secrets.token_hex(8)
@@ -376,7 +379,7 @@ def _require_one_signature(conn: sqlite3.Connection, producer: str, target: sqli
 
 def generation_drop(conn: sqlite3.Connection, config: Config, producer: str, generation: str) -> dict[str, Any]:
     """Drop one of `producer`'s inactive generations: its slot frees at once, its open batches close, and its rows
-    go in bounded sweeps. Receipts for commits into it stay, reporting those versions invalid."""
+    stay, invalid from now on. Receipts for commits into it stay, reporting those versions invalid."""
     _require_producer(config, producer)
     with transaction(conn):
         row = conn.execute("SELECT * FROM generations WHERE id = ?", (str(generation),)).fetchone()
@@ -393,18 +396,6 @@ def generation_drop(conn: sqlite3.Connection, config: Config, producer: str, gen
     return {"generation": row["id"], "dropped": True}
 
 
-def invalidate_lost(conn: sqlite3.Connection, lost: list[tuple[str, int]]) -> None:
-    """Flip every valid version made from a message that has just lost its last copy. In the caller's transaction.
-
-    A version's inputs include its prior's (checked at commit), so one match on the seq reaches every version
-    of the chain without walking it.
-    """
-    for conversation_id, seq in sorted(set(lost)):
-        conn.execute("UPDATE artifact_versions SET state = 'invalid' WHERE state = 'valid' AND id IN"
-                     " (SELECT version_id FROM artifact_inputs WHERE conversation_id = ? AND from_seq <= ?"
-                     " AND to_seq >= ?)", (conversation_id, seq, seq))
-
-
 def _owned_generation(conn: sqlite3.Connection, producer: str, generation: str) -> sqlite3.Row:
     row = conn.execute("SELECT * FROM generations WHERE id = ?", (str(generation),)).fetchone()
     if row is None:
@@ -419,6 +410,7 @@ def _owned_generation(conn: sqlite3.Connection, producer: str, generation: str) 
 def _after_watermark(conn: sqlite3.Connection, watermark: int) -> tuple[dict[str, int], set[str]]:
     """Per conversation, how many messages were added after the watermark; and which lost a copy after it.
     Participant changes count for neither: at scope `all` they change no coverage and no validity."""
+    # Logs written before copies stopped expiring still hold `message_expired` rows, and count the same.
     added = {row[0]: row[1] for row in conn.execute(
         "SELECT conversation_id, COUNT(*) FROM change_log WHERE change_seq > ? AND kind = 'message_added'"
         " GROUP BY conversation_id", (watermark,))}
@@ -724,7 +716,7 @@ def _state(conn: sqlite3.Connection, version_id: str) -> str:
                        " JOIN conversations AS conversation ON conversation.id = version.conversation_id"
                        " JOIN generations AS generation ON generation.id = version.generation"
                        " WHERE version.id = ?", (version_id,)).fetchone()
-    # Cleanup removes only invalid versions and dropped generations' rows; a dropped one's are invalid at once.
+    # A dropped generation's versions are invalid at once.
     if row is None or row["state"] == "invalid" or row["dropped_at"] is not None:
         return "invalid"
     return "behind" if row["covered_through_seq"] < row["last_seq"] else "valid"
@@ -919,15 +911,14 @@ def _cannot_advance(conn: sqlite3.Connection, config: Config, conversation_id: s
     return row[0] is not None and len(_merge(prior + [[row[0], row[0]]])) > config.indexer.max_input_segments
 
 
-def _cleanup(conn: sqlite3.Connection, config: Config) -> None:
-    """Free space, a bounded amount per writer call: expired batches, aged-out receipts, invalid versions a
-    newer version has replaced, and the rows of dropped generations, a generation replaced longer ago than its
-    retention counting as dropped. Never needed for correctness; the latest version of a kind in a live
-    generation always stays, and the active generation is never swept."""
-    limit = config.indexer.cleanup_batch
+def _retire_generations(conn: sqlite3.Connection, config: Config) -> None:
+    """Retire a generation replaced longer ago than its retention: mark it dropped and close its open batches.
+
+    Its rows stay, so anything naming it fails closed. The active generation never retires, and one with an open
+    batch still running waits for it.
+    """
     retired = (datetime.now(UTC) - timedelta(days=config.indexer.generation_retention_days)).isoformat()
-    # A replaced generation ages from when it was replaced, one never activated from its last write; the active
-    # one never ages, and one with an open batch still running waits for it.
+    # A replaced generation ages from when it was replaced, one never activated from its last write.
     for (generation,) in conn.execute(
             "SELECT id FROM generations WHERE active = 0 AND dropped_at IS NULL"
             " AND COALESCE(deactivated_at, CASE WHEN activated_at IS NULL THEN last_write_at END) < ?"
@@ -935,38 +926,6 @@ def _cleanup(conn: sqlite3.Connection, config: Config) -> None:
             " AND expires_at > ?)", (retired, time.time())).fetchall():
         conn.execute("UPDATE generations SET dropped_at = ? WHERE id = ?", (_now(), generation))
         conn.execute("UPDATE batches SET state = 'discarded' WHERE generation = ? AND state = 'open'", (generation,))
-    dropped = "(SELECT id FROM generations WHERE dropped_at IS NOT NULL)"
-    for version_id in [row[0] for row in conn.execute(
-            f"SELECT id FROM artifact_versions WHERE generation IN {dropped} LIMIT ?", (limit,))]:
-        conn.execute("DELETE FROM artifact_inputs WHERE version_id = ?", (version_id,))
-        conn.execute("DELETE FROM artifact_depends_on WHERE version_id = ?", (version_id,))
-        conn.execute("DELETE FROM artifact_versions WHERE id = ?", (version_id,))
-    for table in ("vectors", "vector_skips"):
-        conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE generation IN {dropped}"
-                     " LIMIT ?)", (limit,))
-    for batch_id in [row[0] for row in conn.execute(f"SELECT id FROM batches WHERE generation IN {dropped} LIMIT ?",
-                                                    (limit,))]:
-        conn.execute("DELETE FROM batch_pages WHERE batch_id = ?", (batch_id,))
-        conn.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
-    # A dropped generation's own row stays, as a tombstone, so anything naming it later fails closed.
-    expired = [row[0] for row in conn.execute("SELECT id FROM batches WHERE expires_at <= ? LIMIT ?",
-                                              (time.time(), limit))]
-    for batch_id in expired:
-        conn.execute("DELETE FROM batch_pages WHERE batch_id = ?", (batch_id,))
-        conn.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
-    conn.execute("DELETE FROM commit_requests WHERE rowid IN (SELECT rowid FROM commit_requests WHERE expires_at <= ?"
-                 " LIMIT ?)", (_now(), limit))
-    replaced = [row[0] for row in conn.execute(
-        "SELECT id FROM artifact_versions AS old WHERE state = 'invalid' AND EXISTS (SELECT 1 FROM artifact_versions"
-        " AS newer WHERE newer.producer = old.producer AND newer.scope_id = old.scope_id AND newer.generation ="
-        " old.generation AND newer.conversation_id = old.conversation_id AND newer.kind = old.kind AND"
-        " newer.version > old.version) LIMIT ?", (limit,))]
-    for version_id in replaced:
-        for table in ("vectors", "vector_skips"):
-            conn.execute(f"DELETE FROM {table} WHERE item_kind = 'artifact' AND item_id = ?", (version_id,))
-        conn.execute("DELETE FROM artifact_inputs WHERE version_id = ?", (version_id,))
-        conn.execute("DELETE FROM artifact_depends_on WHERE version_id = ?", (version_id,))
-        conn.execute("DELETE FROM artifact_versions WHERE id = ?", (version_id,))
 
 
 def _inputs(conn: sqlite3.Connection, version_id: str) -> list[list[int]]:
