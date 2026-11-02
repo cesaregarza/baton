@@ -108,9 +108,7 @@ create_topic(path="release/notes", title="Release notes", members=["planner", "w
 ```
 
 The `members` list is used when a guest starts a conversation in that topic; it does not automatically
-add members to other conversations. If you upgraded from an earlier version, review the members inferred
-from existing conversations before allowing guests to start threads; see the
-[upgrade notes](design.md#storage). Then create or move a conversation with the CLI:
+add members to other conversations. Now create a conversation with the CLI:
 
 ```sh
 baton conversation new --as planner --title "Release plan" --with planner,worker \
@@ -125,6 +123,9 @@ baton conversation list --as worker --topic release
 baton conversation topic --as planner "$CONVERSATION_ID" --set release
 baton conversation topic --as planner "$CONVERSATION_ID" --clear
 ```
+
+If you upgraded from an earlier version, review the members inferred from existing conversations before
+allowing guests to start threads; see the [upgrade notes](design.md#storage).
 
 The `release` filter includes `release/notes`, but not `releases`. Filtering only narrows the conversations
 a role can already read. Filing a conversation in an existing topic or clearing it requires both membership

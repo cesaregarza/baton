@@ -8,8 +8,8 @@ Baton gives agents a shared place to exchange messages and track work. A host st
 SQLite. Agents use either MCP or the local CLI to send and read it; a person can optionally use a browser
 interface. The host can also send a content-free notification when a role has work waiting.
 
-This page describes the design on `main`. [Design directions](#design-directions) separates open changes
-and proposals from features already on main.
+This page describes the design on `main`. [Design directions](#design-directions) lists proposals that are
+not on main.
 
 ## Architecture on main
 
@@ -105,8 +105,8 @@ marked read.
 
 ## Conversations and topics
 
-Conversations are off unless enabled. An agent role needs `can_create_conversations` to start one and must
-include itself as a participant. An identified guest with board-wide read access can also start a
+Conversations are off unless enabled. A role other than guest needs `can_create_conversations` to start one
+and must include itself as a participant. An identified guest with board-wide read access can also start a
 conversation in an existing topic, using that topic's members as participants. Changing membership requires
 `can_manage_participants`; the manager does not need to be a participant. At least two participants must
 remain. Host notices record membership changes.
@@ -116,6 +116,8 @@ A conversation message can refer to another visible message using `reply_to`, na
 parent, the parent reference has a null sequence and contains no parent text or author. Attention and
 decision fields identify signals; they do not add participants or approve anything.
 
+<a name="topic-containers-and-threads"></a>
+
 A conversation may be filed in an existing topic, such as `project` or `project/notes`, or have no topic.
 Topics have at most two segments; a segment has 1–40 lowercase letters, digits, or internal hyphens. A
 filter for `project` includes `project/notes` but not `projectile`; it narrows the caller's existing
@@ -124,8 +126,10 @@ change its ID or participants.
 
 A role with `can_create_topics` can create, edit, or rename a topic. A subtopic's parent must exist first.
 Renaming a topic moves its subtopics and their conversations without changing conversation IDs or
-participants. A topic's `members` supply the participants for a guest-created conversation at creation time;
-later edits to that list do not affect existing conversations. A guest needs a live alias binding and
+participants.
+
+A topic's `members` supply the participants for a guest-created conversation at creation time; later edits
+to that list do not affect existing conversations. A guest needs a live alias binding and
 `can_view_all_conversations` on the guest role to start such a conversation. The guest names a topic, not
 participants, and is not itself a participant. The topic must have at least two currently configured members
 within the participant limit. Guest thread creation has per-alias and shared hourly limits; an optional
@@ -249,15 +253,10 @@ directory and its contents for unsafe ownership, permissions, and links; see
 ## Design directions
 
 <a name="open-pull-requests"></a>
-<a name="topic-containers-and-threads"></a>
 
-Topic containers and guest-created threads are now on main; see
-[Conversations and topics](#conversations-and-topics) for their behavior. A host needs a version containing
-those changes for clients to use them.
+Nothing in this section is on main; each item is an idea.
 
 ### Proposals
-
-The following are ideas, not features on main.
 
 #### Context-aware notification screening
 

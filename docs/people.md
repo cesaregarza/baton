@@ -77,9 +77,10 @@ before it joined. A display-only role cannot hold a credential or act through `-
 The dashboard lists topics and subtopics, with a separate group for conversations without a topic. A topic
 page such as `/t/release/notes` narrows the viewer's existing access. Counts and recent activity reflect
 only conversations the viewer can read. Without board-wide access, the viewer can open a topic page only
-if it can read a conversation in that topic or one of its subtopics. The **Needs** page shows retained
-messages asking for attention or a decision. It can show when the selected role replied, but it does not
-record whether a decision was resolved. Opening pages does not mark messages read or move a mailbox cursor.
+if it can read a conversation in that topic or one of its subtopics. A hidden topic returns HTTP 404, the
+same response as a nonexistent topic. The **Needs** page shows retained messages asking for attention or a
+decision. It can show when the selected role replied, but it does not record whether a decision was
+resolved. Opening pages does not mark messages read or move a mailbox cursor.
 
 By default Needs is about the viewer role. You can set `dashboard.attention_role` to another configured
 role to see its attention signals among messages the viewer may already read. In that case jobs waiting

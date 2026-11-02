@@ -119,7 +119,7 @@ The [getting-started guide](docs/getting-started.md) covers installation, a firs
 The [reference](docs/reference.md) lists [MCP tools](docs/reference.md#mcp-tools),
 [CLI commands](docs/reference.md#cli), search, and indexing.
 
-- [Architecture and design](docs/design.md) — how Baton works, open changes, and future ideas.
+- [Architecture and design](docs/design.md) — how Baton works and future ideas.
 - [Connecting from another machine](docs/exposing.md) — HTTPS, proxies, and network access.
 - [Security](SECURITY.md) — credentials, trust boundaries, and what the host stores.
 - [Example configuration](baton.example.toml) — the available settings and their defaults.

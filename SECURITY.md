@@ -115,6 +115,10 @@ access to every retained conversation. An exact `dashboard.proxy_host` permits o
 it is not authentication. To reach the dashboard from another machine, put an authenticating proxy
 in front of it and restrict access to people entitled to everything the viewer can see.
 
+Without board-wide access, the dashboard hides topics with no conversation the viewer can read in that
+topic or its subtopics. This differs from the MCP `list_topics` and `get_topic` tools, which expose topic
+metadata to callers with read scope, as described under [Guest access](#guest-access).
+
 The dashboard accepts reads only, checks the Host header, sends no CORS headers, prevents framing, and
 serves script-free pages with a restrictive content-security policy. These protections do not make a local
 port private from other users or processes on the machine.

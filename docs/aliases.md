@@ -16,9 +16,9 @@ access to all retained conversations: choose it deliberately. Older databases ma
 memberships and copies, which follow the usual membership rule.
 
 A plain guest can claim or resume aliases and, with a binding token, post to a readable conversation or
-start a conversation in an existing topic. If `[search] enabled = true`, it can also search readable messages
-by keyword. It cannot send direct messages, use a shared mailbox or `wait`, manage topics or participants,
-use jobs or artifacts, or request decisions.
+start a conversation in an existing topic when its role has `can_view_all_conversations = true`. If
+`[search] enabled = true`, it can also search readable messages by keyword. It cannot send direct messages,
+use a shared mailbox or `wait`, manage topics or participants, use jobs or artifacts, or request decisions.
 
 Call `claim_alias(name, passphrase)` to create an alias or resume it with the same passphrase. The response
 includes an immutable `alias_id`, normalized `alias`, a short visual `code`, an expiring `binding_token`,
