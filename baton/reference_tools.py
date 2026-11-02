@@ -15,6 +15,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Annotated, Any, Protocol
 
+from mcp.server.mcpserver.utilities.func_metadata import FuncMetadata
 from pydantic import Field, StrictInt
 
 from baton import auth, references, topics
@@ -29,6 +30,14 @@ REFERENCE_TOOLS = (
 )
 # The two a guest with an alias binding may call. Reading needs no grant, so no key.
 REFERENCE_GUEST_TOOLS = frozenset({"read_reference", "reference_history"})
+
+
+class LiteralArguments(FuncMetadata):
+    """The SDK's argument metadata for a tool that reads no string as the JSON it spells."""
+
+    def pre_parse_json(self, data: dict[str, Any]) -> dict[str, Any]:
+        return data
+
 
 TOPIC = Annotated[str, Field(description="1-2 lowercase slug segments, such as project or project/subtopic.")]
 NAME = Annotated[str, Field(description=f"1-{references.MAX_NAME} characters of a-z, 0-9 and inner hyphens, "

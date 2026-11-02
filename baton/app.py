@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 import uvicorn
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.tools import Tool
 from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
@@ -37,7 +38,7 @@ from baton import search as search_module
 from baton.config import Config
 from baton.errors import BatonError, Forbidden, InvalidRequest, UnknownRole
 from baton.integrations import Integration, IntegrationUnavailable, load_enabled
-from baton.reference_tools import REFERENCE_GUEST_TOOLS, REFERENCE_TOOLS, ReferenceTools
+from baton.reference_tools import REFERENCE_GUEST_TOOLS, REFERENCE_TOOLS, LiteralArguments, ReferenceTools
 from baton.store import connect
 from baton.topic_tools import TopicTools
 from baton.wakes import Dispatcher
@@ -397,6 +398,8 @@ CALL_TOOLS = frozenset({"whoami", "bind_events", "unbind_events"})
 IDENTIFIED_CHANGES = frozenset({"create_topic", "update_topic", "rename_topic", "set_topic", "edit_reference"})
 # The tools a guest may call by presenting a topic grant key. Their body decides what the key allows.
 GRANT_TOOLS = frozenset({"create_topic", "set_topic", "edit_reference"})
+# The tools that take every argument as sent, not as the JSON it may spell.
+LITERAL_TOOLS = frozenset(name for name, _, _ in REFERENCE_TOOLS)
 TOKEN_ARGUMENT = Annotated[str | None, Field(description=(
     "A binding_token from claim_alias, for a shared guest login only. An enrolled alias's token makes this call "
     "run as its mapped role; any other alias's token posts as that alias. Omitted and null are the same; an "
@@ -478,6 +481,11 @@ class Guard:
             guarded.__doc__ = (body.__doc__ or "") + CORE_PROOF_NOTE
         self._validators[name] = func_metadata(guarded, structured_output=False).validate_arguments
         return guarded
+
+    def take_literally(self, tool: Tool) -> None:
+        """Make `tool` read its arguments as sent, and check the calls that carry a token by that same metadata."""
+        tool.fn_metadata = LiteralArguments(**dict(tool.fn_metadata))
+        self._validators[tool.name] = tool.fn_metadata.validate_arguments
 
     def _resolve(self, call: dict[str, Any], proof: object) -> None:
         """A present token selects the alias, and the alias's mapping the role the call runs as."""
@@ -679,6 +687,8 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
         server.add_tool(guard.wrap(name, scope, getattr(tools, name)), name=name,
                         annotations=ToolAnnotations(readOnlyHint=read_only, destructiveHint=False,
                                                     openWorldHint=False))
+        if name in LITERAL_TOOLS:  # these take every argument as sent: a reference may be named "null"
+            guard.take_literally(server._tool_manager.get_tool(name))
     for integration in integrations.values():
         integration.register(server)
     public = urlparse(config.public_url)
