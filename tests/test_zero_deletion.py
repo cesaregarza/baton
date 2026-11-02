@@ -329,7 +329,7 @@ def test_a_reused_request_id_under_an_aged_out_receipt_is_refused_and_writes_not
     assert write_commit(db, config, other, request_id="r-2")["created"] is True
 
 
-@pytest.mark.parametrize("how",["abandoned", "committed", "committed_and_receipt_aged_out"])
+@pytest.mark.parametrize("how", ["abandoned", "committed", "committed_and_receipt_aged_out"])
 def test_guard_an_expired_or_closed_batch_and_an_aged_out_receipt_create_nothing(db, config, how: str) -> None:
     conversation_id, _ = converse_in(db, config, 2)
     manifest = begin(db, config, conversation_id)
