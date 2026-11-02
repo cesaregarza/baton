@@ -82,10 +82,13 @@ def _check_expected(expected: Any) -> None:
 
 
 def _request_id(request_id: Any) -> str:
-    """The caller's request id, or one the host makes when it left it out. An empty one is not left out."""
+    """The caller's request id, or one the host makes when it left it out. An empty one is not left out.
+
+    One with no UTF-8 form, a lone surrogate from JSON, is as malformed as one too long: the database cannot bind it.
+    """
     if request_id is None:
         return messages.new_request_id()
-    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 200:
+    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 200 or _utf8_size(request_id) == 0:
         raise InvalidRequest("request_id is 1-200 characters")
     return request_id
 
