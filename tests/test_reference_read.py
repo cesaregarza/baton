@@ -12,6 +12,10 @@ What this pins:
 * An unknown topic, an unknown reference and an unknown revision are three different refusals, and an unknown reference
   never reads as an empty body.
 * Text comes back byte for byte: nothing is stripped or normalised.
+* The module checks `history`'s paging arguments itself, so a limit or a cursor the schema would refuse is refused when
+  the tool body is called past the schema.
+* A read and a history answer from one view of the database: a revision committed while the call is running is not mixed
+  into its answer.
 
 Mutant numbers in comments refer to the spec's list of one-line mutants the tests must kill. Q numbers refer to its open
 questions: the test pins the question's default, so a ruling changes only the tests that carry that number.
@@ -53,6 +57,7 @@ from reference_support import (
     f10,
     f11,
     grantee_edit,
+    other_writer_adds_revision,
     read_reference,
     reference_history,
     refused_by_schema,
@@ -82,6 +87,25 @@ async def reader(kind, client, scene):
     if kind.split()[0] in ("revoked", "expired", "pending", "invalid"):
         bring_to_state(scene, held, kind.split()[0])
     return Bound.of(held)
+
+
+class ReadStaging(Staging):
+    """A `Staging` for a read, which takes no lock and writes nothing, so nothing marks a moment in it but its own
+    statements. `before(fragment, action)` runs `action` just before the first SELECT whose text holds `fragment`, and
+    keeps the statement that ran before it, so a test can say where the write landed."""
+
+    def before(self, fragment, action):
+        self.moment, self.action, self.fired, self.outcome = "select", action, False, None
+        self.fragment, self.landed_after = fragment.upper(), None
+        return self
+
+    def _trace(self, sql, conn):
+        previous = self.statements[-1][0] if self.statements else None
+        self.statements.append((sql, conn.in_transaction))
+        if (self.moment == "select" and not self.fired and sql.lstrip().upper().startswith("SELECT")
+                and self.fragment in sql.upper()):
+            self.fired, self.landed_after = True, previous
+            self.outcome = self.action()
 
 
 # 1. Who may read ---------------------------------------------------------------------------------------------
@@ -325,6 +349,75 @@ def test_the_module_does_not_read_revision_zero_as_the_current_one(build_scene, 
         with pytest.raises(BatonError) as raised:
             direct(scene, "read_reference", "worker", topic=BOARDS, name=NAME, revision=revision)
         assert raised.value.code in ("unknown_reference", "invalid_request"), str(raised.value)
+
+    play(scene.host, scenario)
+
+
+# 3a. Past the schema, and one view per call -----------------------------------------------------------------
+
+PAGING = [("limit", 0), ("limit", 101), ("limit", True), ("limit", "5"),
+          ("after_revision", -1), ("after_revision", True), ("after_revision", "0")]
+
+
+@pytest.mark.parametrize("argument,value", PAGING, ids=[f"{argument}={value!r}" for argument, value in PAGING])
+def test_the_module_refuses_a_limit_or_a_cursor_the_schema_would_have_refused(build_scene, argument, value):
+    """R6. Called directly, past the schema, `history` still refuses a limit of 0 or 101, a cursor below 0 and a boolean
+    or a text for either: the module's own checks hold where the schema's bounds do not run."""
+    scene = build_scene()
+
+    async def scenario(client):
+        await support.stage(client, scene.host)
+        await write_revisions(client, scene, BOARDS, NAME, 2)
+        with pytest.raises(BatonError) as raised:
+            direct(scene, "reference_history", "worker", topic=BOARDS, name=NAME, **{argument: value})
+        assert (raised.value.code, str(raised.value)) == ("invalid_request",
+                                                          "limit is 1-100 and after_revision at least 0")
+
+    play(scene.host, scenario)
+
+
+def test_a_history_page_ends_at_the_current_revision_it_reports_when_a_write_lands_between_its_reads(
+        build_scene, monkeypatch):
+    """R6. `history` reads the document's current revision and its page from one view, so a revision committed between
+    the two is in neither: the page ends at the `current_revision` it reports, and `next_revision` is that revision."""
+    scene = build_scene()
+
+    async def scenario(client):
+        await support.stage(client, scene.host)
+        await write_revisions(client, scene, BOARDS, NAME, 3)
+        # A writer commits revision 4 after the call has read that the document is at 3, and before it reads the page.
+        staging = ReadStaging(monkeypatch).before(
+            "ORDER BY revision LIMIT", other_writer_adds_revision(scene, BOARDS, NAME, 4))
+        page = direct(scene, "reference_history", "worker", topic=BOARDS, name=NAME)
+        assert staging.fired and staging.outcome == "landed", (staging.fired, staging.outcome)
+        assert "reference_docs" in staging.landed_after, staging.landed_after
+        assert page["current_revision"] == 3
+        assert [entry["revision"] for entry in page["revisions"]] == [1, 2, 3], page
+        assert page["next_revision"] == page["current_revision"]
+        later = direct(scene, "reference_history", "worker", topic=BOARDS, name=NAME)
+        assert (later["current_revision"], later["next_revision"]) == (4, 4), "the staged write was committed"
+
+    play(scene.host, scenario)
+
+
+def test_a_read_answers_from_the_state_it_began_with_when_a_write_lands_after_its_first_statement(
+        build_scene, monkeypatch):
+    """`read_reference` answers from one view, so a revision committed after the call has begun is not in its answer:
+    it names the revision and the text the document had when the call began."""
+    scene = build_scene()
+
+    async def scenario(client):
+        await support.stage(client, scene.host)
+        await write_revisions(client, scene, BOARDS, NAME, 3)
+        # A writer commits revision 4 after the call's first read (the topic) and before its second (the document).
+        staging = ReadStaging(monkeypatch).before(
+            "FROM reference_docs", other_writer_adds_revision(scene, BOARDS, NAME, 4))
+        answer = direct(scene, "read_reference", "worker", topic=BOARDS, name=NAME)
+        assert staging.fired and staging.outcome == "landed", (staging.fired, staging.outcome)
+        assert "FROM topics" in staging.landed_after, staging.landed_after
+        assert (answer["revision"], answer["current_revision"], answer["body"]) == (3, 3, body_of(3)), answer
+        later = direct(scene, "read_reference", "worker", topic=BOARDS, name=NAME)
+        assert (later["revision"], later["current_revision"]) == (4, 4), "the staged write was committed"
 
     play(scene.host, scenario)
 
