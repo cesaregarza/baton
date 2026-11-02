@@ -1,4 +1,4 @@
-"""Topic ids on upgrade (CES-1641, slice S0): every older database gains `topics.id` and `topic_changes`.
+"""Topic ids on upgrade: every older database gains `topics.id` and `topic_changes`.
 
 `tests/fixtures/schema_v15.sql` is the schema as main e17bbfb created it, with rows: three topics (a root
 with a subtopic, and another root) and four conversations filed in them or in none. Every older
@@ -9,10 +9,8 @@ The schema version is never written here as a number: the fixture's own version 
 test_topic_migration.py does, and everything about the current one goes through `store.SCHEMA_VERSION`
 and `store.MIGRATES_FROM`, so another change landing first cannot make these wrong.
 
-The existing `test_migration_matrix.py` is affected by this slice in two ways, noted for whoever writes
-the code. Adding `schema_v15.sql` makes `test_the_upgrade_steps_cover_every_version_there_is_a_fixture_for`
-fail until `MIGRATES_FROM` gains 15, and a `topic_changes` entry in `_ADDED_TABLES` for the new version
-will need a matching line in that file's `WHOLE_TABLES`, which pins the declared steps exactly.
+Two checks in `test_migration_matrix.py` follow from this: the new fixture needs 15 in `MIGRATES_FROM`,
+and `WHOLE_TABLES`, which pins the declared steps exactly, lists `topic_changes` for this version.
 """
 
 from __future__ import annotations

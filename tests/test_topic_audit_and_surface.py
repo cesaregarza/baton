@@ -1,11 +1,10 @@
-"""Over MCP, slice S0 of CES-1641: the audit line names the topic, the actor reaches the history, and nothing a
-caller sees has changed.
+"""Over MCP: the audit line names the topic, the actor reaches the history, and nothing a caller sees
+has changed.
 
 In-process dispatch only, with synthetic roles and tokens. Three groups:
 
-* The audit line (`audit.jsonl`). Today only the tools whose argument is called `topic` leave one
-  (set_topic, create_conversation, list_conversations); create_topic, update_topic, rename_topic and
-  get_topic leave no trace of the topic at all. The line gains, exactly:
+* The audit line (`audit.jsonl`) of the topic tools, set_topic, create_conversation and
+  list_conversations. Beyond the keys it already had, it carries exactly:
     - `topic`: the path the call named, whatever the tool called its argument, and also on a refusal;
     - `topic_id`: the id of that topic, on a successful call. create_topic gives the new topic's id and
       rename_topic the renamed topic's, which a rename does not change. A refused call, an unknown path, or

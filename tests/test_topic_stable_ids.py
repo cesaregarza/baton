@@ -1,17 +1,16 @@
-"""Topic ids and topic history (CES-1641, slice S0): a stable id beside the path, and `topic_changes`.
+"""Topic ids and topic history: a stable id beside the path, and `topic_changes`.
 
-These are written before the code, as its specification, and every test of new behaviour first asserts
-that the column or the table exists, so that on the old code it fails on that assertion rather than
-by raising `OperationalError`. Tests that pin behaviour S0 must not change are marked GUARD and pass on
-the old code.
+Every test of new behaviour first asserts that the column or the table exists, so that against a
+database without them it fails on that assertion rather than by raising `OperationalError`. Tests
+marked GUARD pin behaviour topic ids must not change, and pass without them too.
 
-What S0 adds (and nothing else):
+What topic ids add (and nothing else):
 * `topics.id`: non-empty, unique across every topic ever created, kept by a rename, never handed to a
   new topic at a path a rename freed. `path` stays the unique key that every filter and response uses.
 * `topic_changes`: an append-only row for every successful `create_topic`, `update_topic`,
   `rename_topic` and `set_topic` that changes a conversation's topic, and for nothing else.
 
-Column names and shapes that the design left open, chosen here so the code has one reading:
+The history's columns and shapes:
 * columns `topic_id`, `operation`, `actor`, `grant_id`, `before`, `after`, `at`;
 * `operation` is the tool name: create_topic, update_topic, rename_topic or set_topic;
 * `before` and `after` are JSON objects (NULL where there is no earlier state): create_topic has NULL
@@ -195,7 +194,7 @@ def test_topic_changes_has_the_designed_columns_and_a_nullable_grant_id(db):  # 
     assert exists, "there is no topic_changes table"
     found = columns_of(db, "topic_changes")
     assert HISTORY_COLUMNS <= set(found), f"missing {sorted(HISTORY_COLUMNS - set(found))}"
-    assert found["grant_id"]["notnull"] == 0, "grant_id stays NULL until a later slice sets it"
+    assert found["grant_id"]["notnull"] == 0, "grant_id stays NULL until topic grants set it"
     for required in ("topic_id", "operation", "actor", "at"):
         assert found[required]["notnull"] == 1, f"{required} cannot be empty"
 
