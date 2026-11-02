@@ -37,6 +37,7 @@ from baton import search as search_module
 from baton.config import Config
 from baton.errors import BatonError, Forbidden, InvalidRequest, UnknownRole
 from baton.integrations import Integration, IntegrationUnavailable, load_enabled
+from baton.reference_tools import REFERENCE_GUEST_TOOLS, REFERENCE_TOOLS, ReferenceTools
 from baton.store import connect
 from baton.topic_tools import TopicTools
 from baton.wakes import Dispatcher
@@ -66,7 +67,7 @@ An alias enrolled as a role is different: pass its binding_token as `token` on a
 that role, with its mailbox, waits and permissions. whoami shows the role a call runs as."""
 
 
-class Tools(TopicTools):
+class Tools(TopicTools, ReferenceTools):
     """The tool bodies. `role` is the caller's; each call opens its own connection."""
 
     def __init__(self, config: Config) -> None:
@@ -374,6 +375,7 @@ CONVERSATION_TOOLS = (
     ("rename_topic", auth.SCOPE_WRITE, False),
     ("list_topics", auth.SCOPE_READ, True),
     ("get_topic", auth.SCOPE_READ, True),
+    *REFERENCE_TOOLS,
 )
 # Present only when the config enables search.
 SEARCH_TOOLS = (
@@ -386,15 +388,15 @@ ARTIFACT_TOOLS = (
 )
 GUEST_TOOLS = frozenset({"whoami", "alias_exists", "claim_alias", "list_conversations", "read_history",
                          "get_message", "search", "send_message", "create_conversation",
-                         "list_topics", "get_topic"})
+                         "list_topics", "get_topic"}) | REFERENCE_GUEST_TOOLS
 # Guest calls whose body is given the alias behind them, so the row it writes is attributed.
 GUEST_IDENTIFIED = frozenset({"send_message", "create_conversation"})
 # Tools whose bodies read the call context itself, not only the role it runs as.
 CALL_TOOLS = frozenset({"whoami", "bind_events", "unbind_events"})
-# Topic changes whose history row names the alias behind an alias-bound call, not only its role.
-IDENTIFIED_CHANGES = frozenset({"create_topic", "update_topic", "rename_topic", "set_topic"})
-# The two tools a guest may call by presenting a topic grant key. Their body decides what the key allows.
-GRANT_TOOLS = frozenset({"create_topic", "set_topic"})
+# Topic changes and reference edits whose row names the alias behind an alias-bound call, not only its role.
+IDENTIFIED_CHANGES = frozenset({"create_topic", "update_topic", "rename_topic", "set_topic", "edit_reference"})
+# The tools a guest may call by presenting a topic grant key. Their body decides what the key allows.
+GRANT_TOOLS = frozenset({"create_topic", "set_topic", "edit_reference"})
 TOKEN_ARGUMENT = Annotated[str | None, Field(description=(
     "A binding_token from claim_alias, for a shared guest login only. An enrolled alias's token makes this call "
     "run as its mapped role; any other alias's token posts as that alias. Omitted and null are the same; an "
@@ -453,6 +455,10 @@ class Guard:
                     elif call["identity"] is None:
                         raise Forbidden("alias binding is missing, invalid or expired")
                     kwargs["identity"] = call["identity"]
+                if call["role"] == "guest" and name == "edit_reference" and call["identity"] is not None:
+                    # An edit spends the alias's hourly post quota, whether it is then refused or not. Without a
+                    # binding it spends none: the grant check refuses it, in its own words.
+                    self._admit_post(principal, call)
             except BatonError as error:
                 return refuse(error.code, str(error), error.extra)
             if not self._within_limit(call["role"], name, HOURLY_LIMITS[scope]):
@@ -492,6 +498,8 @@ class Guard:
         if role == "guest":
             if name not in GUEST_TOOLS and not (name in GRANT_TOOLS and call["grant_key"] is not None):
                 return f"guest may not call {name}"
+            if name in REFERENCE_GUEST_TOOLS and call["identity"] is None:
+                return "alias binding is missing, invalid or expired"
             if name == "search" and (kwargs.get("producer") is not None or kwargs.get("query_vector") is not None
                                       or kwargs.get("model") is not None or
                                       (kwargs.get("kinds") is not None and
