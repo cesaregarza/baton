@@ -34,7 +34,7 @@ from test_aliases import (  # noqa: F401 -- `guest_host` is a pytest fixture
 )
 from test_per_call_identity import audit, claim, enrol
 
-from baton import auth
+from baton import auth, conversations, store, topics
 from baton.config import Role
 
 BASE_KEYS = {"at", "role", "credential_role", "credential_id", "tool", "outcome"}
@@ -485,4 +485,102 @@ def test_refusals_read_as_they_did(host, label, tool, arguments, role, code, det
                           {"title": "A thread", "participants": ["planner", "worker"], "topic": "baton"})
         arguments_ = {key: made["conversation_id"] if value == "$c" else value for key, value in arguments.items()}
         assert await call(client, host, tool, arguments_, role=role) == {"error": code, "detail": detail}
+    run(host, scenario)
+
+
+# 4. What the line may carry, and which topic it names ---------------------------------------------------------
+
+# Every topic argument, with the rest of a call that would otherwise be well formed. "$c" is a conversation.
+TOKEN_CALLS = [
+    ("get_topic", "path", {"path": "baton"}),
+    ("create_topic", "path", {"path": "other"}),
+    ("update_topic", "path", {"path": "baton", "title": "x"}),
+    ("rename_topic", "path", {"path": "baton/dev", "new_path": "elsewhere"}),
+    ("rename_topic", "new_path", {"path": "baton/dev", "new_path": "elsewhere"}),
+    ("set_topic", "topic", {"conversation_id": "$c", "topic": "baton"}),
+    ("create_conversation", "topic", {"title": "T", "participants": ["planner", "worker"]}),
+    ("list_conversations", "topic", {}),
+]
+
+
+@pytest.mark.parametrize("role", ["guest", "planner"])
+@pytest.mark.parametrize("tool,field,arguments", TOKEN_CALLS, ids=[f"{tool}-{field}" for tool, field, _ in TOKEN_CALLS])
+def test_a_binding_token_in_a_topic_argument_never_reaches_the_line(host, tool, field, arguments, role):
+    """The call omits `token`, so nothing tells the line which value is the secret: it must not copy the argument."""
+    async def scenario(client):
+        conversation = await seed(client, host)
+        token = (await claim(client, host, "lane-a"))["binding_token"]
+        given = {key: conversation if value == "$c" else value for key, value in arguments.items()}
+        await call(client, host, tool, {**given, field: token}, role=role)
+        line = last_line(host)
+        assert line["tool"] == tool and line["outcome"] != "ok", line
+        assert token not in json.dumps(line), f"the binding token reached the audit line: {line}"
+        assert "new_path" not in line, line
+        # Only the value that is not a topic path is dropped: a refused rename still names its well-formed `path`.
+        assert line.get("topic") == (arguments["path"] if field == "new_path" else None), line
+    run(host, scenario)
+
+
+def test_a_guest_refusal_naming_a_well_formed_unknown_path_still_audits_it(host):
+    async def scenario(client):
+        await seed(client, host)
+        refusal = await call(client, host, "get_topic", {"path": "nowhere"}, role="guest")
+        assert refusal["error"] == "unknown_topic"
+        line = last_line(host)
+        assert line["topic"] == "nowhere" and "topic_id" not in line, line
+    run(host, scenario)
+
+
+# The real operations, kept apart from the ones a test replaces to interleave a writer.
+REAL_CREATE, REAL_RENAME = topics.create, topics.rename
+
+
+def usurp(host, path):
+    """What another writer does in the gap: the topic at `path` moves away and a different one takes its path."""
+    conn = store.connect(host.config.db_path)
+    try:
+        REAL_RENAME(conn, host.config, actor="planner", path=path, new_path=path + "-old")
+        REAL_CREATE(conn, host.config, actor="planner", path=path, title="the other topic")
+    finally:
+        conn.close()
+
+
+# (tool, arguments, module and function the body calls, the path that call resolved, extra line keys)
+INTERLEAVED = [
+    ("create_topic", {"path": "late"}, topics, "create", "late", {}),
+    ("update_topic", {"path": "baton/dev", "title": "x"}, topics, "update", "baton/dev", {}),
+    ("rename_topic", {"path": "baton/dev", "new_path": "baton/devx"}, topics, "rename", "baton/devx",
+     {"new_path": "baton/devx"}),
+    ("get_topic", {"path": "baton/dev"}, topics, "get", "baton/dev", {}),
+    ("set_topic", {"conversation_id": "$c", "topic": "baton/dev"}, conversations, "set_topic", "baton/dev", {}),
+    ("create_conversation", {"title": "T", "participants": ["planner", "worker"], "topic": "baton/dev"},
+     conversations, "create", "baton/dev", {}),
+    ("list_conversations", {"topic": "baton/dev"}, conversations, "list_readable", "baton/dev", {}),
+]
+
+
+@pytest.mark.parametrize("tool,arguments,module,function,resolved,extra", INTERLEAVED,
+                         ids=[row[0] for row in INTERLEAVED])
+def test_the_line_names_the_topic_the_call_changed_not_whoever_holds_the_path_later(
+        host, monkeypatch, tool, arguments, module, function, resolved, extra):
+    """Between the body's commit and the line, another writer moves that topic away and reuses its path."""
+    original = getattr(module, function)
+
+    def then_usurp(*args, **kwargs):
+        result = original(*args, **kwargs)
+        usurp(host, resolved)
+        return result
+
+    async def scenario(client):
+        conversation = await seed(client, host)
+        given = {key: conversation if value == "$c" else value for key, value in arguments.items()}
+        monkeypatch.setattr(module, function, then_usurp)
+        answer = await call(client, host, tool, given)
+        assert "error" not in answer, answer
+        ids = topic_ids(host)
+        assert ids[resolved] != ids[resolved + "-old"], "the other writer did not take the path"
+        line = last_line(host)
+        assert line["topic_id"] == ids[resolved + "-old"], f"the line names the later topic: {line}"
+        named = arguments.get("path", arguments.get("topic"))
+        assert (line["topic"], {key: line[key] for key in extra}) == (named, extra)
     run(host, scenario)
