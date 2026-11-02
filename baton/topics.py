@@ -23,7 +23,7 @@ from typing import Any
 from baton import board_read, events, messages
 from baton.config import Config
 from baton.errors import Forbidden, InvalidRequest, UnknownRole, UnknownTopic
-from baton.store import transaction
+from baton.store import new_topic_id, transaction
 
 MAX_TITLE = 100
 MAX_DESCRIPTION = 1000
@@ -126,8 +126,66 @@ def _summary(row: sqlite3.Row) -> dict[str, Any]:
             "created_at": row["created_at"]}
 
 
+def _state(row: sqlite3.Row) -> dict[str, Any]:
+    """What a topic change's history row records of a topic: its editable fields, never its id or path."""
+    return {"title": row["title"], "description": row["description"], "members": json.loads(row["members"])}
+
+
+def history_actor(actor: str, identity: dict[str, str] | None) -> str:
+    """The name a history row gives the caller: its role, and for an alias-bound call the alias's immutable id.
+
+    The id, not the display name, because a name can be claimed again and a reader must be able to tell
+    the alias from a direct credential of the same role.
+    """
+    return actor if identity is None else f"{actor} via alias {identity['alias_id']}"
+
+
+def record(conn: sqlite3.Connection, *, topic_id: str, operation: str, actor: str,
+           before: dict[str, Any] | None, after: dict[str, Any] | None) -> None:
+    """Append one change to the history. The caller holds the write lock and has made the change."""
+    conn.execute("INSERT INTO topic_changes (topic_id, operation, actor, grant_id, before, after, at)"
+                 " VALUES (?, ?, ?, NULL, ?, ?, ?)",
+                 (topic_id, operation, actor, _encoded(before), _encoded(after), events.now()))
+
+
+def _encoded(state: dict[str, Any] | None) -> str | None:
+    return None if state is None else json.dumps(state)
+
+
+def id_of(conn: sqlite3.Connection, path: str) -> str | None:
+    """The id of the topic at `path`, or None when there is none."""
+    row = _row(conn, path)
+    return None if row is None else row["id"]
+
+
+# The tools whose audit line names a topic: by `path` (the topic itself, or a rename's old one), or by `topic`
+# (the topic a thread is filed in, or a listing filters by).
+PATH_TOOLS = frozenset({"create_topic", "update_topic", "rename_topic", "get_topic"})
+AUDIT_TOOLS = PATH_TOOLS | {"set_topic", "create_conversation", "list_conversations"}
+
+
+def audit_fields(conn: sqlite3.Connection, tool: str, arguments: dict[str, Any], outcome: str) -> dict[str, Any]:
+    """What a tool's audit line adds about its topic: the path it named, and on success that topic's id.
+
+    The body returns no id, so the line looks it up here. A refusal names the path and no id, since the topic
+    may not exist. A successful rename names the new path, which is where the topic's id now is.
+    """
+    named = arguments.get("path" if tool in PATH_TOOLS else "topic")
+    if named is None:
+        return {}
+    fields: dict[str, Any] = {"topic": named}
+    if outcome != "ok":
+        return fields
+    if tool == "rename_topic":
+        fields["new_path"] = arguments["new_path"]
+        named = arguments["new_path"]
+    found = id_of(conn, named)
+    return {**fields, **({"topic_id": found} if found is not None else {})}
+
+
 def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, title: Any = None,
-           description: Any = None, members: Any = None, request_id: str | None = None) -> dict[str, Any]:
+           description: Any = None, members: Any = None, request_id: str | None = None,
+           identity: dict[str, str] | None = None) -> dict[str, Any]:
     """Open a topic. A replay rechecks authority and the parent, then returns the topic as it now stands."""
     _may_manage(config, actor)
     checked = _check_path(path)
@@ -147,16 +205,25 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
         if _row(conn, checked) is not None:
             raise InvalidRequest(f"topic {checked!r} already exists")
         stamp = events.now()
+        topic_id = new_topic_id()
         conn.execute("INSERT INTO topics (path, title, description, members, created_by, created_at,"
-                     " request_id, request_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                     (checked, title, description, json.dumps(chosen), actor, stamp, request_id, digest))
-        made = _summary(_row(conn, checked))
+                     " request_id, request_digest, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (checked, title, description, json.dumps(chosen), actor, stamp, request_id, digest,
+                      topic_id))
+        created = _row(conn, checked)
+        record(conn, topic_id=topic_id, operation="create_topic", actor=history_actor(actor, identity),
+               before=None, after={"path": checked, **_state(created)})
+        made = _summary(created)
     return {**made, "request_id": request_id, "created": True}
 
 
 def update(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, title: Any = None,
-           description: Any = UNSET, members: Any = UNSET) -> dict[str, Any]:
-    """Edit a topic's title, description or members. An omitted argument leaves that field as it is."""
+           description: Any = UNSET, members: Any = UNSET,
+           identity: dict[str, str] | None = None) -> dict[str, Any]:
+    """Edit a topic's title, description or members. An omitted argument leaves that field as it is.
+
+    A call that changes none of them writes no history row, as a set_topic to the topic it already has does not.
+    """
     _may_manage(config, actor)
     checked = _check_path(path)
     new_title = _check_text(title, "title", MAX_TITLE)
@@ -170,15 +237,21 @@ def update(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
                       row["description"] if new_description is UNSET else new_description,
                       row["members"] if new_members is UNSET else json.dumps(new_members),
                       checked))
-        return _summary(_row(conn, checked))
+        updated = _row(conn, checked)
+        if _state(updated) != _state(row):
+            record(conn, topic_id=row["id"], operation="update_topic", actor=history_actor(actor, identity),
+                   before=_state(row), after=_state(updated))
+        return _summary(updated)
 
 
-def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, new_path: Any) -> dict[str, Any]:
+def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, new_path: Any,
+           identity: dict[str, str] | None = None) -> dict[str, Any]:
     """Move a topic, its subtopics and every thread filed under them, in one transaction.
 
     Conversation ids never change, and neither do any thread's participants: a rename is a change of
     label, so nobody gains or loses access to anything. Every refusal is decided before the first
-    write, so a refused rename leaves the topic exactly as it was.
+    write, so a refused rename leaves the topic exactly as it was. The history gets one row, for this
+    topic: its subtopics moved with it, and their ids did not change.
     """
     _may_manage(config, actor)
     checked = _check_path(path)
@@ -201,7 +274,23 @@ def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, n
         for old in sorted(moving, key=len, reverse=True):
             conn.execute("UPDATE topics SET path = ? WHERE path = ?", (moving[old], old))
             conn.execute("UPDATE conversations SET topic = ? WHERE topic = ?", (moving[old], old))
-        return {**_summary(_row(conn, target)), "renamed_from": checked, "subtopics": len(children)}
+        renamed = _row(conn, target)
+        record(conn, topic_id=renamed["id"], operation="rename_topic", actor=history_actor(actor, identity),
+               before={"path": checked}, after={"path": target})
+        return {**_summary(renamed), "renamed_from": checked, "subtopics": len(children)}
+
+
+def record_move(conn: sqlite3.Connection, *, conversation_id: str, actor: str, before: str | None,
+                after: str | None) -> None:
+    """Record a conversation's topic changing: a move, or a clear, which is filed under the topic it left.
+
+    Both sides carry their ids, so the move can be followed after either topic has been renamed.
+    """
+    before_id = None if before is None else id_of(conn, before)
+    after_id = None if after is None else id_of(conn, after)
+    record(conn, topic_id=after_id or before_id, operation="set_topic", actor=actor,
+           before={"conversation_id": conversation_id, "topic": before, "topic_id": before_id},
+           after={"conversation_id": conversation_id, "topic": after, "topic_id": after_id})
 
 
 def may_open(conn: sqlite3.Connection, config: Config, reader: str, path: str) -> bool:

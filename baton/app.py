@@ -198,11 +198,13 @@ class Tools:
             description="The roles a guest's thread in this topic is delivered to, copied into each new "
                         "thread. Left out means none, so no guest thread until a core role sets them.")] = None,
         request_id: str | None = None,
+        identity: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Open a topic for threads to be filed in. Pass a request_id to make a retry safe."""
         with self._conn() as conn:
             return topics.create(conn, self._config, actor=role, path=path, title=title,
-                                 description=description, members=members, request_id=request_id)
+                                 description=description, members=members, request_id=request_id,
+                                 identity=identity)
 
     def update_topic(
         self, role: str, path: str, title: str | None = None,
@@ -211,17 +213,19 @@ class Tools:
             description="Replaces the members. Left out or null keeps the current list, and an empty "
                         "list clears it. Threads that already exist keep the participants they "
                         "were created with.")] = None,
+        identity: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Change a topic's title, description or members. An argument you leave out is left as it is."""
         with self._conn() as conn:
             return topics.update(conn, self._config, actor=role, path=path, title=title,
                                  description=topics.UNSET if description is None else description,
-                                 members=topics.UNSET if members is None else members)
+                                 members=topics.UNSET if members is None else members, identity=identity)
 
-    def rename_topic(self, role: str, path: str, new_path: str) -> dict[str, Any]:
+    def rename_topic(self, role: str, path: str, new_path: str,
+                     identity: dict[str, str] | None = None) -> dict[str, Any]:
         """Move a topic, its subtopics and their threads to a new path. Ids and participants never change."""
         with self._conn() as conn:
-            return topics.rename(conn, self._config, actor=role, path=path, new_path=new_path)
+            return topics.rename(conn, self._config, actor=role, path=path, new_path=new_path, identity=identity)
 
     def list_topics(
         self, role: str,
@@ -269,6 +273,7 @@ class Tools:
         topic: Annotated[str | None, Field(
             description="The new topic, 1-2 lowercase slug segments, or null to clear it. Required: say "
                         "what the topic becomes, so that forgetting the argument cannot clear one.")],
+        identity: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Set, rename or clear a conversation's topic. Its id never changes, so nothing else moves.
 
@@ -277,7 +282,8 @@ class Tools:
         accident -- the remote command does drop them, which is why it sends this argument explicitly.
         """
         with self._conn() as conn:
-            return conversations.set_topic(conn, self._config, conversation_id, topic, actor=role)
+            return conversations.set_topic(conn, self._config, conversation_id, topic, actor=role,
+                                           identity=identity)
 
     def read_history(
         self, role: str, conversation_id: str, after_seq: Annotated[int, Field(ge=0)] = 0,
@@ -450,6 +456,8 @@ GUEST_TOOLS = frozenset({"whoami", "alias_exists", "claim_alias", "list_conversa
 GUEST_IDENTIFIED = frozenset({"send_message", "create_conversation"})
 # Tools whose bodies read the call context itself, not only the role it runs as.
 CALL_TOOLS = frozenset({"whoami", "bind_events", "unbind_events"})
+# Topic changes whose history row names the alias behind an alias-bound call, not only its role.
+IDENTIFIED_CHANGES = frozenset({"create_topic", "update_topic", "rename_topic", "set_topic"})
 TOKEN_ARGUMENT = Annotated[str | None, Field(description=(
     "A binding_token from claim_alias, for a shared guest login only. An enrolled alias's token makes this call "
     "run as its mapped role; any other alias's token posts as that alias. Omitted and null are the same; an "
@@ -494,6 +502,8 @@ class Guard:
                 refusal = self._capability(name, call, kwargs)
                 if refusal is not None:
                     return refuse("forbidden", refusal)
+                if call["identity"] is not None and name in IDENTIFIED_CHANGES:
+                    kwargs["identity"] = call["identity"]
                 if call["role"] == "guest" and name in GUEST_IDENTIFIED:
                     # Both carry the alias through to the body, which attributes the row to it. Only a
                     # post spends the hourly post quota; a thread has its own caps, counted where it is
@@ -649,6 +659,15 @@ class Guard:
         self._audit(name, call, kwargs, code, proof)
         return {"error": code, "detail": detail}
 
+    def _topic_fields(self, name: str, kwargs: dict[str, Any], outcome: str) -> dict[str, Any]:
+        if name not in topics.AUDIT_TOOLS:
+            return {}
+        conn = connect(self._config.db_path)
+        try:
+            return topics.audit_fields(conn, name, kwargs, outcome)
+        finally:
+            conn.close()
+
     def _audit(self, name: str, call: dict[str, Any], kwargs: dict[str, Any], outcome: str,
                proof: object = None) -> None:
         """One line: the credential, the role the call ran as, any alias by id and code, and the ids it named."""
@@ -659,7 +678,8 @@ class Guard:
         if isinstance(proof, str) and proof:
             ids = {key: value for key, value in ids.items() if proof not in json.dumps(value)}
         line = {"at": datetime.now(UTC).isoformat(), "role": role, "credential_role": call["credential_role"],
-                "credential_id": call["credential_id"], "tool": name, **ids, "outcome": outcome,
+                "credential_id": call["credential_id"], "tool": name, **ids,
+                **self._topic_fields(name, kwargs, outcome), "outcome": outcome,
                 **({"alias_id": identity["alias_id"], "alias_code": identity["code"]} if identity else {})}
         directory = self._audit_path.parent
         with self._lock, datadir.opened(directory) as dir_fd:

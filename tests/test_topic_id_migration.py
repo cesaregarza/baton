@@ -195,6 +195,7 @@ def test_a_migrated_topic_keeps_its_id_through_a_rename_and_a_new_topic_gets_ano
                          "reviews": before["reviews"]}
         make_topic(db, config, "baton")
         made = ids_in(db)["baton"]
+        assert isinstance(made, str) and made, "the new topic has no id"
         assert made not in before.values(), "a new topic took a migrated topic's id"
     finally:
         db.close()

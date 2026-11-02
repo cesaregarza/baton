@@ -13,7 +13,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from baton.store import connect
+from baton.store import connect, new_topic_id
 
 
 def back_topics(target: Any, *paths: str, members: tuple[str, ...] = ()) -> None:
@@ -33,9 +33,9 @@ def back_topics(target: Any, *paths: str, members: tuple[str, ...] = ()) -> None
         wanted = sorted({part for path in paths for part in (path, path.split("/")[0])})
         with conn:
             conn.executemany(
-                "INSERT OR IGNORE INTO topics (path, title, members, created_by, created_at)"
-                " VALUES (?, ?, ?, 'fixture', '2026-01-01T00:00:00+00:00')",
-                [(path, path.split("/")[-1], json.dumps(list(members))) for path in wanted])
+                "INSERT OR IGNORE INTO topics (path, title, members, created_by, created_at, id)"
+                " VALUES (?, ?, ?, 'fixture', '2026-01-01T00:00:00+00:00', ?)",
+                [(path, path.split("/")[-1], json.dumps(list(members)), new_topic_id()) for path in wanted])
     finally:
         if opened is not None:
             opened.close()

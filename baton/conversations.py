@@ -86,11 +86,12 @@ def check_topic(topic: Any, field: str = "topic") -> str | None:
 
 
 def set_topic(conn: sqlite3.Connection, config: Config, conversation_id: str, topic: Any, *,
-              actor: str) -> dict[str, Any]:
+              actor: str, identity: dict[str, str] | None = None) -> dict[str, Any]:
     """Set, rename or clear a conversation's topic. `None` clears it; the conversation's id never changes.
 
     Takes the same permission as managing participants, and membership of this conversation: a label on
-    a conversation is the conversation's own business.
+    a conversation is the conversation's own business. A move that changes the topic is recorded in the
+    topic history; one that changes nothing is not.
     """
     require_enabled(config)
     if not config.roles[actor].can_manage_participants:
@@ -107,6 +108,8 @@ def set_topic(conn: sqlite3.Connection, config: Config, conversation_id: str, to
             topics.require_exists(conn, topic)
         if topic != before:
             conn.execute("UPDATE conversations SET topic = ? WHERE id = ?", (topic, conversation_id))
+            topics.record_move(conn, conversation_id=conversation_id, actor=topics.history_actor(actor, identity),
+                               before=before, after=topic)
     return {"conversation_id": conversation_id, "topic": topic, "changed": topic != before}
 
 
