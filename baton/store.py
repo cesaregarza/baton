@@ -598,6 +598,19 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     conn.execute("COMMIT")
 
 
+@contextmanager
+def snapshot(conn: sqlite3.Connection) -> Iterator[None]:
+    """One read transaction, so every statement inside sees the same state of the database."""
+    if conn.in_transaction:  # the caller's transaction is already one snapshot
+        yield
+        return
+    conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        conn.execute("COMMIT")
+
+
 def _refuse_other_schema(conn: sqlite3.Connection) -> None:
     """Refuse a database made by another schema version before anything, even the journal mode, changes it."""
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").fetchone():

@@ -51,7 +51,7 @@ from baton.errors import (
     UnknownConversation,
     UnknownRole,
 )
-from baton.store import transaction
+from baton.store import snapshot, transaction
 
 MAX_TITLE = 200
 MIN_PARTICIPANTS = 2
@@ -154,10 +154,11 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str,
             config, participants))})})
     refusal = None
     with transaction(conn):
-        topics.note_path(conn, seen, topic)
         existing = events.replayed(conn, "conversations", request_id, digest)
         if existing is not None:
+            topics.note_replay(conn, seen, topic, existing["topic"])
             return {**_summary(conn, existing), "request_id": request_id, "created": False}
+        topics.note_path(conn, seen, topic)
         if guest:
             roles = topics.members_for_thread(conn, config, topic)
             # Returned rather than raised: when the guest-wide cap is full this also stores the alert,
@@ -302,13 +303,18 @@ def list_readable(conn: sqlite3.Connection, config: Config, role: str, topic: An
                   limit: int = MAX_LISTED, before: tuple[str, str] | None = None,
                   changed_since: str | None = None, _lookahead: bool = False,
                   seen: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """List the conversations this role may read under the shared board predicate."""
-    topics.note_path(conn, seen, check_topic(topic))
-    if board_read.sees_all(config, role):
-        return list_all(conn, topic, limit=limit, before=before, changed_since=changed_since,
+    """List the conversations this role may read under the shared board predicate.
+
+    The topic's id and the listing are read in one snapshot, so a rename and reuse of the path in between
+    cannot make the listing describe a different topic from the one the audit line names.
+    """
+    with snapshot(conn):
+        topics.note_path(conn, seen, check_topic(topic))
+        if board_read.sees_all(config, role):
+            return list_all(conn, topic, limit=limit, before=before, changed_since=changed_since,
+                            _lookahead=_lookahead)
+        return list_for(conn, role, topic, limit=limit, before=before, changed_since=changed_since,
                         _lookahead=_lookahead)
-    return list_for(conn, role, topic, limit=limit, before=before, changed_since=changed_since,
-                    _lookahead=_lookahead)
 
 
 def _before(before: tuple[str, str] | None, alias: str) -> tuple[str, tuple[str, ...]]:

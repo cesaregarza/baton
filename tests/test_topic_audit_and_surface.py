@@ -533,14 +533,23 @@ def test_a_guest_refusal_naming_a_well_formed_unknown_path_still_audits_it(host)
 
 # The real operations, kept apart from the ones a test replaces to interleave a writer.
 REAL_CREATE, REAL_RENAME = topics.create, topics.rename
+REAL_CREATE_CONVERSATION = conversations.create
 
 
-def usurp(host, path):
-    """What another writer does in the gap: the topic at `path` moves away and a different one takes its path."""
+def usurp(host, path, *, thread=False):
+    """What another writer does in the gap: the topic at `path` moves away and a different one takes its path.
+
+    With `thread`, the new topic also gets a conversation. The busy timeout is short on purpose: a reader that
+    held the write lock here would otherwise hang the suite instead of failing it.
+    """
     conn = store.connect(host.config.db_path)
+    conn.execute("PRAGMA busy_timeout = 1000")
     try:
         REAL_RENAME(conn, host.config, actor="planner", path=path, new_path=path + "-old")
         REAL_CREATE(conn, host.config, actor="planner", path=path, title="the other topic")
+        if thread:
+            REAL_CREATE_CONVERSATION(conn, host.config, actor="planner", title="the other thread",
+                                     participants=["planner", "worker"], topic=path)
     finally:
         conn.close()
 
@@ -583,4 +592,125 @@ def test_the_line_names_the_topic_the_call_changed_not_whoever_holds_the_path_la
         assert line["topic_id"] == ids[resolved + "-old"], f"the line names the later topic: {line}"
         named = arguments.get("path", arguments.get("topic"))
         assert (line["topic"], {key: line[key] for key in extra}) == (named, extra)
+    run(host, scenario)
+
+
+# A replay is answered from the original request, and a read is answered from one snapshot -------------------------
+
+def path_of(host, topic_id):
+    return {identifier: path for path, identifier in topic_ids(host).items()}[topic_id]
+
+
+def thread_ids_under(host, path):
+    with database(host) as conn:
+        return {row["id"] for row in conn.execute(
+            "SELECT id FROM conversations WHERE topic = ? OR topic LIKE ?", (path, path + "/%"))}
+
+
+def interleave_after(monkeypatch, module, name, host, path):
+    """Once, right after `module.name` reads `path`, another writer moves that topic and takes its path."""
+    original, fired = getattr(module, name), []
+
+    def wrapper(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not fired and path in args:
+            fired.append(path)
+            usurp(host, path, thread=True)
+        return result
+
+    monkeypatch.setattr(module, name, wrapper)
+    return fired
+
+
+def test_a_replayed_create_topic_names_the_requested_path_and_the_topic_it_returns(host):
+    async def scenario(client):
+        arguments = {"path": "alpha", "request_id": "same-request", "members": ["planner", "worker"]}
+        first = await call(client, host, "create_topic", arguments)
+        assert first["created"] is True
+        original = topic_ids(host)["alpha"]
+        await call(client, host, "rename_topic", {"path": "alpha", "new_path": "beta"})
+        await call(client, host, "create_topic", {"path": "alpha", "title": "the other topic"})
+        other = topic_ids(host)["alpha"]
+        assert other != original
+        replay = await call(client, host, "create_topic", arguments)
+        assert (replay["created"], replay["path"]) == (False, "beta")
+        line = last_line(host)
+        assert (line["topic"], line["topic_id"]) == ("alpha", original), line
+        assert other not in json.dumps(line), f"the line names the topic that now holds the path: {line}"
+    run(host, scenario)
+
+
+def replayed_conversation(host, *, clear_topic=False):
+    """A conversation made in `alpha`, then `alpha` renamed away and reused, then the same request replayed."""
+    async def scenario(client):
+        await call(client, host, "create_topic", {"path": "alpha", "members": ["planner", "worker"]})
+        arguments = {"title": "A thread", "participants": ["planner", "worker"], "topic": "alpha",
+                     "request_id": "same-request"}
+        first = await call(client, host, "create_conversation", arguments)
+        assert first["created"] is True
+        await call(client, host, "rename_topic", {"path": "alpha", "new_path": "beta"})
+        if clear_topic:
+            await call(client, host, "set_topic", {"conversation_id": first["conversation_id"], "topic": None})
+        await call(client, host, "create_topic", {"path": "alpha", "title": "the other topic"})
+        replay = await call(client, host, "create_conversation", arguments)
+        assert (replay["created"], replay["conversation_id"]) == (False, first["conversation_id"])
+        scenario.replay = replay
+    run(host, scenario)
+    return scenario.replay
+
+
+def test_a_replayed_create_conversation_names_the_requested_path_and_the_topic_the_thread_is_in(host):
+    replay = replayed_conversation(host)
+    ids = topic_ids(host)
+    assert replay["topic"] == "beta"
+    line = last_line(host)
+    assert line["topic"] == "alpha", line
+    assert line["topic_id"] == ids[replay["topic"]], f"the line is not the returned thread's topic: {line}"
+    assert line["topic_id"] != ids["alpha"], f"the line names the topic that now holds the path: {line}"
+
+
+def test_a_replayed_create_conversation_whose_thread_has_no_topic_now_carries_no_id(host):
+    replay = replayed_conversation(host, clear_topic=True)
+    assert replay["topic"] is None
+    line = last_line(host)
+    assert line["topic"] == "alpha" and line.get("topic_id") is None, line
+
+
+def test_list_conversations_lists_the_topic_whose_id_is_on_its_line(host, monkeypatch):
+    async def scenario(client):
+        await call(client, host, "create_topic", {"path": "alpha", "members": ["planner", "worker"]})
+        await call(client, host, "create_conversation",
+                   {"title": "A thread", "participants": ["planner", "worker"], "topic": "alpha"})
+        fired = interleave_after(monkeypatch, topics, "note_path", host, "alpha")
+        answer = await call(client, host, "list_conversations", {"topic": "alpha"})
+        assert "error" not in answer and fired, answer
+        ids = topic_ids(host)
+        assert ids["alpha"] != ids["alpha-old"], "the other writer did not take the path"
+        line = last_line(host)
+        assert line["topic"] == "alpha", line
+        listed = {entry["conversation_id"] for entry in answer["conversations"]}
+        assert listed == thread_ids_under(host, path_of(host, line["topic_id"])), \
+            f"the listing is not the line's topic's: {line}"
+    run(host, scenario)
+
+
+def test_get_topic_answers_for_the_topic_whose_id_is_on_its_line(host, monkeypatch):
+    async def scenario(client):
+        await call(client, host, "create_topic", {"path": "alpha", "members": ["planner", "worker"]})
+        await call(client, host, "create_topic", {"path": "alpha/dev"})
+        for topic in ("alpha", "alpha/dev"):
+            await call(client, host, "create_conversation",
+                       {"title": "A thread", "participants": ["planner", "worker"], "topic": topic})
+        fired = interleave_after(monkeypatch, topics, "_row", host, "alpha")
+        answer = await call(client, host, "get_topic", {"path": "alpha"})
+        assert "error" not in answer and fired, answer
+        ids = topic_ids(host)
+        assert ids["alpha"] != ids["alpha-old"], "the other writer did not take the path"
+        line = last_line(host)
+        assert line["topic"] == "alpha", line
+        owner = path_of(host, line["topic_id"])
+        assert answer["threads"] == len(thread_ids_under(host, owner)), f"the count is not the line's topic's: {line}"
+        children = sorted(path for path in ids if path.startswith(owner + "/"))
+        assert answer["subtopics"] == [path.replace(owner, "alpha", 1) for path in children], \
+            f"the subtopics are not the line's topic's: {line}"
     run(host, scenario)

@@ -27,22 +27,24 @@ topic_host = surface.topic_host
 # Each tool as `tools/list` shows it (name, description, input schema, annotations), shortened to 12 hex
 # digits of its canonical JSON: a change to any one shows up as that one tool's line.
 TOOLS = {
-    "whoami": "9b37bc00263d", "alias_exists": "adecd0694710", "claim_alias": "59b15dbf75da",
-    "bind_events": "dcf65c72cb4f", "unbind_events": "d453a6a54b2f", "send_message": "4f1111b049aa",
-    "read_messages": "f6538e06de83", "wait": "515590595769", "create_job": "9c8121afd5d9",
-    "move_job": "80087d2500e5", "get_job": "1bad22419ca9", "list_jobs": "2fc784b2f00e",
-    "read_job_events": "bc92f064732d", "create_conversation": "4c477d055d79",
-    "list_conversations": "d2564ef0696d", "read_history": "774749dc9141", "add_participant": "e03b25076445",
-    "remove_participant": "e16dacc7f22d", "set_topic": "fb47d1e4b940", "create_topic": "200724b31a4d",
-    "update_topic": "6513c7a5398c", "rename_topic": "680d6e974856", "list_topics": "a7b2f4a13b37",
-    "get_topic": "bf27aa557812", "search": "070a787d6cc3", "get_message": "a0e9925237fe",
-    "read_artifacts": "51079d35725b",
+    "whoami": "1c78530665fc", "alias_exists": "adecd0694710", "claim_alias": "eeac78be5de2",
+    "bind_events": "652b57bd4ba2", "unbind_events": "753c08daddc6", "send_message": "ac8107ee5796",
+    "read_messages": "3160263c55ef", "wait": "a2490f8b3a2f", "create_job": "e6a521745eed",
+    "move_job": "f242c8d7c9f3", "get_job": "cb0fd5be32be", "list_jobs": "7af25ba35768",
+    "read_job_events": "1248657164ef", "create_conversation": "4c477d055d79",
+    "list_conversations": "d2564ef0696d", "read_history": "a77467aef649", "add_participant": "aa43e161b34c",
+    "remove_participant": "4f585683f8ad", "set_topic": "2e43591a9670", "create_topic": "c899e1134e25",
+    "update_topic": "95e4df4d625a", "rename_topic": "817b0ddfd188", "list_topics": "a7b2f4a13b37",
+    "get_topic": "bf27aa557812", "search": "a66624d6f016", "get_message": "d249b55ec56d",
+    "read_artifacts": "240da135d827",
 }
 GUEST_MAY_CALL = {"whoami", "alias_exists", "claim_alias", "list_conversations", "read_history", "get_message",
                   "search", "send_message", "create_conversation", "list_topics", "get_topic"}
 
 
 def fingerprint(tool: dict) -> str:
+    # A description comes from a docstring, whose indentation Python 3.12 keeps and 3.13 strips: compare words.
+    tool = {**tool, "description": " ".join(tool["description"].split())}
     return hashlib.sha256(json.dumps(tool, sort_keys=True).encode()).hexdigest()[:12]
 
 
