@@ -145,7 +145,7 @@ def _summary_only(body: str, ranges: str) -> None:
     """The threaded view states the missing ranges once, for the page, and puts no notice among the messages."""
     assert SUMMARY + ranges in body, f"no summary of {ranges}"
     assert body.count(SUMMARY) == 1
-    assert "no longer kept" not in body[body.index("<ul>"):]  # the seat's inline wording never appears among them
+    assert "no longer kept" not in body[body.index("<ul>"):body.index("</ul>")]  # no inline wording among them
 
 
 def test_the_dashboard_summarises_a_gap_above_an_older_top_level_message(tmp_path: Path) -> None:
@@ -200,7 +200,7 @@ def test_a_page_with_a_gap_carries_the_arrival_bar(tmp_path: Path, steps) -> Non
     dismiss = re.search(r'<input type="checkbox" id="([\w-]+)" class="gap-dismiss"', body)
     assert dismiss and f'<label for="{dismiss.group(1)}">' in bar.group(1)
     assert body.index(dismiss.group(0)) < body.index(bar.group(0))  # the CSS reaches the bar from the checkbox
-    assert "no longer kept" not in body[body.index("<ul>"):]  # still no inline notice among the messages
+    assert "no longer kept" not in body[body.index("<ul>"):body.index("</ul>")]  # still no inline notice among them
     for seq, _ in enumerate(steps, 1):  # every retained message keeps its anchor
         assert (seq == 3) != (f'id="m-{seq}"' in body)
 
@@ -208,6 +208,23 @@ def test_a_page_with_a_gap_carries_the_arrival_bar(tmp_path: Path, steps) -> Non
 def test_a_page_without_a_gap_has_no_bar(tmp_path: Path) -> None:
     body = _thread_with(page_config(tmp_path), CROSS_BRANCH, set())
     assert "gap-bar" not in body.split("<body>", 1)[1] and BAR not in body and 'id="missing"' not in body
+
+
+def test_the_marker_closes_a_message_before_its_replies(tmp_path: Path) -> None:
+    body = _thread_with(page_config(tmp_path), [("parent words", None), ("reply words", 1)], set())
+    parent = body[body.index('id="m-1"'):]
+    marker = parent.index('<span class="gap-end"></span>')
+    assert parent.index('<p class="text">parent words</p>') < marker < parent.index('<ul class="replies">')
+
+
+def test_a_gap_page_has_one_hidden_copy_after_the_thread_and_a_clean_page_has_none(tmp_path: Path) -> None:
+    body = _thread_with(page_config(tmp_path), CROSS_BRANCH, {3})
+    copies = re.findall(r'<p class="gap-bar gap-measure"[^>]*>.*?</p>', body, re.S)
+    assert len(copies) == 1, "one measuring copy of the bar per page with gaps"
+    assert copies[0].startswith('<p class="gap-bar gap-measure" aria-hidden="true">')
+    assert " id=" not in copies[0] and " for=" not in copies[0] and "<input" not in copies[0]
+    assert body.index(copies[0]) > body.index("</ul>"), "the copy sits after the thread, so no marker follows it"
+    assert "gap-measure" not in _thread_with(page_config(tmp_path / "clean"), CROSS_BRANCH, set())
 
 
 def _rules(selector_part: str) -> list[str]:
@@ -268,28 +285,45 @@ def test_the_bar_markup_is_the_one_the_stylesheet_targets(tmp_path: Path) -> Non
             '<label for="gap-dismiss">Dismiss</label></span></p>') in body
 
 
-def test_the_bar_reveals_on_the_message_end_with_a_timeline_and_keeps_its_targets_out_of_tab_while_hidden() -> None:
-    """Where scroll-driven animations exist, the bar's visibility follows a view timeline on the anchored message, and
-    the checkbox and link are hidden with visibility while it is hidden. Without them, the bar shows on arrival."""
+def test_the_reveal_is_timed_on_a_hidden_copy_hung_from_the_marker() -> None:
+    """The copy hangs from the marker that closes the anchored message's own content, so the reveal never waits for the
+    replies. The copy owns the view timeline; the bar and its checkbox animate on it, so the bar's real height decides,
+    and no fixed inset stands in for it."""
     from baton import dashboard
 
     style = dashboard.STYLE
-    assert "@supports (animation-timeline: view())" in style and "@supports not (animation-timeline: view())" in style
-    assert "view-timeline: --gap-end block" in style and "timeline-scope: --gap-end" in style
+    assert "@supports (animation-timeline: view()) and (anchor-name: --a) {" in style
+    assert "@supports not ((animation-timeline: view()) and (anchor-name: --a)) {" in style
+    assert "li:target > .gap-end { display: block; height: 0; anchor-name: --gap-end; }" in style
+    (copy,) = [rule for rule in _rules(".gap-measure") if "position: absolute" in rule]
+    for declaration in ("display: block", "position-anchor: --gap-end", "top: anchor(bottom)", "left: 0", "right: 0",
+                        "visibility: hidden", "pointer-events: none", "view-timeline: --gap-reveal block"):
+        assert declaration in copy, declaration
+    assert "body { timeline-scope: --gap-reveal; }" in style
+    assert "--gap-inset" not in style and "view-timeline-inset" not in style
+    assert "li:target { view-timeline" not in style and "view-timeline: --gap-end" not in style
+
+
+def test_the_copy_and_the_bar_share_their_box_styles() -> None:
+    shared = [rule for rule in _rules(".gap-measure") if rule.split("{")[0].strip().endswith(".gap-bar, .gap-measure")]
+    assert len(shared) == 1, "the bar and its copy have one shared box rule"
+    for declaration in ("padding: .5rem 1rem", "font-size: .85rem", "border-top: 1px solid var(--line-strong)",
+                        "text-align: center"):
+        assert declaration in shared[0], declaration
+    assert "position" not in shared[0], "only the real bar is positioned to the viewport"
+
+
+def test_the_bar_reveals_on_the_copy_and_keeps_its_targets_out_of_tab_while_hidden() -> None:
+    """Where scroll-driven animations and anchor positioning exist, the bar's visibility follows the copy's timeline,
+    and the checkbox and link are hidden with visibility while it is hidden. Without them, the bar shows on arrival."""
+    from baton import dashboard
+
+    style = dashboard.STYLE
+    assert "animation-timeline: --gap-reveal" in style
     assert "animation-range: entry-crossing 100% entry-crossing 100%" in style
     assert "@keyframes gap-reveal { from { visibility: hidden; } to { visibility: visible; } }" in style
     assert "visibility: hidden; animation: gap-reveal linear both" in style, "hidden with visibility, not opacity alone"
 
 
-def test_the_reveal_inset_is_at_least_the_bar_height() -> None:
-    """The timeline's scrollport is inset by --gap-inset, so the reveal happens above the bar. The inset must be at
-    least the bar's tallest height at its width, or the reveal would come after the bar has covered the last line:
-    the wide bar is one text line (38px), or two (59px) when it wraps; the narrow bar is two text lines (about 42px)
-    plus the 44px action row and its padding and border (about 103px)."""
-    from baton import dashboard
-
-    wide = re.search(r":root \{ --gap-inset: ([\d.]+)rem;", dashboard.STYLE)
-    narrow = re.search(r":root \{ --gap-inset: ([\d.]+)rem;", _narrow_block())
-    assert wide and narrow
-    assert float(wide.group(1)) * 16 >= 59
-    assert float(narrow.group(1)) * 16 >= 103
+def test_the_action_row_clears_the_focus_ring_of_the_text_on_narrow_screens() -> None:
+    assert re.search(r"\.gap-actions \{[^}]*margin-top: \.3rem;", _narrow_block()), "no gap between text and row"
