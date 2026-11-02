@@ -141,6 +141,24 @@ host notice. The key is handled like a binding token: it is taken out of the arg
 only its hash is stored, and no event, audit line or refusal holds it. Refusals that name a grant are logged on it as
 `refused_use`.
 
+<a name="references"></a>
+
+A topic can keep **references**: named text documents, such as the boards a project watches, that are maintained
+with `edit_reference` and read with `read_reference` and `reference_history`. A reference is information written by
+whoever held the right to edit it, never an instruction to its reader and never an approval. Every edit appends a
+revision and nothing is ever updated or deleted, so the history stays complete and readable, an undo is the old text
+written as a new revision, and a secret pasted into a body stays in every later copy. Every core role with read scope
+and every alias with a live binding can read every revision, and reading consults no grant. Documents belong to the
+topic's id, so a rename carries them and a path it frees starts with none.
+
+Editing is core-only with the same scoped exception as topic changes: a role with `can_create_topics`, or a guest alias
+presenting a `reference.edit` grant key beside its binding token for the grant's topic, or a direct subtopic of it if the
+grant inherits. The caller names the revision it read (0 to create), and an edit made from any other is refused as
+`stale_revision`. The topic, the authority, a retry, that compare and the limits are all decided inside one write
+transaction, so two writers cannot both win and a revoke that commits first refuses the edit. A retry with the same
+`request_id` returns the stored revision after the authority is checked again. A body is 1 to 32768 bytes, a topic holds
+at most 20 documents of its own, and a grantee's edits count against the guest posting limits.
+
 A topic's `members` supply the participants for a guest-created conversation at creation time; later edits
 to that list do not affect existing conversations. A guest needs a live alias binding and
 `can_view_all_conversations` on the guest role to start such a conversation. The guest names a topic, not
@@ -240,8 +258,8 @@ can also send replies.
 ## Storage
 
 The host uses one SQLite database in WAL mode. Writes use `BEGIN IMMEDIATE` transactions to serialize
-dependent updates across the server, CLI, and dispatcher. This revision uses schema 17 and upgrades
-schemas 2 through 16 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
+dependent updates across the server, CLI, and dispatcher. This revision uses schema 18 and upgrades
+schemas 2 through 17 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
 
 The upgrade creates topic records for existing conversation topic paths and any missing parents. It derives
 each topic's members from participants in conversations filed directly there, excluding `guest`. A topic
@@ -256,6 +274,7 @@ the upgrade rather than being discarded.
 | Jobs, job moves, events, cursors, wakes | Job state and history, event delivery, wake status, and retry records. |
 | Aliases, bindings, mappings | Alias continuity, digests of live proofs, and enrolled-role mappings. |
 | Topic grants and their events | Owner grants on topics: their terms and digests, hashes of their keys, revocations, and a log. Keys are never stored. |
+| Reference documents and revisions | Text kept with topics, by topic id: every revision of every document, with who wrote it, under which grant, and its retry identity. Never edited or deleted. |
 | Change log, generations, batches, artifacts, vectors | Optional indexing state and producer-supplied derived data. |
 | Seat sessions, receipts, requests | Optional browser-seat session and delivery state. |
 

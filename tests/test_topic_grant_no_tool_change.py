@@ -3,7 +3,8 @@
 The tool list, every other tool's input schema and description, every refusal text and every guest call stay
 exactly as they were. `create_topic` and `set_topic` gain the optional `grant_token`, and `rename_topic` gains
 `acknowledge_topic_grants`; their pins below were recomputed for exactly that. A guest that presents no key is
-refused in the same words whatever grants exist.
+refused in the same words whatever grants exist. The three reference tools, which came after, are pinned here as
+they were made: `edit_reference` takes `grant_token` too, and a guest may call the two that read.
 
 GUARD tests pin today's answers and pass before and after. The last of the grant tests needs the grant records, so it
 fails until they exist: with an active grant on a topic, a guest's calls that present no key are still refused,
@@ -37,11 +38,13 @@ TOOLS = {
     "list_conversations": "d2564ef0696d", "read_history": "a77467aef649", "add_participant": "aa43e161b34c",
     "remove_participant": "4f585683f8ad", "set_topic": "fc1d16794258", "create_topic": "e7ca129d5f35",
     "update_topic": "95e4df4d625a", "rename_topic": "383655a18830", "list_topics": "a7b2f4a13b37",
-    "get_topic": "bf27aa557812", "search": "a66624d6f016", "get_message": "d249b55ec56d",
+    "get_topic": "bf27aa557812", "edit_reference": "6d122b95d779", "read_reference": "673746dd5430",
+    "reference_history": "91110adca101", "search": "a66624d6f016", "get_message": "d249b55ec56d",
     "read_artifacts": "240da135d827",
 }
 GUEST_MAY_CALL = {"whoami", "alias_exists", "claim_alias", "list_conversations", "read_history", "get_message",
-                  "search", "send_message", "create_conversation", "list_topics", "get_topic"}
+                  "search", "send_message", "create_conversation", "list_topics", "get_topic", "read_reference",
+                  "reference_history"}
 
 
 def fingerprint(tool: dict) -> str:
@@ -64,7 +67,8 @@ def test_the_tool_list_and_every_schema_are_unchanged(topic_host):  # GUARD
 
 
 # The only places a tool's text may name a topic grant: the key a guest presents, and a rename's acknowledgement.
-GRANT_ARGUMENTS = {"grant_token": {"create_topic", "set_topic"}, "acknowledge_topic_grants": {"rename_topic"}}
+GRANT_ARGUMENTS = {"grant_token": {"create_topic", "set_topic", "edit_reference"},
+                   "acknowledge_topic_grants": {"rename_topic"}}
 
 
 def test_a_topic_grant_is_named_only_by_the_arguments_that_use_one_and_no_tool_names_a_key(topic_host):  # GUARD
@@ -77,7 +81,7 @@ def test_a_topic_grant_is_named_only_by_the_arguments_that_use_one_and_no_tool_n
     dispatch(topic_host, scenario)
 
 
-def test_the_guest_tools_are_the_same_eleven(topic_host):  # GUARD
+def test_the_guest_tools_are_the_same_eleven_and_the_two_that_read_references(topic_host):  # GUARD
     assert app.GUEST_TOOLS & set(TOOLS) == GUEST_MAY_CALL
 
 

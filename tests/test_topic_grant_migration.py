@@ -72,9 +72,10 @@ def test_the_grant_tables_are_declared_as_the_step_above_the_v16_fixture():
     assert NEW_STEP in store._STEPS
 
 
-# 2. Every fixture reaches the current schema with both tables, empty ---------------------------------------
+# 2. Every older fixture reaches the current schema with both tables, empty ---------------------------------
 
-@pytest.mark.parametrize("version", FIXTURE_VERSIONS)
+# Only the fixtures below the step that adds the grant tables: a fixture from that step on carries grants.
+@pytest.mark.parametrize("version", [version for version in FIXTURE_VERSIONS if version < NEW_STEP])
 def test_every_older_schema_gains_both_grant_tables_empty(tmp_path, version):
     config = topic_config(tmp_path)
     install(config, f"schema_v{version}.sql")

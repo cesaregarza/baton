@@ -273,8 +273,9 @@ def test_valid_proof_does_not_allow_guest_authority_or_forged_identity(posting_h
             "identity"
             not in next(tool for tool in listed if tool["name"] == "send_message")["inputSchema"]["properties"]
         )
-        # The guest slice grew deliberately: a guest may now start a thread, and read the topics it
-        # could be filed in. Everything below still holds -- each tool outside this set is refused.
+        # The guest slice grew deliberately: a guest may now start a thread, read the topics it could be
+        # filed in, and read the references kept with them. Everything below still holds -- each tool outside
+        # this set is refused.
         allowed = {
             "whoami",
             "alias_exists",
@@ -287,6 +288,8 @@ def test_valid_proof_does_not_allow_guest_authority_or_forged_identity(posting_h
             "create_conversation",
             "list_topics",
             "get_topic",
+            "read_reference",
+            "reference_history",
         }
         assert app.GUEST_TOOLS == allowed
         for tool in listed:
