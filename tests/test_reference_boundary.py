@@ -61,8 +61,8 @@ def audit_lines(scene):
 
 
 def refused_as_mistyped(result, argument):
-    """`refused_by_schema`, and for the argument's type: the SDK's `int_type` error. A bound would not prove it, for
-    `revision=false` was refused before this change too, as 0 is below 1."""
+    """`refused_by_schema`, and by the SDK's `int_type` error, not a bound's. `revision=false` was refused before this
+    change too, as 0 is below 1, so only the kind of error shows the type was looked at."""
     refused_by_schema(result, argument)
     assert "int_type" in str(result.get("unparsed", result)), result
 
@@ -138,10 +138,10 @@ def test_a_mistyped_limit_or_cursor_is_refused_by_the_schema(build_scene, argume
 
 
 def test_a_call_with_a_binding_token_is_refused_a_mistyped_number_as_it_is_an_out_of_range_one(build_scene):
-    """A grantee's edit and a bound guest's reads meet the guard's own check of the schema before the SDK's. Each
-    mistyped number is answered as the first value of its list, which is out of range, has always been: the guard's
-    refusal of arguments that do not match the tool schema. Nothing is written and no hourly post is spent. `false` is
-    left out of `revision`, which the old schema refused as below 1."""
+    """A grantee's edit and a bound guest's reads meet the guard's own check of the schema before the SDK's, and an
+    out-of-range number has always been answered with its one refusal of arguments that do not match the tool schema.
+    The first value of each list is out of range, and every mistyped value must be answered exactly as it is. Nothing
+    is written and no hourly post is spent. `false` is not tried as a `revision`, which the old schema refused too."""
     scene = build_scene()
     guest_calls = {
         "edit_reference": (edit_arguments(BOARDS, NAME, "text", 2), {"expected_revision": [-1, *EXPECTED]}),
@@ -218,7 +218,7 @@ def test_a_request_id_is_refused_for_having_no_utf8_form_and_never_for_its_lette
     """The line is the encoding, not ASCII. After a lone surrogate is refused, request ids of accented letters and of
     characters beyond the basic plane are kept as given, up to 200 characters, and the retry of each replays."""
     scene = build_scene()
-    kept = ["café-ü", "clef-\U0001d11e", "\U0001f600" * 200]
+    kept = ["caf\u00e9-\u00fc", "clef-\U0001d11e", "\U0001f600" * 200]
 
     async def scenario(client):
         await support.stage(client, scene.host)
