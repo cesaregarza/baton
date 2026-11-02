@@ -85,9 +85,14 @@ def _admit(conn: sqlite3.Connection, limits: Aliases, credential: str, name: str
         conn.execute("INSERT INTO alias_claims VALUES (?, ?, ?)", (credential, skeleton(name), now))
 
 
+def alias_code(alias_id: str) -> str:
+    """The short visual code of an alias. It comes from the immutable id, so a rename leaves it unchanged."""
+    return hashlib.sha256(b"baton-alias-code-v1\x00" + alias_id.encode()).hexdigest()[:4]
+
+
 def _identity(row: sqlite3.Row, mapped_role: str | None) -> dict:
     """An alias's identity; the caller reads `mapped_role` in the same query or transaction as `row`."""
-    code = hashlib.sha256(b"baton-alias-code-v1\x00" + row["id"].encode()).hexdigest()[:4]
+    code = alias_code(row["id"])
     return {"alias_id": row["id"], "alias": row["name"], "badge": "guest", "code": code,
             "effective_role": mapped_role or "guest"}
 
