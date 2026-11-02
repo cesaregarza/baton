@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from test_conversations import GROUP, count, group_config, refused
 from test_messages import rid
+from topic_backing import back_topics
 
 from baton import conversations, store
 from baton.config import Config
@@ -40,6 +41,11 @@ def db(config: Config) -> sqlite3.Connection:
 
 
 def open_one(db: sqlite3.Connection, config: Config, title: str, **kwargs: Any) -> str:
+    # This file is about the label: its grammar, its filtering and what a rename does not move. The topic
+    # it names has to exist for a conversation to be filed in it, so back it here and leave every
+    # assertion below as it was. Which roles may open a topic is test_topic_containers.py's subject.
+    if kwargs.get("topic"):
+        back_topics(db, kwargs["topic"])
     made = conversations.create(db, config, actor="orchestrator", title=title, participants=GROUP,
                                 request_id=rid(f"open-{title}"), **kwargs)
     return made["conversation_id"]
@@ -103,6 +109,7 @@ def test_a_conversation_opens_without_a_topic_and_reads_back_as_none(db, config)
 
 
 def test_setting_renaming_and_clearing_a_topic_keeps_the_conversation_id(db, config) -> None:
+    back_topics(db, "project", "project/alpha")
     conversation_id = open_one(db, config, "t")
     first = conversations.set_topic(db, config, conversation_id, "project", actor="orchestrator")
     assert (first["conversation_id"], first["topic"], first["changed"]) == (conversation_id, "project", True)
@@ -138,6 +145,7 @@ def test_setting_a_topic_needs_the_permission_and_membership(db, config) -> None
 
 
 def test_a_topic_is_part_of_a_creates_retry_identity(db, config) -> None:
+    back_topics(db, "project", "project/other")
     request_id = rid("topic-once")
     first = conversations.create(db, config, actor="orchestrator", title="t", participants=GROUP,
                                  topic="project", request_id=request_id)
@@ -228,7 +236,8 @@ def test_every_older_database_gains_a_null_topic(tmp_path: Path, version: int) -
         [carried] = conversations.list_for(db, "reviewer")
         assert (carried["conversation_id"], carried["title"], carried["topic"]) == \
             ("conv_old", "Carried over", None)
-        # And a carried-over conversation can be given one straight away.
+        # And a carried-over conversation can be given one straight away, once the topic exists.
+        back_topics(db, "project/carried")
         assert conversations.set_topic(db, config, "conv_old", "project/carried",
                                        actor="orchestrator")["topic"] == "project/carried"
     db.close()
@@ -244,4 +253,4 @@ def test_the_topic_step_names_the_table_it_alters() -> None:
     # does not read as a failure of the topic step. The set below is still exact: a step that alters
     # a new table has to be added here deliberately, which is the point of the assertion.
     assert {table for step in store._ADDED_COLUMNS.values() for table in step} \
-        == {"messages", "conversations", "wakes", "generations"}
+        == {"messages", "conversations", "wakes", "generations", "topics"}

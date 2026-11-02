@@ -1,89 +1,118 @@
-# Reaching a baton host from other machines
+<a name="reaching-a-baton-host-from-other-machines"></a>
 
-`baton serve` listens on `127.0.0.1` by default. To reach it from elsewhere, put something in front of it
-that terminates TLS. Then set `host.public_url` to the URL clients will use, without `/mcp`. Three common
-setups follow.
+# Connecting from another machine
 
-These rules apply to all of them:
+By default, `baton serve` listens on `127.0.0.1:8765`, so only the host machine can connect. To reach it
+from elsewhere, put an HTTPS reverse proxy or tunnel in front of it and set `host.public_url` to the
+address clients will use. The MCP endpoint is `<public_url>/mcp`.
 
-- **Serve baton at the root of its own host name**, such as `https://baton.example.com`. OAuth clients
-  look for metadata at `/.well-known/...` on the host itself. With a path prefix such as `/baton`, those
-  root paths would have to be forwarded separately.
-- **Under a path prefix, forward the path-form metadata route.** With `public_url` set to
-  `https://example.com/baton`, RFC 8414 clients ask for
-  `/.well-known/oauth-authorization-server<path>`, here `/.well-known/oauth-authorization-server/baton`.
-  baton serves that metadata, with the full `public_url` as its issuer, only at its own root route
-  `/.well-known/oauth-authorization-server`. So the proxy must forward the path form to that root route.
-  baton has no native path-form route.
-- **Keep `listen_host = "127.0.0.1"`** and let the proxy or tunnel connect locally. The host trusts
-  `X-Forwarded-For` only from a loopback peer, and uses it only for rate limiting.
-- **`public_url` must match exactly** what clients use, scheme and port included. It is the OAuth issuer,
-  and `<public_url>/mcp` is the token audience. The MCP endpoint also refuses requests whose `Host` header
-  is not that name (or loopback), which blocks DNS rebinding.
-- **Use HTTPS** whenever the connection leaves the machine. Tokens travel in the `Authorization` header.
+The examples below use placeholder names. Set up access and credentials before sharing a real address.
+This guide covers the MCP host; the [dashboard and browser seat](people.md) have their own access rules.
 
-## Reverse proxy (Caddy, nginx)
+## Choose the public address
 
-Caddy obtains and renews the certificate itself:
+A dedicated host name at the root, such as `https://baton.example.com`, is the simplest setup. OAuth
+clients discover metadata under `/.well-known/` on that host. Set the exact external URL, including its
+scheme and any non-default port:
 
+```toml
+[host]
+public_url = "https://baton.example.com"
+listen_host = "127.0.0.1"
+listen_port = 8765
 ```
+
+The address is also Baton's OAuth issuer, and its `/mcp` URL is the token audience. The MCP endpoint
+checks the Host header against the configured name or loopback. A client that remembers an OAuth issuer
+needs a stable name across restarts.
+
+Keep the listener on loopback when using a local proxy or tunnel. Baton trusts `X-Forwarded-For` only from
+a loopback peer, and uses it only for rate limiting. HTTPS protects bearer tokens as they travel between
+clients and the proxy.
+
+If `public_url` has a path prefix, OAuth clients may request
+`/.well-known/oauth-authorization-server<path>`. For example, with `https://example.com/baton`, configure
+the proxy to forward `/.well-known/oauth-authorization-server/baton` to Baton's root
+`/.well-known/oauth-authorization-server` route. Baton does not serve the path-form route itself; the root
+route returns the full `public_url`, including `/baton`, as the issuer.
+
+For the same example, forward `/.well-known/oauth-protected-resource/baton/mcp` to Baton unchanged. Strip
+the `/baton` prefix from the host's other endpoints: for example, forward `/baton/mcp` to `/mcp`. A
+dedicated host name avoids this extra routing.
+
+<a name="reverse-proxy-caddy-nginx"></a>
+
+## Use a reverse proxy
+
+Caddy can obtain and renew a certificate for a public name:
+
+```caddy
 baton.example.com {
     reverse_proxy 127.0.0.1:8765 {
-        flush_interval -1      # stream responses (MCP may use server-sent events)
+        flush_interval -1
     }
 }
 ```
 
-nginx:
+With nginx, configure a certificate and disable buffering so MCP responses can stream:
 
 ```nginx
 server {
     listen 443 ssl;
     server_name baton.example.com;
-    # ssl_certificate ... ;
+    # Configure ssl_certificate and ssl_certificate_key here.
 
     location / {
         proxy_pass http://127.0.0.1:8765;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_buffering off;          # stream responses
-        proxy_read_timeout 60s;       # longer than the 30 s maximum wait
+        proxy_buffering off;
+        proxy_read_timeout 60s;
     }
 }
 ```
 
-Then set:
+The read timeout is longer than the MCP `wait` limit of 30 seconds. Set `public_url` as shown above and
+restart Baton after changing its config.
 
-```toml
-[host]
-public_url = "https://baton.example.com"
-```
+<a name="tunnel-no-open-ports"></a>
 
-## Tunnel (no open ports)
+## Use a tunnel
 
-A tunnelling service such as Cloudflare Tunnel or ngrok gives you a public HTTPS name that forwards to
-`127.0.0.1:8765`. Point the tunnel at the local port, keep the host name stable across restarts (OAuth
-clients remember the issuer), and set `public_url` to the tunnel's HTTPS URL.
+A tunnel service such as Cloudflare Tunnel or ngrok can give the host a public HTTPS name without opening
+a port on the host machine. Forward it to `127.0.0.1:8765`, keep the external name stable, and set
+`public_url` to its HTTPS URL.
 
-A tunnel makes the host reachable from the whole internet. Use long random bearer tokens, or OAuth with a
-strong passphrase, and keep `redirect_uris` tight.
+A public tunnel makes the host reachable from the internet. Use long random bearer tokens or OAuth with a
+strong consent passphrase, and keep OAuth redirect URIs restricted to the clients you intend to allow.
 
-## Tailnet or VPN (private)
+<a name="tailnet-or-vpn-private"></a>
 
-On a private network such as WireGuard or Tailscale, only machines on that network can reach the host.
-Either:
+## Use a private network
 
-- serve HTTPS on the private name with the network's own certificate feature, or a reverse proxy as above,
-  and set `public_url` to that name; or
-- for a fully trusted network, set `listen_host` to the host's private address and `public_url` to
-  `http://<private-address>:8765`. Tokens are then protected only by the VPN's own encryption.
+On a private network such as WireGuard or Tailscale, serve HTTPS on the private name with the network's
+certificate feature or a reverse proxy, and set `public_url` to that name. Access is then limited to
+machines that can reach that network and have a valid Baton credential.
 
-This is the simplest way to let agents on several of your own machines share one host, without exposing
-anything to the internet.
+On a fully trusted VPN, an operator may instead bind Baton to its private address and use an HTTP
+`public_url`. In that setup the VPN's encryption, rather than TLS at Baton, protects credentials and
+messages in transit. Evaluate access to the whole network before choosing it.
 
-## Checking it
+<a name="checking-it"></a>
+
+## Check the connection
+
+From a machine that should be able to reach the host:
 
 ```sh
-curl -s https://baton.example.com/.well-known/oauth-protected-resource/mcp   # with OAuth on
-curl -s -o /dev/null -w '%{http_code}\n' -X POST https://baton.example.com/mcp   # 401 without a token
+# With OAuth enabled, inspect the protected-resource metadata.
+curl -s https://baton.example.com/.well-known/oauth-protected-resource/mcp
+
+# An unauthenticated request to the MCP endpoint should return 401.
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://baton.example.com/mcp
 ```
+
+Then connect a client with its own credential and try a harmless read. For OAuth, add the client's exact
+documented redirect URI to Baton. By default, HTTP loopback redirects are also allowed; set
+`auth.oauth.allow_loopback_redirects = false` for exact allowlist matches only. See
+[Security](../SECURITY.md#oauth) for the loopback rules, authentication, and revocation.

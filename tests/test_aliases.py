@@ -148,13 +148,13 @@ def test_new_claim_resume_wrong_passphrase_and_persistent_random_identity(alias_
     assert len(calls) == 3  # exactly one scrypt for each admitted new/resume/wrong attempt
     assert calls[0] is None and calls[1] is not None and calls[2] is not None
     calls.clear()
-    assert aliases.resolve_binding(conn, principal, resumed["binding_token"])["alias_id"] == first["alias_id"]
+    assert aliases.resolve_binding(conn, resumed["binding_token"])["alias_id"] == first["alias_id"]
     assert calls == []
     assert aliases.exists(conn, "ＬＡＮＥ-Ｂ") is True
     conn.close()
     reopened = store.connect(config.db_path)
     try:
-        assert aliases.resolve_binding(reopened, principal, first["binding_token"])["code"] == first["code"]
+        assert aliases.resolve_binding(reopened, first["binding_token"])["code"] == first["code"]
     finally:
         reopened.close()
 
@@ -223,7 +223,7 @@ def test_concurrent_claims_have_one_owner_and_database_constraints(alias_store):
         conn.execute("INSERT INTO aliases VALUES ('different-id', ?, 'different', 'unused', 0)", (row["name"],))
 
 
-def test_proofs_are_digest_only_expire_and_require_authenticated_guest(alias_store, monkeypatch):
+def test_proofs_are_digest_only_expire_and_claims_require_a_credential(alias_store, monkeypatch):
     from baton import aliases
     from baton.errors import Forbidden
     conn, _, principal = alias_store
@@ -236,15 +236,15 @@ def test_proofs_are_digest_only_expire_and_require_authenticated_guest(alias_sto
     assert result["binding_token"] not in repr(snapshot(conn))
     for invalid in (None, "", "unrecognized", "x" * 257):
         with pytest.raises(Forbidden, match="missing, invalid or expired"):
-            aliases.resolve_binding(conn, principal, invalid)
-    for invalid_principal in (None, replace_principal(principal, "planner")):
-        with pytest.raises(Forbidden, match="authenticated guest"):
-            aliases.resolve_binding(conn, invalid_principal, result["binding_token"])
-        with pytest.raises(Forbidden, match="authenticated guest"):
+            aliases.resolve_binding(conn, invalid)
+    # A proof on a fixed-role credential is refused by Guard (test_per_call_identity); claims check the credential.
+    for invalid_principal, reason in ((None, "authenticated credential"),
+                                      (replace_principal(principal, "planner"), "only enrols its own role")):
+        with pytest.raises(Forbidden, match=reason):
             aliases.claim(conn, alias_store[1], invalid_principal, "new-name", "synthetic")
     monkeypatch.setattr(aliases.time, "time", lambda: 1060)
     with pytest.raises(Forbidden, match="missing, invalid or expired"):
-        aliases.resolve_binding(conn, principal, result["binding_token"])
+        aliases.resolve_binding(conn, result["binding_token"])
     resumed = claim(alias_store)
     assert resumed["alias_id"] == result["alias_id"]
     assert conn.execute("SELECT COUNT(*) FROM alias_bindings").fetchone()[0] == 1
@@ -325,7 +325,7 @@ def test_passphrase_salted_verifier_and_code_independence(alias_store):
     assert first["code"] == hashlib.sha256(b"baton-alias-code-v1\x00" + first["alias_id"].encode()).hexdigest()[:4]
     alias_store[0].execute("UPDATE aliases SET verifier = ? WHERE id = ?",
                           (auth.hash_passphrase("synthetic changed"), first["alias_id"]))
-    assert aliases.resolve_binding(alias_store[0], alias_store[2], first["binding_token"])["code"] == first["code"]
+    assert aliases.resolve_binding(alias_store[0], first["binding_token"])["code"] == first["code"]
 
 
 def test_exists_is_read_only_and_does_not_disclose_identity(alias_store):
@@ -338,7 +338,7 @@ def test_exists_is_read_only_and_does_not_disclose_identity(alias_store):
     assert aliases.exists(conn, "missing") is False
     assert snapshot(conn) == before
     assert conn.execute("SELECT COUNT(*) FROM alias_claims").fetchone()[0] == attempts
-    assert set(first) == {"alias_id", "alias", "badge", "code", "binding_token", "expires_at"}
+    assert set(first) == {"alias_id", "alias", "badge", "code", "binding_token", "expires_at", "effective_role"}
 
 
 @pytest.mark.parametrize("passphrase", ["", "synthetic secret" * 100])
@@ -493,10 +493,10 @@ def test_24_hour_boundary_refuses_expired_proof_and_resumes_permanent_identity(a
     assert first["expires_at"] == 87400
     original_alias = tuple(conn.execute("SELECT * FROM aliases").fetchone())
     monkeypatch.setattr(aliases.time, "time", lambda: 87399.999)
-    assert aliases.resolve_binding(conn, principal, first["binding_token"])["alias_id"] == first["alias_id"]
+    assert aliases.resolve_binding(conn, first["binding_token"])["alias_id"] == first["alias_id"]
     monkeypatch.setattr(aliases.time, "time", lambda: 87400)
     with pytest.raises(Forbidden, match="missing, invalid or expired"):
-        aliases.resolve_binding(conn, principal, first["binding_token"])
+        aliases.resolve_binding(conn, first["binding_token"])
     assert aliases.exists(conn, "lane-b") is True
     before = snapshot(conn)
     with pytest.raises(Forbidden, match="passphrase did not match"):
@@ -557,7 +557,7 @@ def test_binding_reuse_and_resumption_work_across_authenticated_guest_credential
             principal = auth.static_token(guest_host.config, raw_credential)
             assert principal is not None
             for issued in proofs:
-                resolved = aliases.resolve_binding(conn, principal, issued["binding_token"])
+                resolved = aliases.resolve_binding(conn, issued["binding_token"])
                 assert resolved["alias_id"] == proofs[0]["alias_id"]
     finally:
         conn.close()

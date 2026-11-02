@@ -15,6 +15,7 @@ import pytest
 from seat_helpers import agent_says, conversation, log_in, mailbox, make_seat_host
 from seat_helpers import get as seat_get
 from test_dashboard import snapshot, text
+from topic_backing import back_topics
 
 from baton import config as config_module
 from baton import conversations, jobs
@@ -265,6 +266,7 @@ def test_projected_pages_say_needs_the_person_in_the_title_and_the_index_links(t
     config = projection_config(tmp_path, display_name=MARKUP, attention_role="person")
     conn = connect(config.db_path)
     try:
+        back_topics(conn, "alpha")
         conversations.create(conn, config, actor="orchestrator", title="Topical",
                              participants=["orchestrator", "person"], topic="alpha")
     finally:

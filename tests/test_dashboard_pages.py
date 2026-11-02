@@ -9,16 +9,16 @@ from __future__ import annotations
 import http.client
 import re
 import threading
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from conftest import free_port
 from test_dashboard import PAYLOAD, snapshot, text
+from topic_backing import back_topics
 
 from baton import config as config_module
-from baton import conversations, jobs, messages
+from baton import conversations, jobs
 from baton.config import Config, ConfigError
 from baton.store import connect
 
@@ -37,10 +37,17 @@ JOB_STATES = {"initial": "open", "states": {
 
 
 def page_config(tmp_path: Path, *, view_all: bool = False, port: int | None = None, viewer: str = "operator",
-                **dashboard_keys: Any) -> Config:
-    """Generic roles; `operator` is the viewer by default, and sees every conversation only with the flag."""
-    roles = {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
+                guest: bool = False, **dashboard_keys: Any) -> Config:
+    """Generic roles; `operator` is the viewer by default, and sees every conversation only with the flag.
+
+    `guest` adds a board-reading guest role, for the pages that show a thread a guest started. It is
+    opt-in so that every other page test keeps the role set it was written against.
+    """
+    roles = {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True,
+                              "can_create_topics": True},
              "reviewer": {}, "assistant": {}, "operator": {"can_view_all_conversations": view_all}}
+    if guest:
+        roles["guest"] = {"can_view_all_conversations": True}
     roles[viewer] = {**roles[viewer], "display_only": True}  # the view's identity never holds a credential
     return config_module.parse({
         "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
@@ -57,6 +64,9 @@ def get(config: Config, target: str, *, method: str = "GET", host: str | None = 
 
 
 def made(conn: Any, config: Config, title: str, participants: list[str], topic: str | None = None) -> str:
+    # These pages are about what the viewer may see, so the label's topic is backed rather than opened.
+    if topic:
+        back_topics(conn, topic)
     return conversations.create(conn, config, actor="orchestrator", title=title, participants=participants,
                                 topic=topic)["conversation_id"]
 
@@ -271,17 +281,14 @@ def test_needs_follows_what_the_viewer_could_read_from_its_join_point(tmp_path) 
     assert needs_items(text(get(flagged, "/needs"))) == ["after the join", "before the join"]
 
 
-def test_needs_drops_a_message_once_retention_deletes_the_viewers_copy(tmp_path) -> None:
+def test_needs_drops_a_message_once_the_viewers_copy_is_gone(tmp_path) -> None:
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
         mine = made(conn, config, "Old asks", MINE)
         conversations.send(conn, config, sender="reviewer", conversation_id=mine, text="old ask", needs_decision=True)
         conversations.send(conn, config, sender="reviewer", conversation_id=mine, text="new ask", needs_decision=True)
-        messages.read(conn, "operator", limit=1)
-        stale = (datetime.now(UTC) - messages.READ_RETENTION - timedelta(days=1)).isoformat()
-        conn.execute("UPDATE messages SET at = ? WHERE recipient = 'operator' AND seq = 1", (stale,))
-        messages.sweep(conn)
+        conn.execute("DELETE FROM messages WHERE recipient = 'operator' AND seq = 1")
     finally:
         conn.close()
     assert needs_items(text(get(config, "/needs"))) == ["new ask"]

@@ -4,10 +4,13 @@ Off unless `[dashboard] enabled = true`. It is served from the host's own
 store by a small standard-library HTTP server beside the MCP server, on a
 loopback address only, and it never sees a token.
 
-Conversations are grouped by their topic, with the untagged in a group of
-their own, so a topic organises the view without becoming a requirement.
-`/t/<project>` and `/t/<project>/<subtopic>` show one topic and everything
-under it, by whole segments, with the same filter as `list_conversations`.
+`/` is a directory of the topics a core role has opened, each with its
+description, its subtopics and how many threads in it this viewer may read;
+the conversations with no topic follow in a group of their own, so none is
+hidden. `/t/<project>` and `/t/<project>/<subtopic>` show one topic, headed by
+its own details, with the same whole-segment filter as `list_conversations`. A
+path that is not a topic is a missing page, because a topic is a container
+rather than a label. A thread a guest started names the alias behind it.
 
 `/needs` collects the retained signals that single the viewer out: messages
 it could read whose `attention` names it or that ask for a decision, newest
@@ -43,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from baton import board_read, conversations, jobs, messages
+from baton import board_read, conversations, jobs, messages, topics
 from baton.config import Config
 from baton.errors import BatonError
 from baton.store import connect
@@ -57,6 +60,8 @@ HEADERS = {
     "Referrer-Policy": "no-referrer",
 }
 READS = ("GET", "HEAD")
+# Every refusal offers the way back that the not-found page does, so none of them is a dead end.
+BACK = ' <a href="/">All conversations</a>'
 CONVERSATION_PATH = re.compile(r"/c/([A-Za-z0-9_-]{1,64})")
 # A page number: 1-6 ASCII digits, no leading zero.
 PAGE = re.compile(r"[1-9][0-9]{0,5}")
@@ -70,31 +75,134 @@ MAX_NEEDS_JOBS = 50
 # How many conversations a list page shows, newest first; it says so when there are more.
 MAX_LISTED = conversations.MAX_LISTED
 STYLE = """\
-body { font: 15px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 52rem; padding: 1rem; color: #1d1d1f; }
-a { color: #0b57d0; }
-ul { list-style: none; padding: 0; }
-li { border-bottom: 1px solid #e3e3e3; padding: .6rem 0; }
-.meta, .notice, .source, .muted { color: #5f6368; font-size: .85rem; }
-.role { font-weight: 600; color: #1d1d1f; }
-h2 { font-size: 1rem; margin: 1.2rem 0 .2rem; color: #5f6368; font-weight: 600; }
-.badge { border: 1px solid #c4c7c5; border-radius: .6rem; padding: 0 .4rem; margin-left: .3rem; }
-.text { white-space: pre-wrap; margin: .3rem 0; }
-.relayed { border-left: 3px solid #c4c7c5; margin: .4rem 0 .4rem .6rem; padding-left: .6rem; }
-.relayed-text { white-space: pre-wrap; margin: .2rem 0; }
-.notice { font-style: italic; }
-.replies { margin: .4rem 0 0 1.2rem; border-left: 2px solid #e3e3e3; padding-left: .6rem; }
-.reply-to { color: #5f6368; font-size: .85rem; margin: .2rem 0; }
-h2 a { color: inherit; }
-h1, a, li, .text, .relayed-text, .meta, .reply-to { overflow-wrap: anywhere; }
+/* tokens: one palette, so the dark one only restates the values */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff; --surface: #f4f6f8; --text: #1b1f24; --muted: #565e68;
+  --link: #0b57d0; --link-hover: #083f9c; --link-line: #8fb0ea; --focus: #0b57d0;
+  --line: #e1e5ea; --line-strong: #c3c9d1;
+  --accent-bg: #e6eefc; --accent-text: #0a4aa6; --accent-line: #a9c2ee; --target-bg: #e6eefc;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b; --surface: #1d2127; --text: #e7e9ec; --muted: #a4acb6;
+    --link: #8ab4f8; --link-hover: #b9d2fc; --link-line: #4d6a9c; --focus: #8ab4f8;
+    --line: #2b3038; --line-strong: #434a54;
+    --accent-bg: #1d2e4a; --accent-text: #b4cdfa; --accent-line: #3f5a8a; --target-bg: #1d2e4a;
+  }
+}
+/* base: 16px text, a 42rem column, and a type scale of 13, 14, 16, 18, 24 and 28px */
+*, ::before, ::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { font: 1rem/1.55 var(--font); margin: 0 auto; max-width: 42rem; padding: 1rem 1rem 3rem;
+       background: var(--bg); color: var(--text); }
+h1, h2, h3 { line-height: 1.25; text-wrap: balance; }
+h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -.01em; margin: .25rem 0 .5rem; }
+h2 { font-size: 1.125rem; font-weight: 600; margin: 2rem 0 .25rem; }
+h3 { font-size: 1rem; font-weight: 600; margin: 1.25rem 0 .25rem; }
+p { margin: .6rem 0; }
+a { color: var(--link); text-decoration: underline; text-decoration-color: var(--link-line);
+    text-decoration-thickness: 1px; text-underline-offset: .2em; }
+a:hover { color: var(--link-hover); text-decoration-color: currentColor; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+h2 a { color: inherit; text-decoration-color: var(--line-strong); }
+h1, h2, h3, a, li, p, summary, .text, .relayed-text, .meta, .reply-to { overflow-wrap: anywhere; }
+/* lists and messages */
+ul { list-style: none; margin: 0; padding: 0; }
+li { border-bottom: 1px solid var(--line); padding: .85rem 0; }
+li:last-child, li li, li.muted { border-bottom: 0; }
 li { min-width: 0; }
-.id { font-family: ui-monospace, monospace; }
-details { margin: 1.2rem 0 .2rem; }
-summary { cursor: pointer; color: #5f6368; font-weight: 600; }
-.pager { margin: .6rem 0; }
+.meta, .notice, .source, .muted, .reply-to { color: var(--muted); }
+.meta, .notice, .source, .reply-to { font-size: .8125rem; }
+.muted { font-size: .875rem; }
+.role { font-weight: 600; color: var(--text); }
+.badge { display: inline-block; border: 1px solid var(--line-strong); border-radius: 999px; padding: 0 .45rem;
+         margin-left: .35rem; font-size: .75rem; line-height: 1.5; color: var(--muted); vertical-align: 1px; }
+.badge.human { background: var(--accent-bg); border-color: var(--accent-line); color: var(--accent-text); }
+.text { white-space: pre-wrap; margin: .25rem 0 .1rem; }
+.relayed { border-left: 3px solid var(--line-strong); background: var(--surface); border-radius: 0 .375rem .375rem 0;
+           margin: .6rem 0; padding: .5rem .8rem; }
+.relayed .source { margin: 0 0 .2rem; }
+.relayed-text { white-space: pre-wrap; margin: 0; }
+.notice { font-style: italic; }
+p.notice { background: var(--surface); border-radius: .375rem; padding: .5rem .8rem; margin: .75rem 0; }
+.replies { margin: .6rem 0 0 .25rem; border-left: 2px solid var(--line); padding-left: .85rem; }
+.replies > li { padding: .6rem 0 0; }
+.reply-to { margin: .1rem 0; }
+.message { scroll-margin-top: 1rem; }
+.message:target > .meta { background: var(--target-bg);
+                          box-shadow: -.5rem 0 0 var(--target-bg), .5rem 0 0 var(--target-bg); }
+.id { font-family: var(--mono); font-size: .8125rem; box-sizing: content-box; background: var(--surface);
+      border-radius: .25rem; padding: 0 .3rem; }
+details { margin: 1.75rem 0 .5rem; border: 1px solid var(--line); border-radius: .5rem; padding: 0 1rem; }
+summary { cursor: pointer; padding: .75rem 0; font-weight: 600; }
+details[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: .25rem; }
+.pager { margin: .5rem 0; }
+.gap-bar { display: none; }
+/* the bar and its hidden measuring copy share their box; only the bar is fixed to the viewport's bottom */
+.gap-bar, .gap-measure { margin: 0; padding: .5rem 1rem; background: var(--bg);
+  border-top: 1px solid var(--line-strong); color: var(--muted); font-size: .85rem; text-align: center; }
+.gap-measure { display: none; }
+.gap-dismiss { position: fixed; bottom: 0; left: 0; width: 1px; height: 1px; margin: 0; opacity: 0;
+  visibility: hidden; }
+body:has(li:target) .gap-dismiss:not(:checked) + .gap-bar { display: block; position: fixed; bottom: 0; left: 0;
+  right: 0; }
+body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 4rem; }
+.gap-bar label { margin-left: .6rem; color: var(--link); text-decoration: underline; cursor: pointer; }
+.gap-dismiss:focus-visible + .gap-bar label { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* without scroll-driven animations or anchor positioning the bar shows on arrival, as it always has (acceptance E) */
+@supports not ((animation-timeline: view()) and (anchor-name: --a)) {
+  body:has(li:target) .gap-dismiss:not(:checked) { visibility: visible; }
+}
+/* with both, the bar appears once the end of the anchored message's own content comes into view. The marker closes
+   that content (before the replies), and the hidden copy hangs its full height below the marker, so the copy's bottom
+   edge reaches the viewport's bottom exactly when the bar's top reaches the message's last line. */
+@supports (animation-timeline: view()) and (anchor-name: --a) {
+  li:target > .gap-end { display: block; height: 0; anchor-name: --gap-end; }
+  .gap-measure { display: block; position: absolute; position-anchor: --gap-end; top: anchor(bottom); left: 0; right: 0;
+    visibility: hidden; pointer-events: none; view-timeline: --gap-reveal block; }
+  body { timeline-scope: --gap-reveal; }
+  body:has(li:target) .gap-dismiss:not(:checked),
+  body:has(li:target) .gap-dismiss:not(:checked) + .gap-bar {
+    visibility: hidden; animation: gap-reveal linear both; animation-timeline: --gap-reveal;
+    animation-range: entry-crossing calc(100% - 2px) entry-crossing calc(100% - 2px); }
+  @keyframes gap-reveal { from { visibility: hidden; } to { visibility: visible; } }
+}
+/* primary links are at least 44px tall: an item that opens with its link lets the link carry the item's top space */
+h2 a { display: inline-block; padding: .7rem 0; }
+h2:has(> a) { margin: 1rem 0 0; }
+li > a:first-child, .meta > a:first-child { display: flex; align-items: flex-end; min-height: 2.75rem;
+                                           padding-bottom: .15rem; font-size: 1rem; font-weight: 600;
+                                           text-decoration: none; }
+li > a:first-child:hover, .meta > a:first-child:hover { text-decoration: underline; }
+li:has(> a:first-child), li:has(> .meta > a:first-child) { padding-top: 0; }
+.sep { display: none; }
+.pager a, .crumbs a { display: inline-block; padding: .7rem .15rem; margin-left: -.15rem; }
+.crumbs { margin: 0; font-size: .875rem; }
+.lead { font-size: 1.125rem; margin: 2.5rem 0; }
+.lead a { display: inline-block; padding: .5rem 0; }
+/* narrow screens shorten ids and tighten threads; wide ones get a larger title and deeper threads */
 @media (max-width: 480px) {
   .id { display: inline-block; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         vertical-align: bottom; }
-  body { padding: .6rem; }
+  .replies { margin-left: 0; padding-left: .6rem; }
+  /* on narrow screens the bar's action row is a row of its own: two 44 CSS px targets under the bar's text. A control
+     keeps its width and its words, so a word never breaks; the row wraps when both controls don't fit side by side.
+     The space between the controls is the row's column gap, not the label's margin, so a control on a line of its own
+     is centred */
+  .gap-sep { display: none; }
+  .gap-actions { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; row-gap: 4px;
+    column-gap: .6rem; min-height: 44px; margin-top: .3rem; }
+  .gap-actions a, .gap-actions label { display: inline-flex; align-items: center; flex-shrink: 0; overflow-wrap: normal;
+    min-height: 44px; min-width: 44px; padding: 0 .6rem; margin-left: 0; }
+  body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 7rem; }
+}
+@media (min-width: 40rem) {
+  body { padding: 1.5rem 1.5rem 4rem; }
+  h1 { font-size: 1.75rem; }
+  .replies { margin-left: .5rem; padding-left: 1rem; }
 }
 """
 
@@ -120,10 +228,10 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
     topic = _topic_route(url.path) if url.path.startswith("/t/") else None
     if (url.path.startswith("/t/") and topic is None) or (url.path == "/needs" and _needs_topic(url.query) is False):
         return _page(400, "Bad request", "<p>A topic is one or two lowercase slug segments, such as project or "
-                                         "project/subtopic, given once.</p>")
+                                         "project/subtopic, given once." + BACK + "</p>")
     pages = _pages(url.query)
     if pages is None:
-        return _page(400, "Bad request", "<p>A page number is a whole number from 1, given once.</p>")
+        return _page(400, "Bad request", "<p>A page number is a whole number from 1, given once." + BACK + "</p>")
     if url.path not in ("/", "/needs") and not match and topic is None:
         return _not_found()
     conn = connect(config.db_path)
@@ -132,12 +240,21 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
             body = _needs(config, conn, _needs_topic(url.query), pages)
             return _page(200, f"Needs {_attention_label(config)}", body)
         if topic is not None:
+            # A topic is a container, so one nobody opened is a missing page rather than an empty list.
+            # The grammar check above still answers 400 first, which keeps a malformed path distinct.
+            # A topic this viewer can see nothing under is missing too: the page carries the topic's
+            # description, creator and members, so answering 200 would hand those to anyone who guessed
+            # the path. 404 rather than a bare header also keeps the topic's existence out of it.
+            if not topics.exists(conn, topic) or not topics.may_open(
+                    conn, config, config.dashboard.viewer_role, topic):
+                return _not_found()
             return _page(200, topic, _index(config, conn, topic, pages["page"]))
         if match is None:
             return _page(200, "Conversations", _index(config, conn, None, pages["page"]))
         after = _after_seq(parse_qs(url.query, keep_blank_values=True).get("after_seq", ["0"])[-1])
         if after is None:
-            return _page(400, "Bad request", "<p>after_seq must be a whole number of at most 19 digits.</p>")
+            return _page(400, "Bad request",
+                         "<p>after_seq must be a whole number of at most 19 digits." + BACK + "</p>")
         return _conversation(config, conn, match.group(1), after)
     finally:
         conn.close()
@@ -274,16 +391,73 @@ def _visible(config: Config, conn: Any, topic: str | None = None) -> tuple[list[
     return found, "every conversation" if every else f"the conversations {viewer} is in", every
 
 
+def _topic_header(config: Config, conn: Any, topic: str) -> str:
+    """A topic's own details, above its threads: what it is, who opened it, and who a thread here reaches."""
+    try:
+        details = topics.get(conn, config, reader=config.dashboard.viewer_role, path=topic)
+    except BatonError:
+        return ""
+    title = f'<h2>{_e(details["title"])}</h2>' if details["title"] != topic else ""
+    description = f'<p>{_e(details["description"])}</p>' if details["description"] else ""
+    members = ", ".join(details["members"]) or "none yet"
+    return (f'{title}{description}<p class="meta">Opened by {_e(details["created_by"])} · members '
+            f'{_e(members)}</p>' + _subtopics(details["subtopics"]))
+
+
+def _subtopics(paths: list[str]) -> str:
+    if not paths:
+        return ""
+    # Styled by the existing .meta rule rather than a new one for h3: a bare h3 falls back to the
+    # browser's larger, darker default and reads as outranking the h2 above it.
+    return ('<h3 class="meta">Subtopics</h3><ul>'
+            + "".join(f'<li>{_topic_link(path)}</li>' for path in paths) + "</ul>")
+
+
+def _directory(config: Config, conn: Any) -> str:
+    """The topics, each with its description, its subtopics and this viewer's own thread count.
+
+    A viewer that does not read the whole board is offered only the topics it can see a thread in,
+    which is the rule this page has always followed: a topic whose only thread is hidden from the
+    viewer is not named here either, so the directory discloses nothing the listing would not. A
+    board-reading viewer sees every topic, including one still empty, which is what makes the
+    directory usable as a directory.
+    """
+    viewer = config.dashboard.viewer_role
+    every = board_read.sees_all(config, viewer)
+    listed = [entry for entry in topics.listing(conn, config, reader=viewer)
+              if every or entry["threads"]]
+    children: dict[str, list[str]] = {}
+    for entry in listed:
+        if "/" in entry["path"]:
+            children.setdefault(entry["path"].split("/")[0], []).append(entry["path"])
+    # A root's count covers its subtree, so a root with a visible subtopic is itself visible and there
+    # is no orphan case left to carry: the entry and its children are always rendered together.
+    roots = {entry["path"]: entry for entry in listed if "/" not in entry["path"]}
+    items = []
+    for path, entry in sorted(roots.items()):
+        shown = _subtopics(children.get(path, []))
+        description = f'<p>{_e(entry["description"])}</p>' if entry["description"] else ""
+        activity = f' · last {_time(entry["last_activity_at"])}' if entry["last_activity_at"] else ""
+        counted = f'{entry["threads"]} thread{"" if entry["threads"] == 1 else "s"}'
+        # A topic titled after its own path would otherwise print that word as the link and again as
+        # metadata; the path earns its place in the line only when it says something the title did not.
+        named = f'{_e(path)} · ' if entry["title"] != path else ""
+        items.append(f'<li><a href="/t/{_e(path)}">{_e(entry["title"])}</a>{description}'
+                     f'<div class="meta">{named}{counted}{activity}</div>{shown}</li>')
+    return "<h2>Topics</h2><ul>" + "".join(items) + "</ul>" if items else ""
+
+
 def _index(config: Config, conn: Any, topic: str | None = None, page: int = 1) -> str:
     viewer = config.dashboard.viewer_role
     listed, scope, _ = _visible(config, conn, topic)
     needs = f"Needs {_e(_attention_label(config))}"
     heading = (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}. '
-               f'<a href="/needs">{needs}</a></p>')
+               f'<a href="/needs">{needs}</a></p>' + _directory(config, conn))
     if topic is not None:
         heading = (f'<p><a href="/">All conversations</a> · {_e(" › ".join(topic.split("/")))}</p>'
                    f'<h1>{_e(topic)}</h1><p class="muted">Read-only. Showing {_e(scope)} under this topic, as '
-                   f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">{needs} here</a></p>')
+                   f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">{needs} here</a></p>'
+                   + _topic_header(config, conn, topic))
     if not listed:
         return heading + f'<ul><li class=muted>{"None yet." if topic is None else "None under this topic."}</li></ul>'
     shown = _slice(listed, page, MAX_LISTED)
@@ -362,7 +536,8 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
         job_block = (f'<h2 id="jobs">Jobs waiting on {_e(you)}</h2><ul>' + ("".join(_job(job) for job in waiting)
                      or "<li class=muted>None.</li>") + "</ul>" + job_pager)
     needs = f"Needs {_e(you)}"
-    crumbs = '<p><a href="/">All conversations</a>' + (f' · <a href="/needs">{needs}</a>' if topic else "") + "</p>"
+    crumbs = ('<p class="crumbs"><a href="/">All conversations</a>'
+              + (f' · <a href="/needs">{needs}</a>' if topic else "") + "</p>")
     if projected:
         head = (f'<h1>{needs}{where}</h1><p class="muted">{needs}, read-only view, as visible to {_e(viewer)}. '
                 f'{count}{other_count}{job_count}.</p>'
@@ -395,7 +570,7 @@ def _asking(config: Config, conn: Any, topic: str | None,
     first, and the ids of the messages `subject` itself replied to.
 
     It reads each visible conversation through the same `history` path as its page, under the viewer's
-    shared board-read predicate and within retention: `subject` only filters, it never reads. Each message
+    shared board-read predicate, over the copies still stored: `subject` only filters, it never reads. Each message
     comes once however many copies it has, and one the viewer or `subject` sent isn't waiting on it. A reply
     counts as `subject`'s only when `subject` sent it; when `subject` isn't the viewer it must also be stored as
     a person's, so an agent relaying or quoting the person never counts.
@@ -439,7 +614,8 @@ def _signal(subject: str, you: str, conversation: dict[str, Any], item: dict[str
         labels.append(f"{you} replied")
     why = " · ".join(labels)
     return (f'<li><div class="meta"><a href="{_e(message_path(conversation["conversation_id"], seq))}">'
-            f'{_e(conversation["title"])}</a> · <span class="role">{_e(messages.author_label(item))}</span> · '
+            f'{_e(conversation["title"])}</a><span class="sep"> · </span>'
+            f'<span class="role">{_e(messages.author_label(item))}</span> · '
             f'{_time(item["at"])} · #{seq} · {_e(why)}</div><p class="text">{_e(item["text"])}</p></li>')
 
 
@@ -449,10 +625,10 @@ def _job(job: dict[str, Any]) -> str:
 
 
 def _by_topic(listed: list[dict[str, Any]]) -> list[tuple[str | None, list[dict[str, Any]]]]:
-    """The conversations under each topic, topics in order, and the untagged in a group of their own last.
+    """The conversations under each topic, topics in order, and the untopiced in a group of their own last.
 
-    Untagged conversations are shown rather than dropped: a view that hid them would make a topic a
-    requirement instead of a label.
+    A thread has to be filed in a topic that exists, but a thread may still have none at all, and those
+    are shown rather than dropped: the index is the one place every conversation is reachable from.
     """
     groups: dict[str | None, list[dict[str, Any]]] = {}
     for item in listed:
@@ -462,9 +638,13 @@ def _by_topic(listed: list[dict[str, Any]]) -> list[tuple[str | None, list[dict[
 
 
 def _listing(item: dict[str, Any]) -> str:
+    # A thread a guest started says so, with the alias and its code, exactly as a guest's posts are
+    # attributed. A role's thread carries no alias, so it reads as it always did.
+    alias = (f' · started by {_e(item["created_by_alias"])} ({_e(item["created_by_alias_code"])})'
+             if item.get("created_by_alias") else "")
     return (f'<li><a href="/c/{_e(item["conversation_id"])}">{_e(item["title"])}</a>'
             f'<div class="meta">{_e(", ".join(item["participants"]))} · started '
-            f'{_time(item["created_at"])}</div></li>')
+            f'{_time(item["created_at"])}{alias}</div></li>')
 
 
 def _after_seq(value: str) -> int | None:
@@ -497,12 +677,15 @@ def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -
                 parents[seq] = found[0]
     items = _thread(page["messages"], conversation_id, parents)
     missing = _gap_summary(page["retention_gaps"])
-    more = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
+    measure = _gap_measure(page["retention_gaps"])
+    more = (f'<p class="pager"><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
             if later else "")
-    earlier = (f'<p><a href="/c/{_e(conversation_id)}?after_seq={max(0, after - messages.MAX_PAGE_MESSAGES)}">'
-               'Earlier messages</a></p>' if after > 0 else "")
-    return _page(200, title, f'<p><a href="/">All conversations</a></p><h1>{_e(title)}</h1>{earlier}{missing}'
-                             f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{more}')
+    earlier = (f'<p class="pager"><a href="/c/{_e(conversation_id)}'
+               f'?after_seq={max(0, after - messages.MAX_PAGE_MESSAGES)}">Earlier messages</a></p>'
+               if after > 0 else "")
+    return _page(200, title, '<p class="crumbs"><a href="/">All conversations</a></p>'
+                             f'<h1>{_e(title)}</h1>{earlier}{missing}'
+                             f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{measure}{more}')
 
 
 def _thread(items: list[dict[str, Any]], conversation_id: str = "",
@@ -534,16 +717,43 @@ def _gap_summary(gaps: list[dict[str, int]]) -> str:
     ranges = ", ".join(f"#{gap['from_seq']}" if gap["from_seq"] == gap["to_seq"]
                        else f"#{gap['from_seq']}–#{gap['to_seq']}"
                        for gap in sorted(gaps, key=lambda gap: gap["from_seq"]))
-    return f'<p class="notice">Not kept any more on this page: messages {_e(ranges)}</p>'
+    # Arriving by a message link skips the summary, so a bar at the bottom, where it can't cover the anchored message,
+    # points back to it. It is CSS only (the page runs no scripts): shown once the message's end is in view, and
+    # dismissed by the checkbox. The action row is a span so narrow screens can give it a row of its own.
+    return (f'<p class="notice" id="missing">Not kept any more on this page: messages {_e(ranges)}</p>'
+            '<input type="checkbox" id="gap-dismiss" class="gap-dismiss">' + _gap_bar())
+
+
+def _gap_measure(gaps: list[dict[str, int]]) -> str:
+    """The hidden copy of the bar, after the thread, that the reveal is timed on (see the stylesheet)."""
+    return _gap_bar(measure=True) if gaps else ""
+
+
+def _gap_bar(measure: bool = False) -> str:
+    """The bar's markup, built once for both the arrival bar and its hidden copy, so their contents can't drift apart.
+    The copy has no id or for, and is hidden from assistive technology."""
+    if measure:
+        return ('<p class="gap-bar gap-measure" aria-hidden="true">Some messages on this page are no longer kept'
+                '<span class="gap-sep"> · </span><span class="gap-actions"><a href="#missing">view ranges</a>'
+                '<label>Dismiss</label></span></p>')
+    return ('<p class="gap-bar">Some messages on this page are no longer kept<span class="gap-sep"> · </span>'
+            '<span class="gap-actions"><a href="#missing">view ranges</a>'
+            '<label for="gap-dismiss">Dismiss</label></span></p>')
+
+
+def _notice_words(notice: dict[str, Any], item: dict[str, Any]) -> str:
+    """What a host notice says. A topic move is a sentence the host wrote, naming no participant."""
+    if notice["event"] == "topic_moved":
+        return item["text"]
+    verb = "added" if notice["event"] == "participant_added" else "removed"
+    return f'{notice["participant"]} was {verb} by {notice["by"]}'
 
 
 def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | set[int] = frozenset(),
              conversation_id: str = "", parents: dict[int, dict[str, Any]] | None = None) -> str:
     notice = item.get("notice")
     if notice:
-        verb = "added" if notice["event"] == "participant_added" else "removed"
-        return (f'<li class="notice">{_e(notice["participant"])} was {verb} by {_e(notice["by"])}'
-                f' · {_time(item["at"])}{replies}</li>')
+        return f'<li class="notice">{_e(_notice_words(notice, item))} · {_time(item["at"])}{replies}</li>'
     relayed = "".join(
         f'<blockquote class="relayed"><p class="source">relayed from {_e(entry["source"])} at {_e(entry["at"])}'
         f'</p><p class="relayed-text">{_e(entry["text"])}</p></blockquote>' for entry in item.get("relayed") or [])
@@ -552,7 +762,7 @@ def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | 
     return (f'<li class="message" id="m-{item["seq"]}"><div class="meta"><span class="role">'
             f'{_e(messages.author_label(item))}</span>{badge} · {_time(item["at"])} · #{item["seq"]}</div>'
             f'{_reply_marker(item.get("reply_to"), on_page, conversation_id, parents or {})}'
-            f'<p class="text">{_e(item["text"])}</p>{relayed}{replies}</li>')
+            f'<p class="text">{_e(item["text"])}</p>{relayed}<span class="gap-end"></span>{replies}</li>')
 
 
 QUOTE = 160
@@ -589,7 +799,7 @@ def _page(status: int, title: str, body: str) -> Response:
 
 
 def _not_found() -> Response:
-    return _page(404, "Not found", '<p>Nothing here. <a href="/">All conversations</a></p>')
+    return _page(404, "Not found", '<p class="lead">Nothing here. <a href="/">All conversations</a></p>')
 
 
 def _e(value: Any) -> str:

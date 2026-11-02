@@ -14,6 +14,7 @@ from test_aliases import (
     payload,
     rpc,
 )
+from topic_backing import back_topics
 
 from baton import app, messages, store
 from baton.config import Role
@@ -41,6 +42,9 @@ async def call(client, host, name, arguments=None, role="guest"):
 
 
 async def board(client, host, topic="reviews"):
+    # The board a guest posts to is filed in a topic, which now has to exist; this file is about
+    # posting, so the topic is backed rather than opened through the tool.
+    back_topics(host.config.db_path, topic)
     return (
         await call(
             client,
@@ -269,6 +273,8 @@ def test_valid_proof_does_not_allow_guest_authority_or_forged_identity(posting_h
             "identity"
             not in next(tool for tool in listed if tool["name"] == "send_message")["inputSchema"]["properties"]
         )
+        # The guest slice grew deliberately: a guest may now start a thread, and read the topics it
+        # could be filed in. Everything below still holds -- each tool outside this set is refused.
         allowed = {
             "whoami",
             "alias_exists",
@@ -278,6 +284,9 @@ def test_valid_proof_does_not_allow_guest_authority_or_forged_identity(posting_h
             "get_message",
             "search",
             "send_message",
+            "create_conversation",
+            "list_topics",
+            "get_topic",
         }
         assert app.GUEST_TOOLS == allowed
         for tool in listed:
@@ -430,7 +439,7 @@ def test_schema_12_migrates_forward_preserving_aliases_and_existing_messages(pos
     db_path.chmod(0o600)
     conn = store.connect(db_path)
     try:
-        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 13
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == store.SCHEMA_VERSION
         assert {row["name"] for row in conn.execute("PRAGMA table_info(messages)")} >= {
             "alias_id",
             "alias",
@@ -444,7 +453,7 @@ def test_schema_12_migrates_forward_preserving_aliases_and_existing_messages(pos
             None,
         )
         principal = auth.static_token(posting_host.config, posting_host.tokens["guest"])
-        assert aliases.resolve_binding(conn, principal, proof)["alias_id"] == "immutable-alias"
+        assert aliases.resolve_binding(conn, proof)["alias_id"] == "immutable-alias"
         assert (
             aliases.claim(conn, posting_host.config, principal, "old-alias", "synthetic")["alias_id"]
             == "immutable-alias"
@@ -764,7 +773,9 @@ def test_selected_guest_reply_form_keeps_alias_and_code(posting_host, kind):
             client,
             posting_host,
             "send_message",
-            {"conversation_id": conv, "text": "selected reply target", "token": bound["binding_token"]},
+            # A fixed role's own post carries no token: a token on a fixed-role credential is refused.
+            {"conversation_id": conv, "text": "selected reply target",
+             **({"token": bound["binding_token"]} if kind == "guest" else {})},
             role="guest" if kind == "guest" else "planner",
         )
         conn = store.connect(posting_host.config.db_path)
@@ -792,7 +803,7 @@ def test_valid_optional_post_coercions_keep_sdk_compatibility(posting_host, role
             {
                 "conversation_id": conv,
                 "text": "valid optional fields",
-                "token": bound["binding_token"],
+                **({"token": bound["binding_token"]} if role == "guest" else {}),
                 "attention": '["worker"]',
                 "needs_decision": "false",
                 "request_id": messages.new_request_id(),

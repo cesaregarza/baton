@@ -8,10 +8,11 @@ between a read and the write that depends on it.
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
@@ -19,12 +20,11 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 17
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
 
-# A message's retry identity outlives its text: retention may delete the
-# message, but a retry of its request still replays from here. A direct send
+# A message's retry identity is its own record, so a retry of its request still replays from here. A direct send
 # records its `seq`; a conversation send records each recipient's in `seqs`.
 _MESSAGE_REQUESTS = """CREATE TABLE IF NOT EXISTS message_requests (
         request_id TEXT PRIMARY KEY,
@@ -90,6 +90,13 @@ _ADDED_COLUMNS = {
     11: {"generations": ("watermark_epoch TEXT", "watermark_seq INTEGER", "activated_at TEXT", "deactivated_at TEXT",
                          "dropped_at TEXT", "last_write_at TEXT")},
     13: {"messages": ("alias_id TEXT REFERENCES aliases(id)", "alias TEXT", "alias_code TEXT")},
+    # Who started a guest thread, recorded the way a guest post is attributed. A thread a role started
+    # leaves all three NULL.
+    15: {"conversations": ("created_by_alias_id TEXT REFERENCES aliases(id)", "created_by_alias TEXT",
+                           "created_by_alias_code TEXT")},
+    # A topic's stable id, beside its path. SQLite cannot add a UNIQUE or NOT NULL column in place, so the
+    # column is added bare here, and `_give_topic_ids` gives every existing topic its own id and the index.
+    16: {"topics": ("id TEXT",)},
 }
 _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
@@ -106,8 +113,8 @@ _BACKFILL = {
 _ADDED_TABLES = {
     # The browser seat (`baton.seat`).
     8: ("seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"),
-    # The conversation change log and its epoch and retention floor (`baton.changes`). The search index is
-    # not listed: it exists only where SQLite has FTS5.
+    # The conversation change log, with its epoch and the floor an earlier prune left (`baton.changes`). The
+    # search index is not listed: it exists only where SQLite has FTS5.
     9: ("change_log", "log_meta"),
     # The local indexing writer's derived data (`baton.derived`). Its keyword index is not listed, for the
     # same reason as the messages'.
@@ -117,8 +124,71 @@ _ADDED_TABLES = {
     11: ("vectors", "vector_skips"),
     12: ("aliases", "alias_bindings", "alias_claims"),
     13: ("alias_posts",),
+    # Per-call identity (`baton.aliases`): owner arms, core enrolment and the current alias-to-role mapping.
+    14: ("alias_arms", "core_enrolment", "alias_roles", "events_targets"),
+    # Topics as containers (`baton.topics`).
+    15: ("topics",),
+    # Every change a topic undergoes, one row each (`baton.topics`).
+    16: ("topic_changes",),
+    # The owner's topic grant records and their event log (`baton.topic_grants`).
+    17: ("topic_grants", "topic_grant_events"),
 }
-_STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys()))
+
+
+def _discover_topics(conn: sqlite3.Connection) -> None:
+    """Record a topic for every label the conversations already carry, and for each missing parent.
+
+    Data-driven rather than a fixed list, so a database holding labels this release never saw still
+    upgrades. A stored label that fails the topic grammar stops the upgrade and names itself: dropping
+    it would leave its threads pointing at a topic that does not exist, and the whole upgrade is one
+    transaction, so refusing here leaves the old database exactly as it was.
+
+    Members come from the threads filed directly under a path, never from a subtopic's, so a parent
+    never gains a recipient who was not already in one of its own threads. A membership too small to
+    receive a guest thread is stored empty instead, for a core role to set with `update_topic`; the
+    checks that need the config -- a role it no longer has, or more members than it allows -- belong
+    to admission, which can see it, and the schema stays independent of any one host's config.
+    """
+    from baton import conversations, events  # lazily: both import this module
+
+    stored = [row[0] for row in conn.execute(
+        "SELECT DISTINCT topic FROM conversations WHERE topic IS NOT NULL ORDER BY topic")]
+    for label in stored:
+        conversations.check_topic(label, field="the stored conversation topic")
+    stamp = events.now()
+    for path in sorted({part for label in stored for part in (label, label.split("/")[0])}):
+        members = [row[0] for row in conn.execute(
+            "SELECT DISTINCT p.role FROM participants p JOIN conversations c ON c.id = p.conversation_id"
+            " WHERE c.topic = ? AND p.role != 'guest' ORDER BY p.role", (path,))]
+        if len(members) < conversations.MIN_PARTICIPANTS:
+            members = []
+        conn.execute("INSERT OR IGNORE INTO topics (id, path, title, members, created_by, created_at)"
+                     " VALUES (?, ?, ?, ?, 'migration', ?)",
+                     (new_topic_id(), path, path.split("/")[-1], json.dumps(members), stamp))
+
+
+def new_topic_id() -> str:
+    """A topic's id. Random, never derived from the path: a path a rename frees and a new topic reuses gets a new id."""
+    return "topic_" + secrets.token_hex(8)
+
+
+def _give_topic_ids(conn: sqlite3.Connection) -> None:
+    """Give every topic that has no id its own, then make the id unique for every topic from here on.
+
+    Each id is drawn in code, so no two topics can share one even on a database that began without the
+    column. A fresh database declares the column unique and never runs this.
+    """
+    for (path,) in conn.execute("SELECT path FROM topics WHERE id IS NULL").fetchall():
+        conn.execute("UPDATE topics SET id = ? WHERE path = ?", (new_topic_id(), path))
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS topics_by_id ON topics (id)")
+
+
+# Steps a plain statement cannot express, because they read the data and may refuse the upgrade.
+_PROCEDURES: dict[int, tuple[Callable[[sqlite3.Connection], None], ...]] = {
+    15: (_discover_topics,),
+    16: (_give_topic_ids,),
+}
+_STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys() | _PROCEDURES.keys()))
 
 # One statement per entry: executescript() would commit on its own, outside
 # the transaction that creates the schema.
@@ -143,6 +213,36 @@ _SCHEMA = (
         credential TEXT NOT NULL,
         name TEXT NOT NULL,
         at REAL NOT NULL
+    )""",
+    # An owner's single-use arm: `enrol` names a role that may enrol itself, `rekey` an alias whose next claim
+    # with a new passphrase replaces its verifier. Each expires on its own; a new arm for a target replaces the
+    # old one under a new `id`, so a claim spends only the arm it checked.
+    """CREATE TABLE IF NOT EXISTS alias_arms (
+        id TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('enrol', 'rekey')),
+        target TEXT NOT NULL,
+        expires_at REAL NOT NULL,
+        PRIMARY KEY (kind, target)
+    )""",
+    # Each role's one enrolment, kept as history and never deleted.
+    """CREATE TABLE IF NOT EXISTS core_enrolment (
+        role TEXT PRIMARY KEY,
+        alias_id TEXT NOT NULL UNIQUE REFERENCES aliases(id),
+        enrolled_at REAL NOT NULL,
+        unmapped_at REAL
+    )""",
+    # The current mapping: a proof for `alias_id` makes a call run as `role`. Unique both ways.
+    """CREATE TABLE IF NOT EXISTS alias_roles (
+        role TEXT PRIMARY KEY,
+        alias_id TEXT NOT NULL UNIQUE REFERENCES aliases(id)
+    )""",
+    # Where an OAuth grant's event subscriptions deliver: the role its alias is mapped to, checked on every wake.
+    # `authority` is the grant's `auth.credential_authority`, so a sweep can drop rows whose grant has ended.
+    """CREATE TABLE IF NOT EXISTS events_targets (
+        grant_id TEXT PRIMARY KEY,
+        alias_id TEXT NOT NULL REFERENCES aliases(id),
+        authority TEXT NOT NULL,
+        bound_at REAL NOT NULL
     )""",
     # Admitted guest post attempts, bounded by hourly alias/credential limits; never proof values.
     """CREATE TABLE IF NOT EXISTS alias_posts (
@@ -173,11 +273,80 @@ _SCHEMA = (
         escalated_at TEXT,
         topic TEXT,
         revision INTEGER NOT NULL DEFAULT 0,
-        last_activity_at TEXT
+        last_activity_at TEXT,
+        created_by_alias_id TEXT REFERENCES aliases(id),
+        created_by_alias TEXT,
+        created_by_alias_code TEXT
     )""",
-    # Every change to a conversation's source, in order: a message added, a copy expired by retention, a
-    # participant added or removed. Each carries the revision it bumped the conversation to. Only source
-    # changes are logged; reading logs nothing. See baton.changes.
+    # A topic a core role opened on purpose: the container a thread is filed in, keyed by the same
+    # 1-2 segment path that `conversations.topic` holds, so every existing filter keeps working on the
+    # same text. The parent is implied by the path and depth stays at two, so there is no parent column.
+    # `members` is the JSON list of roles a guest thread here is delivered to, read at creation and
+    # copied into that thread's participants: it is a default for new threads, never a live grant.
+    """CREATE TABLE IF NOT EXISTS topics (
+        path TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        members TEXT NOT NULL DEFAULT '[]',
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        request_id TEXT UNIQUE,
+        request_digest TEXT,
+        id TEXT NOT NULL UNIQUE
+    )""",
+    # Every change to a topic, appended and never edited: what it was, what it became, and who made the change
+    # (`actor` names the alias behind a call when there was one). `topic_id` is the topic acted on, so a rename
+    # keeps the history with the topic and a reused path starts a new one. `grant_id` stays NULL until a later
+    # change fills it. A set_topic row names the topic the conversation moved into, or left when it was cleared.
+    # No foreign key to `topics`: this table is created before an upgrade adds `topics.id`, and nothing deletes a topic.
+    """CREATE TABLE IF NOT EXISTS topic_changes (
+        topic_id TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        grant_id TEXT,
+        before TEXT,
+        after TEXT,
+        at TEXT NOT NULL
+    )""",
+    # An owner's topic grant for one alias: proposed, then authorized, then possibly revoked. The proposed
+    # fields never change, and an authorization or revocation only fills its own. No state is stored; the state
+    # is derived from these columns and the clock (`baton.topic_grants`). Only the key's sha256 is kept.
+    """CREATE TABLE IF NOT EXISTS topic_grants (
+        id TEXT PRIMARY KEY,
+        alias_id TEXT NOT NULL,
+        topic_id TEXT NOT NULL,
+        capabilities TEXT NOT NULL,
+        inherit INTEGER NOT NULL,
+        expires_at TEXT NOT NULL,
+        proposed_by TEXT NOT NULL,
+        proposed_at TEXT NOT NULL,
+        proposal_expires_at TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        authorized_by TEXT,
+        authorized_at TEXT,
+        authorized_digest TEXT,
+        proof_digest TEXT,
+        revoked_at TEXT,
+        revoked_by TEXT,
+        revoke_reason TEXT,
+        alias_name_seen TEXT NOT NULL,
+        alias_code_seen TEXT NOT NULL,
+        topic_path_seen TEXT NOT NULL
+    )""",
+    # Every grant event, appended and never edited. `detail` is JSON or NULL, and never holds a key.
+    # No foreign keys, as with `topic_changes`: nothing deletes a row.
+    """CREATE TABLE IF NOT EXISTS topic_grant_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        grant_id TEXT NOT NULL,
+        event TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        detail TEXT,
+        at TEXT NOT NULL
+    )""",
+    # Every change to a conversation's source, in order: a message added, a participant added or removed, and,
+    # in logs from before copies stopped expiring, a copy expired by retention. Each carries the revision it
+    # bumped the conversation to. Only source changes are logged; reading logs nothing. See baton.changes.
     """CREATE TABLE IF NOT EXISTS change_log (
         change_seq INTEGER PRIMARY KEY AUTOINCREMENT,
         conversation_id TEXT NOT NULL,
@@ -187,7 +356,7 @@ _SCHEMA = (
         role TEXT,
         at TEXT NOT NULL
     )""",
-    # The log's identity (`log_epoch`) and how far retention has pruned it (`pruned_through`).
+    # The log's identity (`log_epoch`) and how far an earlier prune reached (`pruned_through`).
     "CREATE TABLE IF NOT EXISTS log_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     # Derived data, written only by the local indexing writer (baton.derived). A generation is one producer's
     # set of artifacts; each producer has one so far, created by its first batch.
@@ -254,8 +423,6 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS artifact_inputs_by_seq ON artifact_inputs (conversation_id, from_seq, to_seq)",
     "CREATE INDEX IF NOT EXISTS artifact_inputs_by_version ON artifact_inputs (version_id)",
     "CREATE TABLE IF NOT EXISTS artifact_depends_on (version_id TEXT PRIMARY KEY, prior_id TEXT NOT NULL)",
-    # A commit's retry identity and receipt. Kept apart from batches and versions, so a replay is answered
-    # from this row alone after either is cleaned up, until `expires_at`.
     # One vector per item per generation, as little-endian float32; Baton stores them and never computes one.
     """CREATE TABLE IF NOT EXISTS vectors (
         generation TEXT NOT NULL,
@@ -274,6 +441,8 @@ _SCHEMA = (
         reason TEXT NOT NULL,
         PRIMARY KEY (generation, item_kind, item_id)
     )""",
+    # A commit's retry identity and receipt, kept apart from batches and versions so a replay is answered
+    # from this row alone until `expires_at`.
     """CREATE TABLE IF NOT EXISTS commit_requests (
         producer TEXT NOT NULL,
         request_id TEXT NOT NULL,
@@ -428,6 +597,19 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     conn.execute("COMMIT")
 
 
+@contextmanager
+def snapshot(conn: sqlite3.Connection) -> Iterator[None]:
+    """One read transaction, so every statement inside sees the same state of the database."""
+    if conn.in_transaction:  # the caller's transaction is already one snapshot
+        yield
+        return
+    conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        conn.execute("COMMIT")
+
+
 def _refuse_other_schema(conn: sqlite3.Connection) -> None:
     """Refuse a database made by another schema version before anything, even the journal mode, changes it."""
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").fetchone():
@@ -482,6 +664,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
             for statement in _BACKFILL.get(step, ()):
                 conn.execute(statement)
+            for procedure in _PROCEDURES.get(step, ()):
+                procedure(conn)
         # A random epoch no client can already hold, written once: at creation, or at the upgrade adding the log.
         conn.execute("INSERT OR IGNORE INTO log_meta (key, value) VALUES ('log_epoch', ?), ('pruned_through', '0')",
                      (secrets.token_hex(16),))

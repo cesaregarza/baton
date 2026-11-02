@@ -65,6 +65,10 @@ class UnknownConversation(BatonError):
     code = "unknown_conversation"
 
 
+class UnknownTopic(BatonError):
+    code = "unknown_topic"
+
+
 class NotAParticipant(BatonError):
     code = "not_a_participant"
 
@@ -204,7 +208,7 @@ class ReconcileRequired(BatonError):
 
 
 class CursorExpired(BatonError):
-    """The change-log position is from another log, or older than what retention kept: start again from state."""
+    """The change-log position is from another log, or older than the oldest change kept: start again from state."""
 
     code = "cursor_expired"
 

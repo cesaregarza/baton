@@ -3,8 +3,8 @@
 A conversation send stores one copy per other participant, each as that
 recipient's next mailbox seq and all under one shared message_id, in one
 transaction: every recipient gets its copy or none does. Each copy keeps what
-a direct message guarantees: the reader's gap-free seq and cursors, coalesced
-wakes and retention. The sender gets no copy, so it is never woken by its own
+a direct message guarantees: the reader's gap-free seq and cursors, and coalesced
+wakes. The sender gets no copy, so it is never woken by its own
 message.
 
 `history` is separate from that delivery: it returns the conversation as a
@@ -38,7 +38,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from baton import board_read, changes, events, messages
+from baton import board_read, changes, events, messages, topic_grants, topics
 from baton.config import Config, Conversations
 from baton.errors import (
     ConversationFull,
@@ -46,11 +46,12 @@ from baton.errors import (
     ConversationsDisabled,
     Forbidden,
     InvalidRequest,
+    LimitExceeded,
     NotAParticipant,
     UnknownConversation,
     UnknownRole,
 )
-from baton.store import transaction
+from baton.store import snapshot, transaction
 
 MAX_TITLE = 200
 MIN_PARTICIPANTS = 2
@@ -85,24 +86,65 @@ def check_topic(topic: Any, field: str = "topic") -> str | None:
 
 
 def set_topic(conn: sqlite3.Connection, config: Config, conversation_id: str, topic: Any, *,
-              actor: str) -> dict[str, Any]:
+              actor: str, identity: dict[str, str] | None = None,
+              seen: dict[str, Any] | None = None, grant_key: str | None = None) -> dict[str, Any]:
     """Set, rename or clear a conversation's topic. `None` clears it; the conversation's id never changes.
 
-    Takes the same permission as managing participants, and membership of this conversation: a label on
-    a conversation is the conversation's own business.
+    A core role needs the permission to manage participants, and membership of this conversation: a label on
+    a conversation is the conversation's own business. A guest holding `grant_key` needs neither: it may move a
+    thread whose topic and destination its grant covers, and the thread's participants are told. A move that
+    changes the topic is recorded in the topic history; one that changes nothing is not.
     """
     require_enabled(config)
-    if not config.roles[actor].can_manage_participants:
+    if grant_key is None and not config.roles[actor].can_manage_participants:
         raise Forbidden(f"{actor} may not change a conversation's topic "
                         f"(roles.{actor}.can_manage_participants)")
     topic = check_topic(topic)
     with transaction(conn):
         before = _load(conn, conversation_id)["topic"]
-        if actor not in _participants(conn, conversation_id):
-            raise NotAParticipant(f"{actor} is not in {conversation_id}")
+        grant = _authorize_move(conn, actor, conversation_id, before, topic, identity, grant_key)
+        grant_id = None if grant is None else grant["id"]
+        if topic is not None:
+            # A topic is a container now, so a conversation cannot be filed somewhere that isn't one.
+            # Clearing it to None stays allowed, and moving a thread never changes its participants.
+            topics.record_seen(seen, topic, topics.require_exists(conn, topic), grant_id=grant_id)
         if topic != before:
             conn.execute("UPDATE conversations SET topic = ? WHERE id = ?", (topic, conversation_id))
+            who = topics.history_actor(actor, identity)
+            topics.record_move(conn, conversation_id=conversation_id, actor=who, before=before, after=topic,
+                               grant_id=grant_id)
+            if grant is not None:
+                _tell_of_move(conn, conversation_id, grant, identity or {}, who, before, topic)
     return {"conversation_id": conversation_id, "topic": topic, "changed": topic != before}
+
+
+def _authorize_move(conn: sqlite3.Connection, actor: str, conversation_id: str, before: str | None, after: str | None,
+                    identity: dict[str, str] | None, grant_key: str | None) -> sqlite3.Row | None:
+    """A core role must be in the thread. A guest needs the grant its key opens to cover both ends of the move.
+
+    Both ends, because the source is as much a claim as the destination: a grant on the destination alone would let
+    its holder pull any thread in, or one on the source alone push threads out of its reach. A thread with no
+    topic, or a label with no topic row, covers nothing.
+    """
+    if grant_key is None:
+        if actor not in _participants(conn, conversation_id):
+            raise NotAParticipant(f"{actor} is not in {conversation_id}")
+        return None
+    grant = topic_grants.grant_for_use(conn, identity, grant_key)
+    # The refusal does not name the source: the caller never supplied it and may not be able to read the thread.
+    topic_grants.require_covers(conn, grant, "thread.organise", before, shown="this thread's current topic")
+    topic_grants.require_covers(conn, grant, "thread.organise", after)
+    return grant
+
+
+def _tell_of_move(conn: sqlite3.Connection, conversation_id: str, grant: sqlite3.Row, identity: dict[str, str],
+                  who: str, before: str | None, after: str | None) -> None:
+    """A host notice to every participant that a grantee moved their thread, and under which grant."""
+    notice = {"event": "topic_moved", "from": before, "to": after, "by": who, "alias": identity["alias"],
+              "alias_code": identity["code"], "grant_id": grant["id"]}
+    text = (f"alias {identity['alias']} ({identity['code']}) moved this thread from {before} to {after} "
+            f"under topic grant {grant['id']}")
+    _fan_out(conn, conversation_id, _participants(conn, conversation_id), sender=None, text=text, notice=notice)
 
 
 def require_enabled(config: Config) -> Conversations:
@@ -111,37 +153,142 @@ def require_enabled(config: Config) -> Conversations:
     return config.conversations
 
 
-def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str, participants: list[str],
-           topic: Any = None, request_id: str | None = None) -> dict[str, Any]:
-    """Open a conversation among `participants`, who must include `actor`. A retry with the same request_id replays."""
+def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str,
+           participants: list[str] | None = None, topic: Any = None, request_id: str | None = None,
+           identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Open a conversation. A retry with the same request_id replays rather than opening a second one.
+
+    A role names its own `participants`, which must include it. A guest instead presents an alias
+    binding, which the guard resolves into `identity`, and names a topic: the thread goes to that
+    topic's members, so a guest decides what to start and the topic decides who hears it. The guest
+    path is the only one that takes an identity, and `actor` is already the effective role, so an
+    enrolled alias mapped to a role comes through here as that role and takes the role's path.
+    """
     settings = require_enabled(config)
-    if not config.roles[actor].can_create_conversations:
+    guest = actor == "guest"
+    if guest:
+        _admit_guest_thread(config, identity)
+    elif not config.roles[actor].can_create_conversations:
         raise Forbidden(f"{actor} may not create conversations (roles.{actor}.can_create_conversations)")
     request_id = request_id or messages.new_request_id()
     if not 1 <= len(request_id) <= 200 or not 1 <= len(title) <= MAX_TITLE:
         raise InvalidRequest(f"request_id is 1-200 characters and title 1-{MAX_TITLE}")
     topic = check_topic(topic)
-    roles = _check_roles(config, participants)
-    if not MIN_PARTICIPANTS <= len(roles) <= settings.max_participants:
-        raise InvalidRequest(f"a conversation has {MIN_PARTICIPANTS}-{settings.max_participants} participants")
-    if actor not in roles:
-        raise InvalidRequest(f"the creator, {actor}, must be one of the participants")
-    digest = events.request_digest("create_conversation", {"actor": actor, "title": title,
-                                                           "participants": sorted(roles),
-                                                           **({"topic": topic} if topic else {})})
+    if guest:
+        if participants:
+            raise InvalidRequest("a guest does not name participants: the topic's members receive its thread")
+        if topic is None:
+            raise InvalidRequest("a guest's thread needs a topic to go in; list_topics shows them")
+    # The guest digest is deliberately alias-and-topic only: members are derived and may change, and a
+    # replay has to match after a member edit or a rename.
+    digest = events.request_digest("create_conversation", {
+        "actor": actor, "title": title, **({"topic": topic} if topic else {}),
+        **({"alias_id": identity["alias_id"]} if guest else {"participants": sorted(_check_roles(
+            config, participants))})})
+    refusal = None
     with transaction(conn):
         existing = events.replayed(conn, "conversations", request_id, digest)
         if existing is not None:
+            topics.note_replay(conn, seen, topic, existing["topic"])
             return {**_summary(conn, existing), "request_id": request_id, "created": False}
-        conversation_id = f"conv_{uuid.uuid4().hex[:16]}"
-        stamp = events.now()
-        conn.execute("INSERT INTO conversations (id, request_id, request_digest, title, created_by,"
-                     " created_at, topic) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                     (conversation_id, request_id, digest, title, actor, stamp, topic))
-        conn.executemany("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
-                         [(conversation_id, role, stamp) for role in roles])
-        summary = _summary(conn, _load(conn, conversation_id))
+        topics.note_path(conn, seen, topic)
+        if guest:
+            roles = topics.members_for_thread(conn, config, topic)
+            # Returned rather than raised: when the guest-wide cap is full this also stores the alert,
+            # which has to commit with the refusal rather than be rolled back by it.
+            refusal = _thread_cap_refusal(conn, config, identity)
+        else:
+            roles = _check_roles(config, participants)
+            if not MIN_PARTICIPANTS <= len(roles) <= settings.max_participants:
+                raise InvalidRequest(f"a conversation has {MIN_PARTICIPANTS}-{settings.max_participants} "
+                                     "participants")
+            if actor not in roles:
+                raise InvalidRequest(f"the creator, {actor}, must be one of the participants")
+            if topic is not None:
+                topics.require_exists(conn, topic)
+        if refusal is None:
+            conversation_id = f"conv_{uuid.uuid4().hex[:16]}"
+            stamp = events.now()
+            conn.execute("INSERT INTO conversations (id, request_id, request_digest, title, created_by,"
+                         " created_at, topic, created_by_alias_id, created_by_alias, created_by_alias_code)"
+                         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         (conversation_id, request_id, digest, title, actor, stamp, topic,
+                          *((identity["alias_id"], identity["alias"], identity["code"]) if guest
+                            else (None, None, None))))
+            conn.executemany("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
+                             [(conversation_id, role, stamp) for role in roles])
+            summary = _summary(conn, _load(conn, conversation_id))
+    if refusal is not None:
+        raise refusal
     return {**summary, "request_id": request_id, "created": True}
+
+
+def _thread_cap_refusal(conn: sqlite3.Connection, config: Config,
+                        identity: dict[str, str]) -> LimitExceeded | None:
+    """Whether this guest thread is over either hourly cap, counted inside the caller's write lock.
+
+    Both windows are counted from `conversations` itself, so there is no second table to keep in step,
+    and the write lock the transaction already holds is what stops two creates both slipping under a
+    cap. A refusal is returned, not raised: the guest-wide case also stores an alert that has to be
+    committed by this transaction rather than rolled back by the exception.
+    """
+    since = (datetime.now(UTC) - RATE_WINDOW).isoformat()
+    settings = config.aliases
+    mine = conn.execute("SELECT COUNT(*) FROM conversations WHERE created_by_alias_id = ? AND created_at > ?",
+                        (identity["alias_id"], since)).fetchone()[0]
+    everyone = conn.execute("SELECT COUNT(*) FROM conversations WHERE created_by = 'guest' AND created_at > ?",
+                            (since,)).fetchone()[0]
+    over_alias = mine >= settings.max_threads_per_alias_per_hour
+    over_guests = everyone >= settings.max_threads_per_guest_per_hour
+    if not over_alias and not over_guests:
+        return None
+    reached = []
+    if over_alias:
+        reached.append(f"{settings.max_threads_per_alias_per_hour} for this alias")
+    if over_guests:
+        reached.append(f"{settings.max_threads_per_guest_per_hour} across all guests")
+        _alert_guest_cap(conn, config)
+    return LimitExceeded("new guest threads are over their hourly limit: " + " and ".join(reached),
+                         "threads_per_guest" if over_guests else "threads_per_alias")
+
+
+def _alert_guest_cap(conn: sqlite3.Connection, config: Config) -> None:
+    """Tell the alert role the guest-wide cap filled, at most once an hour.
+
+    The timestamp is persisted in the same transaction as the refusal, so a restart cannot turn one
+    alert into a flood, and a full mailbox leaves it unset so the next refusal tries again rather than
+    the hour passing in silence. Nothing is stored when no alert role is configured.
+    """
+    role = config.aliases.guest_cap_alert_role
+    if role is None:
+        return
+    now = datetime.now(UTC)
+    row = conn.execute("SELECT value FROM log_meta WHERE key = 'guest_thread_cap_alerted_at'").fetchone()
+    if row is not None and row["value"] > (now - RATE_WINDOW).isoformat():
+        return
+    if messages.unread(conn, role) >= messages.MAX_UNREAD:
+        return  # Storing would raise MailboxFull and lose the refusal; the timestamp stays unset.
+    limit = config.aliases.max_threads_per_guest_per_hour
+    conn.execute("INSERT INTO log_meta (key, value) VALUES ('guest_thread_cap_alerted_at', ?)"
+                 " ON CONFLICT (key) DO UPDATE SET value = excluded.value", (now.isoformat(),))
+    messages.store_copy(conn, message_id=messages.new_message_id(), sender=None, recipient=role,
+                        text=f"Guest threads reached their hourly limit of {limit} across all guests. "
+                             "Further guest threads are refused until the window moves.",
+                        notice={"event": "guest_threads.cap_reached", "limit": limit, "window": "1h"})
+
+
+def _admit_guest_thread(config: Config, identity: dict[str, str] | None) -> None:
+    """A guest needs a live alias binding, and a guest role that already reads the board.
+
+    The read requirement is what keeps this from widening anything: starting a thread never grants a
+    guest sight of a conversation it could not already see.
+    """
+    if not identity or not identity.get("alias_id"):
+        raise Forbidden("alias binding is missing, invalid or expired")
+    role = config.roles.get("guest")
+    if role is None or not role.can_view_all_conversations:
+        raise Forbidden("this host's guests do not read board conversations "
+                        "(roles.guest.can_view_all_conversations), so they cannot start a thread either")
 
 
 def list_for(conn: sqlite3.Connection, role: str, topic: Any = None, *, limit: int = MAX_LISTED,
@@ -187,13 +334,20 @@ def page_cursor(summary: dict[str, Any]) -> tuple[str, str]:
 
 def list_readable(conn: sqlite3.Connection, config: Config, role: str, topic: Any = None, *,
                   limit: int = MAX_LISTED, before: tuple[str, str] | None = None,
-                  changed_since: str | None = None, _lookahead: bool = False) -> list[dict[str, Any]]:
-    """List the conversations this role may read under the shared board predicate."""
-    if board_read.sees_all(config, role):
-        return list_all(conn, topic, limit=limit, before=before, changed_since=changed_since,
+                  changed_since: str | None = None, _lookahead: bool = False,
+                  seen: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """List the conversations this role may read under the shared board predicate.
+
+    The topic's id and the listing are read in one snapshot, so a rename and reuse of the path in between
+    cannot make the listing describe a different topic from the one the audit line names.
+    """
+    with snapshot(conn):
+        topics.note_path(conn, seen, check_topic(topic))
+        if board_read.sees_all(config, role):
+            return list_all(conn, topic, limit=limit, before=before, changed_since=changed_since,
+                            _lookahead=_lookahead)
+        return list_for(conn, role, topic, limit=limit, before=before, changed_since=changed_since,
                         _lookahead=_lookahead)
-    return list_for(conn, role, topic, limit=limit, before=before, changed_since=changed_since,
-                    _lookahead=_lookahead)
 
 
 def _before(before: tuple[str, str] | None, alias: str) -> tuple[str, tuple[str, ...]]:
@@ -293,18 +447,17 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
                                             **({"attention": attention} if attention else {}),
                                             **({"needs_decision": True} if needs_decision else {})})
     with transaction(conn):
-        if guest:
-            _load(conn, conversation_id)
-            if not board_read.may_read_conversation(conn, config, sender, conversation_id):
-                raise Forbidden("guest may post only to a readable board conversation")
+        # Current authorization first, so a retry never returns a cached result to a sender who lost it.
+        conversation = _load(conn, conversation_id)
+        participants = _participants(conn, conversation_id)
+        if guest and not board_read.may_read_conversation(conn, config, sender, conversation_id):
+            raise Forbidden("guest may post only to a readable board conversation")
+        if not guest and sender not in participants:
+            raise NotAParticipant(f"{sender} is not in {conversation_id}")
         existing = events.replayed(conn, "message_requests", request_id, digest)
         if existing is not None:
             return {"message_id": existing["message_id"], "conversation_id": conversation_id,
                     "seqs": json.loads(existing["seqs"]), "request_id": request_id, "created": False}
-        conversation = _load(conn, conversation_id)
-        participants = _participants(conn, conversation_id)
-        if not guest and sender not in participants:
-            raise NotAParticipant(f"{sender} is not in {conversation_id}")
         recipients = [role for role in participants if role not in (sender, "guest")]
         if not recipients:
             raise InvalidRequest("conversation has no eligible delivery recipients; no message was stored")
@@ -429,7 +582,7 @@ def _has_readable_seq(conn: sqlite3.Connection, condition: str, values: dict[str
 
 
 def gap_words(gap: dict[str, int]) -> str:
-    """What a page says where `read_history` reports a retention gap."""
+    """What a page says where `read_history` reports a gap."""
     first, last = gap["from_seq"], gap["to_seq"]
     return (f"Message #{first} is" if first == last else f"Messages #{first}–#{last} are") + " no longer kept."
 
@@ -577,10 +730,15 @@ def _history_entry(row: sqlite3.Row, reply_to: dict[str, Any] | None = None) -> 
 
 
 def _summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    # The alias pair appears only on a thread a guest started, the way a guest post's attribution does,
+    # so a role's thread reads exactly as it did before.
+    alias = ({"created_by_alias": row["created_by_alias"], "created_by_alias_code": row["created_by_alias_code"]}
+             if row["created_by_alias_id"] else {})
     return {"conversation_id": row["id"], "title": row["title"], "topic": row["topic"],
             "created_by": row["created_by"], "created_at": row["created_at"],
             "participants": _participants(conn, row["id"]), "revision": row["revision"],
-            "last_seq": row["last_seq"], "last_activity_at": row["last_activity_at"] or row["created_at"]}
+            "last_seq": row["last_seq"], "last_activity_at": row["last_activity_at"] or row["created_at"],
+            **alias}
 
 
 def utc_iso(moment: str, name: str) -> str:
