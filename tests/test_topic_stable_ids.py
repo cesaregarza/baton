@@ -275,16 +275,19 @@ def test_rename_topic_writes_one_row_with_the_old_and_new_path(db, config):  # F
     assert decoded(row, "after")["path"] == "platform"
 
 
-def test_renaming_a_topic_with_subtopics_is_still_one_row_for_the_topic_named(db, config):  # FAILS-ON-MAIN
-    """One call, one row: the subtopics' new paths are a consequence, and their ids are unchanged."""
+def test_a_rename_writes_one_row_for_the_topic_named_and_one_for_each_subtopic_it_moves(db, config):  # FAILS-ON-MAIN
+    """Grants follow ids, so history by id must show every path change: the subtopic's id is unchanged and its
+    path is not."""
     make_topic(db, config, "baton")
     make_topic(db, config, "baton/development")
-    root = id_of(db, "baton")
+    root, child = id_of(db, "baton"), id_of(db, "baton/development")
     topics.rename(db, config, actor=O, path="baton", new_path="platform")
-    rows = history(db)
-    assert len(rows) == 3
-    assert rows[-1]["topic_id"] == root
-    assert rows[-1]["operation"] == "rename_topic"
+    renames = {row["topic_id"]: row for row in history(db) if row["operation"] == "rename_topic"}
+    assert len(history(db)) == 4 and set(renames) == {root, child}
+    assert (decoded(renames[root], "before")["path"], decoded(renames[root], "after")["path"]) == (
+        "baton", "platform")
+    assert (decoded(renames[child], "before")["path"], decoded(renames[child], "after")["path"]) == (
+        "baton/development", "platform/development")
 
 
 def test_set_topic_writes_one_row_with_the_old_and_new_topic(db, config):  # FAILS-ON-MAIN

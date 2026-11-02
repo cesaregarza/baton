@@ -120,7 +120,8 @@ def test_a_grant_listing_all_three_covers_each(build_world):
 def test_a_grant_follows_its_topic_through_a_rename(build_world):
     w = build_world()
     made = w.activate(topic=ROOT, inherit=True)["id"]
-    topics.rename(w.db, w.config, actor="orchestrator", path=ROOT, new_path="work-search")
+    topics.rename(w.db, w.config, actor="orchestrator", path=ROOT, new_path="work-search",
+                  acknowledge_topic_grants=[made])
     assert covered(w, made, "work-search", "work-search/x") == ["work-search", "work-search/x"]
     assert covered(w, made, ROOT, CHILD) == [], "the old paths are no topics at all now"
     assert w.state(made) == "active", "a rename does not touch the grant's own digest"
@@ -130,7 +131,8 @@ def test_a_grant_follows_its_topic_through_a_rename(build_world):
 def test_a_new_topic_at_a_path_a_rename_freed_is_not_covered(build_world):
     w = build_world()
     made = w.activate(topic=ROOT, inherit=True)["id"]
-    topics.rename(w.db, w.config, actor="orchestrator", path=ROOT, new_path="work-search")
+    topics.rename(w.db, w.config, actor="orchestrator", path=ROOT, new_path="work-search",
+                  acknowledge_topic_grants=[made])
     back_topics(w.db, ROOT, "job-hunt/fresh")
     assert w.topic_id(ROOT) != w.row(made)["topic_id"]
     assert covered(w, made, ROOT, "job-hunt/fresh") == []
@@ -140,7 +142,8 @@ def test_a_new_topic_at_a_path_a_rename_freed_is_not_covered(build_world):
 def test_a_subtopic_is_judged_by_its_parents_current_path_after_a_rename(build_world):
     w = build_world()
     made = w.activate(topic=ROOT, inherit=True)["id"]
-    topics.rename(w.db, w.config, actor="orchestrator", path=ROOT, new_path=LOOKALIKE + "-two")
+    topics.rename(w.db, w.config, actor="orchestrator", path=ROOT, new_path=LOOKALIKE + "-two",
+                  acknowledge_topic_grants=[made])
     assert covered(w, made, LOOKALIKE + "-two/x") == [LOOKALIKE + "-two/x"]
     assert w.covering(LOOKALIKE_CHILD) is None
 

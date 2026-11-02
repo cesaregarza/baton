@@ -169,7 +169,7 @@ def _add_topic_grant_commands(commands: Any) -> None:
     """The owner's topic grant records. Only `authorize` mints a key, so nothing above it grants access."""
     grant = commands.add_parser("topic-grant", help="owner commands for topic grants").add_subparsers(
         dest="topic_grant_command", required=True)
-    propose = grant.add_parser("propose", help="propose a grant for an alias on a topic; grants nothing yet")
+    propose = grant.add_parser("propose", help="propose a grant for an alias on a topic; it grants nothing yet")
     propose.add_argument("alias")
     propose.add_argument("topic")
     propose.add_argument("--capability", action="append", required=True,
@@ -299,7 +299,7 @@ def _arm_rekey(config: Config, args: argparse.Namespace) -> dict[str, Any]:
 
 # The key is shown once, here. This note says where it may go, because the output is the only copy of it.
 GRANT_KEY_NOTE = ("Give the key to the agent only through the owner's own chat with it, never in a Baton thread. "
-                  "No tool honours a topic grant yet.")
+                  "The agent presents it as grant_token, beside its binding token.")
 
 
 def _topic_grant_propose(config: Config, args: argparse.Namespace) -> dict[str, Any]:

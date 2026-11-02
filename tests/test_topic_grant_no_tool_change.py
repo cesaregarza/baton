@@ -1,11 +1,13 @@
-"""Topic grant records change no MCP tool.
+"""The topic grant check changes three tools and no other, and a call that presents no key is answered as before.
 
-The tool list, every tool's input schema and description, every refusal text and every guest call stay
-exactly as they were: no tool reads a grant yet, and a later change adds the guard that honours one.
+The tool list, every other tool's input schema and description, every refusal text and every guest call stay
+exactly as they were. `create_topic` and `set_topic` gain the optional `grant_token`, and `rename_topic` gains
+`acknowledge_topic_grants`; their pins below were recomputed for exactly that. A guest that presents no key is
+refused in the same words whatever grants exist.
 
-GUARD tests pin today's answers and pass before and after. The last test needs the grant records, so it
-fails until they exist: with an active grant on a topic, a guest's calls are still refused, with the same
-words, because nothing consults the grant.
+GUARD tests pin today's answers and pass before and after. The last of the grant tests needs the grant records, so it
+fails until they exist: with an active grant on a topic, a guest's calls that present no key are still refused,
+with the same words.
 """
 
 from __future__ import annotations
@@ -33,8 +35,8 @@ TOOLS = {
     "move_job": "f242c8d7c9f3", "get_job": "cb0fd5be32be", "list_jobs": "7af25ba35768",
     "read_job_events": "1248657164ef", "create_conversation": "4c477d055d79",
     "list_conversations": "d2564ef0696d", "read_history": "a77467aef649", "add_participant": "aa43e161b34c",
-    "remove_participant": "4f585683f8ad", "set_topic": "2e43591a9670", "create_topic": "c899e1134e25",
-    "update_topic": "95e4df4d625a", "rename_topic": "817b0ddfd188", "list_topics": "a7b2f4a13b37",
+    "remove_participant": "4f585683f8ad", "set_topic": "fc1d16794258", "create_topic": "e7ca129d5f35",
+    "update_topic": "95e4df4d625a", "rename_topic": "383655a18830", "list_topics": "a7b2f4a13b37",
     "get_topic": "bf27aa557812", "search": "a66624d6f016", "get_message": "d249b55ec56d",
     "read_artifacts": "240da135d827",
 }
@@ -61,11 +63,17 @@ def test_the_tool_list_and_every_schema_are_unchanged(topic_host):  # GUARD
     dispatch(topic_host, scenario)
 
 
-def test_no_tool_mentions_a_topic_grant_or_takes_a_grant_key(topic_host):  # GUARD
+# The only places a tool's text may name a topic grant: the key a guest presents, and a rename's acknowledgement.
+GRANT_ARGUMENTS = {"grant_token": {"create_topic", "set_topic"}, "acknowledge_topic_grants": {"rename_topic"}}
+
+
+def test_a_topic_grant_is_named_only_by_the_arguments_that_use_one_and_no_tool_names_a_key(topic_host):  # GUARD
     async def scenario(client):
         for tool in await listed_tools(client, topic_host, "planner"):
             text = json.dumps(tool).lower()
-            assert "topic_grant" not in text and "grant_key" not in text and "tgk_" not in text, tool["name"]
+            assert "grant_key" not in text and "tgk_" not in text, tool["name"]
+            for argument, tools in GRANT_ARGUMENTS.items():
+                assert (argument in text) == (tool["name"] in tools), (argument, tool["name"])
     dispatch(topic_host, scenario)
 
 
@@ -130,7 +138,9 @@ def test_a_bound_guest_is_still_refused_the_topic_tools_in_the_same_words(topic_
     dispatch(topic_host, scenario)
 
 
-def test_an_active_grant_changes_no_answer_because_no_tool_reads_it(topic_host):
+def test_an_active_grant_changes_no_answer_to_a_call_that_presents_no_key(topic_host):
+    """The grant belongs to a key, not to the alias holding it: calls with a binding token alone are answered as
+    they were, and the guest's tool list is the same."""
     tg = grants_module()
 
     async def scenario(client):

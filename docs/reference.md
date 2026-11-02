@@ -46,11 +46,29 @@ These tools are present when `[conversations] enabled = true`.
 | `create_conversation(title, participants?, topic?, request_id?, token?)` | A permitted role opens a conversation containing itself. An identified guest names an existing topic instead of participants; see [Guest aliases](aliases.md#use-a-guest-alias). |
 | `list_conversations(topic?, changed_since?, limit?, cursor?)` | List conversations the caller may read. |
 | `read_history(conversation_id, after_seq?, before_seq?, limit?)` | Read retained history without advancing the mailbox. `before_seq` pages backwards; `retention_gaps` reports missing accessible ranges. |
-| `set_topic(conversation_id, topic)` | File a conversation in an existing topic, or pass `null` to clear it. Requires membership and `can_manage_participants`. |
+| `set_topic(conversation_id, topic, grant_token?, token?)` | File a conversation in an existing topic, or pass `null` to clear it. Requires membership and `can_manage_participants`. A guest holding a `thread.organise` [topic grant](aliases.md#using-a-topic-grant) may instead move a thread between topics the grant covers, with its binding `token` and the grant key as `grant_token`; the participants get a `topic_moved` host notice. |
 | `add_participant(conversation_id, participant)`, `remove_participant(...)` | Change membership, with `can_manage_participants`. |
-| `create_topic(path, title?, description?, members?, request_id?)` | Create a topic; a subtopic's parent must already exist. Requires `can_create_topics`. |
-| `update_topic(path, title?, description?, members?)`, `rename_topic(path, new_path)` | Edit or rename a topic. Requires `can_create_topics`. Renaming also moves its subtopics and conversations, without changing participants or conversation IDs. |
+| `create_topic(path, title?, description?, members?, request_id?, grant_token?, token?)` | Create a topic; a subtopic's parent must already exist. Requires `can_create_topics`. A guest holding a `topic.create_sub` [topic grant](aliases.md#using-a-topic-grant) may create a subtopic directly under the grant's topic with `token` and `grant_token`; it may not pass `members`, and the subtopic copies its parent's. |
+| `update_topic(path, title?, description?, members?)`, `rename_topic(path, new_path, acknowledge_topic_grants?)` | Edit or rename a topic. Requires `can_create_topics`. Renaming also moves its subtopics and conversations, without changing participants or conversation IDs. If active topic grants are affected, `acknowledge_topic_grants` must list exactly their ids. |
 | `list_topics(parent?)`, `get_topic(path)` | Read topic metadata, including members, and counts of conversations the caller can read. Available to guests. |
+
+Topic grant refusals are all `forbidden`, with these texts. The key never appears in one.
+
+| Text | Meaning |
+|---|---|
+| `a topic grant key works only with the alias's binding token` | `grant_token` without a valid binding `token`. |
+| `unknown topic grant key` | No grant has that key. |
+| `this topic grant key is not for this alias` | The key's grant belongs to another alias. |
+| `topic grant <id> is <state>` | The grant is `revoked`, `expired`, `pending`, `lapsed` or `invalid`. |
+| `topic grant <id> does not allow <capability> on <path>` | The grant does not list the capability, or does not cover the topic. For `set_topic`, a thread's current topic is never named: the text ends `on this thread's current topic`, whether that topic is uncovered, absent or stale. |
+
+A guest that sends no `grant_token` gets `guest may not call create_topic` or `guest may not call set_topic`, as before.
+A grantee's `members` is refused as `invalid_request`. A `rename_topic` that must acknowledge grants is refused as
+`invalid_request`, with the ids to repeat it with.
+
+A grantee's move writes this host notice to each participant of the thread, with no sender:
+`{"event": "topic_moved", "from", "to", "by", "alias", "alias_code", "grant_id"}`. Its text reads like
+`alias job-search (a1b2) moved this thread from job-hunt/leads to job-hunt/boards under topic grant tgr_...`.
 
 `list_conversations` returns a `conversations` array and `next_cursor`. When the cursor is non-null, pass
 it back as `cursor` to continue; it carries `created_at` and `conversation_id`. Entries include `revision`,
