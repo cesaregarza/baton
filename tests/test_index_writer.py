@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from baton import cli, conversations, messages, store
+from baton import cli, conversations, search, store
 from baton import config as config_module
 from baton.config import Config, ConfigError
 from baton.errors import BatonError
@@ -70,16 +70,6 @@ def converse(db, config, count: int, participants=GROUP) -> tuple[str, list[str]
 
 def say(db, config, conversation_id: str, text: str, sender: str = "orchestrator") -> str:
     return conversations.send(db, config, sender=sender, conversation_id=conversation_id, text=text)["message_id"]
-
-
-def expire(db, *message_ids: str) -> None:
-    """Ages every copy of each message past retention and sweeps. Nothing is deleted now, so every copy stays."""
-    for role in GROUP:
-        messages.read(db, role)  # delivered and read
-    for message_id in message_ids:
-        db.execute("UPDATE messages SET at = ? WHERE id = ?", ((datetime.now(UTC) - timedelta(days=40)).isoformat(),
-                                                             message_id))
-    messages.sweep(db)
 
 
 def lose(db, *message_ids: str, only: str | None = None) -> None:
@@ -475,13 +465,15 @@ def test_commits_are_budgeted_per_producer(tmp_path: Path) -> None:
 # Invalidation, in the same transaction as the expiry ---------------------------------------------------------
 
 
-def test_2_a_last_copy_going_missing_leaves_the_version_valid_and_not_dirty(db, config) -> None:
+def test_2_a_last_copy_going_missing_changes_no_version_but_stops_serving_it(db, config) -> None:
     conversation_id, sent = converse(db, config, 3)
     cycle(db, config, conversation_id)
-    lose(db, sent[1], only="reviewer")  # one copy of two goes: nothing changes
-    lose(db, sent[1])  # the last copy goes: still nothing changes
-    assert [v["state"] for v in versions(db, conversation_id)] == ["valid"]
-    assert (conversation_id, "summary") not in dirty(db, config)
+    assert [a["version"] for a in search.read_artifacts(db, config, "assistant", conversation_id)["artifacts"]] == [1]
+    before = [(v["id"], v["version"], v["state"]) for v in versions(db, conversation_id)]
+    lose(db, sent[1], only="reviewer")  # one copy of two goes: the other still reads, so still served
+    lose(db, sent[1])  # the last copy goes
+    assert [(v["id"], v["version"], v["state"]) for v in versions(db, conversation_id)] == before
+    assert search.read_artifacts(db, config, "assistant", conversation_id)["artifacts"] == []
 
 
 def test_2_a_version_marked_invalid_is_listed_dirty(db, config) -> None:

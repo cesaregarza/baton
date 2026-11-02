@@ -2,9 +2,9 @@
 
 The worker supplies only text, each artifact's body and the messages it cites. Everything else is Baton's: the
 producer (a name listed in `[indexer] producers`), which messages a batch covers (the manifest Baton issued),
-the version a write builds on, and the provenance recorded with it. A version stays valid: no copy of a message
-it was made from going missing invalidates it. An invalid kind is rebuilt by a rebase, a fresh first version from
-seq 1.
+the version a write builds on, and the provenance recorded with it. Baton deletes no messages, so nothing here
+invalidates a version. A kind that an earlier version of baton invalidated, when a message it was made from lost
+its last copy, is rebuilt by a rebase, a fresh first version from seq 1.
 
 Every writer runs in one transaction and checks its producer before anything else. Nothing here logs a
 change, adds an event or wakes anyone, and nothing here is authority: an artifact is a derived reading of

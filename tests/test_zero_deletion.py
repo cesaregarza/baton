@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_index_writer import begin, cycle, expire, inputs, read_all, say, versions
+from test_index_writer import GROUP, begin, cycle, inputs, read_all, say, versions
 from test_index_writer import commit as write_commit
 from test_index_writer import converse as converse_in
 from test_messages import rid
@@ -26,7 +26,7 @@ from baton import changes, conversations, derived, jobs, messages, search
 from baton.errors import BatonError, RequestTooOld
 from baton.store import connect
 
-LONG_AGO = timedelta(days=40)  # past READ_RETENTION (30 days) and IDENTITY_RETENTION (31 days)
+LONG_AGO = timedelta(days=40)  # past the old 30-day read retention and the 31-day retry-record retention
 
 
 def ago(delta: timedelta = LONG_AGO) -> str:
@@ -50,19 +50,27 @@ def count(db: sqlite3.Connection, sql: str, *args: Any) -> int:
 
 
 def read_everywhere(db) -> None:
-    for role in ("orchestrator", "reviewer", "assistant"):
+    for role in GROUP:
         messages.read(db, role)
+
+
+def expire(db, *message_ids: str) -> None:
+    """Reads every role, ages each message 40 days, then reads again: the second read is what used to expire it."""
+    read_everywhere(db)
+    for message_id in message_ids:
+        db.execute("UPDATE messages SET at = ? WHERE id = ?", (ago(), message_id))
+    read_everywhere(db)
 
 
 # Messages ------------------------------------------------------------------------------------------------------
 
 
-def test_an_old_read_direct_message_survives_the_sweep(conn) -> None:
+def test_an_old_read_direct_message_survives_a_later_read(conn) -> None:
     messages.send(conn, sender="planner", recipient="worker", text="old")
     messages.read(conn, "worker")
     conn.execute("UPDATE messages SET at = ?", (ago(),))
 
-    messages.sweep(conn)
+    messages.read(conn, "worker")  # the read that used to delete it
 
     assert count(conn, "SELECT COUNT(*) FROM messages WHERE text = 'old'") == 1
     page = messages.read(conn, "worker", after_seq=0)
@@ -70,12 +78,12 @@ def test_an_old_read_direct_message_survives_the_sweep(conn) -> None:
     assert page["truncated"] is False
 
 
-def test_an_old_read_thread_message_survives_the_sweep(db, config) -> None:
+def test_an_old_read_thread_message_survives_a_later_read(db, config) -> None:
     conversation_id, sent = converse_in(db, config, 2)
     read_everywhere(db)
     db.execute("UPDATE messages SET at = ?", (ago(),))
 
-    messages.sweep(db)
+    read_everywhere(db)  # the reads that used to delete it
 
     assert count(db, "SELECT COUNT(*) FROM messages WHERE conversation_id = ?", conversation_id) == 4  # two copies each
     page = conversations.history(db, "assistant", conversation_id, config=config)
@@ -84,13 +92,13 @@ def test_an_old_read_thread_message_survives_the_sweep(db, config) -> None:
     assert all(messages.read(db, role, after_seq=0)["truncated"] is False for role in ("reviewer", "assistant"))
 
 
-def test_the_sweep_logs_no_expiry_for_a_message_it_keeps(db, config) -> None:
+def test_a_later_read_logs_no_expiry_for_a_message_it_keeps(db, config) -> None:
     # `message_expired` in the change log would tell a watcher a copy is gone when it is not.
     converse_in(db, config, 2)
     read_everywhere(db)
     db.execute("UPDATE messages SET at = ?", (ago(),))
 
-    messages.sweep(db)
+    read_everywhere(db)
 
     assert count(db, "SELECT COUNT(*) FROM change_log WHERE kind = 'message_expired'") == 0
 
@@ -101,7 +109,7 @@ def test_the_wake_events_of_old_read_messages_are_kept(conn) -> None:
     conn.execute("UPDATE messages SET at = ?", (ago(),))
     conn.execute("UPDATE events SET at = ? WHERE job_id IS NULL", (ago(),))
 
-    messages.sweep(conn)
+    messages.read(conn, "worker")
 
     assert count(conn, "SELECT COUNT(*) FROM events WHERE job_id IS NULL AND kind = 'message'") == 1
 
@@ -120,7 +128,7 @@ def test_a_message_request_record_older_than_the_identity_retention_is_kept(conn
     messages.send(conn, sender="planner", recipient="worker", text="once", request_id=rid("retry"))
     old_id = aged_request(conn, "message_requests")
 
-    messages.sweep(conn)
+    messages.read(conn, "worker")  # the read that used to delete it
 
     assert count(conn, "SELECT COUNT(*) FROM message_requests WHERE request_id = ?", old_id) == 1
 
@@ -132,7 +140,7 @@ def test_a_job_move_record_older_than_the_identity_retention_is_kept(host, conn)
     old_id = aged_request(conn, "job_moves")
     other = jobs.create(conn, graph, request_id="job-2", actor="planner", title="t2")
 
-    jobs.move(conn, graph, other["job_id"], "working", actor="worker")  # every move sweeps first
+    jobs.move(conn, graph, other["job_id"], "working", actor="worker")  # the move that used to delete it
 
     assert count(conn, "SELECT COUNT(*) FROM job_moves WHERE request_id = ?", old_id) == 1
 
@@ -147,12 +155,14 @@ def test_guard_a_retry_with_an_old_request_id_is_still_refused(host, conn, recor
         old_id = aged_request(conn, "message_requests")
         retry = lambda: messages.send(conn, sender="planner", recipient="worker",  # noqa: E731
                                       text="once", request_id=old_id)
+        messages.read(conn, "worker")  # the read that used to delete it
     else:
         jobs.move(conn, graph, job["job_id"], "working", actor="worker", request_id=rid("move"))
         old_id = aged_request(conn, "job_moves")
         retry = lambda: jobs.move(conn, graph, job["job_id"], "working", actor="worker",  # noqa: E731
                                   request_id=old_id)
-    messages.sweep(conn)
+        other = jobs.create(conn, graph, request_id="job-2", actor="planner", title="t2")
+        jobs.move(conn, graph, other["job_id"], "working", actor="worker")  # the move that used to delete it
 
     with pytest.raises(RequestTooOld):
         retry()
@@ -330,7 +340,7 @@ def test_a_summary_built_from_an_old_read_message_stays_valid_and_served(db, con
     conversation_id, sent = converse_in(db, config, 3)
     cycle(db, config, conversation_id)
 
-    expire(db, sent[1])  # every copy of the middle message is read, 40 days old, and swept
+    expire(db, sent[1])  # every copy of the middle message is read, 40 days old, and read again
 
     assert [v["state"] for v in versions(db, conversation_id)] == ["valid"]
     served = search.read_artifacts(db, config, "viewer", conversation_id)["artifacts"]

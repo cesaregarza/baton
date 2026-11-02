@@ -129,8 +129,9 @@ log, which is kept. A cursor from another database, or older than the oldest cha
 `cursor_expired` and a `reset_cursor` for rebuilding.
 
 A batch manifest fixes which messages it covers. The worker reads every page, then submits artifacts such
-as `summary`, `decisions`, or `open_questions`. Baton records their inputs. An artifact becomes invalid if
-one of its source messages is gone from every mailbox; the next batch rebuilds that kind from the start.
+as `summary`, `decisions`, or `open_questions`. Baton records their inputs. Baton deletes no messages, so an
+artifact's sources stay. An artifact that an earlier version invalidated, when a source message expired from every
+mailbox, is rebuilt from the start by the next batch.
 With `[search] rolling_window_messages` enabled, a producer can also write `summary_recent` over the latest
 messages. Retrying an identical commit with the same `request_id` returns its receipt; changing the payload
 under that ID is refused as `idempotency_conflict`.

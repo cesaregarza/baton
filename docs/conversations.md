@@ -67,7 +67,8 @@ sent. Without `can_view_all_conversations`, a role that has left gets `not_a_par
 the history, though it can still receive its retained mailbox copies. A role with that permission can read
 retained conversation history even without joining, including from before it joined. It does not reveal
 direct messages. History reports missing sequence numbers within the reader's accessible range as
-`retention_gaps`. Baton deletes no messages, so a gap appears only when a message is missing for some other reason.
+`retention_gaps`. Baton deletes no messages now. A gap means messages an earlier version deleted under its
+30-day retention, or a message removed outside Baton.
 A page limit or history from before a normal participant joined is not reported as loss.
 
 To reply to a particular message, pass its `message_id` as `reply_to` on `send_message`, or use

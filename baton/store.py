@@ -346,8 +346,6 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS artifact_inputs_by_seq ON artifact_inputs (conversation_id, from_seq, to_seq)",
     "CREATE INDEX IF NOT EXISTS artifact_inputs_by_version ON artifact_inputs (version_id)",
     "CREATE TABLE IF NOT EXISTS artifact_depends_on (version_id TEXT PRIMARY KEY, prior_id TEXT NOT NULL)",
-    # A commit's retry identity and receipt. Kept apart from batches and versions, so a replay is answered
-    # from this row alone after either is cleaned up, until `expires_at`.
     # One vector per item per generation, as little-endian float32; Baton stores them and never computes one.
     """CREATE TABLE IF NOT EXISTS vectors (
         generation TEXT NOT NULL,
@@ -366,6 +364,8 @@ _SCHEMA = (
         reason TEXT NOT NULL,
         PRIMARY KEY (generation, item_kind, item_id)
     )""",
+    # A commit's retry identity and receipt, kept apart from batches and versions so a replay is answered
+    # from this row alone until `expires_at`.
     """CREATE TABLE IF NOT EXISTS commit_requests (
         producer TEXT NOT NULL,
         request_id TEXT NOT NULL,

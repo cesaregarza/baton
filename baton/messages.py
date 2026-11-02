@@ -282,10 +282,6 @@ def mark_read(conn: sqlite3.Connection, recipient: str, seq: int) -> None:
                  (events.now(), recipient, seq, seq))
 
 
-def sweep(conn: sqlite3.Connection) -> None:
-    """Nothing is deleted, so there is nothing to sweep: copies, retry records and events are all kept."""
-
-
 def wire_bytes(text: str) -> int:
     return len(json.dumps(text)) - 2
 
