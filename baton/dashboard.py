@@ -540,7 +540,7 @@ def _asking(config: Config, conn: Any, topic: str | None,
     first, and the ids of the messages `subject` itself replied to.
 
     It reads each visible conversation through the same `history` path as its page, under the viewer's
-    shared board-read predicate and within retention: `subject` only filters, it never reads. Each message
+    shared board-read predicate, over the copies still stored: `subject` only filters, it never reads. Each message
     comes once however many copies it has, and one the viewer or `subject` sent isn't waiting on it. A reply
     counts as `subject`'s only when `subject` sent it; when `subject` isn't the viewer it must also be stored as
     a person's, so an agent relaying or quoting the person never counts.

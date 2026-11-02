@@ -189,7 +189,6 @@ class Indexer:
     max_input_segments: int = 256
     max_commits_per_hour: int = 60
     receipt_retention_days: int = 30
-    cleanup_batch: int = 100
     max_generations: int = 3
     generation_retention_days: int = 30
     max_activation_reconcile: int = 10000
@@ -200,7 +199,7 @@ class Indexer:
 INDEXER_LIMITS = {"max_artifact_bytes": (1, 1 << 20), "max_citations": (1, 1000), "max_manifest_items": (1, 10000),
                   "max_manifest_segments": (1, 1000), "page_items": (1, 1000), "max_open_batches": (1, 100),
                   "batch_ttl_seconds": (60, 86400), "max_input_segments": (1, 10000),
-                  "max_commits_per_hour": (1, 10000), "receipt_retention_days": (1, 365), "cleanup_batch": (1, 10000),
+                  "max_commits_per_hour": (1, 10000), "receipt_retention_days": (1, 365),
                   "max_generations": (1, 100), "generation_retention_days": (1, 365),
                   "max_activation_reconcile": (1, 100000), "max_vectors_per_generation": (1, 100000000)}
 

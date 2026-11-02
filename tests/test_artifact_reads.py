@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_index_writer import artifacts_for, begin, commit, converse, expire, read_all, say, snapshot
+from test_index_writer import artifacts_for, begin, commit, converse, lose, read_all, say, snapshot
 
 from baton import config as config_module
 from baton import conversations, derived, messages, search, store
@@ -102,9 +102,9 @@ def test_every_artifact_says_it_is_derived_and_how_current_it_is(db, config) -> 
 def test_2_an_invalid_latest_version_is_served_nowhere(db, config) -> None:
     conversation_id, sent = converse(db, config, 2)
     publish(db, config, conversation_id, request_id="r-1", body="heron first")
-    third = say(db, config, conversation_id, "note 3")
+    say(db, config, conversation_id, "note 3")
     publish(db, config, conversation_id, request_id="r-2", body="heron second")
-    expire(db, third)  # only the second version had seq 3: the first stays valid, and still isn't served
+    db.execute("UPDATE artifact_versions SET state = 'invalid' WHERE version = 2")  # the first stays valid, unserved
     states = [row[0] for row in db.execute("SELECT state FROM artifact_versions ORDER BY version")]
     assert states == ["valid", "invalid"]
     assert shown(db, config, "assistant", conversation_id) == []
@@ -294,7 +294,7 @@ def test_a_fragmented_recent_window_reaches_the_newest_message(tmp_path: Path) -
     config = reads_config(tmp_path, rolling=3, max_manifest_segments=1)
     db = connect(config.db_path)
     conversation_id, sent = converse(db, config, 5)
-    expire(db, sent[1], sent[3])  # retained seqs 1, 3 and 5: one segment holds only one of them
+    lose(db, sent[1], sent[3])  # retained seqs 1, 3 and 5: one segment holds only one of them
     manifest = begin(db, config, conversation_id, kinds=("summary_recent",))
     assert manifest["window"] == {"from_seq": 5, "to_seq": 5}
     assert [item["seq"] for segment in manifest["segments"] for item in segment["items"]] == [5]

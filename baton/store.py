@@ -24,8 +24,7 @@ SCHEMA_VERSION = 18
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
 MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
 
-# A message's retry identity outlives its text: retention may delete the
-# message, but a retry of its request still replays from here. A direct send
+# A message's retry identity is its own record, so a retry of its request still replays from here. A direct send
 # records its `seq`; a conversation send records each recipient's in `seqs`.
 _MESSAGE_REQUESTS = """CREATE TABLE IF NOT EXISTS message_requests (
         request_id TEXT PRIMARY KEY,
@@ -114,8 +113,8 @@ _BACKFILL = {
 _ADDED_TABLES = {
     # The browser seat (`baton.seat`).
     8: ("seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"),
-    # The conversation change log and its epoch and retention floor (`baton.changes`). The search index is
-    # not listed: it exists only where SQLite has FTS5.
+    # The conversation change log, with its epoch and the floor an earlier prune left (`baton.changes`). The
+    # search index is not listed: it exists only where SQLite has FTS5.
     9: ("change_log", "log_meta"),
     # The local indexing writer's derived data (`baton.derived`). Its keyword index is not listed, for the
     # same reason as the messages'.
@@ -376,9 +375,9 @@ _SCHEMA = (
         at TEXT NOT NULL,
         PRIMARY KEY (doc_id, revision)
     )""",
-    # Every change to a conversation's source, in order: a message added, a copy expired by retention, a
-    # participant added or removed. Each carries the revision it bumped the conversation to. Only source
-    # changes are logged; reading logs nothing. See baton.changes.
+    # Every change to a conversation's source, in order: a message added, a participant added or removed, and,
+    # in logs from before copies stopped expiring, a copy expired by retention. Each carries the revision it
+    # bumped the conversation to. Only source changes are logged; reading logs nothing. See baton.changes.
     """CREATE TABLE IF NOT EXISTS change_log (
         change_seq INTEGER PRIMARY KEY AUTOINCREMENT,
         conversation_id TEXT NOT NULL,
@@ -388,7 +387,7 @@ _SCHEMA = (
         role TEXT,
         at TEXT NOT NULL
     )""",
-    # The log's identity (`log_epoch`) and how far retention has pruned it (`pruned_through`).
+    # The log's identity (`log_epoch`) and how far an earlier prune reached (`pruned_through`).
     "CREATE TABLE IF NOT EXISTS log_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     # Derived data, written only by the local indexing writer (baton.derived). A generation is one producer's
     # set of artifacts; each producer has one so far, created by its first batch.
@@ -455,8 +454,6 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS artifact_inputs_by_seq ON artifact_inputs (conversation_id, from_seq, to_seq)",
     "CREATE INDEX IF NOT EXISTS artifact_inputs_by_version ON artifact_inputs (version_id)",
     "CREATE TABLE IF NOT EXISTS artifact_depends_on (version_id TEXT PRIMARY KEY, prior_id TEXT NOT NULL)",
-    # A commit's retry identity and receipt. Kept apart from batches and versions, so a replay is answered
-    # from this row alone after either is cleaned up, until `expires_at`.
     # One vector per item per generation, as little-endian float32; Baton stores them and never computes one.
     """CREATE TABLE IF NOT EXISTS vectors (
         generation TEXT NOT NULL,
@@ -475,6 +472,8 @@ _SCHEMA = (
         reason TEXT NOT NULL,
         PRIMARY KEY (generation, item_kind, item_id)
     )""",
+    # A commit's retry identity and receipt, kept apart from batches and versions so a replay is answered
+    # from this row alone until `expires_at`.
     """CREATE TABLE IF NOT EXISTS commit_requests (
         producer TEXT NOT NULL,
         request_id TEXT NOT NULL,

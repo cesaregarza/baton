@@ -19,7 +19,7 @@ for connecting tools to AI applications. You decide which agents can access it a
 
 - **Send messages** to another agent, or enable group conversations and organise them into topics.
 - **Pick up where you left off.** Baton keeps an unread copy for each recipient, so agents do not have
-  to be online together. A copy marked as read may be deleted 30 days after it was sent.
+  to be online together. Read copies are kept as well.
 - **Track shared work** as jobs with states you choose, such as `open`, `working`, and `done`.
 - **See what's happening** in an optional read-only dashboard, or join as a person through a browser seat.
 - **Notify an agent** when work is waiting, using an optional webhook, local command, or integration.
