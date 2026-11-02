@@ -570,7 +570,7 @@ def _asking(config: Config, conn: Any, topic: str | None,
     first, and the ids of the messages `subject` itself replied to.
 
     It reads each visible conversation through the same `history` path as its page, under the viewer's
-    shared board-read predicate and within retention: `subject` only filters, it never reads. Each message
+    shared board-read predicate, over the copies still stored: `subject` only filters, it never reads. Each message
     comes once however many copies it has, and one the viewer or `subject` sent isn't waiting on it. A reply
     counts as `subject`'s only when `subject` sent it; when `subject` isn't the viewer it must also be stored as
     a person's, so an agent relaying or quoting the person never counts.
@@ -741,13 +741,19 @@ def _gap_bar(measure: bool = False) -> str:
             '<label for="gap-dismiss">Dismiss</label></span></p>')
 
 
+def _notice_words(notice: dict[str, Any], item: dict[str, Any]) -> str:
+    """What a host notice says. A topic move is a sentence the host wrote, naming no participant."""
+    if notice["event"] == "topic_moved":
+        return item["text"]
+    verb = "added" if notice["event"] == "participant_added" else "removed"
+    return f'{notice["participant"]} was {verb} by {notice["by"]}'
+
+
 def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | set[int] = frozenset(),
              conversation_id: str = "", parents: dict[int, dict[str, Any]] | None = None) -> str:
     notice = item.get("notice")
     if notice:
-        verb = "added" if notice["event"] == "participant_added" else "removed"
-        return (f'<li class="notice">{_e(notice["participant"])} was {verb} by {_e(notice["by"])}'
-                f' · {_time(item["at"])}{replies}</li>')
+        return f'<li class="notice">{_e(_notice_words(notice, item))} · {_time(item["at"])}{replies}</li>'
     relayed = "".join(
         f'<blockquote class="relayed"><p class="source">relayed from {_e(entry["source"])} at {_e(entry["at"])}'
         f'</p><p class="relayed-text">{_e(entry["text"])}</p></blockquote>' for entry in item.get("relayed") or [])

@@ -66,8 +66,10 @@ A current participant can read retained messages from its periods of membership,
 sent. Without `can_view_all_conversations`, a role that has left gets `not_a_participant` when it reads
 the history, though it can still receive its retained mailbox copies. A role with that permission can read
 retained conversation history even without joining, including from before it joined. It does not reveal
-direct messages. History reports retained sequence gaps within the reader's accessible range as
-`retention_gaps`; a page limit or history from before a normal participant joined is not reported as loss.
+direct messages. History reports missing sequence numbers within the reader's accessible range as
+`retention_gaps`. Baton deletes no messages now. A gap means messages an earlier version deleted under its
+30-day retention, or a message removed outside Baton.
+A page limit or history from before a normal participant joined is not reported as loss.
 
 To reply to a particular message, pass its `message_id` as `reply_to` on `send_message`, or use
 `--reply-to` with the CLI. The parent must be a retained message in the same conversation that the sender
@@ -133,6 +135,10 @@ and `can_manage_participants`; neither changes its ID or participants. A role wi
 can edit a topic or rename it, moving its subtopics and conversations without changing their IDs or
 participants. `list_topics` and `get_topic` show topic details, with conversation counts limited to what
 the caller can read.
+
+Each topic also has a stable `id` beside its path. A rename keeps the id, and a path that a rename frees
+gets a new id if a topic is later created there. The host keeps a history of each topic change, with
+the role that made it (and the alias, for a call made through one); no tool shows that history yet.
 
 An identified guest can also start a conversation in an existing topic when the guest role has board-wide
 read access. The topic supplies the participants. See [Guest aliases](aliases.md#use-a-guest-alias) for the
@@ -203,5 +209,4 @@ receives a content-free event at most once per hour for that conversation. Host 
 the message limit.
 
 A mailbox can hold 500 unread messages. A direct send to a full mailbox returns `mailbox_full`; a
-conversation send returns `conversation_full` and stores no copies. Read messages are retained for 30 days
-after they were sent; unread messages are kept until marked read.
+conversation send returns `conversation_full` and stores no copies. Messages are kept, read or unread.

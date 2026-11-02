@@ -38,6 +38,7 @@ from baton.config import Config
 from baton.errors import BatonError, Forbidden, InvalidRequest, UnknownRole
 from baton.integrations import Integration, IntegrationUnavailable, load_enabled
 from baton.store import connect
+from baton.topic_tools import TopicTools
 from baton.wakes import Dispatcher
 
 log = logging.getLogger("baton.app")
@@ -65,7 +66,7 @@ An alias enrolled as a role is different: pass its binding_token as `token` on a
 that role, with its mailbox, waits and permissions. whoami shows the role a call runs as."""
 
 
-class Tools:
+class Tools(TopicTools):
     """The tool bodies. `role` is the caller's; each call opens its own connection."""
 
     def __init__(self, config: Config) -> None:
@@ -182,60 +183,13 @@ class Tools:
                         "guest must give one. list_topics shows them.")] = None,
         request_id: str | None = None,
         identity: dict[str, str] | None = None,
+        call: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Start a thread. Name `participants`, or as a guest give a `topic` and its members receive it."""
         with self._conn() as conn:
             return conversations.create(conn, self._config, actor=role, title=title, participants=participants,
-                                        topic=topic, request_id=request_id, identity=identity)
-
-    def create_topic(
-        self, role: str,
-        path: Annotated[str, Field(description="1-2 lowercase slug segments, such as project or "
-                                               "project/subtopic. A subtopic needs its parent first.")],
-        title: str | None = None,
-        description: str | None = None,
-        members: Annotated[list[str] | None, Field(
-            description="The roles a guest's thread in this topic is delivered to, copied into each new "
-                        "thread. Left out means none, so no guest thread until a core role sets them.")] = None,
-        request_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Open a topic for threads to be filed in. Pass a request_id to make a retry safe."""
-        with self._conn() as conn:
-            return topics.create(conn, self._config, actor=role, path=path, title=title,
-                                 description=description, members=members, request_id=request_id)
-
-    def update_topic(
-        self, role: str, path: str, title: str | None = None,
-        description: Annotated[str | None, Field(description="Left out or null keeps the current one.")] = None,
-        members: Annotated[list[str] | None, Field(
-            description="Replaces the members. Left out or null keeps the current list, and an empty "
-                        "list clears it. Threads that already exist keep the participants they "
-                        "were created with.")] = None,
-    ) -> dict[str, Any]:
-        """Change a topic's title, description or members. An argument you leave out is left as it is."""
-        with self._conn() as conn:
-            return topics.update(conn, self._config, actor=role, path=path, title=title,
-                                 description=topics.UNSET if description is None else description,
-                                 members=topics.UNSET if members is None else members)
-
-    def rename_topic(self, role: str, path: str, new_path: str) -> dict[str, Any]:
-        """Move a topic, its subtopics and their threads to a new path. Ids and participants never change."""
-        with self._conn() as conn:
-            return topics.rename(conn, self._config, actor=role, path=path, new_path=new_path)
-
-    def list_topics(
-        self, role: str,
-        parent: Annotated[str | None, Field(
-            description="Only the subtopics directly under this path. Omit it for every topic.")] = None,
-    ) -> dict[str, Any]:
-        """The topics, each with the number of threads in it you can read and when it last had one."""
-        with self._conn() as conn:
-            return {"topics": topics.listing(conn, self._config, reader=role, parent=parent)}
-
-    def get_topic(self, role: str, path: str) -> dict[str, Any]:
-        """One topic: its title, description, members, subtopics and the threads in it you can read."""
-        with self._conn() as conn:
-            return topics.get(conn, self._config, reader=role, path=path)
+                                        topic=topic, request_id=request_id, identity=identity,
+                                        seen=topics.seen_by(call))
 
     def list_conversations(
         self, role: str,
@@ -250,34 +204,21 @@ class Tools:
         cursor: Annotated[dict[str, str] | None, Field(
             description="Continue after the previous page's next_cursor object, carrying created_at and "
                         "conversation_id unchanged.")] = None,
+        call: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return {conversations: page, next_cursor: cursor or null}; repeat with that cursor for the next page."""
         conversations.require_enabled(self._config)
         before = _conversation_cursor(cursor)
         with self._conn() as conn:
             rows = conversations.list_readable(conn, self._config, role, topic, limit=limit, before=before,
-                                               changed_since=changed_since, _lookahead=True)
+                                               changed_since=changed_since, _lookahead=True,
+                                               seen=topics.seen_by(call))
         has_more = len(rows) > limit
         page = rows[:limit]
         next_cursor = conversations.page_cursor(page[-1]) if has_more and page else None
         return {"conversations": page,
                 "next_cursor": ({"created_at": next_cursor[0], "conversation_id": next_cursor[1]}
                                 if next_cursor else None)}
-
-    def set_topic(
-        self, role: str, conversation_id: str,
-        topic: Annotated[str | None, Field(
-            description="The new topic, 1-2 lowercase slug segments, or null to clear it. Required: say "
-                        "what the topic becomes, so that forgetting the argument cannot clear one.")],
-    ) -> dict[str, Any]:
-        """Set, rename or clear a conversation's topic. Its id never changes, so nothing else moves.
-
-        `topic` has no default on purpose. A tool that cleared the topic when an argument was left out
-        would make an omission destructive, and it would let any caller that drops nulls clear one by
-        accident -- the remote command does drop them, which is why it sends this argument explicitly.
-        """
-        with self._conn() as conn:
-            return conversations.set_topic(conn, self._config, conversation_id, topic, actor=role)
 
     def read_history(
         self, role: str, conversation_id: str, after_seq: Annotated[int, Field(ge=0)] = 0,
@@ -450,6 +391,10 @@ GUEST_TOOLS = frozenset({"whoami", "alias_exists", "claim_alias", "list_conversa
 GUEST_IDENTIFIED = frozenset({"send_message", "create_conversation"})
 # Tools whose bodies read the call context itself, not only the role it runs as.
 CALL_TOOLS = frozenset({"whoami", "bind_events", "unbind_events"})
+# Topic changes whose history row names the alias behind an alias-bound call, not only its role.
+IDENTIFIED_CHANGES = frozenset({"create_topic", "update_topic", "rename_topic", "set_topic"})
+# The two tools a guest may call by presenting a topic grant key. Their body decides what the key allows.
+GRANT_TOOLS = frozenset({"create_topic", "set_topic"})
 TOKEN_ARGUMENT = Annotated[str | None, Field(description=(
     "A binding_token from claim_alias, for a shared guest login only. An enrolled alias's token makes this call "
     "run as its mapped role; any other alias's token posts as that alias. Omitted and null are the same; an "
@@ -476,10 +421,13 @@ class Guard:
             proof = kwargs.pop("token", None)
             principal = get_access_token()
             call = _call_context(principal)
+            # The key is out of the arguments from here on, so nothing that copies them can copy it.
+            call["grant_key"] = kwargs.pop("grant_token", None)
 
             def refuse(code: str, detail: str, extra: dict[str, Any] | None = None) -> Any:
-                if isinstance(proof, str) and proof:
-                    detail = detail.replace(proof, "[redacted]")
+                for secret in (proof, call["grant_key"]):
+                    if isinstance(secret, str) and secret:
+                        detail = detail.replace(secret, "[redacted]")
                 refusal = {**self._refuse(name, call, kwargs, code, detail, proof), **(extra or {})}
                 if name in {"list_conversations", "list_jobs"}:
                     return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))],
@@ -494,6 +442,8 @@ class Guard:
                 refusal = self._capability(name, call, kwargs)
                 if refusal is not None:
                     return refuse("forbidden", refusal)
+                if call["identity"] is not None and name in IDENTIFIED_CHANGES:
+                    kwargs["identity"] = call["identity"]
                 if call["role"] == "guest" and name in GUEST_IDENTIFIED:
                     # Both carry the alias through to the body, which attributes the row to it. Only a
                     # post spends the hourly post quota; a thread has its own caps, counted where it is
@@ -507,7 +457,7 @@ class Guard:
                 return refuse(error.code, str(error), error.extra)
             if not self._within_limit(call["role"], name, HOURLY_LIMITS[scope]):
                 return refuse("rate_limited", f"{name} is over its hourly limit")
-            if name in CALL_TOOLS:
+            if name in CALL_TOOLS | topics.AUDIT_TOOLS:
                 kwargs["call"] = call
             try:
                 result = body(call["role"], **kwargs)
@@ -540,7 +490,7 @@ class Guard:
         """Why the role this call runs as may not make it, or None."""
         role = call["role"]
         if role == "guest":
-            if name not in GUEST_TOOLS:
+            if name not in GUEST_TOOLS and not (name in GRANT_TOOLS and call["grant_key"] is not None):
                 return f"guest may not call {name}"
             if name == "search" and (kwargs.get("producer") is not None or kwargs.get("query_vector") is not None
                                       or kwargs.get("model") is not None or
@@ -605,21 +555,25 @@ class Guard:
         return await call_next(ctx)
 
     async def refuse_token_validation(self, ctx: Any, call_next: Any) -> Any:
-        """Shape-check a present `token` on any tool, and a guest post's, before SDK errors can echo it."""
+        """Shape-check a present `token` or `grant_token` on any tool, and a guest post's, before SDK errors can
+        echo them. A grant key needs no token beside it for this: a call that leaves out a required argument
+        reaches the SDK either way, and its error quotes part of the input."""
         params = ctx.params if isinstance(getattr(ctx, "params", None), dict) else {}
         if getattr(ctx, "method", None) != "tools/call":
             return await call_next(ctx)
         name, arguments = str(params.get("name", "")), params.get("arguments")
         call = _call_context(get_access_token())
-        present = isinstance(arguments, dict) and arguments.get("token") is not None
+        present = isinstance(arguments, dict) and (arguments.get("token") is not None
+                                                   or arguments.get("grant_token") is not None)
         if not present and not (call["credential_role"] == "guest" and name == "send_message"):
             return await call_next(ctx)
         try:
-            # Past this check the arguments are a dict: either a token was present in one, or it's a post.
+            # Past this check the arguments are a dict: either a token or key was present in one, or it's a post.
             if name == "send_message" and (not isinstance(arguments, dict)
                                            or not isinstance(arguments.get("text"), str)):
                 raise InvalidRequest("send_message requires text")
-            aliases.validate_proof(arguments.get("token"))
+            if arguments.get("token") is not None or (call["credential_role"] == "guest" and name == "send_message"):
+                aliases.validate_proof(arguments.get("token"))
             validate = self._validators.get(name)
             if validate is None:
                 raise InvalidRequest(f"{name} takes no token")
@@ -654,10 +608,16 @@ class Guard:
         """One line: the credential, the role the call ran as, any alias by id and code, and the ids it named."""
         role, identity = call["role"], call["identity"]
         proof = kwargs.get("token") if proof is None else proof  # a refusal before Guard sees the raw arguments
-        ids = ({key: kwargs[key] for key in AUDITED_IDS if kwargs.get(key) is not None}
+        ids = ({key: kwargs[key] for key in AUDITED_IDS if kwargs.get(key) is not None
+                and not (key == "topic" and name in topics.AUDIT_TOOLS)}  # the topic tools' fields come below
                if name != "claim_alias" and not (name == "send_message" and role == "guest") else {})
-        if isinstance(proof, str) and proof:
-            ids = {key: value for key, value in ids.items() if proof not in json.dumps(value)}
+        ids.update(topics.audit_fields(name, kwargs, outcome, call.get("topic", {})))
+        # Neither the binding token nor the grant key may reach the line, whichever argument carried it, topic
+        # fields included.
+        # A refusal before the guard has taken the key out audits the raw arguments: look there too, as for the token.
+        for secret in (proof, call.get("grant_key") or kwargs.get("grant_token")):
+            if isinstance(secret, str) and secret:
+                ids = {key: value for key, value in ids.items() if secret not in json.dumps(value)}
         line = {"at": datetime.now(UTC).isoformat(), "role": role, "credential_role": call["credential_role"],
                 "credential_id": call["credential_id"], "tool": name, **ids, "outcome": outcome,
                 **({"alias_id": identity["alias_id"], "alias_code": identity["code"]} if identity else {})}
@@ -676,7 +636,7 @@ def _call_context(principal: Any) -> dict[str, Any]:
     role = auth.role_of(principal)
     authority = auth.credential_authority(principal) if principal is not None else {}
     return {"credential_role": role, "credential_id": authority.get("name") or authority.get("grant"),
-            "authority": authority, "role": role, "identity": None}
+            "authority": authority, "role": role, "identity": None, "grant_key": None}
 
 
 def _tool_signature(name: str, body: Callable[..., Any]) -> inspect.Signature:

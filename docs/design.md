@@ -76,7 +76,7 @@ credential or act through the CLI. See [People and the browser](people.md).
 ## Messages and reads
 
 A direct message is stored in the recipient's mailbox with a monotonically increasing sequence number.
-Old-message deletion does not renumber later messages. A conversation send writes a copy for each other
+Sequence numbers are never renumbered. A conversation send writes a copy for each other
 participant in one transaction. If one recipient's mailbox is full, Baton stores no copies of that send.
 The sender does not receive its own copy.
 
@@ -84,10 +84,13 @@ The sender does not receive its own copy.
 explicit `after_seq`, it starts after the role's delivered position. A read can advance that position to
 the last message returned, but never moves it backwards. An earlier explicit sequence can replay retained
 messages after a lost response without rewinding the position. Keep paging until `messages` is empty: a
-short page is not necessarily the end. `truncated: true` means retention deleted messages after the cursor.
+short page is not necessarily the end. `truncated: true` means the mailbox no longer holds the message right after
+the cursor, because its oldest messages are gone. Baton deletes no messages now; this covers only the oldest
+messages an earlier version deleted under its 30-day retention, or removed outside Baton. A gap between kept
+messages is not reported.
 
 Conversation history is separate from mailbox delivery. It uses conversation sequence numbers and does not
-advance the mailbox position. Membership, `can_view_all_conversations`, and retention determine which
+advance the mailbox position. Membership and `can_view_all_conversations` determine which
 history a role can see. Direct messages remain sender/recipient-only. Search and reply references use the
 same board-read rule. [Conversations and notifications](conversations.md) covers the user-facing behavior.
 
@@ -98,8 +101,7 @@ relayed words, attention labels, nor derived artifacts change a job's state or c
 Message bodies, including relayed text, are limited to 64 KiB measured as escaped JSON. A page is limited
 by count and estimated wire size. A mailbox at 500 unread messages refuses direct sends with `mailbox_full`
 until it is read.
-A copy marked as read becomes eligible for deletion 30 days after it was sent; unread copies remain until
-marked read.
+Read copies are kept too, so reading never removes a message.
 
 <a name="conversations"></a>
 
@@ -126,7 +128,17 @@ change its ID or participants.
 
 A role with `can_create_topics` can create, edit, or rename a topic. A subtopic's parent must exist first.
 Renaming a topic moves its subtopics and their conversations without changing conversation IDs or
-participants.
+participants. The history gets a row for each topic whose path changes. A rename that changes what active
+[topic grants](aliases.md#topic-grant-records) cover names them in `acknowledge_topic_grants`, and each gets a `rename`
+event.
+
+Creating and filing are core-only with one scoped exception. A guest alias presenting a topic grant key beside its
+binding token can create a subtopic directly under the grant's topic, which copies its parent's members, and can move
+a thread whose current and new topics the grant both covers. The grant's own row decides, by topic id and never by
+path text, and it is checked inside the operation's write transaction. A move tells the thread's participants with a
+host notice. The key is handled like a binding token: it is taken out of the arguments before anything copies them,
+only its hash is stored, and no event, audit line or refusal holds it. Refusals that name a grant are logged on it as
+`refused_use`.
 
 A topic's `members` supply the participants for a guest-created conversation at creation time; later edits
 to that list do not affect existing conversations. A guest needs a live alias binding and
@@ -164,7 +176,7 @@ detects a change; it does not lock the job. Of two moves using the same revision
 Messages and job moves accept a `request_id` for safe retries. Use a UTC timestamp prefix in the form
 `YYYYMMDDTHHMMSSZ-<suffix>`. Repeating the same request with the same ID returns its original outcome with
 `created: false`; using that ID for a different request returns `idempotency_conflict`. Baton refuses IDs
-more than 30 days old or more than five minutes in the future, and keeps retry records for 31 days. When
+more than 30 days old or more than five minutes in the future, and keeps retry records. When
 an ID is omitted for a message or job move, Baton generates and returns one.
 
 Job and conversation creation also accept request IDs, but do not require the timestamp format. Provide and
@@ -227,8 +239,8 @@ can also send replies.
 ## Storage
 
 The host uses one SQLite database in WAL mode. Writes use `BEGIN IMMEDIATE` transactions to serialize
-dependent updates across the server, CLI, and dispatcher. This revision uses schema 15 and upgrades
-schemas 2 through 14 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
+dependent updates across the server, CLI, and dispatcher. This revision uses schema 17 and upgrades
+schemas 2 through 16 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
 
 The upgrade creates topic records for existing conversation topic paths and any missing parents. It derives
 each topic's members from participants in conversations filed directly there, excluding `guest`. A topic
@@ -242,6 +254,7 @@ the upgrade rather than being discarded.
 | Messages, mailboxes, topics, conversations, participants | Retained copies, delivery positions, topic metadata, and conversation membership. |
 | Jobs, job moves, events, cursors, wakes | Job state and history, event delivery, wake status, and retry records. |
 | Aliases, bindings, mappings | Alias continuity, digests of live proofs, and enrolled-role mappings. |
+| Topic grants and their events | Owner grants on topics: their terms and digests, hashes of their keys, revocations, and a log. Keys are never stored. |
 | Change log, generations, batches, artifacts, vectors | Optional indexing state and producer-supplied derived data. |
 | Seat sessions, receipts, requests | Optional browser-seat session and delivery state. |
 
@@ -270,5 +283,5 @@ choices; a notification decision would not grant access, move a job, or approve 
 A separate summarizer could provide a compact view of decisions, open questions, references to source
 messages, and the recent unsummarized tail. The current indexing interface can store and search artifacts
 submitted by a producer, but Baton does not generate them. Any future summary would remain derived
-information subject to the same visibility and retention rules, not a substitute for source messages or
+information subject to the same visibility rules, not a substitute for source messages or
 an authorization check.

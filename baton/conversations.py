@@ -3,8 +3,8 @@
 A conversation send stores one copy per other participant, each as that
 recipient's next mailbox seq and all under one shared message_id, in one
 transaction: every recipient gets its copy or none does. Each copy keeps what
-a direct message guarantees: the reader's gap-free seq and cursors, coalesced
-wakes and retention. The sender gets no copy, so it is never woken by its own
+a direct message guarantees: the reader's gap-free seq and cursors, and coalesced
+wakes. The sender gets no copy, so it is never woken by its own
 message.
 
 `history` is separate from that delivery: it returns the conversation as a
@@ -38,7 +38,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from baton import board_read, changes, events, messages, topics
+from baton import board_read, changes, events, messages, topic_grants, topics
 from baton.config import Config, Conversations
 from baton.errors import (
     ConversationFull,
@@ -51,7 +51,7 @@ from baton.errors import (
     UnknownConversation,
     UnknownRole,
 )
-from baton.store import transaction
+from baton.store import snapshot, transaction
 
 MAX_TITLE = 200
 MIN_PARTICIPANTS = 2
@@ -86,28 +86,65 @@ def check_topic(topic: Any, field: str = "topic") -> str | None:
 
 
 def set_topic(conn: sqlite3.Connection, config: Config, conversation_id: str, topic: Any, *,
-              actor: str) -> dict[str, Any]:
+              actor: str, identity: dict[str, str] | None = None,
+              seen: dict[str, Any] | None = None, grant_key: str | None = None) -> dict[str, Any]:
     """Set, rename or clear a conversation's topic. `None` clears it; the conversation's id never changes.
 
-    Takes the same permission as managing participants, and membership of this conversation: a label on
-    a conversation is the conversation's own business.
+    A core role needs the permission to manage participants, and membership of this conversation: a label on
+    a conversation is the conversation's own business. A guest holding `grant_key` needs neither: it may move a
+    thread whose topic and destination its grant covers, and the thread's participants are told. A move that
+    changes the topic is recorded in the topic history; one that changes nothing is not.
     """
     require_enabled(config)
-    if not config.roles[actor].can_manage_participants:
+    if grant_key is None and not config.roles[actor].can_manage_participants:
         raise Forbidden(f"{actor} may not change a conversation's topic "
                         f"(roles.{actor}.can_manage_participants)")
     topic = check_topic(topic)
     with transaction(conn):
         before = _load(conn, conversation_id)["topic"]
-        if actor not in _participants(conn, conversation_id):
-            raise NotAParticipant(f"{actor} is not in {conversation_id}")
+        grant = _authorize_move(conn, actor, conversation_id, before, topic, identity, grant_key)
+        grant_id = None if grant is None else grant["id"]
         if topic is not None:
             # A topic is a container now, so a conversation cannot be filed somewhere that isn't one.
             # Clearing it to None stays allowed, and moving a thread never changes its participants.
-            topics.require_exists(conn, topic)
+            topics.record_seen(seen, topic, topics.require_exists(conn, topic), grant_id=grant_id)
         if topic != before:
             conn.execute("UPDATE conversations SET topic = ? WHERE id = ?", (topic, conversation_id))
+            who = topics.history_actor(actor, identity)
+            topics.record_move(conn, conversation_id=conversation_id, actor=who, before=before, after=topic,
+                               grant_id=grant_id)
+            if grant is not None:
+                _tell_of_move(conn, conversation_id, grant, identity or {}, who, before, topic)
     return {"conversation_id": conversation_id, "topic": topic, "changed": topic != before}
+
+
+def _authorize_move(conn: sqlite3.Connection, actor: str, conversation_id: str, before: str | None, after: str | None,
+                    identity: dict[str, str] | None, grant_key: str | None) -> sqlite3.Row | None:
+    """A core role must be in the thread. A guest needs the grant its key opens to cover both ends of the move.
+
+    Both ends, because the source is as much a claim as the destination: a grant on the destination alone would let
+    its holder pull any thread in, or one on the source alone push threads out of its reach. A thread with no
+    topic, or a label with no topic row, covers nothing.
+    """
+    if grant_key is None:
+        if actor not in _participants(conn, conversation_id):
+            raise NotAParticipant(f"{actor} is not in {conversation_id}")
+        return None
+    grant = topic_grants.grant_for_use(conn, identity, grant_key)
+    # The refusal does not name the source: the caller never supplied it and may not be able to read the thread.
+    topic_grants.require_covers(conn, grant, "thread.organise", before, shown="this thread's current topic")
+    topic_grants.require_covers(conn, grant, "thread.organise", after)
+    return grant
+
+
+def _tell_of_move(conn: sqlite3.Connection, conversation_id: str, grant: sqlite3.Row, identity: dict[str, str],
+                  who: str, before: str | None, after: str | None) -> None:
+    """A host notice to every participant that a grantee moved their thread, and under which grant."""
+    notice = {"event": "topic_moved", "from": before, "to": after, "by": who, "alias": identity["alias"],
+              "alias_code": identity["code"], "grant_id": grant["id"]}
+    text = (f"alias {identity['alias']} ({identity['code']}) moved this thread from {before} to {after} "
+            f"under topic grant {grant['id']}")
+    _fan_out(conn, conversation_id, _participants(conn, conversation_id), sender=None, text=text, notice=notice)
 
 
 def require_enabled(config: Config) -> Conversations:
@@ -118,7 +155,7 @@ def require_enabled(config: Config) -> Conversations:
 
 def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str,
            participants: list[str] | None = None, topic: Any = None, request_id: str | None = None,
-           identity: dict[str, str] | None = None) -> dict[str, Any]:
+           identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """Open a conversation. A retry with the same request_id replays rather than opening a second one.
 
     A role names its own `participants`, which must include it. A guest instead presents an alias
@@ -152,7 +189,9 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str,
     with transaction(conn):
         existing = events.replayed(conn, "conversations", request_id, digest)
         if existing is not None:
+            topics.note_replay(conn, seen, topic, existing["topic"])
             return {**_summary(conn, existing), "request_id": request_id, "created": False}
+        topics.note_path(conn, seen, topic)
         if guest:
             roles = topics.members_for_thread(conn, config, topic)
             # Returned rather than raised: when the guest-wide cap is full this also stores the alert,
@@ -295,13 +334,20 @@ def page_cursor(summary: dict[str, Any]) -> tuple[str, str]:
 
 def list_readable(conn: sqlite3.Connection, config: Config, role: str, topic: Any = None, *,
                   limit: int = MAX_LISTED, before: tuple[str, str] | None = None,
-                  changed_since: str | None = None, _lookahead: bool = False) -> list[dict[str, Any]]:
-    """List the conversations this role may read under the shared board predicate."""
-    if board_read.sees_all(config, role):
-        return list_all(conn, topic, limit=limit, before=before, changed_since=changed_since,
+                  changed_since: str | None = None, _lookahead: bool = False,
+                  seen: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """List the conversations this role may read under the shared board predicate.
+
+    The topic's id and the listing are read in one snapshot, so a rename and reuse of the path in between
+    cannot make the listing describe a different topic from the one the audit line names.
+    """
+    with snapshot(conn):
+        topics.note_path(conn, seen, check_topic(topic))
+        if board_read.sees_all(config, role):
+            return list_all(conn, topic, limit=limit, before=before, changed_since=changed_since,
+                            _lookahead=_lookahead)
+        return list_for(conn, role, topic, limit=limit, before=before, changed_since=changed_since,
                         _lookahead=_lookahead)
-    return list_for(conn, role, topic, limit=limit, before=before, changed_since=changed_since,
-                    _lookahead=_lookahead)
 
 
 def _before(before: tuple[str, str] | None, alias: str) -> tuple[str, tuple[str, ...]]:
@@ -536,7 +582,7 @@ def _has_readable_seq(conn: sqlite3.Connection, condition: str, values: dict[str
 
 
 def gap_words(gap: dict[str, int]) -> str:
-    """What a page says where `read_history` reports a retention gap."""
+    """What a page says where `read_history` reports a gap."""
     first, last = gap["from_seq"], gap["to_seq"]
     return (f"Message #{first} is" if first == last else f"Messages #{first}–#{last} are") + " no longer kept."
 

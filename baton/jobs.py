@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import UTC, datetime
 from typing import Any
 
 from baton import events, messages
@@ -69,7 +68,6 @@ def move(conn: sqlite3.Connection, graph: Jobs, job_id: str, to_state: str, *, a
     digest = events.request_digest("move_job", {"job_id": job_id, "to_state": to_state, "actor": actor,
                                                 "note": note, "expected_revision": expected_revision})
     with transaction(conn):
-        _forget_old_moves(conn)
         replay = events.replayed(conn, "job_moves", request_id, digest)
         if replay is not None:
             return {**json.loads(replay["outcome"]), "request_id": request_id, "created": False}
@@ -134,12 +132,6 @@ def read_events(conn: sqlite3.Connection, job_id: str, after_seq: int = 0, limit
 def require_exists(conn: sqlite3.Connection, job_id: str) -> None:
     """Refuse an unknown job. A finished job still accepts messages about it."""
     _load(conn, job_id)
-
-
-def _forget_old_moves(conn: sqlite3.Connection) -> None:
-    """Retry identities expire a day after their request_id would be refused as too old anyway."""
-    cutoff = datetime.now(UTC) - messages.IDENTITY_RETENTION
-    conn.execute("DELETE FROM job_moves WHERE created_at < ?", (cutoff.isoformat(),))
 
 
 def _load(conn: sqlite3.Connection, job_id: str) -> sqlite3.Row:

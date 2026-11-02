@@ -135,5 +135,5 @@ messages, logs, and repositories.
 
 - Add a webhook or command to notify a role when work arrives: [notifications](conversations.md#notifications).
 - Let a person read or reply: [People and the browser](people.md).
-- Learn about message delivery, retention, and retrying writes: [Architecture and design](design.md).
+- Learn about message delivery and retrying writes: [Architecture and design](design.md).
 - Browse all supported settings: [baton.example.toml](../baton.example.toml).

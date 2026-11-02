@@ -116,3 +116,58 @@ checks current authorization before replaying a retried request.
 
 Shared guest OAuth logins can also bind an event subscription to a mapped alias. That is a separate step;
 see [OpenAI MCP Events: shared guest logins](integrations/openai-mcp-events.md#shared-guest-logins).
+
+## Topic grant records
+
+A topic grant lets one alias use a capability on one topic for a set number of days. The owner records grants
+with four host commands. Recording a grant gives no access by itself: the alias uses it by presenting the key
+(see [Using a topic grant](#using-a-topic-grant)).
+
+- `baton topic-grant propose ALIAS TOPIC --capability CAP [--capability CAP ...] [--inherit] --days N` writes a
+  proposal and prints it. `CAP` is `reference.edit`, `thread.organise` or `topic.create_sub`. `--days` is 1 to
+  30. `--inherit` also covers the topic's direct subtopics. A proposal not authorized within 24 hours lapses.
+- `baton topic-grant authorize GRANT_ID DIGEST` authorizes it. Copy the digest from the proposal exactly. The
+  output includes `grant_key` once, with a `note`.
+- `baton topic-grant revoke GRANT_ID --reason TEXT` ends a grant in any state. The reason is 1 to 500
+  characters after trimming.
+- `baton topic-grant list` shows pending and active grants. `--all` shows every grant.
+
+Read the proposal before authorizing. Its alias name and code, topic path, capabilities, inherit setting and
+expiry are the terms the digest covers. If the alias or topic is renamed after the proposal, authorization is
+refused and the grant must be proposed again.
+
+The key is shown only by `authorize`. Baton stores only its SHA-256, so a lost key cannot be recovered: revoke
+the grant and propose again. The key reaches the agent only through the owner's own chat with it, never a
+Baton thread.
+
+`baton alias arm-rekey` also lists the alias's active topic grants when it has any. A rekey does not revoke
+them.
+
+### Using a topic grant
+
+A grantee is an ordinary guest alias. Each call carries two secrets, because they prove different things: `token`,
+the alias's binding token (who is calling), and `grant_token`, the grant key (which grant is used). The key alone
+opens nothing, and a binding alone gets the refusals a guest always gets. Only `create_topic` and `set_topic` take
+`grant_token`, and a grant applies only to a call that runs as `guest`: an alias enrolled as a role runs as that role
+and any `grant_token` on its call is ignored.
+
+Only the presented key's own grant counts. Baton never falls back to another grant the alias holds, and a key
+belonging to another alias is refused.
+
+- `topic.create_sub`: `create_topic(path, grant_token=..., token=...)` opens a subtopic directly under the topic
+  the grant names. `inherit` does not matter here; a root-level path, a parent that is not the grant's topic, and
+  a third level are refused. A grantee may not pass `members`: the new subtopic copies its parent's members once.
+  `title` and `description` may be set.
+- `thread.organise`: `set_topic(conversation_id, topic, grant_token=..., token=...)` moves a thread when both its
+  current topic and the destination are covered by the grant. The grantee need not be a participant, and a move
+  gives it no read or post access. A grantee cannot clear a thread's topic. Every participant gets a host notice
+  saying who moved the thread, from where, to where, and under which grant.
+- `reference.edit` is recorded but no tool uses it yet.
+
+A grant covers a topic by its id, so a rename moves it along. A core role renaming a topic that active grants
+cover, or that enters or leaves an inheriting grant's reach, must name those grants in `acknowledge_topic_grants`
+or the rename is refused; the refusal lists the ids.
+
+A refused call says why, always as `forbidden`: no valid binding, unknown key, a key that is another alias's, a
+grant that is `revoked`, `expired`, `pending`, `lapsed` or `invalid`, or a grant that does not allow the capability
+on that topic. Refusals that name a grant are written to its log as `refused_use`, with the tool and the reason.

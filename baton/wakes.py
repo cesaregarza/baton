@@ -144,7 +144,6 @@ class Dispatcher:
         """Retry wakes whose lease ran out, then wake for every new event; return how many deliveries were tried."""
         conn = connect(self._config.db_path)
         try:
-            messages.sweep(conn)
             tried = 0
             for row in conn.execute("SELECT role, key FROM wakes WHERE status = 'pending' AND lease_until <= ?"
                                     " ORDER BY lease_until LIMIT ?", (_now(), PAGE)).fetchall():

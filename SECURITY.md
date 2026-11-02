@@ -97,6 +97,17 @@ to authenticated callers with read scope, including guests. Their conversation c
 access; a topic does not grant access to its conversations. Grant `can_create_topics` only to roles trusted
 to create, edit, and rename topic containers.
 
+Those tools are core-only, with one scoped exception. A guest alias holding an owner-authorized topic grant may call
+`create_topic` and `set_topic` with its binding token and the grant key, within the grant's topic, capabilities and
+expiry. The key proves which grant, the binding which alias; the key's own grant must belong to the calling alias and
+be active, and Baton never falls back to another grant. The check runs inside the operation's write transaction, so a
+revoke that commits first refuses the call. Only the key's SHA-256 is stored. The `grant_token` argument is taken
+out before the arguments are used, so Baton never writes the key it carries to a table, an event, a refusal or a log.
+The audit line also drops any other argument value that contains the key. A key the caller pastes into another
+argument, such as `request_id`, `title` or `description`, is stored as that argument's value. The audit line of a call
+made under a grant carries its `grant_id`. A rename that changes what active grants cover must
+acknowledge them. Other topic tools stay core-only.
+
 The host owner can enroll and map an alias to an agent role. A valid proof for that alias then runs guest
 calls with the mapped role's authority, including its mailbox and job permissions. Mapping changes end
 affected proofs and event targets. Protect alias passphrases and binding tokens accordingly. See
@@ -158,7 +169,7 @@ and database device and inode after SQLite opens them, but a file swapped and sw
 and that check could still be used. That requires write access to the private directory, which is within
 the host-user trust boundary above.
 
-This revision uses database schema 15. Schemas 2–14 upgrade in one transaction; unsupported versions are
+This revision uses database schema 17. Schemas 2–16 upgrade in one transaction; unsupported versions are
 refused before journal-mode or schema changes. Back up the data before upgrading.
 
 <a name="integrations"></a>
@@ -188,11 +199,10 @@ The data directory contains the following. Protect backups as carefully as the l
 
 - `baton.db`: message text, senders, recipients, times, authorship markers, and relayed words; conversation
   titles and participants; jobs and their state history; event and wake state; retry digests; aliases and
-  their mappings; and optional indexing and seat state. A copy marked as read becomes eligible for deletion
-  30 days after it was sent; unread copies remain until marked read. Conversation metadata and job history
-  remain until the database is deleted.
-- Message-request and job-move retry digests and outcomes are kept for 31 days. Wake records contain roles,
-  reasons, status, and attempts, not message text.
+  their mappings; and optional indexing and seat state. Message copies, read or unread, and conversation
+  metadata and job history remain until the database is deleted.
+- Message-request and job-move retry digests and outcomes are kept until the database is deleted. Wake
+  records contain roles, reasons, status, and attempts, not message text.
 - Alias records include a normalized name, lookalike skeleton, random ID, salted scrypt passphrase verifier,
   and creation time. Ownership is not evicted. Binding tokens are stored as digests with expiry. Admission
   attempts are retained for their hourly windows. Guest post copies include alias attribution; a mapped
