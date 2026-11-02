@@ -72,17 +72,24 @@ def say(db, config, conversation_id: str, text: str, sender: str = "orchestrator
     return conversations.send(db, config, sender=sender, conversation_id=conversation_id, text=text)["message_id"]
 
 
-def expire(db, *message_ids: str, only: str | None = None) -> None:
-    """Retention takes every copy of each message (or only `only`'s), through the real sweep."""
+def expire(db, *message_ids: str) -> None:
+    """Ages every copy of each message past retention and sweeps. Nothing is deleted now, so every copy stays."""
     for role in GROUP:
-        messages.read(db, role)  # delivered and read, so retention may take them
+        messages.read(db, role)  # delivered and read
     for message_id in message_ids:
-        aged = (datetime.now(UTC) - timedelta(days=40)).isoformat()
-        if only is None:
-            db.execute("UPDATE messages SET at = ? WHERE id = ?", (aged, message_id))
-        else:
-            db.execute("UPDATE messages SET at = ? WHERE id = ? AND recipient = ?", (aged, message_id, only))
+        db.execute("UPDATE messages SET at = ? WHERE id = ?", ((datetime.now(UTC) - timedelta(days=40)).isoformat(),
+                                                             message_id))
     messages.sweep(db)
+
+
+def lose(db, *message_ids: str, only: str | None = None) -> None:
+    """Copies go missing for a reason other than retention, as a restored backup could leave them: every copy of
+    each message (or only `only`'s) is deleted from the table. Nothing follows: no log entry, no invalidation."""
+    for message_id in message_ids:
+        if only is None:
+            db.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+        else:
+            db.execute("DELETE FROM messages WHERE id = ? AND recipient = ?", (message_id, only))
 
 
 def begin(db, config, conversation_id: str, kinds=("summary",), producer: str = "alpha") -> dict[str, Any]:
@@ -237,9 +244,9 @@ def test_a_manifest_lists_exact_items_with_counts_and_digests(db, config) -> Non
         json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def test_11_a_retention_hole_is_absent_and_splits_the_segments(db, config) -> None:
+def test_11_a_missing_copy_is_absent_and_splits_the_segments(db, config) -> None:
     conversation_id, sent = converse(db, config, 5)
-    expire(db, sent[2])
+    lose(db, sent[2])
     manifest = begin(db, config, conversation_id)
     assert manifest["absent"] == [{"from_seq": 3, "to_seq": 3, "reason": "expired"}]
     assert [(s["from_seq"], s["to_seq"], s["count"]) for s in manifest["segments"]] == [(1, 2, 2), (4, 5, 2)]
@@ -344,13 +351,13 @@ def test_6_an_expiry_inside_the_window_supersedes_the_batch(db, config) -> None:
     conversation_id, sent = converse(db, config, 3)
     manifest = begin(db, config, conversation_id)
     read_all(db, config, manifest)
-    expire(db, sent[1])
+    lose(db, sent[1])
     error = refused("batch_superseded", commit, db, config, manifest)
     assert sent[1] in str(error)
     assert versions(db, conversation_id) == []
 
 
-def test_13_the_prior_s_input_expiring_mid_batch_supersedes_it(db, config) -> None:
+def test_13_the_prior_going_invalid_mid_batch_supersedes_it(db, config) -> None:
     conversation_id, sent = converse(db, config, 3)
     cycle(db, config, conversation_id, request_id="r-1")
     [prior] = versions(db, conversation_id)
@@ -358,7 +365,7 @@ def test_13_the_prior_s_input_expiring_mid_batch_supersedes_it(db, config) -> No
     manifest = begin(db, config, conversation_id)
     assert manifest["kinds"]["summary"]["prior_version_id"] == prior["id"]
     read_all(db, config, manifest)
-    expire(db, sent[0])  # an input of the prior, after the batch began
+    db.execute("UPDATE artifact_versions SET state = 'invalid' WHERE id = ?", (prior["id"],))  # mid-batch
     error = refused("batch_superseded", commit, db, config, manifest, request_id="r-2")
     assert prior["id"] in str(error)
     assert [v["state"] for v in versions(db, conversation_id)] == ["invalid"]
@@ -468,42 +475,20 @@ def test_commits_are_budgeted_per_producer(tmp_path: Path) -> None:
 # Invalidation, in the same transaction as the expiry ---------------------------------------------------------
 
 
-def test_2_the_last_copy_expiring_invalidates_the_version_and_lists_it_dirty(db, config) -> None:
+def test_2_a_last_copy_going_missing_leaves_the_version_valid_and_not_dirty(db, config) -> None:
     conversation_id, sent = converse(db, config, 3)
     cycle(db, config, conversation_id)
-    expire(db, sent[1], only="reviewer")  # one copy of two goes: nothing changes
+    lose(db, sent[1], only="reviewer")  # one copy of two goes: nothing changes
+    lose(db, sent[1])  # the last copy goes: still nothing changes
     assert [v["state"] for v in versions(db, conversation_id)] == ["valid"]
-    expire(db, sent[1])  # the last copy goes
-    assert [v["state"] for v in versions(db, conversation_id)] == ["invalid"]
-    assert dirty(db, config)[(conversation_id, "summary")]["state"] == "invalid"
+    assert (conversation_id, "summary") not in dirty(db, config)
 
 
-def test_2_invalidation_shares_the_expiry_transaction(db, config, monkeypatch) -> None:
-    conversation_id, sent = converse(db, config, 2)
+def test_2_a_version_marked_invalid_is_listed_dirty(db, config) -> None:
+    conversation_id, _ = converse(db, config, 2)
     cycle(db, config, conversation_id)
-
-    def failing(*args, **kwargs):
-        raise RuntimeError("invalidation failed")
-
-    monkeypatch.setattr(derived, "invalidate_lost", failing)
-    with pytest.raises(RuntimeError):
-        expire(db, sent[0])
-    held = db.execute("SELECT COUNT(*) FROM messages WHERE id = ?", (sent[0],)).fetchone()[0]
-    assert held == 2 and [v["state"] for v in versions(db, conversation_id)] == ["valid"]
-
-
-def test_a_chain_of_versions_is_invalidated_in_full_by_one_expiry(tmp_path: Path) -> None:
-    config = index_config(tmp_path, max_manifest_items=2)
-    db = connect(config.db_path)
-    conversation_id, sent = converse(db, config, 8)
-    for n in range(4):
-        cycle(db, config, conversation_id, request_id=f"r-{n}")
-    chain = versions(db, conversation_id)
-    assert [v["covered_through_seq"] for v in chain] == [2, 4, 6, 8]
-    assert inputs(db, chain[-1]["id"]) == [[1, 8]]  # each version holds its prior's inputs
-    expire(db, sent[0])  # seq 1, in the first window
-    assert [v["state"] for v in versions(db, conversation_id)] == ["invalid"] * 4
-    db.close()
+    db.execute("UPDATE artifact_versions SET state = 'invalid'")
+    assert dirty(db, config)[(conversation_id, "summary")]["state"] == "invalid"
 
 
 def test_3_a_participant_change_flips_no_version(db, config) -> None:
@@ -531,7 +516,8 @@ def test_an_invalid_version_recovers_by_a_rebase_from_seq_1(db, config) -> None:
     conversation_id, sent = converse(db, config, 3)
     cycle(db, config, conversation_id, request_id="r-1")
     [old] = versions(db, conversation_id)
-    expire(db, sent[1])  # a real last-copy expiry
+    lose(db, sent[1])  # a copy gone: a hole in the manifest
+    db.execute("UPDATE artifact_versions SET state = 'invalid'")  # the prior is invalid, as a rebase expects
     assert dirty(db, config)[(conversation_id, "summary")]["state"] == "invalid"
     manifest = begin(db, config, conversation_id)
     plan = manifest["kinds"]["summary"]
@@ -552,7 +538,8 @@ def test_an_invalid_version_recovers_by_a_rebase_from_seq_1(db, config) -> None:
 def test_a_rebase_commit_naming_an_older_version_conflicts(db, config) -> None:
     conversation_id, sent = converse(db, config, 2)
     cycle(db, config, conversation_id, request_id="r-1")
-    expire(db, sent[0])
+    lose(db, sent[0])
+    db.execute("UPDATE artifact_versions SET state = 'invalid'")
     manifest = begin(db, config, conversation_id)
     read_all(db, config, manifest)
     refused("version_conflict", commit, db, config, manifest, artifacts_for(manifest, expected_version=0),
@@ -566,7 +553,8 @@ def test_a_long_conversation_recovers_over_several_batches(tmp_path: Path) -> No
     cycle(db, config, conversation_id, request_id="r-1")
     for n in range(3):
         say(db, config, conversation_id, f"later {n}")
-    expire(db, sent[0])
+    lose(db, sent[0])
+    db.execute("UPDATE artifact_versions SET state = 'invalid'")
     rebase = begin(db, config, conversation_id)
     assert rebase["kinds"]["summary"]["rebase"] is True and rebase["window"] == {"from_seq": 1, "to_seq": 4}
     read_all(db, config, rebase)
@@ -587,7 +575,7 @@ def test_19_a_provenance_limit_fails_closed_and_stays_dirty(tmp_path: Path) -> N
     config = index_config(tmp_path, max_input_segments=2)
     db = connect(config.db_path)
     conversation_id, sent = converse(db, config, 6)
-    expire(db, sent[1], sent[3])  # holes at 2 and 4: inputs 1, 3 and 5-6 are three disjoint segments
+    lose(db, sent[1], sent[3])  # holes at 2 and 4: inputs 1, 3 and 5-6 are three disjoint segments
     first = begin(db, config, conversation_id)
     assert first["window"] == {"from_seq": 1, "to_seq": 4}  # bounded to what two segments can hold
     read_all(db, config, first)
@@ -616,19 +604,17 @@ def test_a_receipt_row_carries_what_a_replay_needs(db, config) -> None:
     assert datetime.fromisoformat(row["expires_at"]) - committed == timedelta(days=30)
 
 
-def test_an_identical_replay_after_the_batch_is_cleaned_up_is_answered_from_the_receipt(db, config) -> None:
-    conversation_id, sent = converse(db, config, 2)
+def test_an_identical_replay_after_the_batch_expires_is_answered_from_the_receipt(db, config) -> None:
+    conversation_id, _ = converse(db, config, 2)
     manifest = begin(db, config, conversation_id)
     read_all(db, config, manifest)
     first = commit(db, config, manifest)
     db.execute("UPDATE batches SET expires_at = 0")
-    cycle(db, config, conversation_id, kinds=("decisions",), request_id="r-sweep")  # a writer call sweeps
-    assert db.execute("SELECT COUNT(*) FROM batches WHERE id = ?", (manifest["batch_id"],)).fetchone()[0] == 0
     before = snapshot(db)
     replay = commit(db, config, manifest)
     assert replay["created"] is False and replay["versions"] == first["versions"]
     assert snapshot(db) == before
-    expire(db, sent[0])  # invalidated since: the replay says so, and resurrects nothing
+    db.execute("UPDATE artifact_versions SET state = 'invalid'")  # invalidated since: the replay says so
     replay = commit(db, config, manifest)
     assert [v["state"] for v in replay["versions"]] == ["invalid"]
     assert not {"body", "citations", "items"} & set(json.dumps(replay).split('"'))
@@ -643,9 +629,9 @@ def test_an_aged_out_receipt_cannot_create_anything(db, config) -> None:
     db.execute("UPDATE batches SET expires_at = 0")
     db.execute("UPDATE commit_requests SET expires_at = ?", ((datetime.now(UTC) - timedelta(days=1)).isoformat(),))
     cycle(db, config, conversation_id, kinds=("decisions",), request_id="r-sweep")
-    assert db.execute("SELECT COUNT(*) FROM commit_requests WHERE request_id = 'r-1'").fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM commit_requests WHERE request_id = 'r-1'").fetchone()[0] == 1
     before = snapshot(db)
-    refused("unknown_batch", commit, db, config, manifest)
+    refused("batch_closed", commit, db, config, manifest)
     assert snapshot(db) == before
 
 
@@ -775,7 +761,7 @@ def test_a_run_of_holes_is_one_entry_and_the_manifest_stays_bounded(tmp_path: Pa
     config = index_config(tmp_path, max_manifest_items=1)
     db = connect(config.db_path)
     conversation_id, sent = converse(db, config, 12)
-    expire(db, *sent[:11])  # seqs 1-11 gone, only 12 left
+    lose(db, *sent[:11])  # seqs 1-11 gone, only 12 left
     manifest = begin(db, config, conversation_id)
     assert manifest["absent"] == [{"from_seq": 1, "to_seq": 11, "reason": "expired"}]
     assert [item["seq"] for segment in manifest["segments"] for item in segment["items"]] == [12]
@@ -786,7 +772,7 @@ def test_alternating_holes_stay_within_the_segment_cap(tmp_path: Path) -> None:
     config = index_config(tmp_path, max_manifest_segments=3)
     db = connect(config.db_path)
     conversation_id, sent = converse(db, config, 20)
-    expire(db, *sent[1::2])  # every even seq gone
+    lose(db, *sent[1::2])  # every even seq gone
     manifest = begin(db, config, conversation_id)
     assert [item["seq"] for segment in manifest["segments"] for item in segment["items"]] == [1, 3, 5]
     assert manifest["absent"] == [{"from_seq": n, "to_seq": n, "reason": "expired"} for n in (2, 4, 6)]

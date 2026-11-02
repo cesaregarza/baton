@@ -124,9 +124,9 @@ change-feed commands do not need a configured producer.
 | `baton index commit-batch B --file F --producer P` | Submit the batch's derived artifacts. |
 | `baton index generation create\|activate\|drop` | Build, switch to, or discard a producer's generation. |
 
-Each new conversation message, expired copy, and membership change updates the conversation revision and
-appends to a change log kept for 30 days. A cursor older than the retained log, or from another database,
-is refused with `cursor_expired` and a `reset_cursor` for rebuilding.
+Each new conversation message and membership change updates the conversation revision and appends to a change
+log, which is kept. A cursor from another database, or older than the oldest change still kept, is refused with
+`cursor_expired` and a `reset_cursor` for rebuilding.
 
 A batch manifest fixes which messages it covers. The worker reads every page, then submits artifacts such
 as `summary`, `decisions`, or `open_questions`. Baton records their inputs. An artifact becomes invalid if
