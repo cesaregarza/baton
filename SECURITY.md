@@ -1,196 +1,211 @@
 # Security
 
-## Reporting
+<a name="reporting"></a>
 
-Please report vulnerabilities privately through GitHub's **Report a vulnerability** button on this
-repository, not in a public issue.
+## Report a vulnerability
 
-## Auth
+Please use this repository's **Report a vulnerability** button on GitHub. Do not put vulnerability details
+in a public issue.
 
-- **Every MCP request needs a credential.** Without a valid bearer token the response is 401. A
-  credential maps to exactly one role, and tools act only as that role. No tool takes a role, a path or a
-  command.
-- **Bearer tokens** are 256-bit random values. The config holds only their SHA-256 digests, which are
-  compared in constant time. Each token's name is unique per host. If a token leaks, `baton token revoke
-  <name>` ends exactly that token from its next call, with no restart; then delete its entry.
-- **OAuth** (off by default):
-  - Clients register dynamically, but only with redirect URIs that exactly match the allowlist, or with
-    loopback URIs if those are allowed. There is no prefix or wildcard matching, and a callback that
-    carries its own `iss` parameter is refused. A client stored before that rule, whose callback carries
-    `iss`, is ignored, and no redirect is ever sent to a callback that already has one. A refused
-    registration is logged as the callback's scheme and host only, with a `[path redacted]` marker. No
-    character of its path, nor its userinfo, port, query or fragment, is ever logged. Control characters are
-    removed, and the whole value is capped at 200 characters.
-  - Issuer identification (RFC 9207): `public_url` is the issuer, so it must be written exactly as the OAuth
-    metadata publishes it, with a plain ASCII path. The config refuses any other form and names the one to
-    write. The metadata advertises
-    `authorization_response_iss_parameter_supported`,
-    and every authorization response redirected to a client, success or error, carries `iss` equal to the
-    metadata's `issuer`. A client that checks it can't be tricked into sending a code to the wrong server
-    (a mix-up attack).
-  - Authorization requires PKCE and the operator's passphrase on the host's consent page. The passphrase
-    is stored as an scrypt hash. Five wrong attempts lock the page for an hour.
-  - Access and refresh tokens are opaque, and stored only as SHA-256 digests. Refresh tokens rotate.
-    `baton oauth revoke-all` ends every grant.
-  - The public endpoints `/register` and `/authorize` are size-limited and rate-limited, both per source
-    and overall. Registered-client and pending-login counts are capped.
-- **Transport.** The MCP endpoint refuses a `Host` header other than its `public_url` name or loopback, and a
-  browser `Origin` other than its own and those configured. It listens on loopback by default. Use TLS
-  whenever traffic leaves the machine (see [docs/exposing.md](docs/exposing.md)).
-- **Local CLI.** The CLI opens the database directly and trusts `--as`, except for a human role, which it
-  refuses. Anyone who can run it as the host's user can act as any other role. The filesystem permissions on
-  `data_dir` are the boundary (below).
-- **Human roles** (`human = true`) hold only bearer tokens. They can't be offered through OAuth, the CLI
-  refuses `--as` for them, and a request naming an author field is refused (`forbidden_field`).
+<a name="threat-model"></a>
 
-### What `author_kind` guarantees
+## Trust boundaries
 
-`author_kind: human` on a message means it was sent with a human role's own token, through this host, and
-was recorded that way when sent. It doesn't guarantee:
+A Baton host serves one operator's agents. Roles limit what clients can do, but they are not independent
+tenants. For example, any role can read jobs. Someone with shell access as the host's user can use the local
+CLI as an agent role and can access the database directly. In particular, the CLI does not enforce the MCP
+guard's `job_authority` restriction. A malicious operator, a compromised host, and denial of service beyond
+Baton's built-in limits are outside this model.
 
-- anything if the host machine is compromised: whoever controls it can write into the database directly;
-- anything if the person's token leaks: revoke it with `baton token revoke`;
-- authority: an authenticated message from a person is information, and whether an assistant acts on it is
-  that assistant's own policy. baton has no approval message type.
+Use TLS whenever traffic leaves the machine. The MCP server listens on loopback by default and checks
+`Host` and browser `Origin` headers. [Connecting from another machine](docs/exposing.md) explains how to
+put HTTPS in front of it. The local data directory must be private; its checks are described below.
+
+Messages are information. Neither a message nor relayed text changes a job's state, revision, or approvals.
+A sender's `relayed` entries are claims made by that sender, not authenticated authorship by the person
+named. Derived artifacts are also information, not authority.
+
+| Risk | Boundary |
+|---|---|
+| An unauthorized client calls tools or claims another sender | MCP credentials, scopes, role checks, rate limits, and refusal of caller-supplied author fields. |
+| A role reads a conversation it should not see | Current membership and retained copies, unless `can_view_all_conversations` grants board-wide reads. Direct messages stay between sender and recipient. |
+| A flooded mailbox or repeated write | Message-size and unread-mailbox limits, conversation rate limits, and retry IDs that reject conflicting requests. |
+| A forged wake or client-supplied callback | Wakes carry no message text; the recipient reads with its own credential. Webhooks can be signed, and MCP Events callbacks have an allowlist and network checks. |
+
+<a name="auth"></a>
+
+## Credentials and roles
+
+Every MCP request needs a valid credential. A normal credential identifies one configured role, and the
+host checks the role's permissions and the required `baton.read` or `baton.write` scope on tool calls. It
+also applies per-role, per-tool hourly limits and writes an audit record without message text. A guest login
+can act as a mapped agent role only when it supplies that alias's live binding token; see
+[Guest aliases](docs/aliases.md).
+
+Bearer tokens are random 256-bit values. The config stores their SHA-256 digests, which are compared in
+constant time. Each token name is unique on the host. If one leaks, run `baton token revoke <name>`: it
+stops that token on its next call without a restart. Then remove its config entry. Editing or rotating a
+config entry requires a restart before the running service sees the new config.
+
+<a name="what-author_kind-guarantees"></a>
+
+A role with `human = true` can use only its own bearer token. It cannot be granted through OAuth, selected
+by the local CLI's `--as`, or mapped from a guest alias. Baton rejects caller-supplied author fields such
+as `from_role` and `author_kind`. It records `author_kind` at send time based on the effective sender role.
+A `human` marker means the message came through this host with that role's credential; it is not proof
+against a stolen token or compromised host, and it is not an approval.
+
+### OAuth
+
+OAuth is optional and off by default. It supports dynamic client registration, PKCE, resource indicators,
+refresh-token rotation, and revocation. The operator chooses which roles OAuth may grant and enters a
+passphrase on the host's consent page. The host stores the passphrase as an scrypt hash. Five wrong
+attempts lock the page for an hour.
+
+Redirect URIs in the configured allowlist are matched exactly, with no wildcard or prefix matches. By
+default, Baton also accepts HTTP loopback redirects to `127.0.0.1`, `[::1]`, or `localhost`, on any port
+and path, without userinfo or a fragment. Set `auth.oauth.allow_loopback_redirects = false` to require an
+exact allowlist match for those redirects too. A callback carrying its own `iss` parameter is refused,
+including one stored before that rule. Refused registrations log only the callback's sanitized scheme and
+host with a redacted-path marker, never its path, userinfo, port, query, or fragment.
+
+`host.public_url` is the OAuth issuer and must match the canonical issuer published in metadata. Baton
+advertises RFC 9207 issuer identification and includes the issuer in authorization responses. Clients that
+support issuer identification may offer a stable callback URI; use the exact one documented by your client.
+The MCP endpoint's token audience is `<public_url>/mcp`. See [the network guide](docs/exposing.md) before
+changing this URL or placing the host behind a proxy.
+
+Access and refresh tokens are opaque and stored only as digests. Access tokens last one hour; refresh
+tokens rotate and last 30 days. `baton oauth revoke-all` ends every grant. Registration and authorization
+endpoints have size, rate, and state limits. Unused client registrations expire after 24 hours; authorization
+codes are single-use and valid for five minutes.
+
+### Guest access
+
+An ordinary guest may read conversations its role can access and post to a readable conversation with a
+valid alias binding token. A new guest cannot be a participant, so it needs `can_view_all_conversations = true`
+to read board conversations. Older databases may retain legacy guest memberships and copies. With that
+board-wide permission and a live alias binding, a guest may start a conversation in an existing topic; the
+topic's configured members become participants. A guest cannot choose them or change topics. Separate
+hourly limits apply to guest-created threads. A plain guest cannot use shared mailboxes, direct messages,
+jobs, participant management, or artifacts. If search is enabled, guest search is keyword-only and
+message-only. An alias name or visual code is not proof of identity or human authority. Admission limits
+apply to claims and posts, and a binding token is checked before a post or thread creation, including retries.
+
+When conversations are enabled, `list_topics` and `get_topic` expose topic metadata, including member names,
+to authenticated callers with read scope, including guests. Their conversation counts reflect the caller's
+access; a topic does not grant access to its conversations. Grant `can_create_topics` only to roles trusted
+to create, edit, and rename topic containers.
+
+The host owner can enroll and map an alias to an agent role. A valid proof for that alias then runs guest
+calls with the mapped role's authority, including its mailbox and job permissions. Mapping changes end
+affected proofs and event targets. Protect alias passphrases and binding tokens accordingly. See
+[Guest aliases](docs/aliases.md) for expiry, limits, and recovery.
+
+A role with `can_manage_participants` can add or remove participants even in a conversation it has not
+joined. Adding a role can give it access to future conversation messages, so grant that permission only to
+roles trusted to manage membership. Changing a conversation's topic also requires that permission, but
+additionally requires the caller to be a current participant.
+
+## Browser interfaces
+
+The optional dashboard has **no login** and binds only to loopback. Anyone or any process able to reach
+its port can read what its configured viewer role can see. `can_view_all_conversations` grants that viewer
+access to every retained conversation. An exact `dashboard.proxy_host` permits one additional Host header;
+it is not authentication. To reach the dashboard from another machine, put an authenticating proxy
+in front of it and restrict access to people entitled to everything the viewer can see.
+
+Without board-wide access, the dashboard hides topics with no conversation the viewer can read in that
+topic or its subtopics. This differs from the MCP `list_topics` and `get_topic` tools, which expose topic
+metadata to callers with read scope, as described under [Guest access](#guest-access).
+
+The dashboard accepts reads only, checks the Host header, sends no CORS headers, prevents framing, and
+serves script-free pages with a restrictive content-security policy. These protections do not make a local
+port private from other users or processes on the machine.
+
+The optional human seat has a login and also binds to loopback. An HTTPS proxy must terminate TLS at its
+configured origin. The seat uses the person's bearer token for login, keeps a credential-bound session
+instead of the token, and checks the credential and revocation state on each request. Forms require the
+exact origin and a session-bound CSRF token; cookies use `__Host-`, Secure, HttpOnly, and SameSite=Strict.
+Baton rejects ambiguous framing and duplicate or unexpected form fields.
+
+Give the seat its own host name. Browsers share a host's cookies across services on that name, including
+ports. Reusing the MCP host's or dashboard's name requires the explicit `same_host_trust_accepted` setting,
+which records trust in those other services with the human role's authority. See
+[People and the browser](docs/people.md) for setup, session limits, and revocation.
 
 ## The data directory
 
-baton refuses to start, and every command refuses to run, unless the data directory is private. It
-**never changes** what it finds: no `chmod`, no `chown`. A refusal (`unsafe_data_dir`, exit status 2) names
-the path, what is wrong, and the fix. These checks run at `serve` startup, at every CLI command, and on
-every access to the database, the OAuth state and the audit log:
+Baton refuses to start or run a CLI command if its data directory is unsafe. It does not fix permissions or
+ownership automatically. An `unsafe_data_dir` refusal names the problem. Checks occur at startup, on CLI
+commands, and when the database, OAuth state, or audit log is accessed.
 
-- **One path.** `data_dir` is turned into one absolute path, used to check, create and open it. A `..`
-  component is refused, and so is a symlink anywhere in the path: write the real path.
-- **Parents.** The path is opened one component at a time from `/`, with `O_DIRECTORY | O_NOFOLLOW`, and each
-  directory is checked with `fstat` on the descriptor actually opened. Every ancestor must be owned by root
-  or the current user, and must not be group- or other-writable unless it has the sticky bit (as `/tmp`
-  does). Nothing is checked by path, so a directory swapped in after its check is never the one used.
-- **The directory.** `data_dir` must be a real directory owned by the current user, with no group or other
-  permission bits. A missing one is created `0700`, together with any missing parents, each inside its
-  already-checked parent and then opened and checked itself. At the end, the path must still name the
-  directory that was checked.
-- **Its contents.** Every entry in it must be a regular file, not a symlink, owned by the current user,
-  with no group or other bits. That includes leftovers such as an old temp file.
-- **Opening files.** The directory is opened with `O_DIRECTORY | O_NOFOLLOW` and checked with `fstat` on
-  that descriptor. The OAuth state, its lock and the audit log are opened relative to it with
-  `O_NOFOLLOW`, then checked again with `fstat`. A link swapped in after the check is refused, not
-  followed.
-- **New files** are created `0600`. `serve` and the CLI also set the process umask to `077`. The database
-  is created `0600` before SQLite opens it, and SQLite gives its `-wal` and `-shm` files the database's
-  permissions.
-- **The OAuth state** is written to a unique, exclusively created temp file in the directory, fsynced, and
-  renamed into place. A fixed temp name is never used.
+- The configured path is made absolute. A `..` component or symlink anywhere in it is refused.
+- Each parent is opened one component at a time with no-follow directory flags and checked using its open
+  descriptor. Ancestors must be owned by root or the current user and cannot be group- or other-writable
+  unless the sticky bit is set.
+- The data directory must be a real directory owned by the current user, with no group or other permission
+  bits. Missing directories are created as `0700` and checked. The final path must still name the directory
+  that was checked.
+- Every entry must be a regular file, owned by the current user, with no group or other permission bits.
+  This includes temporary leftovers. New files are created `0600`; the server and CLI set umask `077`.
+- OAuth state, its lock, and the audit log are opened relative to the checked directory without following
+  symlinks and checked again. OAuth state is written to a unique exclusive temporary file, synced, and
+  renamed into place. SQLite's WAL and shared-memory files inherit the database's permissions.
 
-- **The database schema.** Schemas 2–12 upgrade atomically to schema 13, preserving existing rows. An
-  unsupported version is refused before journal mode or schema changes. Back up before an authorized upgrade.
+SQLite opens files by path rather than through the checked directory descriptor. Baton checks the directory
+and database device and inode after SQLite opens them, but a file swapped and swapped back between the open
+and that check could still be used. That requires write access to the private directory, which is within
+the host-user trust boundary above.
 
-What remains: SQLite opens its files by path, not through the checked descriptor. After it opens, baton
-checks that the path still names the directory and database file it checked (device and inode), and
-refuses otherwise. Someone who swapped the file and swapped it back between SQLite's open and that check
-could still make SQLite use another file. That needs write access to the `0700` directory, which means
-the same user or root, which is out of scope below.
+This revision uses database schema 15. Schemas 2–14 upgrade in one transaction; unsupported versions are
+refused before journal-mode or schema changes. Back up the data before upgrading.
 
-## Integrations
+<a name="integrations"></a>
 
-Optional integrations (`baton/integrations/`) load only when the config enables them. The MCP Events
-integration is the only one that accepts a URL from a client. When it is enabled:
+## Integrations and outbound requests
 
-- callbacks must be canonical HTTPS URLs (no `.` or `..` segments, encoded separators, userinfo, query or
-  fragment) under an operator allowlist, compared segment by segment. The checked string is the one sent;
-- each callback is verified with a signed challenge before anything is stored, and a refusal keeps no state;
-- every request resolves the name once, requires every address to be global, and connects only to those
-  addresses, keeping the name for TLS and `Host`. It follows no redirects and ignores proxy settings;
-- subscriptions belong to the subscribing credential's role, are capped per role and overall, and expire.
-  Every delivery needs that same credential (the same token, or the same OAuth grant) to still hold that
-  role;
-- every request has one absolute deadline that bounds each blocking step (connect, TLS, every write and read),
-  resolves names on a fixed, bounded thread pool, refuses content-encoded responses, and reads at most
-  64 KiB in total;
-- a subscription keeps at most one previous signing secret and rotates at most once per overlap window;
-- test-only settings can't be set from the config;
-- events are signed (Standard Webhooks) and carry no message text;
-- signing secrets are kept only in a `0600` state file in the data directory, and are never logged,
-  audited or returned.
+Core wake webhooks and commands come from the operator's config. Webhook wakes can be signed with Standard
+Webhooks; they contain identifiers and reasons, not message text or job bodies. Failed wakes retry with
+backoff. A successful notification does not prove that the recipient read or acted on the work.
 
-Its doc in `docs/integrations/` lists what is verified against the published contract, and what still
-needs a live test.
+The optional MCP Events integration accepts a client-supplied callback only when enabled. It requires a
+canonical HTTPS URL under an operator-controlled allowlist and checks it with a signed challenge. On each
+challenge and delivery it resolves the name once, rejects it if any address is non-public, and connects to
+a checked address while retaining the name for TLS. It follows no redirects or proxy settings.
 
-## Threat model
+Requests have time and size limits. Challenge responses must be unencoded; event delivery uses the status
+without reading or decoding the body. Subscriptions expire, and delivery checks the subscriber's credential.
+Events are signed and carry no message text. [MCP Events](docs/integrations/openai-mcp-events.md) explains
+the checks, limits, tests, and deployment guidance.
 
-| Threat | Mitigation |
-|---|---|
-| Someone on the network calls the MCP endpoint | A token or an OAuth grant is required; scopes and an hourly limit apply to every tool |
-| One client impersonates another role | The role comes from the credential, never from arguments. A message's `from_role` is always its sender's credential role, and a request carrying an author field is refused (`forbidden_field`) |
-| A guest role reads shared mailbox state, mutates jobs, or uses a supplied alias as authority | Guest dispatch is limited by the authenticated role to board reads, message-only keyword search and bounded alias claims; guest direct messages, membership, jobs/decisions and event-subscription mutations are refused. Conversation posts require a valid per-request alias proof before replay, readable board access and layered limits; guests never escalate. Alias-shaped author fields are rejected before tool argument validation |
-| A restricted fixed role creates or moves a job, including by replaying an old request | `roles.<name>.job_authority = false` refuses both job mutations before the tool body and idempotent replay; omitted settings preserve the existing default |
-| An assistant posting as the person, or making relayed text read as theirs | A human role has only its own bearer token: never an OAuth grant, never `--as`. `author_kind` is recorded at send time from the sender's role; quoted or relayed words read as the sender's (`agent`) |
-| A message, or words relayed in one, taken as an approval | Messages are information, never authority: no message changes a job's state, revision or approvals. Relayed words are typed apart from the sender's text and are never anyone's authenticated authorship |
-| A role reading or posting in a conversation it isn't in | Sending still requires current participation. Reading uses the shared board predicate: `can_view_all_conversations` grants retained conversation reads, while other roles need membership and retained copies; direct messages remain sender/recipient-only. Creating conversations and managing participants each need a config permission |
-| A stolen access token | Expires in 1 hour; revoke with `baton oauth revoke-all`, or `baton token revoke <name>` for a bearer token |
-| Guessing the consent passphrase | scrypt hash, 5 failures per hour, then lockout |
-| An open registration endpoint used to fill memory or disk | Size and rate limits, a cap on clients, and unused registrations expire after 24 h |
-| Redirect-based code theft | Exact redirect allowlist, PKCE, single-use codes valid for 5 minutes |
-| DNS rebinding against a local host | `Host` and `Origin` checks |
-| Reaching the dashboard through a proxy (`dashboard.proxy_host`, off by default) | It accepts one exact extra Host value and never reads `X-Forwarded-*`. That is Host validation, not authentication: any local process can send that Host, so the proxy in front must authenticate, and admit only people entitled to everything the viewer role sees (every conversation, with `can_view_all_conversations`). Tailnet membership alone isn't that permission |
-| The host made to fetch internal URLs (SSRF) | The core never fetches a client-given URL: its wake targets come only from the operator's config. The optional MCP Events integration accepts client callbacks only under an operator allowlist, with the defences below |
-| A forged or replayed wake | A wake carries no content; the agent reads with its own credential. Webhooks can be signed (Standard Webhooks) |
-| A message flood | Per-recipient unread cap (`mailbox_full`, or `conversation_full` with no copy stored), message size cap, per-role tool rate limits, and an hourly cap per conversation that wakes an escalation role |
-| Retried writes duplicating messages or jobs | Idempotent `request_id`s; a conflicting retry is refused |
-
-Out of scope:
-
-- a malicious operator, or anyone with shell access as the host's user;
-- denial of service beyond the limits above. Put a proxy in front for that;
-- confidentiality between roles on the same host. Any role can read any job, and roles are not tenants.
+The optional [decision-push integration](docs/integrations/decision-push.md) sends a content-free notice to
+an operator-configured endpoint. Its failure and retry behavior is different from wake delivery.
 
 ## What the host stores
 
-All of it is under `data_dir`:
+The data directory contains the following. Protect backups as carefully as the live directory.
 
-- `baton.db` (SQLite):
-  - **message text** with sender, recipient, time and `author_kind`, and any relayed words with their stated source and
-    time. A conversation message is stored once per recipient. Read messages are deleted 30 days after
-    they were sent; unread ones are kept until they are read;
-  - **conversation titles and participants**. Kept until you delete the database;
-  - **job titles, bodies and state history**, including the short notes given with `move_job`. Kept until
-    you delete the database;
-  - SHA-256 digests of message requests, and of job moves with each move's recorded outcome, for 31 days;
-  - wake records: role, reason, status and attempts. Never message text;
-  - **guest post attribution** (schema 13): immutable alias ID, normalized alias and code on each copy.
-    Authenticated sender remains `guest`, authorship remains `agent`; labels never confer core/human/job authority;
-  - **permanent guest aliases** (introduced in schema 12): normalized name and lookalike skeleton, immutable server-random ID,
-    salted scrypt verifier and creation time. Alias count is unlimited; names are never released or evicted.
-    No plaintext passphrase or pepper. The visual code derives only from the random alias ID;
-  - **expiring alias binding proofs**, stored only as SHA-256 digests with alias ID and expiry. They last
-    24 hours by default; `aliases.binding_ttl_seconds` accepts 1–86400 seconds. A proof for an alias mapped
-    to a role lasts `aliases.mapped_binding_ttl_seconds`, 7 days by default (1–604800). Expired proofs are pruned
-    on successful claims; capacity refuses rather than silently evicting another active session. A valid proof
-    is reusable across authenticated guest credentials. It is never authentication or human authority, and
-    carries a role's authority only while its alias is mapped to that role;
-  - **per-call identity** (schema 14): each role's one enrolment (role, alias ID, enrolment and last unmap
-    times), kept and never deleted; the current alias-to-role mapping; the owner's single-use arms (kind,
-    target, expiry); and each OAuth grant's events target (grant id, alias ID, the grant's client id, role,
-    scopes and resource, and when it was bound). No token or passphrase;
-  - admitted alias claim attempts: credential digest, alias skeleton and timestamp, bounded by the global hourly
-    quota and pruned as the claim window advances. Refused passphrases consume claim quota before scrypt;
-  - guest post admission attempts: immutable alias ID, credential digest and timestamp, pruned after an hour.
-    Per-alias/per-credential quotas count valid proof-bearing calls, including retries and later body refusals.
-    No mailbox, membership, wait cursor or wake is created for a guest, and fan-out never delivers a guest copy.
-- `oauth.json` (`0600`): registered clients' metadata (name, redirect URIs), and token **digests** with
-  their expiry, scopes and role. No token is stored in the clear.
-- With the MCP Events integration on, its state file holds each subscription's role, owner (the role, or a
-  guest's OAuth grant id), client id, callback URL, expiry and **signing secret** (`0600`), and delivery
-  receipts (wake id, subscription id, owner and outcome) for 3 days, at most 500. Delete it to drop every
-  subscription. `baton events status` shows only the ids, expiry, state and receipts.
-- `revoked_tokens.json` (`0600`): the digest, name and role of each bearer token ended by `baton token revoke`,
-  and when.
-- `audit.jsonl`: one line per tool call with the time, the role the call ran as, the credential's role and id
-  (a bearer entry's name or an OAuth grant id), any alias's ID and code, the tool, ids and outcome. **Never message text,
-  job bodies, passphrases or proof/credential values.** Guest post audit includes immutable alias ID, never raw
-  caller arguments. Secret-bearing malformed calls are refused before SDK validation can echo their input.
-  Idempotency includes alias ID, never the passphrase, proof or visual code.
+- `baton.db`: message text, senders, recipients, times, authorship markers, and relayed words; conversation
+  titles and participants; jobs and their state history; event and wake state; retry digests; aliases and
+  their mappings; and optional indexing and seat state. A copy marked as read becomes eligible for deletion
+  30 days after it was sent; unread copies remain until marked read. Conversation metadata and job history
+  remain until the database is deleted.
+- Message-request and job-move retry digests and outcomes are kept for 31 days. Wake records contain roles,
+  reasons, status, and attempts, not message text.
+- Alias records include a normalized name, lookalike skeleton, random ID, salted scrypt passphrase verifier,
+  and creation time. Ownership is not evicted. Binding tokens are stored as digests with expiry. Admission
+  attempts are retained for their hourly windows. Guest post copies include alias attribution; a mapped
+  alias call acts as its mapped role. Proofs and passphrases are not stored in plaintext.
+- `oauth.json`: client metadata and token digests, expiry, scopes, and roles; no cleartext OAuth tokens.
+- `revoked_tokens.json`: the digest, name, role, and revocation time of each revoked bearer token.
+- With MCP Events enabled, its `0600` state file contains subscription ownership, callback URLs, expiry, and
+  signing secrets, plus delivery receipts kept for up to three days and at most 500 records. Delete the
+  file to drop all subscriptions. `baton events status` omits URLs and secrets.
+- `audit.jsonl`: call time, credential and effective roles, credential identifier, tool, relevant IDs,
+  outcome, and any alias ID and code. It excludes message text, job bodies, passphrases, and credentials.
+  Malformed secret-bearing calls are refused before validation can echo their input.
 
-The host logs to stderr: registrations, consent outcomes, wake failures. Those logs contain no secrets,
-tokens or message text. Webhook secrets are read from the environment variable named in the config, and
-are never written anywhere.
+The host's stderr logs record events such as registration, consent outcomes, and wake failures without
+message text or secrets. Operator-configured webhook signing secrets are read from named environment
+variables rather than written to the config or audit log.
