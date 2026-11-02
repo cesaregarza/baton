@@ -60,7 +60,7 @@ build_scene = refs.build_scene  # the fixture, under the name the tests ask for
 def topic_grammar_text(value):
     """What the existing helper says of a malformed topic: the text a bad `topic` is refused with here too."""
     with pytest.raises(InvalidRequest) as raised:
-        topics._check_path(value, field="topic")
+        topics.check_path(value, field="topic")
     return str(raised.value)
 
 

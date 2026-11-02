@@ -200,7 +200,7 @@ def edit(conn: sqlite3.Connection, config: Config, *, actor: str, topic: Any, na
     """
     if grant_key is None:
         _may_edit(config, actor)
-    path = topics._check_path(topic, field="topic")
+    path = topics.check_path(topic, field="topic")
     _check_name(name)
     _check_body(body)
     _check_expected(expected_revision)
@@ -247,7 +247,7 @@ def read(conn: sqlite3.Connection, *, topic: Any, name: Any = None, revision: An
     The list holds only the topic's own documents. A revision needs a name, and a revision the document does not
     have is refused with the number it is at, never read as the current one.
     """
-    path = topics._check_path(topic, field="topic")
+    path = topics.check_path(topic, field="topic")
     if name is not None:
         _check_name(name)
     if revision is not None and not _is_count(revision, 1):
@@ -277,7 +277,7 @@ def history(conn: sqlite3.Connection, *, topic: Any, name: Any, after_revision: 
     `next_revision` is the last one returned, or `after_revision` when the page is empty, so feeding it back
     reads on until nothing is left.
     """
-    path = topics._check_path(topic, field="topic")
+    path = topics.check_path(topic, field="topic")
     _check_name(name)
     if not (_is_count(after_revision, 0) and _is_count(limit, 1) and limit <= MAX_HISTORY_PAGE):
         raise InvalidRequest(f"limit is 1-{MAX_HISTORY_PAGE} and after_revision at least 0")

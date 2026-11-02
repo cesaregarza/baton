@@ -37,7 +37,7 @@ def _may_manage(config: Config, actor: str) -> None:
         raise Forbidden(f"{actor} may not create or change topics (roles.{actor}.can_create_topics)")
 
 
-def _check_path(path: Any, field: str = "path") -> str:
+def check_path(path: Any, field: str = "path") -> str:
     from baton import conversations  # lazily: conversations imports this module
 
     checked = conversations.check_topic(path, field=field)
@@ -289,7 +289,7 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
     """
     if grant_key is None:
         _may_manage(config, actor)
-    checked = _check_path(path)
+    checked = check_path(path)
     title = _check_text(title, "title", MAX_TITLE, default=checked.split("/")[-1])
     description = _check_text(description, "description", MAX_DESCRIPTION)
     chosen = _check_members(config, members) if grant_key is None else _no_members(members)
@@ -333,7 +333,7 @@ def update(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
     A call that changes none of them writes no history row, as a set_topic to the topic it already has does not.
     """
     _may_manage(config, actor)
-    checked = _check_path(path)
+    checked = check_path(path)
     new_title = _check_text(title, "title", MAX_TITLE)
     new_description = (UNSET if description is UNSET
                        else _check_text(description, "description", MAX_DESCRIPTION))
@@ -379,8 +379,8 @@ def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, n
     A rename that changes what active topic grants cover must acknowledge them, and logs a `rename` event on each.
     """
     _may_manage(config, actor)
-    checked = _check_path(path)
-    target = _check_path(new_path, field="new_path")
+    checked = check_path(path)
+    target = check_path(new_path, field="new_path")
     if target == checked or target.startswith(checked + "/"):
         raise InvalidRequest(f"new_path {target!r} is {path!r} itself or inside it")
     with transaction(conn):
@@ -439,7 +439,7 @@ def may_open(conn: sqlite3.Connection, config: Config, reader: str, path: str) -
 def get(conn: sqlite3.Connection, config: Config, *, reader: str, path: Any,
         seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """One topic, with the number of threads in it this reader may see and the subtopics it may open."""
-    checked = _check_path(path)
+    checked = check_path(path)
     with snapshot(conn):  # one view, so a rename in between cannot mix two topics into one answer
         row = require_topic(conn, checked)
         record_seen(seen, checked, row)
@@ -458,7 +458,7 @@ def listing(conn: sqlite3.Connection, config: Config, *, reader: str,
     if parent is None:
         rows = conn.execute("SELECT * FROM topics ORDER BY path").fetchall()
     else:
-        checked = _check_path(parent, field="parent")
+        checked = check_path(parent, field="parent")
         rows = conn.execute("SELECT * FROM topics WHERE path LIKE ? ORDER BY path",
                             (f"{checked}/%",)).fetchall()
     listed = []
