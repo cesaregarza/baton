@@ -132,7 +132,7 @@ li { border-bottom: 1px solid var(--rule); padding: .7rem 0; min-width: 0; }
 .person { font-size: .75rem; border: 1px solid var(--rule); border-radius: 1rem; padding: 0 .45rem;
           color: var(--muted); }
 .text { white-space: pre-wrap; overflow-wrap: anywhere; margin: .25rem 0 0; }
-.notice { color: var(--muted); font-style: italic; margin: 0; }
+.notice { color: var(--muted); font-style: italic; margin: 0; overflow-wrap: anywhere; }
 .relayed { border-left: 3px solid var(--rule); margin: .4rem 0 0; padding: .1rem 0 .1rem .7rem; }
 .relayed p { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .actions { margin: .3rem 0 0; font-size: .9rem; }

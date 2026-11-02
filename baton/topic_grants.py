@@ -319,19 +319,22 @@ def grant_for_use(conn: sqlite3.Connection, identity: dict[str, str] | None, key
     return row
 
 
-def _not_allowed(grant: sqlite3.Row, capability: str, path: str | None) -> GrantRefused:
-    return GrantRefused(f"topic grant {grant['id']} does not allow {capability} on {path or '(no topic)'}",
+def _not_allowed(grant: sqlite3.Row, capability: str, shown: str) -> GrantRefused:
+    return GrantRefused(f"topic grant {grant['id']} does not allow {capability} on {shown}",
                         grant["id"], "not_covered")
 
 
-def require_covers(conn: sqlite3.Connection, grant: sqlite3.Row, capability: str, path: str | None) -> sqlite3.Row:
+def require_covers(conn: sqlite3.Connection, grant: sqlite3.Row, capability: str, path: str | None,
+                   shown: str | None = None) -> sqlite3.Row:
     """The topic at `path`, unless the grant does not cover it for `capability`, which is refused.
 
-    No topic at that path (none given, or a stale label with no row) is not covered either.
+    No topic at that path (none given, or a stale label with no row) is not covered either. A refusal names the
+    path unless `shown` says what to call it instead: a path the caller did not supply, such as the topic a thread
+    is filed in, is not the caller's to learn from a refusal.
     """
     topic = None if path is None else conn.execute("SELECT * FROM topics WHERE path = ?", (path,)).fetchone()
     if topic is None or not _covers(grant, topic["id"], topic["path"], capability):
-        raise _not_allowed(grant, capability, path)
+        raise _not_allowed(grant, capability, shown or path or "(no topic)")
     return topic
 
 

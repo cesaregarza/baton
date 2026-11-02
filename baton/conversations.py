@@ -131,8 +131,9 @@ def _authorize_move(conn: sqlite3.Connection, actor: str, conversation_id: str, 
             raise NotAParticipant(f"{actor} is not in {conversation_id}")
         return None
     grant = topic_grants.grant_for_use(conn, identity, grant_key)
-    for path in (before, after):
-        topic_grants.require_covers(conn, grant, "thread.organise", path)
+    # The refusal does not name the source: the caller never supplied it and may not be able to read the thread.
+    topic_grants.require_covers(conn, grant, "thread.organise", before, shown="this thread's current topic")
+    topic_grants.require_covers(conn, grant, "thread.organise", after)
     return grant
 
 
