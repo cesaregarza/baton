@@ -141,15 +141,35 @@ summary { cursor: pointer; padding: .75rem 0; font-weight: 600; }
 details[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: .25rem; }
 .pager { margin: .5rem 0; }
 .gap-bar { display: none; }
+/* the bar and its hidden measuring copy share their box; only the bar is fixed to the viewport's bottom */
+.gap-bar, .gap-measure { margin: 0; padding: .5rem 1rem; background: var(--bg);
+  border-top: 1px solid var(--line-strong); color: var(--muted); font-size: .85rem; text-align: center; }
+.gap-measure { display: none; }
 .gap-dismiss { position: fixed; bottom: 0; left: 0; width: 1px; height: 1px; margin: 0; opacity: 0;
   visibility: hidden; }
-body:has(li:target) .gap-dismiss:not(:checked) { visibility: visible; }
 body:has(li:target) .gap-dismiss:not(:checked) + .gap-bar { display: block; position: fixed; bottom: 0; left: 0;
-  right: 0; margin: 0; padding: .5rem 1rem; background: var(--bg); border-top: 1px solid var(--line-strong);
-  color: var(--muted); font-size: .85rem; text-align: center; }
+  right: 0; }
 body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 4rem; }
 .gap-bar label { margin-left: .6rem; color: var(--link); text-decoration: underline; cursor: pointer; }
 .gap-dismiss:focus-visible + .gap-bar label { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* without scroll-driven animations or anchor positioning the bar shows on arrival, as it always has (acceptance E) */
+@supports not ((animation-timeline: view()) and (anchor-name: --a)) {
+  body:has(li:target) .gap-dismiss:not(:checked) { visibility: visible; }
+}
+/* with both, the bar appears once the end of the anchored message's own content comes into view. The marker closes
+   that content (before the replies), and the hidden copy hangs its full height below the marker, so the copy's bottom
+   edge reaches the viewport's bottom exactly when the bar's top reaches the message's last line. */
+@supports (animation-timeline: view()) and (anchor-name: --a) {
+  li:target > .gap-end { display: block; height: 0; anchor-name: --gap-end; }
+  .gap-measure { display: block; position: absolute; position-anchor: --gap-end; top: anchor(bottom); left: 0; right: 0;
+    visibility: hidden; pointer-events: none; view-timeline: --gap-reveal block; }
+  body { timeline-scope: --gap-reveal; }
+  body:has(li:target) .gap-dismiss:not(:checked),
+  body:has(li:target) .gap-dismiss:not(:checked) + .gap-bar {
+    visibility: hidden; animation: gap-reveal linear both; animation-timeline: --gap-reveal;
+    animation-range: entry-crossing calc(100% - 2px) entry-crossing calc(100% - 2px); }
+  @keyframes gap-reveal { from { visibility: hidden; } to { visibility: visible; } }
+}
 /* primary links are at least 44px tall: an item that opens with its link lets the link carry the item's top space */
 h2 a { display: inline-block; padding: .7rem 0; }
 h2:has(> a) { margin: 1rem 0 0; }
@@ -168,6 +188,16 @@ li:has(> a:first-child), li:has(> .meta > a:first-child) { padding-top: 0; }
   .id { display: inline-block; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         vertical-align: bottom; }
   .replies { margin-left: 0; padding-left: .6rem; }
+  /* on narrow screens the bar's action row is a row of its own: two 44 CSS px targets under the bar's text. A control
+     keeps its width and its words, so a word never breaks; the row wraps when both controls don't fit side by side.
+     The space between the controls is the row's column gap, not the label's margin, so a control on a line of its own
+     is centred */
+  .gap-sep { display: none; }
+  .gap-actions { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; row-gap: 4px;
+    column-gap: .6rem; min-height: 44px; margin-top: .3rem; }
+  .gap-actions a, .gap-actions label { display: inline-flex; align-items: center; flex-shrink: 0; overflow-wrap: normal;
+    min-height: 44px; min-width: 44px; padding: 0 .6rem; margin-left: 0; }
+  body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 7rem; }
 }
 @media (min-width: 40rem) {
   body { padding: 1.5rem 1.5rem 4rem; }
@@ -647,6 +677,7 @@ def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -
                 parents[seq] = found[0]
     items = _thread(page["messages"], conversation_id, parents)
     missing = _gap_summary(page["retention_gaps"])
+    measure = _gap_measure(page["retention_gaps"])
     more = (f'<p class="pager"><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
             if later else "")
     earlier = (f'<p class="pager"><a href="/c/{_e(conversation_id)}'
@@ -654,7 +685,7 @@ def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -
                if after > 0 else "")
     return _page(200, title, '<p class="crumbs"><a href="/">All conversations</a></p>'
                              f'<h1>{_e(title)}</h1>{earlier}{missing}'
-                             f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{more}')
+                             f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{measure}{more}')
 
 
 def _thread(items: list[dict[str, Any]], conversation_id: str = "",
@@ -687,11 +718,27 @@ def _gap_summary(gaps: list[dict[str, int]]) -> str:
                        else f"#{gap['from_seq']}–#{gap['to_seq']}"
                        for gap in sorted(gaps, key=lambda gap: gap["from_seq"]))
     # Arriving by a message link skips the summary, so a bar at the bottom, where it can't cover the anchored message,
-    # points back to it. It is CSS only (the page runs no scripts): shown under :target, dismissed by the checkbox.
+    # points back to it. It is CSS only (the page runs no scripts): shown once the message's end is in view, and
+    # dismissed by the checkbox. The action row is a span so narrow screens can give it a row of its own.
     return (f'<p class="notice" id="missing">Not kept any more on this page: messages {_e(ranges)}</p>'
-            '<input type="checkbox" id="gap-dismiss" class="gap-dismiss">'
-            '<p class="gap-bar">Some messages on this page are no longer kept · <a href="#missing">view ranges</a>'
-            '<label for="gap-dismiss">Dismiss</label></p>')
+            '<input type="checkbox" id="gap-dismiss" class="gap-dismiss">' + _gap_bar())
+
+
+def _gap_measure(gaps: list[dict[str, int]]) -> str:
+    """The hidden copy of the bar, after the thread, that the reveal is timed on (see the stylesheet)."""
+    return _gap_bar(measure=True) if gaps else ""
+
+
+def _gap_bar(measure: bool = False) -> str:
+    """The bar's markup, built once for both the arrival bar and its hidden copy, so their contents can't drift apart.
+    The copy has no id or for, and is hidden from assistive technology."""
+    if measure:
+        return ('<p class="gap-bar gap-measure" aria-hidden="true">Some messages on this page are no longer kept'
+                '<span class="gap-sep"> · </span><span class="gap-actions"><a href="#missing">view ranges</a>'
+                '<label>Dismiss</label></span></p>')
+    return ('<p class="gap-bar">Some messages on this page are no longer kept<span class="gap-sep"> · </span>'
+            '<span class="gap-actions"><a href="#missing">view ranges</a>'
+            '<label for="gap-dismiss">Dismiss</label></span></p>')
 
 
 def _notice_words(notice: dict[str, Any], item: dict[str, Any]) -> str:
@@ -715,7 +762,7 @@ def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | 
     return (f'<li class="message" id="m-{item["seq"]}"><div class="meta"><span class="role">'
             f'{_e(messages.author_label(item))}</span>{badge} · {_time(item["at"])} · #{item["seq"]}</div>'
             f'{_reply_marker(item.get("reply_to"), on_page, conversation_id, parents or {})}'
-            f'<p class="text">{_e(item["text"])}</p>{relayed}{replies}</li>')
+            f'<p class="text">{_e(item["text"])}</p>{relayed}<span class="gap-end"></span>{replies}</li>')
 
 
 QUOTE = 160
