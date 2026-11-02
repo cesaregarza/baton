@@ -60,7 +60,7 @@ Topic grant refusals are all `forbidden`, with these texts. The key never appear
 | `unknown topic grant key` | No grant has that key. |
 | `this topic grant key is not for this alias` | The key's grant belongs to another alias. |
 | `topic grant <id> is <state>` | The grant is `revoked`, `expired`, `pending`, `lapsed` or `invalid`. |
-| `topic grant <id> does not allow <capability> on <path>` | The grant does not list the capability, or does not cover the topic. |
+| `topic grant <id> does not allow <capability> on <path>` | The grant does not list the capability, or does not cover the topic. For `set_topic`, a thread's current topic is never named: the text ends `on this thread's current topic`, whether that topic is uncovered, absent or stale. |
 
 A guest that sends no `grant_token` gets `guest may not call create_topic` or `guest may not call set_topic`, as before.
 A grantee's `members` is refused as `invalid_request`. A `rename_topic` that must acknowledge grants is refused as

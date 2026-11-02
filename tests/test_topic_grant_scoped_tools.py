@@ -288,7 +288,8 @@ def test_a_move_needs_both_the_source_and_the_destination_in_scope(build_scene, 
         result = await held.call(client, "set_topic", conversation_id=moving, topic=destination)
         assert result.get("error") == "forbidden", result
         assert result["detail"].startswith(not_allowed(held.grant_id, "thread.organise")), result
-        assert uncovered in result["detail"], result
+        # The destination is the caller's own word and is named; the thread's current topic never is.
+        assert (uncovered in result["detail"]) == (uncovered == destination), result
         assert scene.thread_topic(moving) == source
         assert scene.changes("set_topic") == [] and scene.moved_notices(moving) == []
         row = only(scene.events("refused_use"), "refused_use event")

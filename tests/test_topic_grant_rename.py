@@ -76,7 +76,7 @@ def test_renaming_a_subtopic_out_of_the_root_needs_the_acknowledgement_and_ends_
         out = await held.call(client, "set_topic", conversation_id=inside, topic="job-hunt/boards")
         assert out.get("error") == "forbidden" and out["detail"].startswith(
             f"topic grant {held.grant_id} does not allow thread.organise on "), out
-        assert "leads" in out["detail"]
+        assert "leads" not in out["detail"], "the thread's current topic is not named in a refusal"
         elsewhere = await thread(client, scene.host, "job-hunt/boards")
         into = await held.call(client, "set_topic", conversation_id=elsewhere, topic="leads")
         assert into.get("error") == "forbidden", into

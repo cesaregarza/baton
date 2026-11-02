@@ -555,21 +555,25 @@ class Guard:
         return await call_next(ctx)
 
     async def refuse_token_validation(self, ctx: Any, call_next: Any) -> Any:
-        """Shape-check a present `token` on any tool, and a guest post's, before SDK errors can echo it."""
+        """Shape-check a present `token` or `grant_token` on any tool, and a guest post's, before SDK errors can
+        echo them. A grant key needs no token beside it for this: a call that leaves out a required argument
+        reaches the SDK either way, and its error quotes part of the input."""
         params = ctx.params if isinstance(getattr(ctx, "params", None), dict) else {}
         if getattr(ctx, "method", None) != "tools/call":
             return await call_next(ctx)
         name, arguments = str(params.get("name", "")), params.get("arguments")
         call = _call_context(get_access_token())
-        present = isinstance(arguments, dict) and arguments.get("token") is not None
+        present = isinstance(arguments, dict) and (arguments.get("token") is not None
+                                                   or arguments.get("grant_token") is not None)
         if not present and not (call["credential_role"] == "guest" and name == "send_message"):
             return await call_next(ctx)
         try:
-            # Past this check the arguments are a dict: either a token was present in one, or it's a post.
+            # Past this check the arguments are a dict: either a token or key was present in one, or it's a post.
             if name == "send_message" and (not isinstance(arguments, dict)
                                            or not isinstance(arguments.get("text"), str)):
                 raise InvalidRequest("send_message requires text")
-            aliases.validate_proof(arguments.get("token"))
+            if arguments.get("token") is not None or name == "send_message":
+                aliases.validate_proof(arguments.get("token"))
             validate = self._validators.get(name)
             if validate is None:
                 raise InvalidRequest(f"{name} takes no token")
@@ -610,7 +614,8 @@ class Guard:
         ids.update(topics.audit_fields(name, kwargs, outcome, call.get("topic", {})))
         # Neither the binding token nor the grant key may reach the line, whichever argument carried it, topic
         # fields included.
-        for secret in (proof, call.get("grant_key")):
+        # A refusal before the guard has taken the key out audits the raw arguments: look there too, as for the token.
+        for secret in (proof, call.get("grant_key") or kwargs.get("grant_token")):
             if isinstance(secret, str) and secret:
                 ids = {key: value for key, value in ids.items() if secret not in json.dumps(value)}
         line = {"at": datetime.now(UTC).isoformat(), "role": role, "credential_role": call["credential_role"],
