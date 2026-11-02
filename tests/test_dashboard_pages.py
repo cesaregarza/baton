@@ -9,7 +9,6 @@ from __future__ import annotations
 import http.client
 import re
 import threading
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +18,7 @@ from test_dashboard import PAYLOAD, snapshot, text
 from topic_backing import back_topics
 
 from baton import config as config_module
-from baton import conversations, jobs, messages
+from baton import conversations, jobs
 from baton.config import Config, ConfigError
 from baton.store import connect
 
@@ -282,17 +281,14 @@ def test_needs_follows_what_the_viewer_could_read_from_its_join_point(tmp_path) 
     assert needs_items(text(get(flagged, "/needs"))) == ["after the join", "before the join"]
 
 
-def test_needs_drops_a_message_once_retention_deletes_the_viewers_copy(tmp_path) -> None:
+def test_needs_drops_a_message_once_the_viewers_copy_is_gone(tmp_path) -> None:
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
         mine = made(conn, config, "Old asks", MINE)
         conversations.send(conn, config, sender="reviewer", conversation_id=mine, text="old ask", needs_decision=True)
         conversations.send(conn, config, sender="reviewer", conversation_id=mine, text="new ask", needs_decision=True)
-        messages.read(conn, "operator", limit=1)
-        stale = (datetime.now(UTC) - messages.READ_RETENTION - timedelta(days=1)).isoformat()
-        conn.execute("UPDATE messages SET at = ? WHERE recipient = 'operator' AND seq = 1", (stale,))
-        messages.sweep(conn)
+        conn.execute("DELETE FROM messages WHERE recipient = 'operator' AND seq = 1")
     finally:
         conn.close()
     assert needs_items(text(get(config, "/needs"))) == ["new ask"]

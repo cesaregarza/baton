@@ -3,8 +3,8 @@
 A conversation send stores one copy per other participant, each as that
 recipient's next mailbox seq and all under one shared message_id, in one
 transaction: every recipient gets its copy or none does. Each copy keeps what
-a direct message guarantees: the reader's gap-free seq and cursors, coalesced
-wakes and retention. The sender gets no copy, so it is never woken by its own
+a direct message guarantees: the reader's gap-free seq and cursors, and coalesced
+wakes. The sender gets no copy, so it is never woken by its own
 message.
 
 `history` is separate from that delivery: it returns the conversation as a
@@ -549,7 +549,7 @@ def _has_readable_seq(conn: sqlite3.Connection, condition: str, values: dict[str
 
 
 def gap_words(gap: dict[str, int]) -> str:
-    """What a page says where `read_history` reports a retention gap."""
+    """What a page says where `read_history` reports a gap."""
     first, last = gap["from_seq"], gap["to_seq"]
     return (f"Message #{first} is" if first == last else f"Messages #{first}–#{last} are") + " no longer kept."
 

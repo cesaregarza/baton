@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_index_writer import converse, expire, read_all, say
+from test_index_writer import converse, read_all, say
 
 from baton import config as config_module
 from baton import derived, search
@@ -387,12 +387,12 @@ def test_hybrid_search_never_lets_an_unreadable_perfect_match_in_or_ahead(db, co
 
 
 def test_an_invalid_version_s_vector_never_contributes(db, config) -> None:
-    conversation_id, sent = converse(db, config, 2)
+    conversation_id, _ = converse(db, config, 2)
     generation = embedding_generation(db, config)
     manifest = begin(db, config, conversation_id, generation, kinds=derived.KINDS)
     commit(db, config, manifest, payload(manifest, body="heron summary"))
     derived.generation_activate(db, config, "alpha", generation)
-    expire(db, sent[0])
+    db.execute("UPDATE artifact_versions SET state = 'invalid'")
     hits = search.search(db, config, "viewer", "heron", kinds=["summary"], query_vector=UNIT["x"],
                          model="toy-embed")["hits"]
     assert hits == []

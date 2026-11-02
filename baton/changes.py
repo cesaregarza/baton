@@ -1,14 +1,13 @@
 """Conversation revisions and the change log: what changed in each conversation's source, in order.
 
-Every message stored in a conversation, every copy retention expires, and every participant added or removed
-bumps that conversation's `revision` by one and appends one `change_log` row, in the same transaction as the
-change itself. Reading never logs anything. An indexer follows the log with `read` and `wait` through a
-cursor, `<log_epoch>:<change_seq>`, that it keeps itself: baton holds no position for it, so following the log
-moves nothing anyone else depends on.
+Every message stored in a conversation and every participant added or removed bumps that conversation's
+`revision` by one and appends one `change_log` row, in the same transaction as the change itself. Reading never
+logs anything. An indexer follows the log with `read` and `wait` through a cursor, `<log_epoch>:<change_seq>`,
+that it keeps itself: baton holds no position for it, so following the log moves nothing anyone else depends
+on.
 
-The log is an optimisation, never the only source of truth: rows older than `RETENTION` are pruned, and a
-cursor from before that, or from another log entirely, is refused as `cursor_expired` with a position to
-start again from.
+The log is an optimisation, never the only source of truth. A cursor from another log entirely, or older than
+the oldest change still kept, is refused as `cursor_expired` with a position to start again from.
 
 Every read names its scope. There is one scope today, `Scope.ALL`, for the host's own local worker; no read
 falls back to it implicitly.
@@ -18,17 +17,16 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
 from baton.errors import CursorExpired, InvalidRequest
 from baton.store import snapshot
 
-RETENTION = timedelta(days=30)
 MAX_SCAN = 1000  # rows one read looks at, so a long stretch is paged and never loaded at once
 MAX_LIMIT = 1000
-KINDS = ("message_added", "message_expired", "participant_added", "participant_removed")
+KINDS = ("message_added", "participant_added", "participant_removed")
 FIELDS = ("change_seq", "conversation_id", "revision", "kind", "message_id", "role", "at")
 
 
@@ -48,7 +46,6 @@ def record(conn: sqlite3.Connection, conversation_id: str, kind: str, *, message
     now = datetime.now(UTC)
     conn.execute("INSERT INTO change_log (conversation_id, revision, kind, message_id, role, at)"
                  " VALUES (?, ?, ?, ?, ?, ?)", (conversation_id, revision, kind, message_id, role, now.isoformat()))
-    _prune(conn, now)
     return revision
 
 
@@ -60,7 +57,7 @@ def read(conn: sqlite3.Connection, scope: Scope, *, cursor: str | None = None, l
     """The changes after `cursor`, oldest first, metadata only, and `next_cursor` to continue from.
 
     `next_cursor` is past every row looked at, so a page always advances. Without a cursor the read starts at
-    the oldest change retention kept.
+    the oldest change still kept.
     """
     _require(scope)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_LIMIT:
@@ -104,16 +101,7 @@ def _position(conn: sqlite3.Connection, cursor: str | None) -> int:
     if not number.isdigit():
         raise InvalidRequest("a cursor is <log_epoch>:<change_seq>, as next_cursor gave it")
     if stamp != current or int(number) < pruned:
-        raise CursorExpired("that cursor is from another log or older than what retention kept; rebuild from "
+        raise CursorExpired("that cursor is from another log or older than the oldest change kept; rebuild from "
                             "state, then continue from reset_cursor", f"{current}:{pruned}")
     return int(number)
 
-
-def _prune(conn: sqlite3.Connection, now: datetime) -> None:
-    cutoff = (now - RETENTION).isoformat()
-    last_pruned = conn.execute("SELECT MAX(change_seq) FROM change_log WHERE at < ?", (cutoff,)).fetchone()[0]
-    if last_pruned is None:
-        return
-    conn.execute("DELETE FROM change_log WHERE change_seq <= ?", (last_pruned,))
-    conn.execute("UPDATE log_meta SET value = ? WHERE key = 'pruned_through' AND CAST(value AS INTEGER) < ?",
-                 (str(last_pruned), last_pruned))

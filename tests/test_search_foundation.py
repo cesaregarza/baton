@@ -90,11 +90,6 @@ def state(db) -> dict[str, Any]:
             for table in ("mailboxes", "cursors", "wakes", "events", "change_log")}
 
 
-def age(db, message_id: str, days: int = 40) -> None:
-    db.execute("UPDATE messages SET at = ? WHERE id = ?",
-               ((datetime.now(UTC) - timedelta(days=days)).isoformat(), message_id))
-
-
 # Revisions and the change log ---------------------------------------------------------------------------
 
 
@@ -119,20 +114,6 @@ def test_a_refused_send_logs_nothing(db, config) -> None:
     conversation_id = start(db, config)
     refused("not_a_participant", say, db, config, "outsider", conversation_id, "let me in")
     assert revision(db, conversation_id) == 0 and log(db, conversation_id) == []
-
-
-def test_each_expired_copy_is_logged_with_its_role(db, config) -> None:
-    conversation_id = start(db, config)
-    sent = say(db, config, "orchestrator", conversation_id, "will expire")
-    for role in ("reviewer", "assistant"):
-        messages.read(db, role)
-    age(db, sent["message_id"])
-    before = revision(db, conversation_id)
-    messages.sweep(db)
-    expired = [entry for entry in log(db, conversation_id) if entry["kind"] == "message_expired"]
-    assert sorted((entry["message_id"], entry["role"]) for entry in expired) == \
-        [(sent["message_id"], "assistant"), (sent["message_id"], "reviewer")]  # one per copy
-    assert revision(db, conversation_id) == before + 2
 
 
 def test_reads_change_no_revision_and_log_nothing(db, config) -> None:
@@ -178,7 +159,7 @@ def test_the_cursor_always_advances_past_what_was_scanned(db, config, monkeypatc
                for entry in first["entries"])  # metadata only, never text
 
 
-def test_a_cursor_from_another_epoch_or_past_retention_is_expired(db, config) -> None:
+def test_a_cursor_from_another_epoch_or_before_an_earlier_prune_is_expired(db, config) -> None:
     conversation_id = start(db, config)
     say(db, config, "reviewer", conversation_id, "one")
     foreign = "0" * 32 + ":1"
@@ -186,8 +167,8 @@ def test_a_cursor_from_another_epoch_or_past_retention_is_expired(db, config) ->
     assert error.extra["resync"] is True and error.extra["reset_cursor"].startswith(changes.epoch(db))
 
     first = changes.read(db, changes.Scope.ALL)["next_cursor"]
-    db.execute("UPDATE change_log SET at = ?", ((datetime.now(UTC) - timedelta(days=40)).isoformat(),))
-    say(db, config, "reviewer", conversation_id, "two")  # a new change prunes the aged rows
+    say(db, config, "reviewer", conversation_id, "two")
+    db.execute("UPDATE log_meta SET value = '1' WHERE key = 'pruned_through'")  # a log an earlier version pruned
     error = refused("cursor_expired", changes.read, db, changes.Scope.ALL, cursor=first.split(":")[0] + ":0")
     assert error.extra["reset_cursor"] == f"{changes.epoch(db)}:1"
     db.execute("DELETE FROM change_log")  # an empty log still knows what it pruned
@@ -583,13 +564,10 @@ def test_the_keyword_fallback_is_reported_and_authorizes_the_same(tmp_path: Path
     db.close()
 
 
-def test_the_fts_index_follows_retention(db, config) -> None:
+def test_the_fts_index_follows_a_missing_copy(db, config) -> None:
     conversation_id = start(db, config)
     sent = say(db, config, "orchestrator", conversation_id, "platypus goodbye")
-    for role in ("reviewer", "assistant"):
-        messages.read(db, role)
-    age(db, sent["message_id"])
-    messages.sweep(db)
+    db.execute("DELETE FROM messages WHERE id = ?", (sent["message_id"],))
     assert ids(search.search(db, config, "viewer", "platypus")) == []
     assert db.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0] == 0
 

@@ -24,7 +24,7 @@ def wait(conn: sqlite3.Connection, role: str, *, timeout_seconds: float | None =
     """New events for `role`, oldest first; an empty list only once `timeout_seconds` has passed.
 
     A message event carries the message itself, or `"message": null` if
-    retention has already deleted it. `more` is true when a page limit was hit.
+    the message is missing. `more` is true when a page limit was hit.
     """
     deadline = None if timeout_seconds is None else time.monotonic() + max(0.0, timeout_seconds)
     while True:
