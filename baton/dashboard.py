@@ -167,7 +167,7 @@ body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 4rem; }
   body:has(li:target) .gap-dismiss:not(:checked),
   body:has(li:target) .gap-dismiss:not(:checked) + .gap-bar {
     visibility: hidden; animation: gap-reveal linear both; animation-timeline: --gap-reveal;
-    animation-range: entry-crossing 100% entry-crossing 100%; }
+    animation-range: entry-crossing calc(100% - 2px) entry-crossing calc(100% - 2px); }
   @keyframes gap-reveal { from { visibility: hidden; } to { visibility: visible; } }
 }
 /* primary links are at least 44px tall: an item that opens with its link lets the link carry the item's top space */

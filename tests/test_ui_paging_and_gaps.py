@@ -320,7 +320,7 @@ def test_the_bar_reveals_on_the_copy_and_keeps_its_targets_out_of_tab_while_hidd
 
     style = dashboard.STYLE
     assert "animation-timeline: --gap-reveal" in style
-    assert "animation-range: entry-crossing 100% entry-crossing 100%" in style
+    assert "animation-range: entry-crossing calc(100% - 2px) entry-crossing calc(100% - 2px)" in style
     assert "@keyframes gap-reveal { from { visibility: hidden; } to { visibility: visible; } }" in style
     assert "visibility: hidden; animation: gap-reveal linear both" in style, "hidden with visibility, not opacity alone"
 
