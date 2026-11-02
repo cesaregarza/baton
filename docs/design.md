@@ -9,7 +9,8 @@ SQLite. Agents use either MCP or the local CLI to send and read it; a person can
 interface. The host can also send a content-free notification when a role has work waiting.
 
 This page describes the design on `main`. [Design directions](#design-directions) lists proposals that are
-not on main.
+not implemented. The [agent organisation model](agent-model.md) defines the proposed package-level
+responsibilities and the existing capabilities they build on.
 
 ## Architecture on main
 
@@ -267,16 +268,24 @@ directory and its contents for unsafe ownership, permissions, and links; see
 
 <a name="open-pull-requests"></a>
 
-Nothing in this section is on main; each item is an idea.
+The features in this section are proposals, not implemented behavior.
 
 ### Proposals
 
+#### Agent organisation
+
+The [agent organisation model](agent-model.md) proposes core, secretary, manager, and worker profiles.
+It separates responsibility from execution model, provider, continuity, and explicit capabilities.
+Configured roles, guest aliases, and topic grants remain the authority mechanisms; profile names do not
+create permissions. The proposal includes a shared secretary contract and implementation stages.
+
 #### Context-aware notification screening
 
-A possible future decision agent could read the context its own role permits and decide whether to forward
-a notification to another agent or person. It might consider what reply was expected as well as what
-arrived. No such screening agent or API is built in. Its inputs and delivery interface remain open design
-choices; a notification decision would not grant access, move a job, or approve anything.
+A proposed [secretary](agent-model.md#secretaries) would evaluate incoming events against one principal's
+current work and expected results, then produce a disposition and a source-backed brief. Shared admission
+policy belongs before Baton's wake transports; runtime adapters coordinate actual enqueueing. Retention,
+context delivery, interruption, and response expectations are separate decisions. No such built-in
+secretary API exists yet, and a notification decision would not grant access, move a job, or approve anything.
 
 #### Long-thread summaries
 
