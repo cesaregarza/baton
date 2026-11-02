@@ -51,7 +51,7 @@ from baton.errors import (
     UnknownConversation,
     UnknownRole,
 )
-from baton.store import transaction
+from baton.store import snapshot, transaction
 
 MAX_TITLE = 200
 MIN_PARTICIPANTS = 2
@@ -86,11 +86,13 @@ def check_topic(topic: Any, field: str = "topic") -> str | None:
 
 
 def set_topic(conn: sqlite3.Connection, config: Config, conversation_id: str, topic: Any, *,
-              actor: str) -> dict[str, Any]:
+              actor: str, identity: dict[str, str] | None = None,
+              seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """Set, rename or clear a conversation's topic. `None` clears it; the conversation's id never changes.
 
     Takes the same permission as managing participants, and membership of this conversation: a label on
-    a conversation is the conversation's own business.
+    a conversation is the conversation's own business. A move that changes the topic is recorded in the
+    topic history; one that changes nothing is not.
     """
     require_enabled(config)
     if not config.roles[actor].can_manage_participants:
@@ -104,9 +106,11 @@ def set_topic(conn: sqlite3.Connection, config: Config, conversation_id: str, to
         if topic is not None:
             # A topic is a container now, so a conversation cannot be filed somewhere that isn't one.
             # Clearing it to None stays allowed, and moving a thread never changes its participants.
-            topics.require_exists(conn, topic)
+            topics.record_seen(seen, topic, topics.require_exists(conn, topic))
         if topic != before:
             conn.execute("UPDATE conversations SET topic = ? WHERE id = ?", (topic, conversation_id))
+            topics.record_move(conn, conversation_id=conversation_id, actor=topics.history_actor(actor, identity),
+                               before=before, after=topic)
     return {"conversation_id": conversation_id, "topic": topic, "changed": topic != before}
 
 
@@ -118,7 +122,7 @@ def require_enabled(config: Config) -> Conversations:
 
 def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str,
            participants: list[str] | None = None, topic: Any = None, request_id: str | None = None,
-           identity: dict[str, str] | None = None) -> dict[str, Any]:
+           identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """Open a conversation. A retry with the same request_id replays rather than opening a second one.
 
     A role names its own `participants`, which must include it. A guest instead presents an alias
@@ -152,7 +156,9 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str,
     with transaction(conn):
         existing = events.replayed(conn, "conversations", request_id, digest)
         if existing is not None:
+            topics.note_replay(conn, seen, topic, existing["topic"])
             return {**_summary(conn, existing), "request_id": request_id, "created": False}
+        topics.note_path(conn, seen, topic)
         if guest:
             roles = topics.members_for_thread(conn, config, topic)
             # Returned rather than raised: when the guest-wide cap is full this also stores the alert,
@@ -295,13 +301,20 @@ def page_cursor(summary: dict[str, Any]) -> tuple[str, str]:
 
 def list_readable(conn: sqlite3.Connection, config: Config, role: str, topic: Any = None, *,
                   limit: int = MAX_LISTED, before: tuple[str, str] | None = None,
-                  changed_since: str | None = None, _lookahead: bool = False) -> list[dict[str, Any]]:
-    """List the conversations this role may read under the shared board predicate."""
-    if board_read.sees_all(config, role):
-        return list_all(conn, topic, limit=limit, before=before, changed_since=changed_since,
+                  changed_since: str | None = None, _lookahead: bool = False,
+                  seen: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """List the conversations this role may read under the shared board predicate.
+
+    The topic's id and the listing are read in one snapshot, so a rename and reuse of the path in between
+    cannot make the listing describe a different topic from the one the audit line names.
+    """
+    with snapshot(conn):
+        topics.note_path(conn, seen, check_topic(topic))
+        if board_read.sees_all(config, role):
+            return list_all(conn, topic, limit=limit, before=before, changed_since=changed_since,
+                            _lookahead=_lookahead)
+        return list_for(conn, role, topic, limit=limit, before=before, changed_since=changed_since,
                         _lookahead=_lookahead)
-    return list_for(conn, role, topic, limit=limit, before=before, changed_since=changed_since,
-                    _lookahead=_lookahead)
 
 
 def _before(before: tuple[str, str] | None, alias: str) -> tuple[str, tuple[str, ...]]:

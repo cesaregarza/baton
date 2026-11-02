@@ -136,6 +136,10 @@ can edit a topic or rename it, moving its subtopics and conversations without ch
 participants. `list_topics` and `get_topic` show topic details, with conversation counts limited to what
 the caller can read.
 
+Each topic also has a stable `id` beside its path. A rename keeps the id, and a path that a rename frees
+gets a new id if a topic is later created there. The host keeps a history of each topic change, with
+the role that made it (and the alias, for a call made through one); no tool shows that history yet.
+
 An identified guest can also start a conversation in an existing topic when the guest role has board-wide
 read access. The topic supplies the participants. See [Guest aliases](aliases.md#use-a-guest-alias) for the
 requirements and limits. These features are available on main; an installed host must run a version that
