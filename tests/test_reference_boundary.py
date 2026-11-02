@@ -1,5 +1,5 @@
-"""What crosses the MCP boundary into the reference tools: whole numbers that are whole numbers, and a request id and a
-grant key that the database can take.
+"""What crosses the MCP boundary into the reference tools: whole numbers that are whole numbers, a request id and a
+grant key that the database can take, and every argument as the caller sent it.
 
 The SDK reads a plain `int` argument leniently. Before a body ran it made 0 of `false`, 1 of `true`, 5 of "5" and 5 of
 5.0, so the module's own checks, which refuse a bool, never saw what the caller sent. The four whole numbers of the
@@ -17,6 +17,12 @@ A grant key that holds a lone surrogate is the same kind of argument. The check 
 grantee's `edit_reference`, `create_topic` and `set_topic` each crashed the same way, and `edit_reference` had spent
 the grantee's hourly post besides. A key that opens nothing has always been refused as an unknown key, whatever its
 format. One with no UTF-8 form is refused as that now, before it is hashed, and it leaves what any such key leaves.
+
+The SDK also reads a string argument as the JSON it spells, and a string that spells null, a list or an object is no
+longer that string. `read_reference` took the name "null" for no name and listed the topic's references, a revision
+beside it failed with "revision needs a name", an edit's request id "null" became a made-up one, so its retry came
+back stale, and one like "[1]" was refused by the schema. The three tools take every argument as sent, and the string
+"null" for a whole number is refused as the string it is. Nothing else about how they are called changes.
 """
 
 from __future__ import annotations
@@ -30,16 +36,20 @@ import pytest
 import reference_support as refs
 import topic_grant_tools_support as support
 from reference_support import (
+    BINDING_GONE,
     BOARDS,
     F13,
     NAME,
     NEEDS_BINDING,
+    READ_KEYS,
+    Anonymous,
     Bound,
     Core,
     Keyed,
     Staging,
     as_the_guard_calls,
     board,
+    body_of,
     core_edit,
     direct,
     edit_arguments,
@@ -336,5 +346,188 @@ def test_the_grant_check_refuses_a_key_with_no_utf8_form_before_it_hashes_it_or_
         assert asked == 0, statements
         assert (type(ordinary), str(ordinary)) == (Forbidden, "unknown topic grant key") and len(statements) > 0
         assert type(unbound) is Forbidden and str(unbound) == NEEDS_BINDING, repr(unbound)
+
+    play(scene.host, scenario)
+
+
+# 4. Arguments taken as sent ---------------------------------------------------------------------------------
+
+def refused_as_text(result, argument):
+    """`refused_as_mistyped`, and for a string the schema saw as one: its error says `input_type=str`. Read as the JSON
+    it spells, "null" is refused as a null (`NoneType`) or, for `revision`, not refused at all."""
+    refused_as_mistyped(result, argument)
+    assert "input_type=str" in str(result.get("unparsed", result)), result
+
+
+def test_a_reference_named_null_is_read_by_name_and_not_listed(build_scene):
+    """`null` is a name under the rules. A reference called that is read by its name, as its current text and as
+    revision 1, and its history is listed, by a core role and by a guest holding only a binding. The SDK took the
+    string for an omitted `name`, so a read listed the topic's references, and with a revision it answered "revision
+    needs a name": the text could not be reached."""
+    scene = build_scene()
+
+    async def scenario(client):
+        held = await board(client, scene)
+        await write_revisions(client, scene, BOARDS, "null", 2)
+        succeeded(await core_edit(client, scene, BOARDS, NAME, "another one", 0))
+        for who in (Core(scene.host, "worker"), Bound.of(held)):
+            current = succeeded(await read_reference(client, who, BOARDS, "null"))
+            assert set(current) == READ_KEYS, current
+            assert (current["name"], current["revision"], current["body"]) == ("null", 2, body_of(2)), current
+            first = succeeded(await read_reference(client, who, BOARDS, "null", 1))
+            assert (first["name"], first["revision"], first["body"]) == ("null", 1, body_of(1)), first
+            history = succeeded(await reference_history(client, who, BOARDS, "null"))
+            assert history["name"] == "null" and [one["revision"] for one in history["revisions"]] == [1, 2], history
+        listing = succeeded(await read_reference(client, Core(scene.host, "worker"), BOARDS))
+        assert [one["name"] for one in listing["references"]] == [NAME, "null"], listing
+
+    play(scene.host, scenario)
+
+
+@pytest.mark.parametrize("caller", ["core role", "grantee"])
+@pytest.mark.parametrize("rid", ["null", "[1]", '{"a": 1}'], ids=["null", "list", "object"])
+def test_a_request_id_that_reads_as_json_is_kept_as_sent_and_its_retry_replays(build_scene, caller, rid):
+    """A request id is any text of 1 to 200 characters. `null`, `[1]` and `{"a": 1}` are each kept as sent. The
+    identical retry gets the stored revision with `created` false and writes nothing, and both calls' audit lines
+    record the id as sent. The SDK turned "null" into a made-up id, so the retry was stale, and the schema refused the
+    others."""
+    scene = build_scene()
+
+    async def scenario(client):
+        held = await board(client, scene)
+
+        async def edit():
+            if caller == "core role":
+                return await core_edit(client, scene, BOARDS, NAME, "text", 0, request_id=rid)
+            return await grantee_edit(client, held, BOARDS, NAME, "text", 0, request_id=rid)
+
+        first = succeeded(await edit())
+        assert (first["request_id"], first["created"]) == (rid, True), first
+        tables = scene.tables()
+        retry = succeeded(await edit())
+        assert retry == {**first, "created": False}, retry
+        assert scene.tables() == tables
+        written = [json.loads(line) for line in audit_lines(scene)]
+        edits = [(line["outcome"], line.get("request_id")) for line in written if line.get("tool") == "edit_reference"]
+        assert edits == [("ok", rid), ("ok", rid)], edits
+
+    play(scene.host, scenario)
+
+
+@pytest.mark.parametrize("argument,existing", [("expected_revision", False), ("expected_revision", True),
+                                               ("revision", True), ("after_revision", True), ("limit", True)],
+                         ids=["expected_revision-new", "expected_revision-at-revision-1", "revision", "after_revision",
+                              "limit"])
+def test_the_string_null_is_refused_by_the_schema_as_a_string_for_a_whole_number(build_scene, argument, existing):
+    """The string "null" is a string like any other for `expected_revision` (when creating and on an existing
+    reference), `revision`, `after_revision` and `limit`: the schema refuses it as one, and nothing is written. The SDK
+    read it as a null, which `revision` accepted as no revision, and read the current text."""
+    scene = build_scene()
+
+    async def scenario(client):
+        await support.stage(client, scene.host)
+        if existing:
+            await write_revisions(client, scene, BOARDS, NAME, 1)
+        tables, lines = scene.tables(), audit_lines(scene)
+        who = Core(scene.host, "worker")
+        if argument == "expected_revision":
+            result = await core_edit(client, scene, BOARDS, NAME, "text", "null")
+        elif argument == "revision":
+            result = await read_reference(client, who, BOARDS, NAME, "null")
+        else:
+            result = await reference_history(client, who, BOARDS, NAME, **{argument: "null"})
+        refused_as_text(result, argument)
+        assert "board list" not in str(result).lower()
+        assert scene.tables() == tables and audit_lines(scene) == lines
+
+    play(scene.host, scenario)
+
+
+def test_a_call_with_a_binding_token_is_refused_the_string_null_for_a_number_like_any_mistyped_one(build_scene):
+    """The guard checks a call that carries a binding token against the schema before the SDK does, and it must read
+    the arguments as the SDK will: "null" for each whole number is answered with the guard's refusal of arguments that
+    do not match the tool schema, as any other mistyped number is. Checked with the SDK's reading, `revision` passed
+    the guard, and the SDK's own error came back instead."""
+    scene = build_scene()
+    guest_calls = {
+        "edit_reference": (edit_arguments(BOARDS, NAME, "text", 2), {"expected_revision": ["null"]}),
+        "read_reference": ({"topic": BOARDS, "name": NAME}, {"revision": ["null"]}),
+        "reference_history": ({"topic": BOARDS, "name": NAME}, {"limit": ["null"], "after_revision": ["null"]}),
+    }
+
+    async def scenario(client):
+        held = await board(client, scene)
+        await write_revisions(client, scene, BOARDS, NAME, 2)
+        tables, posts = scene.tables(), scene.posts_counted()
+        for tool_name, (fixed, varied) in guest_calls.items():
+            who = Keyed(held) if tool_name == "edit_reference" else Bound.of(held)
+            for argument, values in varied.items():
+                for value in values:
+                    answer = await who.call(client, tool_name, **{**fixed, argument: value})
+                    assert answer == schema_refusal(tool_name), (tool_name, argument, value, answer)
+        assert scene.tables() == tables and scene.posts_counted() == posts
+
+    play(scene.host, scenario)
+
+
+def test_a_body_that_reads_as_json_is_stored_and_read_back_as_sent(build_scene):
+    """PIN. An edit's text is a plain string argument, which the SDK never read as JSON, so `null`, `[1]` and
+    `{"a": 1}` are each stored and read back verbatim. It passes before and after the change, and keeps the three
+    tools' other string arguments honest about what taking them as sent means."""
+    scene = build_scene()
+
+    async def scenario(client):
+        await support.stage(client, scene.host)
+        for number, text in enumerate(["null", "[1]", '{"a": 1}']):
+            made = succeeded(await core_edit(client, scene, BOARDS, NAME, text, number))
+            assert made["size"] == len(text.encode()), made
+            read = succeeded(await read_reference(client, Core(scene.host, "worker"), BOARDS, NAME))
+            assert (read["revision"], read["body"]) == (number + 1, text), read
+
+    play(scene.host, scenario)
+
+
+@pytest.mark.parametrize("argument", ["token", "grant_token"])
+@pytest.mark.parametrize("tool_name", ["edit_reference", "read_reference", "reference_history"])
+def test_the_string_null_as_a_token_or_a_grant_key_is_refused_like_any_other(build_scene, tool_name, argument):
+    """The string "null" as `token` or as `grant_token` is a token or a key that opens nothing, and is refused as any
+    other is, with the same answer, audit lines, grant events, hourly posts and tables: on the shared guest login
+    (an unknown binding), on a core credential (which takes no binding token), and for a key, on a guest with a
+    binding. A core role ignores a key, whatever it says. The SDK dropped "null" as an omitted argument, so a core
+    role's call went through with its token ignored, and an edit by a guest was refused as if it had sent none. The
+    read tools declare no `grant_token`, so for them that case is a PIN: any key is dropped there."""
+    scene = build_scene()
+    other = {"token": "not-a-token", "grant_token": "not-a-grant-key"}[argument]
+    refusals = {("the shared guest login", "token"): BINDING_GONE, ("a core credential", "token"):
+                "a binding token is accepted only on a guest credential"}
+
+    async def scenario(client):
+        held = await board(client, scene)
+        await write_revisions(client, scene, BOARDS, NAME, 1)
+        arguments = (edit_arguments(BOARDS, NAME, "text", 0) if tool_name == "edit_reference"
+                     else {"topic": BOARDS, "name": NAME})  # an edit that is stale when it gets that far writes nothing
+        planner = Core(scene.host, "planner")
+        if argument == "token":
+            callers = {"the shared guest login": (Anonymous(scene.host), {}), "a core credential": (planner, {})}
+            if tool_name == "edit_reference":
+                callers["the shared guest login, with a real grant key"] = (Anonymous(scene.host),
+                                                                             {"grant_token": held.key})
+        else:
+            callers = {"a guest with a binding": (Bound.of(held), {}), "a core credential": (planner, {})}
+
+        async def present(who, extra, value):
+            return await left_behind(client, scene, lambda: who.call(client, tool_name, **arguments, **extra,
+                                                                      **{argument: value}))
+
+        for name, (who, extra) in callers.items():
+            asked, wrong = await present(who, extra, "null"), await present(who, extra, other)
+            for field in wrong:
+                assert asked[field] == wrong[field], (name, field, asked[field], wrong[field])
+            expected = refusals.get((name.split(",")[0], argument))
+            if expected is not None:
+                assert wrong["answer"] == {"error": "forbidden", "detail": expected}, (name, wrong)
+        if argument == "grant_token" and tool_name == "edit_reference":
+            guest = await present(Bound.of(held), {}, other)
+            assert guest["answer"] == {"error": "forbidden", "detail": "unknown topic grant key"}, guest
 
     play(scene.host, scenario)
