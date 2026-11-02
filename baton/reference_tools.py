@@ -5,6 +5,9 @@ lists, so what they rely on is written down here rather than found by reading th
 
 There is no `from __future__ import annotations` here, as in `baton.app`: the SDK reads a tool's annotations through
 the wrapper `Guard` makes, whose namespace is not this module's, so they must already be evaluated.
+
+Every whole number is a `StrictInt`. The SDK reads a plain `int` leniently and hands the body 1 for `true`, "1" or 1.0,
+so `references` cannot tell what was sent. Strict, the schema refuses them as it refuses a number out of range.
 """
 
 import sqlite3
@@ -12,7 +15,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Annotated, Any, Protocol
 
-from pydantic import Field
+from pydantic import Field, StrictInt
 
 from baton import auth, references, topics
 from baton.config import Config
@@ -51,7 +54,7 @@ class ReferenceTools:
         self: _Host, role: str, topic: TOPIC, name: NAME,
         body: Annotated[str, Field(description=f"The whole new text, 1 to {references.MAX_BODY_BYTES} bytes of "
                                                "UTF-8. It is kept exactly as sent.")],
-        expected_revision: Annotated[int, Field(
+        expected_revision: Annotated[StrictInt, Field(
             ge=0, description="The revision you read, or 0 to create the reference. If it has moved on, nothing is "
                               "written and the edit is refused as stale_revision.")],
         request_id: Annotated[str | None, Field(
@@ -84,7 +87,7 @@ class ReferenceTools:
         name: Annotated[str | None, Field(
             description=f"1-{references.MAX_NAME} characters of a-z, 0-9 and inner hyphens. Left out, the topic's "
                         "references are listed.")] = None,
-        revision: Annotated[int | None, Field(
+        revision: Annotated[StrictInt | None, Field(
             ge=1, description="An earlier revision to read, which needs a name. Left out, the current one.")] = None,
         call: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -101,8 +104,8 @@ class ReferenceTools:
 
     def reference_history(
         self: _Host, role: str, topic: TOPIC, name: NAME,
-        after_revision: Annotated[int, Field(ge=0, description="Only the revisions after this one.")] = 0,
-        limit: Annotated[int, Field(ge=1, le=references.MAX_HISTORY_PAGE)] = 50,
+        after_revision: Annotated[StrictInt, Field(ge=0, description="Only the revisions after this one.")] = 0,
+        limit: Annotated[StrictInt, Field(ge=1, le=references.MAX_HISTORY_PAGE)] = 50,
         call: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """A reference's revisions after `after_revision`, oldest first, with none of their text.
