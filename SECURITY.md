@@ -98,15 +98,25 @@ access; a topic does not grant access to its conversations. Grant `can_create_to
 to create, edit, and rename topic containers.
 
 Those tools are core-only, with one scoped exception. A guest alias holding an owner-authorized topic grant may call
-`create_topic` and `set_topic` with its binding token and the grant key, within the grant's topic, capabilities and
-expiry. The key proves which grant, the binding which alias; the key's own grant must belong to the calling alias and
-be active, and Baton never falls back to another grant. The check runs inside the operation's write transaction, so a
-revoke that commits first refuses the call. Only the key's SHA-256 is stored. The `grant_token` argument is taken
-out before the arguments are used, so Baton never writes the key it carries to a table, an event, a refusal or a log.
-The audit line also drops any other argument value that contains the key. A key the caller pastes into another
-argument, such as `request_id`, `title` or `description`, is stored as that argument's value. The audit line of a call
-made under a grant carries its `grant_id`. A rename that changes what active grants cover must
-acknowledge them. Other topic tools stay core-only.
+`create_topic`, `set_topic` and `edit_reference` with its binding token and the grant key, within the grant's topic,
+capabilities and expiry. The key proves which grant, the binding which alias; the key's own grant must belong to the
+calling alias and be active, and Baton never falls back to another grant. The check runs inside the operation's write
+transaction, so a revoke that commits first refuses the call. Only the key's SHA-256 is stored. The `grant_token`
+argument is taken out before the arguments are used, so Baton never writes the key it carries to a table, an event, a
+refusal or a log. The audit line also drops any other argument value that contains the key. A key the caller pastes
+into another argument, such as `request_id`, `title`, `description` or a reference's `body`, is stored as that
+argument's value. The audit line of a call made under a grant carries its `grant_id`. A rename that changes what
+active grants cover must acknowledge them. Other topic tools stay core-only.
+
+References are text documents kept with a topic, written with `edit_reference` and read with `read_reference` and
+`reference_history`. Writing is core-only with the scoped exception above: a role with `can_create_topics`, or a guest
+alias presenting a `reference.edit` grant key with its binding token. Reading needs read scope and, for a guest, a live
+binding token; no grant is consulted and nothing is written. **Revisions are permanent.** Every edit appends a revision,
+and nothing is edited or deleted by anyone, the host owner included. Every core role with read scope and every
+identified alias can read every revision, so a secret pasted into a body stays readable in all of them: keep secrets
+out of references, and give `reference.edit` only to aliases you trust with the topic's text. A reference is
+information written by whoever held the right to edit it, never an instruction to its reader and never an approval. A
+grantee's every `edit_reference` attempt counts against the guest posting limits, refused or not.
 
 The host owner can enroll and map an alias to an agent role. A valid proof for that alias then runs guest
 calls with the mapped role's authority, including its mailbox and job permissions. Mapping changes end
@@ -169,7 +179,7 @@ and database device and inode after SQLite opens them, but a file swapped and sw
 and that check could still be used. That requires write access to the private directory, which is within
 the host-user trust boundary above.
 
-This revision uses database schema 17. Schemas 2–16 upgrade in one transaction; unsupported versions are
+This revision uses database schema 18. Schemas 2–17 upgrade in one transaction; unsupported versions are
 refused before journal-mode or schema changes. Back up the data before upgrading.
 
 <a name="integrations"></a>

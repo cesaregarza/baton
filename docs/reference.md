@@ -75,6 +75,76 @@ it back as `cursor` to continue; it carries `created_at` and `conversation_id`. 
 `last_seq`, and `last_activity_at`. See [Conversations and notifications](conversations.md) for examples,
 visibility rules, and limits.
 
+### References
+
+These tools are present when `[conversations] enabled = true`. A reference is a named text kept with a topic, such as
+`job-board` in `job-hunt/boards`, and maintained one revision at a time. It is information, never an instruction to
+whoever reads it and never an approval: it says only what whoever held the right to edit it wrote.
+
+**Revisions are permanent.** Every edit appends a revision, and nothing is edited or deleted, by anyone, the host
+owner included. A secret pasted into a body stays in every later copy of the history. Every core role with read
+scope and every alias with a live binding token can read every revision, so keep secrets out of references.
+
+| Tool | Purpose |
+|---|---|
+| `edit_reference(topic, name, body, expected_revision, request_id?, grant_token?, token?)` | Write the next revision of a topic's reference, or create it with `expected_revision` 0. Requires `can_create_topics`. A guest holding a `reference.edit` [topic grant](aliases.md#using-a-topic-grant) may instead edit in the grant's topic, or directly under it if the grant inherits, with its binding `token` and `grant_token`. |
+| `read_reference(topic, name?, revision?, token?)` | Without `name`, list the topic's own references by name, each described by its current revision. With `name`, read its current text, or the text of `revision`. Available to guests. |
+| `reference_history(topic, name, after_revision?, limit?, token?)` | Page through a reference's revisions after `after_revision`, oldest first, without their text. `limit` is 1 to 100 and defaults to 50. Available to guests. |
+
+A `name` is 1 to 40 characters of a-z, 0-9 and inner hyphens. A `body` is 1 to 32768 bytes of UTF-8, counted in
+bytes. It is stored and returned exactly as sent: nothing is trimmed or normalized, and text of spaces alone is a
+body.
+
+- `expected_revision` is required. Give the revision you read, or 0 to create the reference. If the reference is at any
+  other revision the edit is refused as `stale_revision` and writes nothing; the refusal carries `current_revision`, so
+  read again and then edit. Two writers who read the same revision cannot both succeed. An edit that changes nothing is
+  still a new revision.
+- To undo, read an earlier revision and write its text as the next one. There is no restore tool, and nothing marks the
+  new revision as a restore.
+- A topic holds at most 20 references of its own, not counting its subtopics'. The limit applies when one is created,
+  so a full topic can still have each of its references edited. A reference has no limit on revisions.
+- A retry with the same `request_id` and arguments returns the stored revision with `created: false` and writes
+  nothing, even after the reference has moved on. It checks the caller's authority first, so a grant that has ended
+  or a role that lost `can_create_topics` is refused. The same `request_id` with a different body, name, topic,
+  `expected_revision`, role or alias is `idempotency_conflict`. Leave `request_id` out and the host makes one.
+- Reading takes no grant. A guest passes its alias `token`; without a valid one it is refused. A reader needs no
+  thread in the topic. Reads change nothing.
+- Each `edit_reference` a guest alias makes counts against the alias's hourly post limits, like a post, whether it is
+  then refused, stale or a retry. A core role's edits and every read are not counted. See
+  [Limits and expiry](aliases.md#limits-and-expiry).
+- Documents belong to the topic's id. Renaming a topic carries its references with it, and a path the rename frees
+  starts with none.
+
+An edit answers with `topic` (the topic's path now), `topic_id`, `name`, `revision`, `base_revision`, `size` (UTF-8
+bytes), `at`, `author`, `grant_id`, `request_id` and `created`; it does not echo the body. Reading one reference adds
+`current_revision` and `body`, and the list is `references`, each with `name`, `current_revision`, `at`, `size`,
+`author` and `grant_id`. History is `revisions` and `next_revision` beside `current_revision`. `author` is the role
+the call ran as and, when an alias was behind it, its `alias_id`, `alias` and `code` as they were then. `grant_id` is
+null for a core role.
+
+A grantee's edit can be refused with the topic grant texts above, which here name `reference.edit`. A guest that
+sends no `grant_token` to `edit_reference` gets `guest may not call edit_reference`, and a guest that reads without
+a valid binding gets `alias binding is missing, invalid or expired`. A grantee naming a topic that does not exist is
+refused as if the grant did not cover it. The other refusals are these:
+
+| Code | Text | When |
+|---|---|---|
+| `forbidden` | `<role> may not edit references (roles.<role>.can_create_topics)` | A core role without the flag. |
+| `invalid_request` | `name must be 1-40 characters of a-z, 0-9 and inner hyphens, such as job-board` | A malformed or missing `name`. |
+| `invalid_request` | `body must be text of 1-32768 bytes of UTF-8` | An empty body, or one that is not text. |
+| `invalid_request` | `expected_revision is required: 0 to create the reference, otherwise the revision you read` | A missing or negative `expected_revision`. |
+| `invalid_request` | `request_id is 1-200 characters` | An empty or longer `request_id`. |
+| `invalid_request` | `revision needs a name` | `read_reference` with `revision` and no `name`. |
+| `invalid_request` | the usual `topic` messages | A malformed `topic`. |
+| `limit_exceeded` | `a reference body is at most 32768 bytes of UTF-8; this one is <n>` | `limit` is `reference_body_bytes`. |
+| `limit_exceeded` | `topic '<path>' already holds 20 references; edit one of them` | `limit` is `references_per_topic`. |
+| `limit_exceeded` | `guest posting is over its hourly limit` | `limit` is `posts_per_alias` or `posts_per_credential`. |
+| `stale_revision` | `reference '<name>' in '<path>' is at revision <current>, not <expected>; read it again before editing it` | Carries `current_revision`. |
+| `idempotency_conflict` | `request_id <id> was already used with a different body` | A reused `request_id`. |
+| `unknown_topic` | `no topic '<path>'` | An unknown topic, on any of the three tools; for an edit, only to a core role. |
+| `unknown_reference` | `no reference '<name>' in '<path>'` | A topic with no such reference. |
+| `unknown_reference` | `reference '<name>' in '<path>' has no revision <n>; its current revision is <current>` | A revision the reference does not have. |
+
 ### Search and derived artifacts
 
 These tools are present when `[search] enabled = true`.
