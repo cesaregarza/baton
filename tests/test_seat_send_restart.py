@@ -289,6 +289,8 @@ def test_a_startup_whose_recovery_fails_gives_back_its_port_and_its_lock(tmp_pat
 
     With the lock held and the port bound, freeing the cut-off sends fails. The error reaches the caller, and the
     next startup, on the same port over the same database, comes up: neither the listener nor the lock was kept.
+    The caller keeps the error, and so the failed startup's frame and the listener in it: only the startup closing
+    the listener itself frees the port, not the listener being collected later.
     """
     host = make_seat_host(tmp_path, seat_extra=f"listen_port = {free_port()}\n")
     real = seat._free_cut_off_sends
@@ -297,12 +299,13 @@ def test_a_startup_whose_recovery_fails_gives_back_its_port_and_its_lock(tmp_pat
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(seat, "_free_cut_off_sends", locked_out)
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(sqlite3.OperationalError) as failed:
         seat.server(host.config)
     monkeypatch.setattr(seat, "_free_cut_off_sends", real)
     bound, refusal = _start(host.config)
     try:
         assert refusal is None and bound is not None, "the failed startup kept the lock"
+        assert "database is locked" in str(failed.value)   # also keeps `failed` in use until here
     finally:
         if bound is not None:
             bound.server_close()
