@@ -41,6 +41,17 @@ class StaleRevision(BatonError):
     code = "stale_revision"
 
 
+class StaleReference(StaleRevision):
+    """A reference was edited from a revision it is no longer at; `current_revision` says where it is.
+
+    A job's stale refusal carries no such field, so this one adds it and `StaleRevision` itself stays as it was.
+    """
+
+    def __init__(self, detail: str, current_revision: int) -> None:
+        super().__init__(detail)
+        self.extra = {"current_revision": current_revision}
+
+
 class MailboxFull(BatonError):
     """The recipient has too many unread messages: backpressure, not loss. Retry after it reads."""
 
@@ -67,6 +78,12 @@ class UnknownConversation(BatonError):
 
 class UnknownTopic(BatonError):
     code = "unknown_topic"
+
+
+class UnknownReference(BatonError):
+    """The topic has no such reference, or the reference has no such revision."""
+
+    code = "unknown_reference"
 
 
 class NotAParticipant(BatonError):

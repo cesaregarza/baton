@@ -20,9 +20,9 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
 
 # A message's retry identity is its own record, so a retry of its request still replays from here. A direct send
 # records its `seq`; a conversation send records each recipient's in `seqs`.
@@ -132,6 +132,8 @@ _ADDED_TABLES = {
     16: ("topic_changes",),
     # The owner's topic grant records and their event log (`baton.topic_grants`).
     17: ("topic_grants", "topic_grant_events"),
+    # A topic's reference documents and every revision of them (`baton.references`).
+    18: ("reference_docs", "reference_revisions"),
 }
 
 
@@ -343,6 +345,35 @@ _SCHEMA = (
         actor TEXT NOT NULL,
         detail TEXT,
         at TEXT NOT NULL
+    )""",
+    # A reference: a named document in a topic, kept by the topic's id and never its path, so a rename carries it
+    # along and a path a rename frees starts again with none. Its text is in `reference_revisions`.
+    # No foreign keys, as with `topic_changes`: nothing deletes a row.
+    """CREATE TABLE IF NOT EXISTS reference_docs (
+        id TEXT PRIMARY KEY,
+        topic_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (topic_id, name)
+    )""",
+    # Every revision of every reference, appended and never edited or deleted. A document's current text is its
+    # highest revision, so no counter is stored. The alias columns are all NULL (a direct credential) or all set: the
+    # name and code are what the alias was called then, for reading only. `grant_id` is the topic grant a guest acted
+    # under, NULL for a core role. `request_id` is the retry identity, and lives as long as the revision does.
+    """CREATE TABLE IF NOT EXISTS reference_revisions (
+        doc_id TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        body TEXT NOT NULL,
+        author_role TEXT NOT NULL,
+        author_alias_id TEXT,
+        author_alias_name TEXT,
+        author_alias_code TEXT,
+        grant_id TEXT,
+        request_id TEXT NOT NULL UNIQUE,
+        request_digest TEXT NOT NULL,
+        base_revision INTEGER NOT NULL CHECK (base_revision = revision - 1),
+        at TEXT NOT NULL,
+        PRIMARY KEY (doc_id, revision)
     )""",
     # Every change to a conversation's source, in order: a message added, a participant added or removed, and,
     # in logs from before copies stopped expiring, a copy expired by retention. Each carries the revision it

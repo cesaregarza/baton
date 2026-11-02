@@ -15,10 +15,11 @@ First configure and authenticate a `guest` role. New guests cannot join conversa
 access to all retained conversations: choose it deliberately. Older databases may retain legacy guest
 memberships and copies, which follow the usual membership rule.
 
-A plain guest can claim or resume aliases and, with a binding token, post to a readable conversation or
-start a conversation in an existing topic when its role has `can_view_all_conversations = true`. If
-`[search] enabled = true`, it can also search readable messages by keyword. It cannot send direct messages,
-use a shared mailbox or `wait`, manage topics or participants, use jobs or artifacts, or request decisions.
+A plain guest can claim or resume aliases and, with a binding token, post to a readable conversation or start a
+conversation in an existing topic when its role has `can_view_all_conversations = true`. With a binding token it can
+also read the references kept with a topic. If `[search] enabled = true`, it can also search readable messages by
+keyword. It cannot send direct messages, use a shared mailbox or `wait`, manage topics or participants, use jobs or
+artifacts, or request decisions.
 
 Call `claim_alias(name, passphrase)` to create an alias or resume it with the same passphrase. The response
 includes an immutable `alias_id`, normalized `alias`, a short visual `code`, an expiring `binding_token`,
@@ -69,7 +70,8 @@ binding capacity refuses a new claim rather than evicting someone else's active 
 
 By default, posting is limited to 30 admitted calls per alias per hour and 300 per authenticated guest
 credential per hour, in addition to role and conversation limits. A valid proof-bearing retry or a later
-body refusal still counts as an admitted call. Claims have separate per-credential, per-alias-lookalike,
+body refusal still counts as an admitted call. So does every `edit_reference` call by a grantee, refused, stale or
+retried: edits and posts share the same two limits. Claims have separate per-credential, per-alias-lookalike,
 and overall limits, including wrong-passphrase attempts. See the `[aliases]` section in the
 [example config](../baton.example.toml) for settings and defaults.
 
@@ -145,11 +147,11 @@ them.
 
 ### Using a topic grant
 
-A grantee is an ordinary guest alias. Each call carries two secrets, because they prove different things: `token`,
-the alias's binding token (who is calling), and `grant_token`, the grant key (which grant is used). The key alone
-opens nothing, and a binding alone gets the refusals a guest always gets. Only `create_topic` and `set_topic` take
-`grant_token`, and a grant applies only to a call that runs as `guest`: an alias enrolled as a role runs as that role
-and any `grant_token` on its call is ignored.
+A grantee is an ordinary guest alias. Each call carries two secrets, because they prove different things: `token`, the
+alias's binding token (who is calling), and `grant_token`, the grant key (which grant is used). The key alone opens
+nothing, and a binding alone gets the refusals a guest always gets. Only `create_topic`, `set_topic` and
+`edit_reference` take `grant_token`, and a grant applies only to a call that runs as `guest`: an alias enrolled as a
+role runs as that role and any `grant_token` on its call is ignored.
 
 Only the presented key's own grant counts. Baton never falls back to another grant the alias holds, and a key
 belonging to another alias is refused.
@@ -162,7 +164,13 @@ belonging to another alias is refused.
   current topic and the destination are covered by the grant. The grantee need not be a participant, and a move
   gives it no read or post access. A grantee cannot clear a thread's topic. Every participant gets a host notice
   saying who moved the thread, from where, to where, and under which grant.
-- `reference.edit` is recorded but no tool uses it yet.
+- `reference.edit`: `edit_reference(topic, name, body, expected_revision, grant_token=..., token=...)` writes the next
+  revision of a reference in the grant's topic, or in a direct subtopic of it when the grant inherits, and creates the
+  reference when `expected_revision` is 0. The key is for edits only: reading a reference, with `read_reference` or
+  `reference_history`, needs the binding token and no key, and works for any identified alias, whether or not it holds a
+  grant, and after a grant has ended. Each revision records the alias and the grant it was written under.
+  Revisions are permanent and readable by every core role and every alias: nothing is edited or deleted, so do not
+  put a secret in a reference. See [References](reference.md#references).
 
 A grant covers a topic by its id, so a rename moves it along. A core role renaming a topic that active grants
 cover, or that enters or leaves an inheriting grant's reach, must name those grants in `acknowledge_topic_grants`

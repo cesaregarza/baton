@@ -184,7 +184,8 @@ WHOLE_TABLES = {8: {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_req
                 14: {"alias_arms", "core_enrolment", "alias_roles", "events_targets"},  # per-call identity
                 15: {"topics"},  # topics as containers
                 16: {"topic_changes"},  # the history of every topic change
-                17: {"topic_grants", "topic_grant_events"}}  # the owner's topic grant records and their log
+                17: {"topic_grants", "topic_grant_events"},  # the owner's topic grant records and their log
+                18: {"reference_docs", "reference_revisions"}}  # the documents a topic keeps, and their revisions
 
 
 @pytest.mark.parametrize("version", FIXTURE_VERSIONS)

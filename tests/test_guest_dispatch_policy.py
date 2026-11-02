@@ -128,7 +128,7 @@ def test_guest_policy_enumerates_every_registered_tool_and_allows_only_the_read_
         registered = {tool["name"] for tool in listed}
         allowed = {"whoami", "alias_exists", "claim_alias", "list_conversations", "read_history",
                    "get_message", "search", "send_message", "create_conversation",
-                   "list_topics", "get_topic"}
+                   "list_topics", "get_topic", "read_reference", "reference_history"}
         if hasattr(app_module, "GUEST_TOOLS"):
             assert app_module.GUEST_TOOLS & registered == allowed
         assert allowed <= registered

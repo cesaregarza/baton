@@ -37,7 +37,7 @@ def _may_manage(config: Config, actor: str) -> None:
         raise Forbidden(f"{actor} may not create or change topics (roles.{actor}.can_create_topics)")
 
 
-def _check_path(path: Any, field: str = "path") -> str:
+def check_path(path: Any, field: str = "path") -> str:
     from baton import conversations  # lazily: conversations imports this module
 
     checked = conversations.check_topic(path, field=field)
@@ -96,6 +96,14 @@ def require_exists(conn: sqlite3.Connection, path: str, field: str = "topic") ->
     row = _row(conn, path)
     if row is None:
         raise InvalidRequest(f"{field} {path!r} is not a topic; a core role opens one with create_topic")
+    return row
+
+
+def require_topic(conn: sqlite3.Connection, path: str) -> sqlite3.Row:
+    """The topic at `path`, or the `unknown_topic` refusal `get_topic` gives for a path no topic holds."""
+    row = _row(conn, path)
+    if row is None:
+        raise UnknownTopic(f"no topic {path!r}")
     return row
 
 
@@ -162,13 +170,15 @@ def id_of(conn: sqlite3.Connection, path: str) -> str | None:
 
 
 # The tools whose audit line names a topic: by `path` (the topic itself, or a rename's old one), or by `topic`
-# (the topic a thread is filed in, or a listing filters by).
+# (the topic a thread is filed in, a listing filters by, or a reference is kept in).
 PATH_TOOLS = frozenset({"create_topic", "update_topic", "rename_topic", "get_topic"})
-AUDIT_TOOLS = PATH_TOOLS | {"set_topic", "create_conversation", "list_conversations"}
+# The reference tools, whose line also names the reference, by its `name`.
+REFERENCE_AUDIT = frozenset({"edit_reference", "read_reference", "reference_history"})
+AUDIT_TOOLS = PATH_TOOLS | {"set_topic", "create_conversation", "list_conversations"} | REFERENCE_AUDIT
 
 
 def record_seen(seen: dict[str, Any] | None, path: str, row: sqlite3.Row | None = None,
-                **more: str | None) -> None:
+                **more: str | int | None) -> None:
     """Note in `seen`, when the caller gave one, the topic this call resolved: `path` and the id of `row`, if any.
 
     `path` is what the call named, and `row` the topic its result is, or is in, read while the call held a
@@ -218,6 +228,18 @@ def _is_path(value: Any) -> bool:
         return False
 
 
+def _well_formed(key: str, value: Any) -> bool:
+    """Whether an audit field may be written as given. A topic, a rename's new path and a reference name come from
+    the caller's own arguments when a call is refused, so each must be well formed; every other field is the host's."""
+    if key in ("topic", "new_path"):
+        return _is_path(value)
+    if key == "reference":
+        from baton import references  # lazily: references imports this module
+
+        return references.is_name(value)
+    return True
+
+
 def audit_fields(tool: str, arguments: dict[str, Any], outcome: str, seen: dict[str, Any]) -> dict[str, Any]:
     """What a topic tool's audit line adds: the topic and, on success, its id, and a rename's new path.
 
@@ -227,12 +249,16 @@ def audit_fields(tool: str, arguments: dict[str, Any], outcome: str, seen: dict[
     because its transaction rolled back and `seen` may hold part of what it did. Either way a topic or new
     path is written only if it is a well-formed topic path: a refused argument is otherwise anything the
     caller sent, a binding token included.
+
+    A reference tool's line also names the reference, under the same rule, and an edit's the revision it wrote
+    or replayed.
     """
     if tool not in AUDIT_TOOLS:
         return {}
     if outcome != "ok":
-        seen = {"topic": arguments.get("path" if tool in PATH_TOOLS else "topic")}
-    return {key: value for key, value in seen.items() if key not in ("topic", "new_path") or _is_path(value)}
+        seen = {"topic": arguments.get("path" if tool in PATH_TOOLS else "topic"),
+                **({"reference": arguments.get("name")} if tool in REFERENCE_AUDIT else {})}
+    return {key: value for key, value in seen.items() if _well_formed(key, value)}
 
 
 def _no_members(members: Any) -> list[str]:
@@ -263,7 +289,7 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
     """
     if grant_key is None:
         _may_manage(config, actor)
-    checked = _check_path(path)
+    checked = check_path(path)
     title = _check_text(title, "title", MAX_TITLE, default=checked.split("/")[-1])
     description = _check_text(description, "description", MAX_DESCRIPTION)
     chosen = _check_members(config, members) if grant_key is None else _no_members(members)
@@ -307,7 +333,7 @@ def update(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
     A call that changes none of them writes no history row, as a set_topic to the topic it already has does not.
     """
     _may_manage(config, actor)
-    checked = _check_path(path)
+    checked = check_path(path)
     new_title = _check_text(title, "title", MAX_TITLE)
     new_description = (UNSET if description is UNSET
                        else _check_text(description, "description", MAX_DESCRIPTION))
@@ -353,8 +379,8 @@ def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, n
     A rename that changes what active topic grants cover must acknowledge them, and logs a `rename` event on each.
     """
     _may_manage(config, actor)
-    checked = _check_path(path)
-    target = _check_path(new_path, field="new_path")
+    checked = check_path(path)
+    target = check_path(new_path, field="new_path")
     if target == checked or target.startswith(checked + "/"):
         raise InvalidRequest(f"new_path {target!r} is {path!r} itself or inside it")
     with transaction(conn):
@@ -413,11 +439,9 @@ def may_open(conn: sqlite3.Connection, config: Config, reader: str, path: str) -
 def get(conn: sqlite3.Connection, config: Config, *, reader: str, path: Any,
         seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """One topic, with the number of threads in it this reader may see and the subtopics it may open."""
-    checked = _check_path(path)
+    checked = check_path(path)
     with snapshot(conn):  # one view, so a rename in between cannot mix two topics into one answer
-        row = _row(conn, checked)
-        if row is None:
-            raise UnknownTopic(f"no topic {checked!r}")
+        row = require_topic(conn, checked)
         record_seen(seen, checked, row)
         threads, _ = _readable(conn, config, reader, checked)
         # Filtered, because the subtopic list is the other way this could name a topic the reader may not
@@ -434,7 +458,7 @@ def listing(conn: sqlite3.Connection, config: Config, *, reader: str,
     if parent is None:
         rows = conn.execute("SELECT * FROM topics ORDER BY path").fetchall()
     else:
-        checked = _check_path(parent, field="parent")
+        checked = check_path(parent, field="parent")
         rows = conn.execute("SELECT * FROM topics WHERE path LIKE ? ORDER BY path",
                             (f"{checked}/%",)).fetchall()
     listed = []

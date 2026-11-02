@@ -34,6 +34,7 @@ PROPOSAL_HOURS = 24
 MAX_REASON = 500
 OWNER = "owner"
 NEEDS_BINDING = "a topic grant key works only with the alias's binding token"
+UNKNOWN_KEY = "unknown topic grant key"
 # A grant joined to the topic it is on, read by id: that topic's path is its current one.
 WITH_ROOT = ("SELECT g.*, root.path AS root_path FROM topic_grants g"
              " LEFT JOIN topics root ON root.id = g.topic_id")
@@ -307,10 +308,14 @@ def grant_for_use(conn: sqlite3.Connection, identity: dict[str, str] | None, key
     """
     if identity is None:
         raise Forbidden(NEEDS_BINDING)
+    # Every key is minted ASCII, so a key that is not opens nothing. It is refused as any unknown key is, before it
+    # is hashed: a lone surrogate from JSON has no UTF-8 form to hash.
+    if not key.isascii():
+        raise Forbidden(UNKNOWN_KEY)
     digest = hashlib.sha256(key.encode()).hexdigest()
     row = conn.execute(f"{WITH_ROOT} WHERE g.proof_digest = ?", (digest,)).fetchone()
     if row is None:
-        raise Forbidden("unknown topic grant key")
+        raise Forbidden(UNKNOWN_KEY)
     if row["alias_id"] != identity["alias_id"]:
         raise GrantRefused("this topic grant key is not for this alias", row["id"], "other_alias")
     state = _state(row, _now())
