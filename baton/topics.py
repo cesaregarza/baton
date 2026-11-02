@@ -229,8 +229,8 @@ def _is_path(value: Any) -> bool:
 
 
 def _well_formed(key: str, value: Any) -> bool:
-    """Whether an audit field may be written as given. A topic or new path must be a topic path and a reference
-    a reference name, for a refused argument is anything the caller sent; every other field is the host's own."""
+    """Whether an audit field may be written as given. A topic, a rename's new path and a reference name come from
+    the caller's own arguments when a call is refused, so each must be well formed; every other field is the host's."""
     if key in ("topic", "new_path"):
         return _is_path(value)
     if key == "reference":
@@ -243,14 +243,15 @@ def _well_formed(key: str, value: Any) -> bool:
 def audit_fields(tool: str, arguments: dict[str, Any], outcome: str, seen: dict[str, Any]) -> dict[str, Any]:
     """What a topic tool's audit line adds: the topic and, on success, its id, and a rename's new path.
 
-    A reference tool's line also names the reference and, for an edit, the revision it wrote or replayed.
-
     `topic` is always the path the call named. `topic_id` is the stable id of the topic the call's result is, or
     is in, read while the call held a consistent view of the database. A success writes what the call recorded
-    in `seen`. A refusal writes only the path it named (and the reference's name), never an id,
-    because its transaction rolled back and `seen` may hold part of what it did. Either way a topic, new
-    path or reference is written only if it is well formed: a refused argument is otherwise anything the
+    in `seen`. A refusal writes only the path it named, never an id,
+    because its transaction rolled back and `seen` may hold part of what it did. Either way a topic or new
+    path is written only if it is a well-formed topic path: a refused argument is otherwise anything the
     caller sent, a binding token included.
+
+    A reference tool's line also names the reference, under the same rule, and an edit's the revision it wrote
+    or replayed.
     """
     if tool not in AUDIT_TOOLS:
         return {}
