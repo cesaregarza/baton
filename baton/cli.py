@@ -122,6 +122,7 @@ def _parser() -> argparse.ArgumentParser:
         handler=_seat_logout_all)
 
     _add_owner_alias_commands(commands)
+    _add_topic_grant_commands(commands)
 
     commands.add_parser("hash-passphrase", help="hash an OAuth consent passphrase for the config")
     oauth = commands.add_parser("oauth", help="OAuth grants").add_subparsers(dest="oauth_command", required=True)
@@ -143,8 +144,7 @@ def _add_owner_alias_commands(commands: Any) -> None:
     rekey = alias.add_parser("arm-rekey", help="let the next claim with a new passphrase reset an alias, "
                                                "within 15 minutes")
     rekey.add_argument("name")
-    rekey.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.arm_rekey(
-        conn, args.name)))
+    rekey.set_defaults(handler=_arm_rekey)
     mapping = alias.add_parser("map", help="make an alias act as an enrolled role; ends both sides' old proofs")
     mapping.add_argument("name")
     mapping.add_argument("map_role", metavar="role")
@@ -163,6 +163,31 @@ def _add_owner_alias_commands(commands: Any) -> None:
     unbind.add_argument("grant")
     unbind.set_defaults(handler=lambda config, args: _aliases(config, lambda aliases, conn: aliases.unbind_grant(
         conn, args.grant)))
+
+
+def _add_topic_grant_commands(commands: Any) -> None:
+    """The owner's topic grant records. Only `authorize` mints a key, so nothing above it grants access."""
+    grant = commands.add_parser("topic-grant", help="owner commands for topic grants").add_subparsers(
+        dest="topic_grant_command", required=True)
+    propose = grant.add_parser("propose", help="propose a grant for an alias on a topic; grants nothing yet")
+    propose.add_argument("alias")
+    propose.add_argument("topic")
+    propose.add_argument("--capability", action="append", required=True,
+                         help="reference.edit, thread.organise or topic.create_sub; repeat for more")
+    propose.add_argument("--inherit", action="store_true", help="also cover the topic's direct subtopics")
+    propose.add_argument("--days", type=int, required=True, help="how long the grant lasts once authorized: 1-30")
+    propose.set_defaults(handler=_topic_grant_propose)
+    authorize = grant.add_parser("authorize", help="authorize a proposal by its digest; prints the key once")
+    authorize.add_argument("grant_id")
+    authorize.add_argument("digest")
+    authorize.set_defaults(handler=_topic_grant_authorize)
+    revoke = grant.add_parser("revoke", help="end a grant in any state, with a reason")
+    revoke.add_argument("grant_id")
+    revoke.add_argument("--reason", required=True)
+    revoke.set_defaults(handler=_topic_grant_revoke)
+    listing = grant.add_parser("list", help="pending and active grants")
+    listing.add_argument("--all", action="store_true", help="every grant, including those no longer in force")
+    listing.set_defaults(handler=_topic_grant_list)
 
 
 def _add_job_commands(commands: Any) -> None:
@@ -258,6 +283,49 @@ def _aliases(config: Config, operation: Any) -> Any:
     from baton import aliases  # lazily: it imports the MCP SDK, slow for one-shot commands
 
     return _db(config, lambda conn: operation(aliases, conn))
+
+
+def _arm_rekey(config: Config, args: argparse.Namespace) -> dict[str, Any]:
+    """Arm a rekey, and name the alias's active topic grants when it has any, so the owner sees what the alias holds."""
+    from baton import aliases, topic_grants  # lazily: aliases imports the MCP SDK
+
+    def arm(conn: Any) -> dict[str, Any]:
+        armed = aliases.arm_rekey(conn, args.name)
+        grants = topic_grants.active_grant_ids(conn, armed["target"])
+        return {**armed, "active_topic_grants": grants} if grants else armed
+
+    return _db(config, arm)
+
+
+# The key is shown once, here. This note says where it may go, because the output is the only copy of it.
+GRANT_KEY_NOTE = ("Give the key to the agent only through the owner's own chat with it, never in a Baton thread. "
+                  "No tool honours a topic grant yet.")
+
+
+def _topic_grant_propose(config: Config, args: argparse.Namespace) -> dict[str, Any]:
+    from baton import topic_grants  # lazily, like the aliases
+
+    return _db(config, lambda conn: topic_grants.propose(conn, args.alias, args.topic, args.capability,
+                                                         args.inherit, args.days))
+
+
+def _topic_grant_authorize(config: Config, args: argparse.Namespace) -> dict[str, Any]:
+    from baton import topic_grants
+
+    granted = _db(config, lambda conn: topic_grants.authorize(conn, args.grant_id, args.digest))
+    return {**granted, "note": GRANT_KEY_NOTE}
+
+
+def _topic_grant_revoke(config: Config, args: argparse.Namespace) -> dict[str, Any]:
+    from baton import topic_grants
+
+    return _db(config, lambda conn: topic_grants.revoke(conn, args.grant_id, args.reason))
+
+
+def _topic_grant_list(config: Config, args: argparse.Namespace) -> list[dict[str, Any]]:
+    from baton import topic_grants
+
+    return _db(config, lambda conn: topic_grants.list_grants(conn, include_all=args.all))
 
 
 def _events_status(config: Config, args: argparse.Namespace) -> dict[str, Any]:

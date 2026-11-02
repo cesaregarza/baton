@@ -20,9 +20,9 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
 
 # A message's retry identity is its own record, so a retry of its request still replays from here. A direct send
 # records its `seq`; a conversation send records each recipient's in `seqs`.
@@ -130,6 +130,8 @@ _ADDED_TABLES = {
     15: ("topics",),
     # Every change a topic undergoes, one row each (`baton.topics`).
     16: ("topic_changes",),
+    # The owner's topic grant records and their event log (`baton.topic_grants`).
+    17: ("topic_grants", "topic_grant_events"),
 }
 
 
@@ -304,6 +306,42 @@ _SCHEMA = (
         grant_id TEXT,
         before TEXT,
         after TEXT,
+        at TEXT NOT NULL
+    )""",
+    # An owner's topic grant for one alias: proposed, then authorized, then possibly revoked. The proposed
+    # fields never change, and an authorization or revocation only fills its own. No state is stored; the state
+    # is derived from these columns and the clock (`baton.topic_grants`). Only the key's sha256 is kept.
+    """CREATE TABLE IF NOT EXISTS topic_grants (
+        id TEXT PRIMARY KEY,
+        alias_id TEXT NOT NULL,
+        topic_id TEXT NOT NULL,
+        capabilities TEXT NOT NULL,
+        inherit INTEGER NOT NULL,
+        expires_at TEXT NOT NULL,
+        proposed_by TEXT NOT NULL,
+        proposed_at TEXT NOT NULL,
+        proposal_expires_at TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        authorized_by TEXT,
+        authorized_at TEXT,
+        authorized_digest TEXT,
+        proof_digest TEXT,
+        revoked_at TEXT,
+        revoked_by TEXT,
+        revoke_reason TEXT,
+        alias_name_seen TEXT NOT NULL,
+        alias_code_seen TEXT NOT NULL,
+        topic_path_seen TEXT NOT NULL
+    )""",
+    # Every grant event, appended and never edited. `detail` is JSON or NULL, and never holds a key.
+    # No foreign keys, as with `topic_changes`: nothing deletes a row.
+    """CREATE TABLE IF NOT EXISTS topic_grant_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        grant_id TEXT NOT NULL,
+        event TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        detail TEXT,
         at TEXT NOT NULL
     )""",
     # Every change to a conversation's source, in order: a message added, a participant added or removed, and,

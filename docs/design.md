@@ -229,8 +229,8 @@ can also send replies.
 ## Storage
 
 The host uses one SQLite database in WAL mode. Writes use `BEGIN IMMEDIATE` transactions to serialize
-dependent updates across the server, CLI, and dispatcher. This revision uses schema 16 and upgrades
-schemas 2 through 15 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
+dependent updates across the server, CLI, and dispatcher. This revision uses schema 17 and upgrades
+schemas 2 through 16 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
 
 The upgrade creates topic records for existing conversation topic paths and any missing parents. It derives
 each topic's members from participants in conversations filed directly there, excluding `guest`. A topic
@@ -244,6 +244,7 @@ the upgrade rather than being discarded.
 | Messages, mailboxes, topics, conversations, participants | Retained copies, delivery positions, topic metadata, and conversation membership. |
 | Jobs, job moves, events, cursors, wakes | Job state and history, event delivery, wake status, and retry records. |
 | Aliases, bindings, mappings | Alias continuity, digests of live proofs, and enrolled-role mappings. |
+| Topic grants and their events | Owner grants on topics: their terms and digests, hashes of their keys, revocations, and a log. Keys are never stored. |
 | Change log, generations, batches, artifacts, vectors | Optional indexing state and producer-supplied derived data. |
 | Seat sessions, receipts, requests | Optional browser-seat session and delivery state. |
 
