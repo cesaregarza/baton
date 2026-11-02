@@ -125,9 +125,9 @@ description = "Picks up jobs and reports back"
 # batch_ttl_seconds = 900                     # an open batch expires after this
 # max_input_segments = 256                    # seq ranges one artifact's inputs may span
 # max_commits_per_hour = 60                   # per producer
-# receipt_retention_days = 30                 # receipts are kept; how long a retried commit replays its receipt
+# receipt_retention_days = 30                 # how long a retried commit replays its (kept) receipt
 # max_generations = 3                         # per producer, the active one included
-# generation_retention_days = 30              # a replaced generation retires after this, which frees its slot; its rows are kept
+# generation_retention_days = 30              # a replaced generation then retires, freeing its slot; rows stay
 # max_activation_reconcile = 10000            # (conversation, kind) pairs one activation may check
 # max_vectors_per_generation = 1000000        # vectors one generation may hold; past it a commit is refused
 
