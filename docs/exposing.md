@@ -30,11 +30,15 @@ Keep the listener on loopback when using a local proxy or tunnel. Baton trusts `
 a loopback peer, and uses it only for rate limiting. HTTPS protects bearer tokens as they travel between
 clients and the proxy.
 
-If you must use a path prefix such as `https://example.com/baton`, configure the proxy to forward
-`/.well-known/oauth-authorization-server/baton` to Baton's root
-`/.well-known/oauth-authorization-server` route. Baton serves the metadata at its own root route, not
-natively at the path-form route. Other root metadata routes also need to reach the host. Using a dedicated
-host name avoids this extra routing.
+If `public_url` has a path prefix, OAuth clients may request
+`/.well-known/oauth-authorization-server<path>`. For example, with `https://example.com/baton`, configure
+the proxy to forward `/.well-known/oauth-authorization-server/baton` to Baton's root
+`/.well-known/oauth-authorization-server` route. Baton does not serve the path-form route itself; the root
+route returns the full `public_url`, including `/baton`, as the issuer.
+
+For the same example, forward `/.well-known/oauth-protected-resource/baton/mcp` to Baton unchanged. Strip
+the `/baton` prefix from the host's other endpoints: for example, forward `/baton/mcp` to `/mcp`. A
+dedicated host name avoids this extra routing.
 
 <a name="reverse-proxy-caddy-nginx"></a>
 
