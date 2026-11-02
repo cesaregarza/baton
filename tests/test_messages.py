@@ -95,6 +95,17 @@ def test_a_message_missing_from_the_mailbox_reports_truncation(conn) -> None:
     assert conn.execute("SELECT COUNT(*) FROM events WHERE data LIKE '%old%'").fetchone()[0] == 0
 
 
+def test_truncated_does_not_flag_a_gap_between_kept_messages(conn) -> None:
+    # The check sees only the message after the cursor being missing, so a hole between kept ones is not reported.
+    for text in ("one", "two", "three"):
+        messages.send(conn, sender="planner", recipient="worker", text=text)
+    conn.execute("DELETE FROM messages WHERE recipient = 'worker' AND seq = 2")  # removed outside Baton
+
+    page = messages.read(conn, "worker", after_seq=0)
+    assert [m["seq"] for m in page["messages"]] == [1, 3]
+    assert page["truncated"] is False
+
+
 def test_wait_returns_messages_once_and_skips_ones_already_read(conn) -> None:
     messages.send(conn, sender="planner", recipient="worker", text="read elsewhere")
     messages.read(conn, "worker")

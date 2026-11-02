@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_index_writer import GROUP, begin, cycle, inputs, read_all, say, versions
+from test_index_writer import GROUP, begin, cycle, inputs, read_all, refused, say, versions
 from test_index_writer import commit as write_commit
 from test_index_writer import converse as converse_in
 from test_messages import rid
@@ -312,7 +312,24 @@ def test_a_commit_receipt_past_its_expiry_is_kept(db, config) -> None:
     assert count(db, "SELECT COUNT(*) FROM commit_requests WHERE request_id = 'r-1'") == 1
 
 
-@pytest.mark.parametrize("how", ["abandoned", "committed", "committed_and_receipt_aged_out"])
+def test_a_reused_request_id_under_an_aged_out_receipt_is_refused_and_writes_nothing(db, config) -> None:
+    conversation_id, _ = converse_in(db, config, 2)
+    cycle(db, config, conversation_id, request_id="r-1")
+    db.execute("UPDATE commit_requests SET expires_at = ?", (ago(timedelta(days=1)),))
+    receipt = dict(db.execute("SELECT * FROM commit_requests WHERE request_id = 'r-1'").fetchone())
+    other = begin(db, config, conversation_id, kinds=("decisions",))
+    read_all(db, config, other)
+    versions_before = count(db, "SELECT COUNT(*) FROM artifact_versions")
+
+    refused("idempotency_conflict", write_commit, db, config, other, request_id="r-1")  # no crash
+
+    assert dict(db.execute("SELECT * FROM commit_requests WHERE request_id = 'r-1'").fetchone()) == receipt
+    assert count(db, "SELECT COUNT(*) FROM artifact_versions") == versions_before
+    assert count(db, "SELECT COUNT(*) FROM batches WHERE id = ? AND state = 'open'", other["batch_id"]) == 1
+    assert write_commit(db, config, other, request_id="r-2")["created"] is True
+
+
+@pytest.mark.parametrize("how",["abandoned", "committed", "committed_and_receipt_aged_out"])
 def test_guard_an_expired_or_closed_batch_and_an_aged_out_receipt_create_nothing(db, config, how: str) -> None:
     conversation_id, _ = converse_in(db, config, 2)
     manifest = begin(db, config, conversation_id)
