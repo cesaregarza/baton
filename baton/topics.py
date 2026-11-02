@@ -176,6 +176,11 @@ def record_seen(seen: dict[str, Any] | None, path: str, row: sqlite3.Row | None 
         seen.update({"topic": path, **({} if row is None else {"topic_id": row["id"]}), **more})
 
 
+def seen_by(call: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Where a topic tool's body records the topic it resolved, for the audit line."""
+    return None if call is None else call.setdefault("topic", {})
+
+
 def note_path(conn: sqlite3.Connection, seen: dict[str, Any] | None, path: str | None) -> None:
     """record_seen for the topic now at `path`, which may be none; a path with no topic records no id."""
     if path is not None and seen is not None:

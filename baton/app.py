@@ -38,6 +38,7 @@ from baton.config import Config
 from baton.errors import BatonError, Forbidden, InvalidRequest, UnknownRole
 from baton.integrations import Integration, IntegrationUnavailable, load_enabled
 from baton.store import connect
+from baton.topic_tools import TopicTools
 from baton.wakes import Dispatcher
 
 log = logging.getLogger("baton.app")
@@ -65,7 +66,7 @@ An alias enrolled as a role is different: pass its binding_token as `token` on a
 that role, with its mailbox, waits and permissions. whoami shows the role a call runs as."""
 
 
-class Tools:
+class Tools(TopicTools):
     """The tool bodies. `role` is the caller's; each call opens its own connection."""
 
     def __init__(self, config: Config) -> None:
@@ -187,64 +188,8 @@ class Tools:
         """Start a thread. Name `participants`, or as a guest give a `topic` and its members receive it."""
         with self._conn() as conn:
             return conversations.create(conn, self._config, actor=role, title=title, participants=participants,
-                                        topic=topic, request_id=request_id, identity=identity, seen=_seen(call))
-
-    def create_topic(
-        self, role: str,
-        path: Annotated[str, Field(description="1-2 lowercase slug segments, such as project or "
-                                               "project/subtopic. A subtopic needs its parent first.")],
-        title: str | None = None,
-        description: str | None = None,
-        members: Annotated[list[str] | None, Field(
-            description="The roles a guest's thread in this topic is delivered to, copied into each new "
-                        "thread. Left out means none, so no guest thread until a core role sets them.")] = None,
-        request_id: str | None = None,
-        identity: dict[str, str] | None = None,
-        call: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Open a topic for threads to be filed in. Pass a request_id to make a retry safe."""
-        with self._conn() as conn:
-            return topics.create(conn, self._config, actor=role, path=path, title=title,
-                                 description=description, members=members, request_id=request_id,
-                                 identity=identity, seen=_seen(call))
-
-    def update_topic(
-        self, role: str, path: str, title: str | None = None,
-        description: Annotated[str | None, Field(description="Left out or null keeps the current one.")] = None,
-        members: Annotated[list[str] | None, Field(
-            description="Replaces the members. Left out or null keeps the current list, and an empty "
-                        "list clears it. Threads that already exist keep the participants they "
-                        "were created with.")] = None,
-        identity: dict[str, str] | None = None,
-        call: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Change a topic's title, description or members. An argument you leave out is left as it is."""
-        with self._conn() as conn:
-            return topics.update(conn, self._config, actor=role, path=path, title=title,
-                                 description=topics.UNSET if description is None else description,
-                                 members=topics.UNSET if members is None else members, identity=identity,
-                                 seen=_seen(call))
-
-    def rename_topic(self, role: str, path: str, new_path: str, identity: dict[str, str] | None = None,
-                     call: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Move a topic, its subtopics and their threads to a new path. Ids and participants never change."""
-        with self._conn() as conn:
-            return topics.rename(conn, self._config, actor=role, path=path, new_path=new_path, identity=identity,
-                                 seen=_seen(call))
-
-    def list_topics(
-        self, role: str,
-        parent: Annotated[str | None, Field(
-            description="Only the subtopics directly under this path. Omit it for every topic.")] = None,
-    ) -> dict[str, Any]:
-        """The topics, each with the number of threads in it you can read and when it last had one."""
-        with self._conn() as conn:
-            return {"topics": topics.listing(conn, self._config, reader=role, parent=parent)}
-
-    def get_topic(self, role: str, path: str, call: dict[str, Any] | None = None) -> dict[str, Any]:
-        """One topic: its title, description, members, subtopics and the threads in it you can read."""
-        with self._conn() as conn:
-            return topics.get(conn, self._config, reader=role, path=path, seen=_seen(call))
+                                        topic=topic, request_id=request_id, identity=identity,
+                                        seen=topics.seen_by(call))
 
     def list_conversations(
         self, role: str,
@@ -267,31 +212,13 @@ class Tools:
         with self._conn() as conn:
             rows = conversations.list_readable(conn, self._config, role, topic, limit=limit, before=before,
                                                changed_since=changed_since, _lookahead=True,
-                                               seen=_seen(call))
+                                               seen=topics.seen_by(call))
         has_more = len(rows) > limit
         page = rows[:limit]
         next_cursor = conversations.page_cursor(page[-1]) if has_more and page else None
         return {"conversations": page,
                 "next_cursor": ({"created_at": next_cursor[0], "conversation_id": next_cursor[1]}
                                 if next_cursor else None)}
-
-    def set_topic(
-        self, role: str, conversation_id: str,
-        topic: Annotated[str | None, Field(
-            description="The new topic, 1-2 lowercase slug segments, or null to clear it. Required: say "
-                        "what the topic becomes, so that forgetting the argument cannot clear one.")],
-        identity: dict[str, str] | None = None,
-        call: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Set, rename or clear a conversation's topic. Its id never changes, so nothing else moves.
-
-        `topic` has no default on purpose. A tool that cleared the topic when an argument was left out
-        would make an omission destructive, and it would let any caller that drops nulls clear one by
-        accident -- the remote command does drop them, which is why it sends this argument explicitly.
-        """
-        with self._conn() as conn:
-            return conversations.set_topic(conn, self._config, conversation_id, topic, actor=role,
-                                           identity=identity, seen=_seen(call))
 
     def read_history(
         self, role: str, conversation_id: str, after_seq: Annotated[int, Field(ge=0)] = 0,
@@ -698,11 +625,6 @@ def _call_context(principal: Any) -> dict[str, Any]:
     authority = auth.credential_authority(principal) if principal is not None else {}
     return {"credential_role": role, "credential_id": authority.get("name") or authority.get("grant"),
             "authority": authority, "role": role, "identity": None}
-
-
-def _seen(call: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Where a topic tool's body records the topic it resolved, for the audit line."""
-    return None if call is None else call.setdefault("topic", {})
 
 
 def _tool_signature(name: str, body: Callable[..., Any]) -> inspect.Signature:
