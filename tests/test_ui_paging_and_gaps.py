@@ -283,6 +283,16 @@ def test_the_gap_controls_are_44_css_px_and_never_shrink_or_break_a_word() -> No
     assert "2.75rem" not in controls and "2.75rem" not in row
 
 
+def test_a_wrapped_gap_control_is_centred_on_its_own_line() -> None:
+    """The space between the controls is the row's column gap, not the label's margin, so a control that wraps
+    is centred on its line."""
+    narrow = _narrow_block()
+    (row,) = re.findall(r"\.gap-actions \{([^}]*)\}", narrow)
+    (controls,) = re.findall(r"\.gap-actions a, \.gap-actions label \{([^}]*)\}", narrow)
+    assert "column-gap: .6rem;" in row, "the space between the controls is not the row's column gap"
+    assert "margin-left: 0;" in controls, "a control on its own line keeps the label's left margin"
+
+
 def test_the_bar_targets_are_sized_only_at_narrow_widths() -> None:
     from baton import dashboard
 
