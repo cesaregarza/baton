@@ -176,7 +176,7 @@ def record_seen(seen: dict[str, Any] | None, path: str, row: sqlite3.Row | None 
 
 def note_path(conn: sqlite3.Connection, seen: dict[str, Any] | None, path: str | None) -> None:
     """record_seen for the topic now at `path`, which may be none; a path with no topic records no id."""
-    if path is not None:
+    if path is not None and seen is not None:
         record_seen(seen, path, _row(conn, path))
 
 
