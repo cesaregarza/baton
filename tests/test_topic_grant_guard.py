@@ -49,6 +49,7 @@ SCHEMAS = {
     "read_history": "63f54b713678", "add_participant": "18dac23653c9", "remove_participant": "fcffd1cdc0b6",
     "set_topic": "20a40f8ad8aa", "create_topic": "9514eb63adbd", "update_topic": "0ea2c3a5982e",
     "rename_topic": "e059705fa155", "list_topics": "1fcfff77f07f", "get_topic": "2c43e2242bf5",
+    "edit_reference": "5914d7459662", "read_reference": "1d11e9527348", "reference_history": "0d4b246122a7",
     "search": "86e33946f89c", "get_message": "d82ecf551fcb", "read_artifacts": "1e4ef6c035c0",
 }
 
@@ -96,8 +97,9 @@ def test_a_bound_guest_without_a_key_gets_todays_refusal_even_when_its_alias_hol
 
 
 def test_a_valid_key_opens_no_other_tool(build_scene):
-    """GUARD. Only `create_topic` and `set_topic` look at a key. Every other tool a guest may not call keeps its
-    refusal, whatever the guest presents, so a grantee cannot update, rename, or change a thread's participants."""
+    """GUARD. Only `create_topic`, `set_topic` and `edit_reference` look at a key. Every other tool a guest may not
+    call keeps its refusal, whatever the guest presents, so a grantee cannot update, rename, or change a thread's
+    participants."""
     scene = build_scene()
 
     async def scenario(client):
@@ -107,7 +109,7 @@ def test_a_valid_key_opens_no_other_tool(build_scene):
         names = [one["name"] for one in shown]
         assert {"update_topic", "rename_topic", "add_participant", "create_job"} <= set(names)
         for one in shown:
-            if one["name"] in GUEST_MAY_CALL | {"create_topic", "set_topic"}:
+            if one["name"] in GUEST_MAY_CALL | {"create_topic", "set_topic", "edit_reference"}:
                 continue
             result = await tool(client, scene.host, one["name"], held.arguments(**required_arguments(one)))
             assert result == todays_refusal(one["name"]), (one["name"], result)
@@ -480,7 +482,7 @@ def test_the_tool_list_has_no_tool_to_propose_list_or_renounce_a_topic_grant(bui
 
 def test_every_tool_schema_but_the_three_that_change_is_unchanged(build_scene):
     """GUARD. Every tool's input schema and annotations are what they were, except for `create_topic`, `set_topic`
-    and `rename_topic`, which gain an argument."""
+    and `rename_topic`, which gain an argument. The reference tools, which are new, are pinned as they were made."""
     scene = build_scene()
     changing = {"create_topic", "set_topic", "rename_topic"}
 
