@@ -121,8 +121,8 @@ def _row(conn: sqlite3.Connection, grant_id: str) -> sqlite3.Row:
 
 def _event(conn: sqlite3.Connection, grant_id: str, event: str, now: datetime, actor: str = OWNER,
            detail: dict[str, str] | None = None) -> None:
-    """One line in the grant's log. `detail` is a few names the caller chose, never a value a caller sent: an event
-    must not be able to carry a key."""
+    """One line in the grant's log. `detail` holds only ids, states, tool names and checked topic paths, never
+    free-form text, so it cannot carry a key ("tgk_" plus urlsafe base64 is never a lowercase slug)."""
     conn.execute("INSERT INTO topic_grant_events (grant_id, event, actor, detail, at) VALUES (?, ?, ?, ?, ?)",
                  (grant_id, event, actor, None if detail is None else json.dumps(detail), now.isoformat()))
 

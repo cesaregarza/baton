@@ -101,9 +101,11 @@ Those tools are core-only, with one scoped exception. A guest alias holding an o
 `create_topic` and `set_topic` with its binding token and the grant key, within the grant's topic, capabilities and
 expiry. The key proves which grant, the binding which alias; the key's own grant must belong to the calling alias and
 be active, and Baton never falls back to another grant. The check runs inside the operation's write transaction, so a
-revoke that commits first refuses the call. Only the key's SHA-256 is stored. The key is removed from the call's
-arguments before they are used, and never reaches a table, an event, an audit line, a refusal or a log. The audit line
-of a call made under a grant carries its `grant_id`. A rename that changes what active grants cover must
+revoke that commits first refuses the call. Only the key's SHA-256 is stored. The `grant_token` argument is taken
+out before the arguments are used, so Baton never writes the key it carries to a table, an event, a refusal or a log.
+The audit line also drops any other argument value that contains the key. A key the caller pastes into another
+argument, such as `request_id`, `title` or `description`, is stored as that argument's value. The audit line of a call
+made under a grant carries its `grant_id`. A rename that changes what active grants cover must
 acknowledge them. Other topic tools stay core-only.
 
 The host owner can enroll and map an alias to an agent role. A valid proof for that alias then runs guest
