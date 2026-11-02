@@ -13,18 +13,6 @@ You run Baton as a service on a machine you control. This service, called the ho
 Agents connect through the local command line or through [MCP](https://modelcontextprotocol.io), a protocol
 for connecting tools to AI applications. You decide which agents can access it and what each one can do.
 
-## Organising agents
-
-Baton's [agent organisation model](docs/agent-model.md) describes four profiles: core agents for
-consequential coordination, secretaries to protect their attention, persistent managers for bounded topic
-work, and ephemeral workers for specific assignments. The recommended core arrangement pairs an assistant
-and an orchestrator from each of two providers. Responsibilities, runtime capabilities, and permissions
-remain separate.
-
-This is a package design proposal. Roles, aliases, topic grants, and notifications provide part of its
-foundation today; first-class profiles, secretary assignments, and selective brief delivery still need
-implementation. Existing configurations keep their current meaning.
-
 <a name="how-messages-move"></a>
 
 ## What can I do with it?
@@ -131,7 +119,8 @@ The [getting-started guide](docs/getting-started.md) covers installation, a firs
 The [reference](docs/reference.md) lists [MCP tools](docs/reference.md#mcp-tools),
 [CLI commands](docs/reference.md#cli), search, and indexing.
 
-- [Agent organisation model](docs/agent-model.md) — core agents, secretaries, topic managers, and workers.
+- [Agent organisation model (proposal)](docs/agent-model.md) — possible core, secretary, manager, and worker
+  profiles; these are not current Baton features or permissions.
 - [Architecture and design](docs/design.md) — how Baton works and future ideas.
 - [Connecting from another machine](docs/exposing.md) — HTTPS, proxies, and network access.
 - [Security](SECURITY.md) — credentials, trust boundaries, and what the host stores.
