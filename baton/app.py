@@ -182,11 +182,12 @@ class Tools:
                         "guest must give one. list_topics shows them.")] = None,
         request_id: str | None = None,
         identity: dict[str, str] | None = None,
+        call: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Start a thread. Name `participants`, or as a guest give a `topic` and its members receive it."""
         with self._conn() as conn:
             return conversations.create(conn, self._config, actor=role, title=title, participants=participants,
-                                        topic=topic, request_id=request_id, identity=identity)
+                                        topic=topic, request_id=request_id, identity=identity, seen=_seen(call))
 
     def create_topic(
         self, role: str,
@@ -199,12 +200,13 @@ class Tools:
                         "thread. Left out means none, so no guest thread until a core role sets them.")] = None,
         request_id: str | None = None,
         identity: dict[str, str] | None = None,
+        call: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Open a topic for threads to be filed in. Pass a request_id to make a retry safe."""
         with self._conn() as conn:
             return topics.create(conn, self._config, actor=role, path=path, title=title,
                                  description=description, members=members, request_id=request_id,
-                                 identity=identity)
+                                 identity=identity, seen=_seen(call))
 
     def update_topic(
         self, role: str, path: str, title: str | None = None,
@@ -214,18 +216,21 @@ class Tools:
                         "list clears it. Threads that already exist keep the participants they "
                         "were created with.")] = None,
         identity: dict[str, str] | None = None,
+        call: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Change a topic's title, description or members. An argument you leave out is left as it is."""
         with self._conn() as conn:
             return topics.update(conn, self._config, actor=role, path=path, title=title,
                                  description=topics.UNSET if description is None else description,
-                                 members=topics.UNSET if members is None else members, identity=identity)
+                                 members=topics.UNSET if members is None else members, identity=identity,
+                                 seen=_seen(call))
 
-    def rename_topic(self, role: str, path: str, new_path: str,
-                     identity: dict[str, str] | None = None) -> dict[str, Any]:
+    def rename_topic(self, role: str, path: str, new_path: str, identity: dict[str, str] | None = None,
+                     call: dict[str, Any] | None = None) -> dict[str, Any]:
         """Move a topic, its subtopics and their threads to a new path. Ids and participants never change."""
         with self._conn() as conn:
-            return topics.rename(conn, self._config, actor=role, path=path, new_path=new_path, identity=identity)
+            return topics.rename(conn, self._config, actor=role, path=path, new_path=new_path, identity=identity,
+                                 seen=_seen(call))
 
     def list_topics(
         self, role: str,
@@ -236,10 +241,10 @@ class Tools:
         with self._conn() as conn:
             return {"topics": topics.listing(conn, self._config, reader=role, parent=parent)}
 
-    def get_topic(self, role: str, path: str) -> dict[str, Any]:
+    def get_topic(self, role: str, path: str, call: dict[str, Any] | None = None) -> dict[str, Any]:
         """One topic: its title, description, members, subtopics and the threads in it you can read."""
         with self._conn() as conn:
-            return topics.get(conn, self._config, reader=role, path=path)
+            return topics.get(conn, self._config, reader=role, path=path, seen=_seen(call))
 
     def list_conversations(
         self, role: str,
@@ -254,13 +259,15 @@ class Tools:
         cursor: Annotated[dict[str, str] | None, Field(
             description="Continue after the previous page's next_cursor object, carrying created_at and "
                         "conversation_id unchanged.")] = None,
+        call: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return {conversations: page, next_cursor: cursor or null}; repeat with that cursor for the next page."""
         conversations.require_enabled(self._config)
         before = _conversation_cursor(cursor)
         with self._conn() as conn:
             rows = conversations.list_readable(conn, self._config, role, topic, limit=limit, before=before,
-                                               changed_since=changed_since, _lookahead=True)
+                                               changed_since=changed_since, _lookahead=True,
+                                               seen=_seen(call))
         has_more = len(rows) > limit
         page = rows[:limit]
         next_cursor = conversations.page_cursor(page[-1]) if has_more and page else None
@@ -274,6 +281,7 @@ class Tools:
             description="The new topic, 1-2 lowercase slug segments, or null to clear it. Required: say "
                         "what the topic becomes, so that forgetting the argument cannot clear one.")],
         identity: dict[str, str] | None = None,
+        call: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Set, rename or clear a conversation's topic. Its id never changes, so nothing else moves.
 
@@ -283,7 +291,7 @@ class Tools:
         """
         with self._conn() as conn:
             return conversations.set_topic(conn, self._config, conversation_id, topic, actor=role,
-                                           identity=identity)
+                                           identity=identity, seen=_seen(call))
 
     def read_history(
         self, role: str, conversation_id: str, after_seq: Annotated[int, Field(ge=0)] = 0,
@@ -517,7 +525,7 @@ class Guard:
                 return refuse(error.code, str(error), error.extra)
             if not self._within_limit(call["role"], name, HOURLY_LIMITS[scope]):
                 return refuse("rate_limited", f"{name} is over its hourly limit")
-            if name in CALL_TOOLS:
+            if name in CALL_TOOLS | topics.AUDIT_TOOLS:
                 kwargs["call"] = call
             try:
                 result = body(call["role"], **kwargs)
@@ -659,25 +667,15 @@ class Guard:
         self._audit(name, call, kwargs, code, proof)
         return {"error": code, "detail": detail}
 
-    def _topic_fields(self, name: str, kwargs: dict[str, Any], outcome: str) -> dict[str, Any]:
-        if name not in topics.AUDIT_TOOLS:
-            return {}
-        if outcome != "ok":
-            return topics.named_fields(name, kwargs)
-        conn = connect(self._config.db_path)
-        try:
-            return topics.audit_fields(conn, name, kwargs)
-        finally:
-            conn.close()
-
     def _audit(self, name: str, call: dict[str, Any], kwargs: dict[str, Any], outcome: str,
                proof: object = None) -> None:
         """One line: the credential, the role the call ran as, any alias by id and code, and the ids it named."""
         role, identity = call["role"], call["identity"]
         proof = kwargs.get("token") if proof is None else proof  # a refusal before Guard sees the raw arguments
-        ids = ({key: kwargs[key] for key in AUDITED_IDS if kwargs.get(key) is not None}
+        ids = ({key: kwargs[key] for key in AUDITED_IDS if kwargs.get(key) is not None
+                and not (key == "topic" and name in topics.AUDIT_TOOLS)}  # the topic tools' fields come below
                if name != "claim_alias" and not (name == "send_message" and role == "guest") else {})
-        ids.update(self._topic_fields(name, kwargs, outcome))
+        ids.update(topics.audit_fields(name, kwargs, outcome, call.get("topic", {})))
         # The binding token must never reach the line, whichever argument carried it, topic fields included.
         if isinstance(proof, str) and proof:
             ids = {key: value for key, value in ids.items() if proof not in json.dumps(value)}
@@ -700,6 +698,11 @@ def _call_context(principal: Any) -> dict[str, Any]:
     authority = auth.credential_authority(principal) if principal is not None else {}
     return {"credential_role": role, "credential_id": authority.get("name") or authority.get("grant"),
             "authority": authority, "role": role, "identity": None}
+
+
+def _seen(call: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Where a topic tool's body records the topic it resolved, for the audit line."""
+    return None if call is None else call.setdefault("topic", {})
 
 
 def _tool_signature(name: str, body: Callable[..., Any]) -> inspect.Signature:
