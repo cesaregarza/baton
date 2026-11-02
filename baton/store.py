@@ -20,9 +20,9 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
 
 # A message's retry identity is its own record, so a retry of its request still replays from here. A direct send
 # records its `seq`; a conversation send records each recipient's in `seqs`.
@@ -97,6 +97,9 @@ _ADDED_COLUMNS = {
     # A topic's stable id, beside its path. SQLite cannot add a UNIQUE or NOT NULL column in place, so the
     # column is added bare here, and `_give_topic_ids` gives every existing topic its own id and the index.
     16: {"topics": ("id TEXT",)},
+    # When and how a seat row ended. A row that ends is kept, and every check refuses it by this state.
+    19: {table: ("ended_at REAL", "end_reason TEXT")
+         for table in ("seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests")},
 }
 _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
@@ -134,6 +137,9 @@ _ADDED_TABLES = {
     17: ("topic_grants", "topic_grant_events"),
     # A topic's reference documents and every revision of them (`baton.references`).
     18: ("reference_docs", "reference_revisions"),
+    # Records kept where something used to be overwritten or expired: each alias rekey and each MCP Events secret
+    # rotation (neither with a secret), and each MCP Events wake's occurrence, outcomes and delivery receipts.
+    19: ("alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes", "events_receipts"),
 }
 
 
@@ -246,6 +252,17 @@ _SCHEMA = (
         authority TEXT NOT NULL,
         bound_at REAL NOT NULL
     )""",
+    # When an owner's armed rekey replaced an alias's verifier. Neither verifier is kept.
+    "CREATE TABLE IF NOT EXISTS alias_rekeys (alias_id TEXT NOT NULL REFERENCES aliases(id), at REAL NOT NULL)",
+    # MCP Events records, never pruned. A rotation keeps only when it happened and whose it was: no secret, digest
+    # or fingerprint. A wake's occurrence time and each destination's first final outcome outlive the core wake,
+    # and every delivery attempt leaves a receipt; `status` shows only the recent ones.
+    "CREATE TABLE IF NOT EXISTS events_rotations (subscription TEXT NOT NULL, owner TEXT NOT NULL, at REAL NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS events_occurrences (wake_id TEXT PRIMARY KEY, at REAL NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS events_outcomes (wake_id TEXT NOT NULL, subscription TEXT NOT NULL,"
+    " outcome TEXT NOT NULL, PRIMARY KEY (wake_id, subscription))",
+    "CREATE TABLE IF NOT EXISTS events_receipts (at REAL NOT NULL, wake_id TEXT NOT NULL, subscription TEXT NOT NULL,"
+    " owner TEXT NOT NULL, outcome TEXT NOT NULL, UNIQUE (wake_id, subscription, at))",
     # Admitted guest post attempts, bounded by hourly alias/credential limits; never proof values.
     """CREATE TABLE IF NOT EXISTS alias_posts (
         alias_id TEXT NOT NULL REFERENCES aliases(id),
@@ -547,15 +564,19 @@ _SCHEMA = (
     )""",
     # The browser seat (`baton.seat`). Nothing secret is stored: a session, a pre-login form and an inbox
     # receipt are kept only as SHA-256 digests of their random values, and a session's credential only as
-    # the name, digest and role that `auth.authority_live` checks again on every request.
+    # the name, digest and role that `auth.authority_live` checks again on every request. A row that ends
+    # stays, with when and how it ended, and is refused by that.
     """CREATE TABLE IF NOT EXISTS seat_sessions (
         digest TEXT PRIMARY KEY,
         role TEXT NOT NULL,
         authority TEXT NOT NULL,
         created_at REAL NOT NULL,
-        last_seen REAL NOT NULL
+        last_seen REAL NOT NULL,
+        ended_at REAL,
+        end_reason TEXT
     )""",
-    "CREATE TABLE IF NOT EXISTS seat_prelogin (digest TEXT PRIMARY KEY, expires_at REAL NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS seat_prelogin (digest TEXT PRIMARY KEY, expires_at REAL NOT NULL, ended_at REAL,"
+    " end_reason TEXT)",
     # One rendered inbox page: acknowledging it advances the cursor from `start_seq` to `last_seq`, or nothing.
     """CREATE TABLE IF NOT EXISTS seat_receipts (
         digest TEXT PRIMARY KEY,
@@ -563,7 +584,9 @@ _SCHEMA = (
         role TEXT NOT NULL,
         start_seq INTEGER NOT NULL,
         last_seq INTEGER NOT NULL,
-        expires_at REAL NOT NULL
+        expires_at REAL NOT NULL,
+        ended_at REAL,
+        end_reason TEXT
     )""",
     # A compose form's request id, bound to the session and conversation it was rendered for. `sent_at` is its
     # place in the hourly quota, held while `holders` requests for it are in flight or once it is stored.
@@ -573,7 +596,9 @@ _SCHEMA = (
         conversation_id TEXT NOT NULL,
         created_at REAL NOT NULL,
         sent_at REAL,
-        holders INTEGER NOT NULL DEFAULT 0
+        holders INTEGER NOT NULL DEFAULT 0,
+        ended_at REAL,
+        end_reason TEXT
     )""",
 )
 
