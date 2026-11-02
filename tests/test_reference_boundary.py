@@ -1,5 +1,5 @@
-"""What crosses the MCP boundary into the reference tools: whole numbers that are whole numbers, and a request id the
-database can keep.
+"""What crosses the MCP boundary into the reference tools: whole numbers that are whole numbers, and a request id and a
+grant key that the database can take.
 
 The SDK reads a plain `int` argument leniently. Before a body ran it made 0 of `false`, 1 of `true`, 5 of "5" and 5 of
 5.0, so the module's own checks, which refuse a bool, never saw what the caller sent. The four whole numbers of the
@@ -12,11 +12,19 @@ A request id that holds a lone surrogate, sent as a JSON escape such as `\\ud800
 cannot bind it. The edit used to crash on it after the guard had admitted the call: the caller got the SDK's "Error
 executing tool" sentence and the call left no audit line. It is refused before the edit's transaction, with the
 refusal any other malformed request id gets, and the call has its audit line.
+
+A grant key that holds a lone surrogate is the same kind of argument. The check every grant tool shares hashed it, so a
+grantee's `edit_reference`, `create_topic` and `set_topic` each crashed the same way, and `edit_reference` had spent
+the grantee's hourly post besides. A key that opens nothing has always been refused as an unknown key, whatever its
+format. One with no UTF-8 form is refused as that now, before it is hashed, and it leaves what any such key leaves.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import secrets
+from dataclasses import replace
 
 import pytest
 import reference_support as refs
@@ -25,10 +33,12 @@ from reference_support import (
     BOARDS,
     F13,
     NAME,
+    NEEDS_BINDING,
     Bound,
     Core,
     Keyed,
     Staging,
+    as_the_guard_calls,
     board,
     core_edit,
     direct,
@@ -39,9 +49,10 @@ from reference_support import (
     refused_by_schema,
     write_revisions,
 )
-from topic_grant_tools_support import play, succeeded
+from topic_grant_tools_support import play, succeeded, thread
 
-from baton.errors import InvalidRequest
+from baton import topic_grants
+from baton.errors import Forbidden, InvalidRequest
 
 build_scene = refs.build_scene  # the fixture, under the name the tests ask for
 
@@ -228,5 +239,102 @@ def test_a_request_id_is_refused_for_having_no_utf8_form_and_never_for_its_lette
             again = succeeded(await core_edit(client, scene, BOARDS, NAME, "text", number, request_id=rid))
             assert (first["request_id"], first["created"], again["created"]) == (rid, True, False), rid
         assert [row["request_id"] for row in scene.revisions(BOARDS, NAME)] == kept
+
+    play(scene.host, scenario)
+
+
+# 3. A grant key with no UTF-8 form --------------------------------------------------------------------------
+
+def rows_of_every_table(scene):
+    """Every row of every ordinary table but the hourly post counter, which a test counts apart."""
+    with scene.db() as conn:
+        names = [row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            " AND name NOT LIKE '%\\_fts%' ESCAPE '\\' AND name != 'alias_posts' ORDER BY name")]
+        return {name: sorted(repr(tuple(row)) for row in conn.execute(f"SELECT * FROM {name}")) for name in names}
+
+
+async def left_behind(client, scene, call):
+    """Make one call and report all it did: its answer, the audit lines it wrote (without their times), the grant
+    events and hourly posts it added, and whether any other table changed."""
+    tables, lines = rows_of_every_table(scene), audit_lines(scene)
+    events, posts = len(scene.events()), scene.posts_counted()
+    answer = await call()
+    written = [json.loads(line) for line in audit_lines(scene)[len(lines):]]
+    return {"answer": answer,
+            "audit lines": [{key: value for key, value in line.items() if key != "at"} for line in written],
+            "grant events": len(scene.events()) - events, "hourly posts": scene.posts_counted() - posts,
+            "a table changed": rows_of_every_table(scene) != tables}
+
+
+@pytest.mark.parametrize("tool_name", ["edit_reference", "create_topic", "set_topic"])
+@pytest.mark.parametrize("shape", ["bare", "in a key shape"])
+def test_a_grant_key_with_no_utf8_form_gets_what_any_key_that_opens_nothing_gets(
+        build_scene, caplog, tool_name, shape):
+    """A grantee that presents a lone surrogate as its grant key, sent as a JSON escape, is answered, audited and
+    counted exactly as one that presents an ASCII key of the wrong format: the same refusal, the same one audit line,
+    no grant event, the same hourly posts (one for an edit, none for the topic tools) and no table changed. The three
+    tools share the check, so each is tried. A key-shaped string no grant has, and letters outside ASCII that do have
+    a UTF-8 form, get the same. The key, as sent and as JSON writes it, is in no answer, audit line or log."""
+    caplog.set_level(logging.DEBUG)
+    scene = build_scene()
+    pieces = [secrets.token_urlsafe(12), secrets.token_urlsafe(12)]
+    lone = "\ud800" if shape == "bare" else f"tgk_{pieces[0]}\udfff{pieces[1]}"
+
+    async def scenario(client):
+        held = await board(client, scene)
+        moving = await thread(client, scene.host, "job-hunt/leads")
+        calls = {
+            "edit_reference": lambda who: grantee_edit(client, who, BOARDS, NAME, "text", 0),
+            "create_topic": lambda who: who.call(client, "create_topic", path="job-hunt/new"),
+            "set_topic": lambda who: who.call(client, "set_topic", conversation_id=moving, topic="job-hunt/boards"),
+        }
+
+        async def present(key):
+            return await left_behind(client, scene, lambda: calls[tool_name](replace(held, key=key)))
+
+        wrong = await present("not-a-grant-key")
+        assert wrong["answer"] == {"error": "forbidden", "detail": "unknown topic grant key"}, wrong
+        assert [line["outcome"] for line in wrong["audit lines"]] == ["forbidden"], wrong
+        assert (wrong["grant events"], wrong["a table changed"]) == (0, False), wrong
+        assert wrong["hourly posts"] == (1 if tool_name == "edit_reference" else 0), wrong
+        got = {}
+        for what, key in (("a lone surrogate", lone), ("a key-shaped string no grant has", support.new_key()),
+                          ("letters outside ASCII", "caf\xe9-\U0001f600")):
+            got[what] = await present(key)
+            for field in wrong:
+                assert got[what][field] == wrong[field], (what, field, got[what][field], wrong[field])
+        answer = got["a lone surrogate"]["answer"]
+        seen = {"the answer": json.dumps(answer) + repr(answer), "the audit file": "\n".join(audit_lines(scene)),
+                "the log": caplog.text}
+        for where, text in seen.items():
+            for form in (lone, json.dumps(lone)[1:-1], *(pieces if shape != "bare" else ())):
+                assert form not in text, (where, form)
+
+    play(scene.host, scenario)
+
+
+@pytest.mark.parametrize("bad", ["\ud800", "\udfff", "tgk_a\udc00b"], ids=["high", "low", "inside"])
+def test_the_grant_check_refuses_a_key_with_no_utf8_form_before_it_hashes_it_or_asks_the_database(build_scene, bad):
+    """Called directly, `grant_for_use` raises the refusal any key that opens nothing gets, a plain `Forbidden` that
+    names no grant, and the database sees no statement for it, while it does see one for an ASCII key. With no
+    binding the refusal is still the binding's own."""
+    scene = build_scene()
+
+    async def scenario(client):
+        held = await board(client, scene)
+        identity = as_the_guard_calls(scene, held)["identity"]
+        with scene.db() as conn:
+            statements = []
+            conn.set_trace_callback(statements.append)
+            raised = what_it_raised(lambda: topic_grants.grant_for_use(conn, identity, bad))
+            asked = len(statements)
+            ordinary = what_it_raised(lambda: topic_grants.grant_for_use(conn, identity, "not-a-grant-key"))
+            conn.set_trace_callback(None)
+            unbound = what_it_raised(lambda: topic_grants.grant_for_use(conn, None, bad))
+        assert type(raised) is Forbidden and str(raised) == "unknown topic grant key", repr(raised)
+        assert asked == 0, statements
+        assert (type(ordinary), str(ordinary)) == (Forbidden, "unknown topic grant key") and len(statements) > 0
+        assert type(unbound) is Forbidden and str(unbound) == NEEDS_BINDING, repr(unbound)
 
     play(scene.host, scenario)
