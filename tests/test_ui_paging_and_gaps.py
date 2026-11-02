@@ -257,17 +257,30 @@ def _narrow_block() -> str:
     return found.group(1)
 
 
-TAP_RULE = r"\.gap-actions a, \.gap-actions label \{[^}]*min-height: 2\.75rem;[^}]*min-width: 2\.75rem;"
-ACTION_ROW = r"\.gap-actions \{[^}]*min-height: 2\.75rem;"
+TAP_RULE = r"\.gap-actions a, \.gap-actions label \{[^}]*min-height: 44px;[^}]*min-width: 44px;"
+ACTION_ROW = r"\.gap-actions \{[^}]*min-height: 44px;"
 
 
 def test_the_bar_targets_are_44px_tall_on_narrow_screens() -> None:
-    """The action row is a row of its own under the bar's text, 2.75rem (44px) tall, and its two targets fill it at
+    """The action row is a row of its own under the bar's text, 44 CSS px tall, and its two targets fill it at
     the same height and at least that wide, so the targets never reach over the text."""
     narrow = _narrow_block()
     assert re.search(TAP_RULE, narrow), "no 44px target rule at narrow widths"
     assert re.search(ACTION_ROW, narrow), "the action row is not 44px tall at narrow widths"
     assert ".gap-sep { display: none; }" in narrow, "the separator would dangle at the end of the text row"
+
+
+def test_the_gap_controls_are_44_css_px_and_never_shrink_or_break_a_word() -> None:
+    """The narrow controls are 44 CSS px, not rem, so they don't grow with the root font. They keep their width and
+    their words: a control never shrinks and a word never breaks, and the action row wraps when both don't fit."""
+    narrow = _narrow_block()
+    (controls,) = re.findall(r"\.gap-actions a, \.gap-actions label \{([^}]*)\}", narrow)
+    for declaration in ("min-height: 44px", "min-width: 44px", "flex-shrink: 0", "overflow-wrap: normal"):
+        assert declaration in controls, declaration
+    (row,) = re.findall(r"\.gap-actions \{([^}]*)\}", narrow)
+    for declaration in ("min-height: 44px", "flex-wrap: wrap", "row-gap:"):
+        assert declaration in row, declaration
+    assert "2.75rem" not in controls and "2.75rem" not in row
 
 
 def test_the_bar_targets_are_sized_only_at_narrow_widths() -> None:

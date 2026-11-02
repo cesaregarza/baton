@@ -188,11 +188,13 @@ li:has(> a:first-child), li:has(> .meta > a:first-child) { padding-top: 0; }
   .id { display: inline-block; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         vertical-align: bottom; }
   .replies { margin-left: 0; padding-left: .6rem; }
-  /* on narrow screens the bar's action row is a row of its own: two 44px targets under the bar's text */
+  /* on narrow screens the bar's action row is a row of its own: two 44 CSS px targets under the bar's text. A control
+     keeps its width and its words, so a word never breaks; the row wraps when both controls don't fit side by side */
   .gap-sep { display: none; }
-  .gap-actions { display: flex; justify-content: center; align-items: center; min-height: 2.75rem; margin-top: .3rem; }
-  .gap-actions a, .gap-actions label { display: inline-flex; align-items: center; min-height: 2.75rem;
-    min-width: 2.75rem; padding: 0 .6rem; }
+  .gap-actions { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; row-gap: 4px;
+    min-height: 44px; margin-top: .3rem; }
+  .gap-actions a, .gap-actions label { display: inline-flex; align-items: center; flex-shrink: 0; overflow-wrap: normal;
+    min-height: 44px; min-width: 44px; padding: 0 .6rem; }
   body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 7rem; }
 }
 @media (min-width: 40rem) {
