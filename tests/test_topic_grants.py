@@ -120,7 +120,7 @@ def test_propose_refuses_a_missing_alias_or_topic_and_writes_nothing(build_world
 
 
 # Mutant 8: `days` of 0 or 31 must be refused, and 1 and 30 must not be.
-@pytest.mark.parametrize("days", [0, 31, -1, 365, "7", 7.5, None])
+@pytest.mark.parametrize("days", [0, 31, -1, 365, "7", 7.5, None, True])
 def test_propose_refuses_days_outside_1_to_30(build_world, days):
     w = build_world()
     assert refusal(w.propose, days=days).code == "invalid_request"
