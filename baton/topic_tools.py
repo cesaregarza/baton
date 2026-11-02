@@ -2,9 +2,10 @@
 
 `Tools` inherits them. Each reaches the host's configuration and its database only through `self._config` and
 `self._conn()`, which `Tools` provides.
-"""
 
-from __future__ import annotations
+There is no `from __future__ import annotations` here, as in `baton.app`: the SDK reads a tool's annotations through
+the wrapper `Guard` makes, whose namespace is not this module's, and a tool's schema is made from them.
+"""
 
 from typing import Annotated, Any
 
