@@ -572,7 +572,7 @@ class Guard:
             if name == "send_message" and (not isinstance(arguments, dict)
                                            or not isinstance(arguments.get("text"), str)):
                 raise InvalidRequest("send_message requires text")
-            if arguments.get("token") is not None or name == "send_message":
+            if arguments.get("token") is not None or (call["credential_role"] == "guest" and name == "send_message"):
                 aliases.validate_proof(arguments.get("token"))
             validate = self._validators.get(name)
             if validate is None:
