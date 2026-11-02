@@ -143,13 +143,28 @@ details[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: .
 .gap-bar { display: none; }
 .gap-dismiss { position: fixed; bottom: 0; left: 0; width: 1px; height: 1px; margin: 0; opacity: 0;
   visibility: hidden; }
-body:has(li:target) .gap-dismiss:not(:checked) { visibility: visible; }
 body:has(li:target) .gap-dismiss:not(:checked) + .gap-bar { display: block; position: fixed; bottom: 0; left: 0;
   right: 0; margin: 0; padding: .5rem 1rem; background: var(--bg); border-top: 1px solid var(--line-strong);
   color: var(--muted); font-size: .85rem; text-align: center; }
 body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 4rem; }
 .gap-bar label { margin-left: .6rem; color: var(--link); text-decoration: underline; cursor: pointer; }
 .gap-dismiss:focus-visible + .gap-bar label { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* without scroll-driven animations the bar shows on arrival, as it always has (acceptance E) */
+@supports not (animation-timeline: view()) {
+  body:has(li:target) .gap-dismiss:not(:checked) { visibility: visible; }
+}
+/* with them, the bar appears once the end of the anchored message comes into view. The target's view timeline has
+   its scrollport inset by the bar's height, so the bar appears above the last line and never covers it. */
+@supports (animation-timeline: view()) {
+  :root { --gap-inset: 4rem; }
+  body { timeline-scope: --gap-end; }
+  li:target { view-timeline: --gap-end block; view-timeline-inset: 0 var(--gap-inset); }
+  body:has(li:target) .gap-dismiss:not(:checked),
+  body:has(li:target) .gap-dismiss:not(:checked) + .gap-bar {
+    visibility: hidden; animation: gap-reveal linear both; animation-timeline: --gap-end;
+    animation-range: entry-crossing 100% entry-crossing 100%; }
+  @keyframes gap-reveal { from { visibility: hidden; } to { visibility: visible; } }
+}
 /* primary links are at least 44px tall: an item that opens with its link lets the link carry the item's top space */
 h2 a { display: inline-block; padding: .7rem 0; }
 h2:has(> a) { margin: 1rem 0 0; }
@@ -168,6 +183,13 @@ li:has(> a:first-child), li:has(> .meta > a:first-child) { padding-top: 0; }
   .id { display: inline-block; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         vertical-align: bottom; }
   .replies { margin-left: 0; padding-left: .6rem; }
+  /* on narrow screens the bar's action row is a row of its own: two 44px targets under the bar's text */
+  .gap-sep { display: none; }
+  .gap-actions { display: flex; justify-content: center; align-items: center; min-height: 2.75rem; }
+  .gap-actions a, .gap-actions label { display: inline-flex; align-items: center; min-height: 2.75rem;
+    min-width: 2.75rem; padding: 0 .6rem; }
+  body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 7rem; }
+  :root { --gap-inset: 6.5rem; }  /* the reveal's inset: the narrow bar's tallest height, see the scroll-driven block */
 }
 @media (min-width: 40rem) {
   body { padding: 1.5rem 1.5rem 4rem; }
@@ -687,11 +709,13 @@ def _gap_summary(gaps: list[dict[str, int]]) -> str:
                        else f"#{gap['from_seq']}–#{gap['to_seq']}"
                        for gap in sorted(gaps, key=lambda gap: gap["from_seq"]))
     # Arriving by a message link skips the summary, so a bar at the bottom, where it can't cover the anchored message,
-    # points back to it. It is CSS only (the page runs no scripts): shown under :target, dismissed by the checkbox.
+    # points back to it. It is CSS only (the page runs no scripts): shown once the message's end is in view, and
+    # dismissed by the checkbox. The action row is a span so narrow screens can give it a row of its own.
     return (f'<p class="notice" id="missing">Not kept any more on this page: messages {_e(ranges)}</p>'
             '<input type="checkbox" id="gap-dismiss" class="gap-dismiss">'
-            '<p class="gap-bar">Some messages on this page are no longer kept · <a href="#missing">view ranges</a>'
-            '<label for="gap-dismiss">Dismiss</label></p>')
+            '<p class="gap-bar">Some messages on this page are no longer kept<span class="gap-sep"> · </span>'
+            '<span class="gap-actions"><a href="#missing">view ranges</a>'
+            '<label for="gap-dismiss">Dismiss</label></span></p>')
 
 
 def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | set[int] = frozenset(),

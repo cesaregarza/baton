@@ -229,3 +229,67 @@ def test_the_bar_shows_only_on_arrival_at_a_message_and_never_covers_the_top() -
 def test_the_dismiss_control_stays_reachable_by_keyboard() -> None:
     rules = _rules(".gap-dismiss")
     assert rules and not any("display: none" in rule for rule in rules), "a display:none checkbox can't be focused"
+
+
+def _narrow_block() -> str:
+    """The stylesheet's rules for narrow screens: the block that opens at 480px and closes at its own brace."""
+    from baton import dashboard
+
+    found = re.search(r"@media \(max-width: 480px\) \{(.*?)\n\}", dashboard.STYLE, re.S)
+    assert found, "no narrow-screen block"
+    return found.group(1)
+
+
+TAP_RULE = r"\.gap-actions a, \.gap-actions label \{[^}]*min-height: 2\.75rem;[^}]*min-width: 2\.75rem;"
+ACTION_ROW = r"\.gap-actions \{[^}]*min-height: 2\.75rem;"
+
+
+def test_the_bar_targets_are_44px_tall_on_narrow_screens() -> None:
+    """The action row is a row of its own under the bar's text, 2.75rem (44px) tall, and its two targets fill it at
+    the same height and at least that wide, so the targets never reach over the text."""
+    narrow = _narrow_block()
+    assert re.search(TAP_RULE, narrow), "no 44px target rule at narrow widths"
+    assert re.search(ACTION_ROW, narrow), "the action row is not 44px tall at narrow widths"
+    assert ".gap-sep { display: none; }" in narrow, "the separator would dangle at the end of the text row"
+
+
+def test_the_bar_targets_are_sized_only_at_narrow_widths() -> None:
+    from baton import dashboard
+
+    assert len(re.findall(TAP_RULE, _narrow_block())) == 1
+    assert len(re.findall(TAP_RULE, dashboard.STYLE)) == 1, "the target rule belongs in the narrow block only"
+
+
+def test_the_bar_markup_is_the_one_the_stylesheet_targets(tmp_path: Path) -> None:
+    body = _thread_with(page_config(tmp_path), CROSS_BRANCH, {3})
+    assert ('<input type="checkbox" id="gap-dismiss" class="gap-dismiss">'
+            '<p class="gap-bar">Some messages on this page are no longer kept<span class="gap-sep"> · </span>'
+            '<span class="gap-actions"><a href="#missing">view ranges</a>'
+            '<label for="gap-dismiss">Dismiss</label></span></p>') in body
+
+
+def test_the_bar_reveals_on_the_message_end_with_a_timeline_and_keeps_its_targets_out_of_tab_while_hidden() -> None:
+    """Where scroll-driven animations exist, the bar's visibility follows a view timeline on the anchored message, and
+    the checkbox and link are hidden with visibility while it is hidden. Without them, the bar shows on arrival."""
+    from baton import dashboard
+
+    style = dashboard.STYLE
+    assert "@supports (animation-timeline: view())" in style and "@supports not (animation-timeline: view())" in style
+    assert "view-timeline: --gap-end block" in style and "timeline-scope: --gap-end" in style
+    assert "animation-range: entry-crossing 100% entry-crossing 100%" in style
+    assert "@keyframes gap-reveal { from { visibility: hidden; } to { visibility: visible; } }" in style
+    assert "visibility: hidden; animation: gap-reveal linear both" in style, "hidden with visibility, not opacity alone"
+
+
+def test_the_reveal_inset_is_at_least_the_bar_height() -> None:
+    """The timeline's scrollport is inset by --gap-inset, so the reveal happens above the bar. The inset must be at
+    least the bar's tallest height at its width, or the reveal would come after the bar has covered the last line:
+    the wide bar is one text line (38px), or two (59px) when it wraps; the narrow bar is two text lines (about 42px)
+    plus the 44px action row and its padding and border (about 103px)."""
+    from baton import dashboard
+
+    wide = re.search(r":root \{ --gap-inset: ([\d.]+)rem;", dashboard.STYLE)
+    narrow = re.search(r":root \{ --gap-inset: ([\d.]+)rem;", _narrow_block())
+    assert wide and narrow
+    assert float(wide.group(1)) * 16 >= 59
+    assert float(narrow.group(1)) * 16 >= 103
