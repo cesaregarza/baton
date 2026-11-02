@@ -189,12 +189,14 @@ li:has(> a:first-child), li:has(> .meta > a:first-child) { padding-top: 0; }
         vertical-align: bottom; }
   .replies { margin-left: 0; padding-left: .6rem; }
   /* on narrow screens the bar's action row is a row of its own: two 44 CSS px targets under the bar's text. A control
-     keeps its width and its words, so a word never breaks; the row wraps when both controls don't fit side by side */
+     keeps its width and its words, so a word never breaks; the row wraps when both controls don't fit side by side.
+     The space between the controls is the row's column gap, not the label's margin, so a control on a line of its own
+     is centred */
   .gap-sep { display: none; }
   .gap-actions { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; row-gap: 4px;
-    min-height: 44px; margin-top: .3rem; }
+    column-gap: .6rem; min-height: 44px; margin-top: .3rem; }
   .gap-actions a, .gap-actions label { display: inline-flex; align-items: center; flex-shrink: 0; overflow-wrap: normal;
-    min-height: 44px; min-width: 44px; padding: 0 .6rem; }
+    min-height: 44px; min-width: 44px; padding: 0 .6rem; margin-left: 0; }
   body:has(li:target):has(.gap-dismiss:not(:checked)) { padding-bottom: 7rem; }
 }
 @media (min-width: 40rem) {
