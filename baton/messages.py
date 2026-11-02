@@ -235,7 +235,9 @@ def read(conn: sqlite3.Connection, recipient: str, after_seq: int | None = None,
     """The recipient's messages after `after_seq` (default: after the last one delivered), oldest first.
 
     `next_seq` is where the next page starts, so a short page is not the end.
-    `truncated` is true when a message after `after_seq` is missing from the mailbox.
+    `truncated` is true when the mailbox no longer holds the message right after `after_seq`, because its oldest
+    message comes later. Baton deletes no messages now, and it used to remove only a mailbox's oldest read ones,
+    which this covers; a gap left between kept messages by a change outside Baton is not detected.
     """
     if not 1 <= limit <= MAX_PAGE_MESSAGES or (after_seq is not None and after_seq < 0):
         raise InvalidRequest(f"limit must be 1-{MAX_PAGE_MESSAGES} and after_seq at least 0")

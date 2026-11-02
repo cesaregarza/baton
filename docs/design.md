@@ -84,9 +84,10 @@ The sender does not receive its own copy.
 explicit `after_seq`, it starts after the role's delivered position. A read can advance that position to
 the last message returned, but never moves it backwards. An earlier explicit sequence can replay retained
 messages after a lost response without rewinding the position. Keep paging until `messages` is empty: a
-short page is not necessarily the end. `truncated: true` means a message after the cursor is missing. Baton
-deletes no messages now, so this comes only from messages an earlier version deleted under its 30-day retention,
-or messages removed outside Baton.
+short page is not necessarily the end. `truncated: true` means the mailbox no longer holds the message right after
+the cursor, because its oldest messages are gone. Baton deletes no messages now; this covers only the oldest
+messages an earlier version deleted under its 30-day retention, or removed outside Baton. A gap between kept
+messages is not reported.
 
 Conversation history is separate from mailbox delivery. It uses conversation sequence numbers and does not
 advance the mailbox position. Membership and `can_view_all_conversations` determine which

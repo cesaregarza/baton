@@ -160,12 +160,15 @@ def commit_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_
     digest = _digest(request)
     limits = config.indexer
     with transaction(conn):
-        receipt = conn.execute("SELECT * FROM commit_requests WHERE producer = ? AND request_id = ?"
-                               " AND expires_at > ?", (producer, request_id, _now())).fetchone()
+        # A request_id names one commit forever, so an aged-out receipt still refuses a different commit.
+        receipt = conn.execute("SELECT * FROM commit_requests WHERE producer = ? AND request_id = ?",
+                               (producer, request_id)).fetchone()
         if receipt is not None:
             if receipt["digest"] != digest:
                 raise IdempotencyConflict(f"request_id {request_id} was used for a different commit")
-            return _replay(conn, receipt)
+            if receipt["expires_at"] > _now():
+                return _replay(conn, receipt)
+            # Aged out: the batch this commit made is committed, so the checks below refuse it as batch_closed.
         _require_producer(config, producer)
         _open_batch(conn, producer, batch_id)
         _retire_generations(conn, config)
