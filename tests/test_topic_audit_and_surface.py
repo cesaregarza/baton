@@ -432,10 +432,11 @@ def test_the_topic_tools_take_the_same_arguments_as_before(host):  # GUARD
     expected = {
         "create_conversation": ({"participants", "request_id", "title", "token", "topic"}, {"title"}),
         "list_conversations": ({"changed_since", "cursor", "limit", "token", "topic"}, set()),
-        "set_topic": ({"conversation_id", "token", "topic"}, {"conversation_id", "topic"}),
-        "create_topic": ({"description", "members", "path", "request_id", "title", "token"}, {"path"}),
+        "set_topic": ({"conversation_id", "grant_token", "token", "topic"}, {"conversation_id", "topic"}),
+        "create_topic": ({"description", "grant_token", "members", "path", "request_id", "title", "token"},
+                         {"path"}),
         "update_topic": ({"description", "members", "path", "title", "token"}, {"path"}),
-        "rename_topic": ({"new_path", "path", "token"}, {"new_path", "path"}),
+        "rename_topic": ({"acknowledge_topic_grants", "new_path", "path", "token"}, {"new_path", "path"}),
         "list_topics": ({"parent", "token"}, set()),
         "get_topic": ({"path", "token"}, {"path"}),
     }

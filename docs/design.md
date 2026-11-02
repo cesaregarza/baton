@@ -126,7 +126,17 @@ change its ID or participants.
 
 A role with `can_create_topics` can create, edit, or rename a topic. A subtopic's parent must exist first.
 Renaming a topic moves its subtopics and their conversations without changing conversation IDs or
-participants.
+participants. The history gets a row for each topic whose path changes. A rename that changes what active
+[topic grants](aliases.md#topic-grant-records) cover names them in `acknowledge_topic_grants`, and each gets a `rename`
+event.
+
+Creating and filing are core-only with one scoped exception. A guest alias presenting a topic grant key beside its
+binding token can create a subtopic directly under the grant's topic, which copies its parent's members, and can move
+a thread whose current and new topics the grant both covers. The grant's own row decides, by topic id and never by
+path text, and it is checked inside the operation's write transaction. A move tells the thread's participants with a
+host notice. The key is handled like a binding token: it is taken out of the arguments before anything copies them,
+only its hash is stored, and no event, audit line or refusal holds it. Refusals that name a grant are logged on it as
+`refused_use`.
 
 A topic's `members` supply the participants for a guest-created conversation at creation time; later edits
 to that list do not affect existing conversations. A guest needs a live alias binding and

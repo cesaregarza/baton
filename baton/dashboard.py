@@ -694,13 +694,19 @@ def _gap_summary(gaps: list[dict[str, int]]) -> str:
             '<label for="gap-dismiss">Dismiss</label></p>')
 
 
+def _notice_words(notice: dict[str, Any], item: dict[str, Any]) -> str:
+    """What a host notice says. A topic move is a sentence the host wrote, naming no participant."""
+    if notice["event"] == "topic_moved":
+        return item["text"]
+    verb = "added" if notice["event"] == "participant_added" else "removed"
+    return f'{notice["participant"]} was {verb} by {notice["by"]}'
+
+
 def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | set[int] = frozenset(),
              conversation_id: str = "", parents: dict[int, dict[str, Any]] | None = None) -> str:
     notice = item.get("notice")
     if notice:
-        verb = "added" if notice["event"] == "participant_added" else "removed"
-        return (f'<li class="notice">{_e(notice["participant"])} was {verb} by {_e(notice["by"])}'
-                f' · {_time(item["at"])}{replies}</li>')
+        return f'<li class="notice">{_e(_notice_words(notice, item))} · {_time(item["at"])}{replies}</li>'
     relayed = "".join(
         f'<blockquote class="relayed"><p class="source">relayed from {_e(entry["source"])} at {_e(entry["at"])}'
         f'</p><p class="relayed-text">{_e(entry["text"])}</p></blockquote>' for entry in item.get("relayed") or [])

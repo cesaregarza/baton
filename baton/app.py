@@ -393,6 +393,8 @@ GUEST_IDENTIFIED = frozenset({"send_message", "create_conversation"})
 CALL_TOOLS = frozenset({"whoami", "bind_events", "unbind_events"})
 # Topic changes whose history row names the alias behind an alias-bound call, not only its role.
 IDENTIFIED_CHANGES = frozenset({"create_topic", "update_topic", "rename_topic", "set_topic"})
+# The two tools a guest may call by presenting a topic grant key. Their body decides what the key allows.
+GRANT_TOOLS = frozenset({"create_topic", "set_topic"})
 TOKEN_ARGUMENT = Annotated[str | None, Field(description=(
     "A binding_token from claim_alias, for a shared guest login only. An enrolled alias's token makes this call "
     "run as its mapped role; any other alias's token posts as that alias. Omitted and null are the same; an "
@@ -419,10 +421,13 @@ class Guard:
             proof = kwargs.pop("token", None)
             principal = get_access_token()
             call = _call_context(principal)
+            # The key is out of the arguments from here on, so nothing that copies them can copy it.
+            call["grant_key"] = kwargs.pop("grant_token", None)
 
             def refuse(code: str, detail: str, extra: dict[str, Any] | None = None) -> Any:
-                if isinstance(proof, str) and proof:
-                    detail = detail.replace(proof, "[redacted]")
+                for secret in (proof, call["grant_key"]):
+                    if isinstance(secret, str) and secret:
+                        detail = detail.replace(secret, "[redacted]")
                 refusal = {**self._refuse(name, call, kwargs, code, detail, proof), **(extra or {})}
                 if name in {"list_conversations", "list_jobs"}:
                     return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))],
@@ -485,7 +490,7 @@ class Guard:
         """Why the role this call runs as may not make it, or None."""
         role = call["role"]
         if role == "guest":
-            if name not in GUEST_TOOLS:
+            if name not in GUEST_TOOLS and not (name in GRANT_TOOLS and call["grant_key"] is not None):
                 return f"guest may not call {name}"
             if name == "search" and (kwargs.get("producer") is not None or kwargs.get("query_vector") is not None
                                       or kwargs.get("model") is not None or
@@ -603,9 +608,11 @@ class Guard:
                 and not (key == "topic" and name in topics.AUDIT_TOOLS)}  # the topic tools' fields come below
                if name != "claim_alias" and not (name == "send_message" and role == "guest") else {})
         ids.update(topics.audit_fields(name, kwargs, outcome, call.get("topic", {})))
-        # The binding token must never reach the line, whichever argument carried it, topic fields included.
-        if isinstance(proof, str) and proof:
-            ids = {key: value for key, value in ids.items() if proof not in json.dumps(value)}
+        # Neither the binding token nor the grant key may reach the line, whichever argument carried it, topic
+        # fields included.
+        for secret in (proof, call.get("grant_key")):
+            if isinstance(secret, str) and secret:
+                ids = {key: value for key, value in ids.items() if secret not in json.dumps(value)}
         line = {"at": datetime.now(UTC).isoformat(), "role": role, "credential_role": call["credential_role"],
                 "credential_id": call["credential_id"], "tool": name, **ids, "outcome": outcome,
                 **({"alias_id": identity["alias_id"], "alias_code": identity["code"]} if identity else {})}
@@ -624,7 +631,7 @@ def _call_context(principal: Any) -> dict[str, Any]:
     role = auth.role_of(principal)
     authority = auth.credential_authority(principal) if principal is not None else {}
     return {"credential_role": role, "credential_id": authority.get("name") or authority.get("grant"),
-            "authority": authority, "role": role, "identity": None}
+            "authority": authority, "role": role, "identity": None, "grant_key": None}
 
 
 def _tool_signature(name: str, body: Callable[..., Any]) -> inspect.Signature:

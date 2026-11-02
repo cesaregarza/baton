@@ -20,7 +20,7 @@ import json
 import sqlite3
 from typing import Any
 
-from baton import board_read, events, messages
+from baton import board_read, events, messages, topic_grants
 from baton.config import Config
 from baton.errors import Forbidden, InvalidRequest, UnknownRole, UnknownTopic
 from baton.store import new_topic_id, snapshot, transaction
@@ -141,11 +141,14 @@ def history_actor(actor: str, identity: dict[str, str] | None) -> str:
 
 
 def record(conn: sqlite3.Connection, *, topic_id: str, operation: str, actor: str,
-           before: dict[str, Any] | None, after: dict[str, Any] | None) -> None:
-    """Append one change to the history. The caller holds the write lock and has made the change."""
+           before: dict[str, Any] | None, after: dict[str, Any] | None, grant_id: str | None = None) -> None:
+    """Append one change to the history. The caller holds the write lock and has made the change.
+
+    `grant_id` is the topic grant a guest acted under, and is None for a core role.
+    """
     conn.execute("INSERT INTO topic_changes (topic_id, operation, actor, grant_id, before, after, at)"
-                 " VALUES (?, ?, ?, NULL, ?, ?, ?)",
-                 (topic_id, operation, actor, _encoded(before), _encoded(after), events.now()))
+                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (topic_id, operation, actor, grant_id, _encoded(before), _encoded(after), events.now()))
 
 
 def _encoded(state: dict[str, Any] | None) -> str | None:
@@ -164,16 +167,19 @@ PATH_TOOLS = frozenset({"create_topic", "update_topic", "rename_topic", "get_top
 AUDIT_TOOLS = PATH_TOOLS | {"set_topic", "create_conversation", "list_conversations"}
 
 
-def record_seen(seen: dict[str, Any] | None, path: str, row: sqlite3.Row | None = None, **more: str) -> None:
+def record_seen(seen: dict[str, Any] | None, path: str, row: sqlite3.Row | None = None,
+                **more: str | None) -> None:
     """Note in `seen`, when the caller gave one, the topic this call resolved: `path` and the id of `row`, if any.
 
     `path` is what the call named, and `row` the topic its result is, or is in, read while the call held a
     consistent view. The audit line is written after the call's transaction has committed, and by then another
     writer may have moved that topic and given its path to a different one, so a call records what it resolved
     while it held it. A replay therefore passes the path it was asked for, not the path its topic has now.
+    An extra whose value is None is left out, so a core role's line has no `grant_id`.
     """
     if seen is not None:
-        seen.update({"topic": path, **({} if row is None else {"topic_id": row["id"]}), **more})
+        seen.update({"topic": path, **({} if row is None else {"topic_id": row["id"]}),
+                     **{key: value for key, value in more.items() if value is not None}})
 
 
 def seen_by(call: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -229,28 +235,56 @@ def audit_fields(tool: str, arguments: dict[str, Any], outcome: str, seen: dict[
     return {key: value for key, value in seen.items() if key not in ("topic", "new_path") or _is_path(value)}
 
 
+def _no_members(members: Any) -> list[str]:
+    """A grantee takes its parent's members, so it may not name any, not even none."""
+    if members is not None:
+        raise InvalidRequest("a topic grant cannot set members; a new subtopic takes its parent's members")
+    return []
+
+
+def _grant_and_parent(conn: sqlite3.Connection, identity: dict[str, str] | None, grant_key: str | None,
+                      path: str) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
+    """The grant the key opens and the parent it names for a new topic at `path`; neither for a core role."""
+    if grant_key is None:
+        return None, None
+    grant = topic_grants.grant_for_use(conn, identity, grant_key)
+    return grant, topic_grants.require_names(conn, grant, "topic.create_sub", path)
+
+
 def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, title: Any = None,
            description: Any = None, members: Any = None, request_id: str | None = None,
-           identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Open a topic. A replay rechecks authority and the parent, then returns the topic as it now stands."""
-    _may_manage(config, actor)
+           identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None,
+           grant_key: str | None = None) -> dict[str, Any]:
+    """Open a topic. A replay rechecks authority and the parent, then returns the topic as it now stands.
+
+    With `grant_key` the caller is a guest, and may only open a subtopic of the topic its key's grant names. Its
+    request digest holds its alias, since every guest has the same role. The replay runs the grant check first,
+    so a grant that has ended answers no retry from the stored result.
+    """
+    if grant_key is None:
+        _may_manage(config, actor)
     checked = _check_path(path)
     title = _check_text(title, "title", MAX_TITLE, default=checked.split("/")[-1])
     description = _check_text(description, "description", MAX_DESCRIPTION)
-    chosen = _check_members(config, members)
+    chosen = _check_members(config, members) if grant_key is None else _no_members(members)
     request_id = request_id or messages.new_request_id()
     if not 1 <= len(request_id) <= 200:
         raise InvalidRequest("request_id is 1-200 characters")
+    whose = {} if grant_key is None else {"alias_id": (identity or {}).get("alias_id")}
     digest = events.request_digest("create_topic", {"actor": actor, "path": checked, "title": title,
-                                                    "description": description, "members": chosen})
+                                                    "description": description, "members": chosen, **whose})
     with transaction(conn):
+        grant, parent = _grant_and_parent(conn, identity, grant_key, checked)
+        grant_id = None if grant is None else grant["id"]
         existing = events.replayed(conn, "topics", request_id, digest)
         if existing is not None:
-            record_seen(seen, checked, existing)
+            record_seen(seen, checked, existing, grant_id=grant_id)
             return {**_summary(existing), "request_id": request_id, "created": False}
         _require_parent(conn, checked)
         if _row(conn, checked) is not None:
             raise InvalidRequest(f"topic {checked!r} already exists")
+        if parent is not None:
+            chosen = json.loads(parent["members"])
         stamp = events.now()
         topic_id = new_topic_id()
         conn.execute("INSERT INTO topics (path, title, description, members, created_by, created_at,"
@@ -258,9 +292,9 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
                      (checked, title, description, json.dumps(chosen), actor, stamp, request_id, digest,
                       topic_id))
         created = _row(conn, checked)
-        record_seen(seen, checked, created)
+        record_seen(seen, checked, created, grant_id=grant_id)
         record(conn, topic_id=topic_id, operation="create_topic", actor=history_actor(actor, identity),
-               before=None, after={"path": checked, **_state(created)})
+               before=None, after={"path": checked, **_state(created)}, grant_id=grant_id)
         made = _summary(created)
     return {**made, "request_id": request_id, "created": True}
 
@@ -293,14 +327,30 @@ def update(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
         return _summary(updated)
 
 
+def _require_acknowledged(path: str, affected: list[str], acknowledged: list[str] | None) -> None:
+    """A rename that changes what active grants cover must name exactly those grants, so no one renames a topic
+    out from under a grantee without having been told. Naming ids when none is affected is refused too: it
+    would be an acknowledgement of something that is not so."""
+    named = set(acknowledged or [])
+    if named == set(affected):
+        return
+    if not affected:
+        raise InvalidRequest(f"none of the topic grants are affected by renaming {path}, "
+                             "so leave acknowledge_topic_grants out")
+    raise InvalidRequest(f"renaming {path} changes what topic grants {', '.join(affected)} cover; "
+                         "repeat the call with acknowledge_topic_grants set to exactly those ids")
+
+
 def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, new_path: Any,
-           identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None) -> dict[str, Any]:
+           identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None,
+           acknowledge_topic_grants: list[str] | None = None) -> dict[str, Any]:
     """Move a topic, its subtopics and every thread filed under them, in one transaction.
 
     Conversation ids never change, and neither do any thread's participants: a rename is a change of
     label, so nobody gains or loses access to anything. Every refusal is decided before the first
-    write, so a refused rename leaves the topic exactly as it was. The history gets one row, for this
-    topic: its subtopics moved with it, and their ids did not change.
+    write, so a refused rename leaves the topic exactly as it was. The history gets one row for each
+    topic whose path changed, since a grant follows a topic by id and the history must show where it went.
+    A rename that changes what active topic grants cover must acknowledge them, and logs a `rename` event on each.
     """
     _may_manage(config, actor)
     checked = _check_path(path)
@@ -319,19 +369,25 @@ def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, n
         taken = [new for new in moving.values() if _row(conn, new) is not None]
         if taken:
             raise InvalidRequest(f"new_path {taken[0]!r} is already a topic")
+        affected = topic_grants.affected_by_rename(conn, checked, target, moving)
+        _require_acknowledged(checked, affected, acknowledge_topic_grants)
+        ids = {old: _row(conn, old)["id"] for old in moving}
         # Deepest first, so a path never collides with one still to move.
         for old in sorted(moving, key=len, reverse=True):
             conn.execute("UPDATE topics SET path = ? WHERE path = ?", (moving[old], old))
             conn.execute("UPDATE conversations SET topic = ? WHERE topic = ?", (moving[old], old))
+        who = history_actor(actor, identity)
+        for old, new in moving.items():
+            record(conn, topic_id=ids[old], operation="rename_topic", actor=who, before={"path": old},
+                   after={"path": new})
+        topic_grants.record_rename(conn, affected, who, ids[checked], checked, target)
         renamed = _row(conn, target)
         record_seen(seen, checked, renamed, new_path=target)
-        record(conn, topic_id=renamed["id"], operation="rename_topic", actor=history_actor(actor, identity),
-               before={"path": checked}, after={"path": target})
         return {**_summary(renamed), "renamed_from": checked, "subtopics": len(children)}
 
 
 def record_move(conn: sqlite3.Connection, *, conversation_id: str, actor: str, before: str | None,
-                after: str | None) -> None:
+                after: str | None, grant_id: str | None = None) -> None:
     """Record a conversation's topic changing: a move, or a clear, which is filed under the topic it left.
 
     Both sides carry their ids, so the move can be followed after either topic has been renamed.
@@ -340,7 +396,7 @@ def record_move(conn: sqlite3.Connection, *, conversation_id: str, actor: str, b
     after_id = None if after is None else id_of(conn, after)
     record(conn, topic_id=after_id or before_id, operation="set_topic", actor=actor,
            before={"conversation_id": conversation_id, "topic": before, "topic_id": before_id},
-           after={"conversation_id": conversation_id, "topic": after, "topic_id": after_id})
+           after={"conversation_id": conversation_id, "topic": after, "topic_id": after_id}, grant_id=grant_id)
 
 
 def may_open(conn: sqlite3.Connection, config: Config, reader: str, path: str) -> bool:
