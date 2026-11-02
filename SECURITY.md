@@ -95,7 +95,7 @@ apply to claims and posts, and a binding token is checked before a post or threa
 When conversations are enabled, `list_topics` and `get_topic` expose topic metadata, including member names,
 to authenticated callers with read scope, including guests. Their conversation counts reflect the caller's
 access; a topic does not grant access to its conversations. Grant `can_create_topics` only to roles trusted
-to create, edit, and rename topic containers.
+to create, edit, and rename topic containers and to write the references kept in them.
 
 Those tools are core-only, with one scoped exception. A guest alias holding an owner-authorized topic grant may call
 `create_topic`, `set_topic` and `edit_reference` with its binding token and the grant key, within the grant's topic,
