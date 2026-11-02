@@ -164,31 +164,54 @@ PATH_TOOLS = frozenset({"create_topic", "update_topic", "rename_topic", "get_top
 AUDIT_TOOLS = PATH_TOOLS | {"set_topic", "create_conversation", "list_conversations"}
 
 
-def named_fields(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """The path a refused call named, for its audit line. The argument is unvalidated, so only a string is kept."""
-    named = arguments.get("path" if tool in PATH_TOOLS else "topic")
-    return {"topic": named} if isinstance(named, str) else {}
+def record_seen(seen: dict[str, Any] | None, path: str, row: sqlite3.Row | None = None, **more: str) -> None:
+    """Note in `seen`, when the caller gave one, the topic this call resolved: its path, and its id if it has a row.
 
-
-def audit_fields(conn: sqlite3.Connection, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """What a successful call's audit line adds about its topic: the path it named, and that topic's id.
-
-    The body returns no id, so the line looks it up here. A successful rename names the new path, which is
-    where the topic's id now is.
+    The audit line is written after the call's transaction has committed, and by then another writer may have
+    moved this topic and given its path to a different one, so a call records what it resolved while it held it.
     """
-    fields = named_fields(tool, arguments)
-    if "topic" not in fields:
+    if seen is not None:
+        seen.update({"topic": path, **({} if row is None else {"topic_id": row["id"]}), **more})
+
+
+def note_path(conn: sqlite3.Connection, seen: dict[str, Any] | None, path: str | None) -> None:
+    """record_seen for the topic now at `path`, which may be none; a path with no topic records no id."""
+    if path is not None:
+        record_seen(seen, path, _row(conn, path))
+
+
+def _is_path(value: Any) -> bool:
+    """Whether `value` is a topic path as conversations.check_topic accepts it.
+
+    No binding token passes: it is secrets.token_urlsafe(32), 43 characters with no slash, and a topic
+    segment is at most MAX_TOPIC_SEGMENT (40) characters.
+    """
+    from baton import conversations  # lazily: conversations imports this module
+
+    try:
+        return conversations.check_topic(value) is not None
+    except InvalidRequest:
+        return False
+
+
+def audit_fields(tool: str, arguments: dict[str, Any], outcome: str, seen: dict[str, Any]) -> dict[str, Any]:
+    """What a topic tool's audit line adds: the topic and, on success, its id, and a rename's new path.
+
+    A success writes what the call recorded in `seen`. A refusal writes only the path it named, never an id,
+    because its transaction rolled back and `seen` may hold part of what it did. Either way a topic or new
+    path is written only if it is a well-formed topic path: a refused argument is otherwise anything the
+    caller sent, a binding token included.
+    """
+    if tool not in AUDIT_TOOLS:
         return {}
-    named = fields["topic"]
-    if tool == "rename_topic" and isinstance(arguments.get("new_path"), str):
-        named = fields["new_path"] = arguments["new_path"]
-    found = id_of(conn, named)
-    return {**fields, **({"topic_id": found} if found is not None else {})}
+    if outcome != "ok":
+        seen = {"topic": arguments.get("path" if tool in PATH_TOOLS else "topic")}
+    return {key: value for key, value in seen.items() if key not in ("topic", "new_path") or _is_path(value)}
 
 
 def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, title: Any = None,
            description: Any = None, members: Any = None, request_id: str | None = None,
-           identity: dict[str, str] | None = None) -> dict[str, Any]:
+           identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """Open a topic. A replay rechecks authority and the parent, then returns the topic as it now stands."""
     _may_manage(config, actor)
     checked = _check_path(path)
@@ -203,6 +226,7 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
     with transaction(conn):
         existing = events.replayed(conn, "topics", request_id, digest)
         if existing is not None:
+            record_seen(seen, existing["path"], existing)
             return {**_summary(existing), "request_id": request_id, "created": False}
         _require_parent(conn, checked)
         if _row(conn, checked) is not None:
@@ -214,6 +238,7 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
                      (checked, title, description, json.dumps(chosen), actor, stamp, request_id, digest,
                       topic_id))
         created = _row(conn, checked)
+        record_seen(seen, checked, created)
         record(conn, topic_id=topic_id, operation="create_topic", actor=history_actor(actor, identity),
                before=None, after={"path": checked, **_state(created)})
         made = _summary(created)
@@ -221,8 +246,8 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
 
 
 def update(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, title: Any = None,
-           description: Any = UNSET, members: Any = UNSET,
-           identity: dict[str, str] | None = None) -> dict[str, Any]:
+           description: Any = UNSET, members: Any = UNSET, identity: dict[str, str] | None = None,
+           seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """Edit a topic's title, description or members. An omitted argument leaves that field as it is.
 
     A call that changes none of them writes no history row, as a set_topic to the topic it already has does not.
@@ -235,6 +260,7 @@ def update(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
     new_members = UNSET if members is UNSET else _check_members(config, members)
     with transaction(conn):
         row = require_exists(conn, checked)
+        record_seen(seen, checked, row)
         conn.execute("UPDATE topics SET title = ?, description = ?, members = ? WHERE path = ?",
                      (new_title or row["title"],
                       row["description"] if new_description is UNSET else new_description,
@@ -248,7 +274,7 @@ def update(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
 
 
 def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, new_path: Any,
-           identity: dict[str, str] | None = None) -> dict[str, Any]:
+           identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """Move a topic, its subtopics and every thread filed under them, in one transaction.
 
     Conversation ids never change, and neither do any thread's participants: a rename is a change of
@@ -278,6 +304,7 @@ def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, n
             conn.execute("UPDATE topics SET path = ? WHERE path = ?", (moving[old], old))
             conn.execute("UPDATE conversations SET topic = ? WHERE topic = ?", (moving[old], old))
         renamed = _row(conn, target)
+        record_seen(seen, checked, renamed, new_path=target)
         record(conn, topic_id=renamed["id"], operation="rename_topic", actor=history_actor(actor, identity),
                before={"path": checked}, after={"path": target})
         return {**_summary(renamed), "renamed_from": checked, "subtopics": len(children)}
@@ -307,12 +334,14 @@ def may_open(conn: sqlite3.Connection, config: Config, reader: str, path: str) -
     return board_read.sees_all(config, reader) or _readable(conn, config, reader, path)[0] > 0
 
 
-def get(conn: sqlite3.Connection, config: Config, *, reader: str, path: Any) -> dict[str, Any]:
+def get(conn: sqlite3.Connection, config: Config, *, reader: str, path: Any,
+        seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """One topic, with the number of threads in it this reader may see and the subtopics it may open."""
     checked = _check_path(path)
     row = _row(conn, checked)
     if row is None:
         raise UnknownTopic(f"no topic {checked!r}")
+    record_seen(seen, checked, row)
     threads, _ = _readable(conn, config, reader, checked)
     # Filtered, because the subtopic list is the other way this could name a topic the reader may not
     # see into -- the page renders these as links, and the tool hands them to whoever called it.
