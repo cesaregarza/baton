@@ -69,3 +69,13 @@ def test_the_seat_shows_a_topic_moved_notice_in_the_thread_and_the_inbox(tmp_pat
         body = page.body.decode()
         for part in (ALIAS, CODE, FROM, TO, grant_id):
             assert part in body, (target, part)
+
+
+def test_the_seat_wraps_a_notice_whose_values_have_no_break_points(tmp_path):
+    """A guest picks the alias and the subtopic slugs a topic_moved notice names, and `/` is not a break point, so
+    the seat's `.notice` rule must let a long unbroken line wrap, as its `.text` rule does."""
+    host = make_seat_host(tmp_path)
+    style = get(host.config, "/seat/style.css").body.decode()
+    rules = re.findall(r"^\.notice \{([^}]*)\}", style, re.M)
+    assert len(rules) == 1, rules
+    assert "overflow-wrap: anywhere" in rules[0], rules[0]
