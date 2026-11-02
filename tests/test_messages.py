@@ -82,19 +82,28 @@ def test_a_full_mailbox_pushes_back_until_read(conn, monkeypatch) -> None:
     assert messages.send(conn, sender="planner", recipient="worker", text="c")["seq"] == 3
 
 
-def test_retention_deletes_old_read_messages_and_reports_truncation(conn) -> None:
+def test_a_message_missing_from_the_mailbox_reports_truncation(conn) -> None:
     messages.send(conn, sender="planner", recipient="worker", text="old")
     messages.send(conn, sender="planner", recipient="worker", text="new")
     messages.read(conn, "worker", limit=1)
-    stale = (datetime.now(UTC) - messages.READ_RETENTION - timedelta(days=1)).isoformat()
-    conn.execute("UPDATE messages SET at = ? WHERE seq = 1", (stale,))
-    conn.execute("UPDATE events SET at = ? WHERE seq = 1 AND job_id IS NULL", (stale,))
+    conn.execute("DELETE FROM messages WHERE seq = 1")  # a copy missing for some reason other than expiry
 
     page = messages.read(conn, "worker", after_seq=0)
     assert [m["text"] for m in page["messages"]] == ["new"]
     assert page["truncated"] is True
-    # The event log never held the text, and the retired event is gone too.
+    # The event log never held the text.
     assert conn.execute("SELECT COUNT(*) FROM events WHERE data LIKE '%old%'").fetchone()[0] == 0
+
+
+def test_truncated_does_not_flag_a_gap_between_kept_messages(conn) -> None:
+    # The check sees only the message after the cursor being missing, so a hole between kept ones is not reported.
+    for text in ("one", "two", "three"):
+        messages.send(conn, sender="planner", recipient="worker", text=text)
+    conn.execute("DELETE FROM messages WHERE recipient = 'worker' AND seq = 2")  # removed outside Baton
+
+    page = messages.read(conn, "worker", after_seq=0)
+    assert [m["seq"] for m in page["messages"]] == [1, 3]
+    assert page["truncated"] is False
 
 
 def test_wait_returns_messages_once_and_skips_ones_already_read(conn) -> None:
