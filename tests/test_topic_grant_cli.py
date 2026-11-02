@@ -100,7 +100,7 @@ def test_the_whole_round_trip_propose_authorize_list_revoke(owner):
     assert re.fullmatch(r"tgk_[A-Za-z0-9_-]{43}", key)
     assert granted["state"] == "active"
     note = granted["note"].lower()
-    assert "chat" in note and "thread" in note, "the note says the key goes through Cesar's own chat, never a thread"
+    assert "chat" in note and "thread" in note, "the note says the key goes through the owner's own chat, never a thread"
 
     [listed] = owner.ok("topic-grant", "list")
     assert (listed["id"], listed["state"]) == (proposal["id"], "active")
