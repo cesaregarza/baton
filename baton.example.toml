@@ -19,7 +19,7 @@ description = "Picks up jobs and reports back"
 
 # Optional shared connector identity. Configure credentials separately; uncommenting this grants none.
 # guest can read permitted board conversations, check alias names and claim/resume an alias with a passphrase.
-# Alias ownership persists across sessions; the current database schema is 14.
+# Alias ownership persists across sessions; the current database schema is 15.
 # Bindings expire and only their digests are stored. Codes are visual, not identity proof.
 # A valid per-request proof permits readable conversation posts; no guest mailbox, membership, jobs or DMs.
 # [roles.guest]
@@ -39,6 +39,7 @@ description = "Picks up jobs and reports back"
 # Optional, with [conversations] enabled: what a role may do in group conversations (all default to false).
 # can_create_conversations = true
 # can_manage_participants = true
+# can_create_topics = true            # open, edit and rename a topic; does not grant conversation creation
 # can_view_all_conversations = true   # grants retained board-wide reads; also lets the dashboard show every conversation
 
 # Optional: remove this role's permission to create or move jobs. Defaults to true for existing roles.
@@ -66,6 +67,10 @@ description = "Picks up jobs and reports back"
 # max_claims_per_credential_per_hour = 20       # at most 10000; includes refused passphrases
 # max_claims_per_alias_per_hour = 5            # at most 10000; lookalike skeletons share a limit
 # max_claims_per_hour = 100                    # at most 10000 overall, before scrypt
+# max_threads_per_alias_per_hour = 5           # new threads one alias may start; at most 10000
+# max_threads_per_guest_per_hour = 50          # new threads all guests together may start; at most 10000
+# guest_cap_alert_role = "planner"             # optional notice when the guest-wide thread cap is reached,
+#                                              # at most once an hour; must name a configured non-guest role
 
 # Optional: group conversations among two or more roles. Off unless enabled.
 # [conversations]

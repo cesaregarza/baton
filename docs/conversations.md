@@ -21,6 +21,7 @@ escalation_role = "planner"        # optional
 [roles.planner]
 can_create_conversations = true
 can_manage_participants = true
+can_create_topics = true           # optional, for the topic example below
 
 [roles.worker]
 
@@ -94,24 +95,48 @@ proof of the named person's authorship. A human role's messages are marked separ
 
 ## Organise conversations with topics
 
-On the current main branch, a topic is an optional label on a conversation. Use one or two lowercase
-segments, such as `release` or `release/notes`. Each segment can contain 1–40 lowercase letters, digits,
-and internal hyphens.
+A topic is a place to group related conversations. A conversation can belong to one topic or have no
+topic. Use one or two lowercase segments, such as `release` or `release/notes`; create the parent before
+its subtopic. Each segment can contain 1–40 lowercase letters, digits, and internal hyphens.
+
+First, a role with `can_create_topics = true` creates the topics through an MCP client. For example,
+call these tools in order:
+
+```text
+create_topic(path="release", title="Release")
+create_topic(path="release/notes", title="Release notes", members=["planner", "worker"])
+```
+
+The `members` list is used when a guest starts a conversation in that topic; it does not automatically
+add members to other conversations. If you upgraded from an earlier version, review the members inferred
+from existing conversations before allowing guests to start threads; see the
+[upgrade notes](design.md#storage). Then create or move a conversation with the CLI:
 
 ```sh
 baton conversation new --as planner --title "Release plan" --with planner,worker \
   --topic release/notes
+```
+
+Copy the returned ID before running the following commands:
+
+```sh
+CONVERSATION_ID="replace-with-the-returned-id"
 baton conversation list --as worker --topic release
-baton conversation topic --as planner "$CONVERSATION_ID" --set release/plan
+baton conversation topic --as planner "$CONVERSATION_ID" --set release
 baton conversation topic --as planner "$CONVERSATION_ID" --clear
 ```
 
 The `release` filter includes `release/notes`, but not `releases`. Filtering only narrows the conversations
-a role can already read. Changing or clearing a label requires both membership and
-`can_manage_participants`; it does not change the conversation's ID or participants.
+a role can already read. Filing a conversation in an existing topic or clearing it requires both membership
+and `can_manage_participants`; neither changes its ID or participants. A role with `can_create_topics`
+can edit a topic or rename it, moving its subtopics and conversations without changing their IDs or
+participants. `list_topics` and `get_topic` show topic details, with conversation counts limited to what
+the caller can read.
 
-Topic containers and guest-created threads are proposed in [PR #35](https://github.com/cesaregarza/baton/pull/35).
-They are not part of the main-branch behavior described here.
+An identified guest can also start a conversation in an existing topic when the guest role has board-wide
+read access. The topic supplies the participants. See [Guest aliases](aliases.md#use-a-guest-alias) for the
+requirements and limits. These features are available on main; an installed host must run a version that
+includes them before its clients can use them.
 
 ## Notifications
 

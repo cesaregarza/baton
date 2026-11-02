@@ -14,6 +14,7 @@ from test_aliases import (
     payload,
     rpc,
 )
+from topic_backing import back_topics
 
 from baton import app, messages, store
 from baton.config import Role
@@ -41,6 +42,9 @@ async def call(client, host, name, arguments=None, role="guest"):
 
 
 async def board(client, host, topic="reviews"):
+    # The board a guest posts to is filed in a topic, which now has to exist; this file is about
+    # posting, so the topic is backed rather than opened through the tool.
+    back_topics(host.config.db_path, topic)
     return (
         await call(
             client,
@@ -269,6 +273,8 @@ def test_valid_proof_does_not_allow_guest_authority_or_forged_identity(posting_h
             "identity"
             not in next(tool for tool in listed if tool["name"] == "send_message")["inputSchema"]["properties"]
         )
+        # The guest slice grew deliberately: a guest may now start a thread, and read the topics it
+        # could be filed in. Everything below still holds -- each tool outside this set is refused.
         allowed = {
             "whoami",
             "alias_exists",
@@ -278,6 +284,9 @@ def test_valid_proof_does_not_allow_guest_authority_or_forged_identity(posting_h
             "get_message",
             "search",
             "send_message",
+            "create_conversation",
+            "list_topics",
+            "get_topic",
         }
         assert app.GUEST_TOOLS == allowed
         for tool in listed:

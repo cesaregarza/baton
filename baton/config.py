@@ -67,6 +67,9 @@ class Role:
     wake: Wake = field(default_factory=Wake)
     can_create_conversations: bool = False
     can_manage_participants: bool = False
+    # Lets this role open, edit and rename a topic. Starting a thread inside one needs no such flag:
+    # any identified caller may do that, which is what makes a topic a container rather than a label.
+    can_create_topics: bool = False
     # Lets the dashboard's viewer see every conversation, not only the ones this role is in.
     can_view_all_conversations: bool = False
     # A person, not an agent: acts only with its own bearer token, never through OAuth or `--as`.
@@ -142,13 +145,19 @@ class Aliases:
     max_claims_per_credential_per_hour: int = 20
     max_claims_per_alias_per_hour: int = 5
     max_claims_per_hour: int = 100
+    # New threads a guest may start in a rolling hour, per alias and across every alias together.
+    max_threads_per_alias_per_hour: int = 5
+    max_threads_per_guest_per_hour: int = 50
+    # Who hears that the guest-wide thread cap filled, at most once an hour. Unset means nobody is told.
+    guest_cap_alert_role: str | None = None
 
 
 ALIAS_LIMITS = {"max_posts_per_alias_per_hour": (1, 10000), "max_posts_per_credential_per_hour": (1, 10000),
                 "binding_ttl_seconds": (1, 86400), "mapped_binding_ttl_seconds": (1, 604800),
                 "max_bindings_per_alias": (1, 1000),
                 "max_claims_per_credential_per_hour": (1, 10000), "max_claims_per_alias_per_hour": (1, 10000),
-                "max_claims_per_hour": (1, 10000)}
+                "max_claims_per_hour": (1, 10000),
+                "max_threads_per_alias_per_hour": (1, 10000), "max_threads_per_guest_per_hour": (1, 10000)}
 
 
 @dataclass(frozen=True)
@@ -367,15 +376,23 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         seat=_seat(raw.get("seat", {}), roles, public_url, dashboard),
         search=search,
         indexer=indexer,
-        aliases=_aliases(raw.get("aliases", {})),
+        aliases=_aliases(raw.get("aliases", {}), roles),
     )
 
 
-def _aliases(table: dict[str, Any]) -> Aliases:
+def _aliases(table: dict[str, Any], roles: dict[str, Role]) -> Aliases:
     if not isinstance(table, dict):
         raise ConfigError("aliases must be a table of limits")
+    alert_role = table.get("guest_cap_alert_role")
+    # A role that cannot be delivered to would make the alert fail at the moment it matters, so it is
+    # refused at load instead: an unset value is the way to ask for no alert.
+    if alert_role is not None and (not isinstance(alert_role, str) or alert_role not in roles
+                                   or alert_role == "guest"):
+        raise ConfigError(f"aliases.guest_cap_alert_role must name a configured non-guest role; "
+                          f"got {alert_role!r}")
     defaults = Aliases()
-    return Aliases(**{key: _number(table, key, getattr(defaults, key), f"aliases.{key}", low, high, integer=True)
+    return Aliases(guest_cap_alert_role=alert_role,
+                   **{key: _number(table, key, getattr(defaults, key), f"aliases.{key}", low, high, integer=True)
                       for key, (low, high) in ALIAS_LIMITS.items()})
 
 
@@ -493,13 +510,19 @@ def _role(name: str, table: dict[str, Any]) -> Role:
         timeout_seconds=_number(wake, "timeout_seconds", 10.0, f"roles.{name}.wake.timeout_seconds", 0.1, 300),
         only_when_addressed=_boolean(wake, "only_when_addressed", False,
                                      f"roles.{name}.wake.only_when_addressed"),
-    ), _boolean(table, "can_create_conversations", False, f"roles.{name}.can_create_conversations"),
-        _boolean(table, "can_manage_participants", False, f"roles.{name}.can_manage_participants"),
-        _boolean(table, "can_view_all_conversations", False, f"roles.{name}.can_view_all_conversations"),
-        _boolean(table, "human", False, f"roles.{name}.human"),
-        _boolean(table, "display_only", False, f"roles.{name}.display_only"),
-        str(table.get("display_name", "")),
-        _boolean(table, "job_authority", True, f"roles.{name}.job_authority"))
+    ),
+        # Named rather than positional: a flag added in the middle would otherwise shift every one after it.
+        can_create_conversations=_boolean(table, "can_create_conversations", False,
+                                          f"roles.{name}.can_create_conversations"),
+        can_manage_participants=_boolean(table, "can_manage_participants", False,
+                                         f"roles.{name}.can_manage_participants"),
+        can_create_topics=_boolean(table, "can_create_topics", False, f"roles.{name}.can_create_topics"),
+        can_view_all_conversations=_boolean(table, "can_view_all_conversations", False,
+                                            f"roles.{name}.can_view_all_conversations"),
+        human=_boolean(table, "human", False, f"roles.{name}.human"),
+        display_only=_boolean(table, "display_only", False, f"roles.{name}.display_only"),
+        display_name=str(table.get("display_name", "")),
+        job_authority=_boolean(table, "job_authority", True, f"roles.{name}.job_authority"))
 
 
 def _valid_webhook(url: str) -> bool:

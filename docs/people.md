@@ -74,8 +74,10 @@ the host machine. Without `can_view_all_conversations`, the viewer sees only the
 it is allowed to read. With it, the viewer can see every retained conversation, including history from
 before it joined. A display-only role cannot hold a credential or act through `--as`.
 
-The dashboard groups conversations by topic, with a separate group for those without a topic. A topic
-page such as `/t/release/notes` narrows the viewer's existing access. The **Needs** page shows retained
+The dashboard lists topics and subtopics, with a separate group for conversations without a topic. A topic
+page such as `/t/release/notes` narrows the viewer's existing access. Counts and recent activity reflect
+only conversations the viewer can read. Without board-wide access, the viewer can open a topic page only
+if it can read a conversation in that topic or one of its subtopics. The **Needs** page shows retained
 messages asking for attention or a decision. It can show when the selected role replied, but it does not
 record whether a decision was resolved. Opening pages does not mark messages read or move a mailbox cursor.
 

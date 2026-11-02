@@ -8,10 +8,11 @@ between a read and the write that depends on it.
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
@@ -19,9 +20,9 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
 
 # A message's retry identity outlives its text: retention may delete the
 # message, but a retry of its request still replays from here. A direct send
@@ -90,6 +91,10 @@ _ADDED_COLUMNS = {
     11: {"generations": ("watermark_epoch TEXT", "watermark_seq INTEGER", "activated_at TEXT", "deactivated_at TEXT",
                          "dropped_at TEXT", "last_write_at TEXT")},
     13: {"messages": ("alias_id TEXT REFERENCES aliases(id)", "alias TEXT", "alias_code TEXT")},
+    # Who started a guest thread, recorded the way a guest post is attributed. A thread a role started
+    # leaves all three NULL.
+    15: {"conversations": ("created_by_alias_id TEXT REFERENCES aliases(id)", "created_by_alias TEXT",
+                           "created_by_alias_code TEXT")},
 }
 _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
@@ -119,8 +124,46 @@ _ADDED_TABLES = {
     13: ("alias_posts",),
     # Per-call identity (`baton.aliases`): owner arms, core enrolment and the current alias-to-role mapping.
     14: ("alias_arms", "core_enrolment", "alias_roles", "events_targets"),
+    # Topics as containers (`baton.topics`).
+    15: ("topics",),
 }
-_STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys()))
+
+
+def _discover_topics(conn: sqlite3.Connection) -> None:
+    """Record a topic for every label the conversations already carry, and for each missing parent.
+
+    Data-driven rather than a fixed list, so a database holding labels this release never saw still
+    upgrades. A stored label that fails the topic grammar stops the upgrade and names itself: dropping
+    it would leave its threads pointing at a topic that does not exist, and the whole upgrade is one
+    transaction, so refusing here leaves the old database exactly as it was.
+
+    Members come from the threads filed directly under a path, never from a subtopic's, so a parent
+    never gains a recipient who was not already in one of its own threads. A membership too small to
+    receive a guest thread is stored empty instead, for a core role to set with `update_topic`; the
+    checks that need the config -- a role it no longer has, or more members than it allows -- belong
+    to admission, which can see it, and the schema stays independent of any one host's config.
+    """
+    from baton import conversations, events  # lazily: both import this module
+
+    stored = [row[0] for row in conn.execute(
+        "SELECT DISTINCT topic FROM conversations WHERE topic IS NOT NULL ORDER BY topic")]
+    for label in stored:
+        conversations.check_topic(label, field="the stored conversation topic")
+    stamp = events.now()
+    for path in sorted({part for label in stored for part in (label, label.split("/")[0])}):
+        members = [row[0] for row in conn.execute(
+            "SELECT DISTINCT p.role FROM participants p JOIN conversations c ON c.id = p.conversation_id"
+            " WHERE c.topic = ? AND p.role != 'guest' ORDER BY p.role", (path,))]
+        if len(members) < conversations.MIN_PARTICIPANTS:
+            members = []
+        conn.execute("INSERT OR IGNORE INTO topics (path, title, members, created_by, created_at)"
+                     " VALUES (?, ?, ?, 'migration', ?)",
+                     (path, path.split("/")[-1], json.dumps(members), stamp))
+
+
+# Steps a plain statement cannot express, because they read the data and may refuse the upgrade.
+_PROCEDURES: dict[int, tuple[Callable[[sqlite3.Connection], None], ...]] = {15: (_discover_topics,)}
+_STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys() | _PROCEDURES.keys()))
 
 # One statement per entry: executescript() would commit on its own, outside
 # the transaction that creates the schema.
@@ -205,7 +248,25 @@ _SCHEMA = (
         escalated_at TEXT,
         topic TEXT,
         revision INTEGER NOT NULL DEFAULT 0,
-        last_activity_at TEXT
+        last_activity_at TEXT,
+        created_by_alias_id TEXT REFERENCES aliases(id),
+        created_by_alias TEXT,
+        created_by_alias_code TEXT
+    )""",
+    # A topic a core role opened on purpose: the container a thread is filed in, keyed by the same
+    # 1-2 segment path that `conversations.topic` holds, so every existing filter keeps working on the
+    # same text. The parent is implied by the path and depth stays at two, so there is no parent column.
+    # `members` is the JSON list of roles a guest thread here is delivered to, read at creation and
+    # copied into that thread's participants: it is a default for new threads, never a live grant.
+    """CREATE TABLE IF NOT EXISTS topics (
+        path TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        members TEXT NOT NULL DEFAULT '[]',
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        request_id TEXT UNIQUE,
+        request_digest TEXT
     )""",
     # Every change to a conversation's source, in order: a message added, a copy expired by retention, a
     # participant added or removed. Each carries the revision it bumped the conversation to. Only source
@@ -514,6 +575,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
             for statement in _BACKFILL.get(step, ()):
                 conn.execute(statement)
+            for procedure in _PROCEDURES.get(step, ()):
+                procedure(conn)
         # A random epoch no client can already hold, written once: at creation, or at the upgrade adding the log.
         conn.execute("INSERT OR IGNORE INTO log_meta (key, value) VALUES ('log_epoch', ?), ('pruned_through', '0')",
                      (secrets.token_hex(16),))

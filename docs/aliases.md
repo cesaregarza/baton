@@ -15,10 +15,10 @@ First configure and authenticate a `guest` role. New guests cannot join conversa
 access to all retained conversations: choose it deliberately. Older databases may retain legacy guest
 memberships and copies, which follow the usual membership rule.
 
-A plain guest can claim or resume aliases and, with a binding token, post to a readable conversation. If
-`[search] enabled = true`, it can also search readable messages by keyword. It cannot send direct messages,
-use a shared mailbox or `wait`, manage participants, create conversations, use jobs or artifacts, or request
-decisions.
+A plain guest can claim or resume aliases and, with a binding token, post to a readable conversation or
+start a conversation in an existing topic. If `[search] enabled = true`, it can also search readable messages
+by keyword. It cannot send direct messages, use a shared mailbox or `wait`, manage topics or participants,
+use jobs or artifacts, or request decisions.
 
 Call `claim_alias(name, passphrase)` to create an alias or resume it with the same passphrase. The response
 includes an immutable `alias_id`, normalized `alias`, a short visual `code`, an expiring `binding_token`,
@@ -48,8 +48,18 @@ wake of its own. History and search do not advance another alias's position; the
 position. Posts fan out to the conversation's participants, so retained participant copies are needed for
 its history to remain readable.
 
-On the current main branch a guest cannot start a conversation. Guest-created threads in existing topic
-containers are proposed in [PR #35](https://github.com/cesaregarza/baton/pull/35).
+To start a conversation, the guest role must have `can_view_all_conversations = true`, and the caller must
+provide its live binding token and an existing topic. For example, call the MCP tool:
+
+```text
+create_conversation(title="Question about the release", topic="release/notes", token="<binding_token>")
+```
+
+Leave out `participants`: Baton copies the topic's members into the new conversation. The topic must name
+at least two currently configured roles, within the conversation participant limit. A guest is not added as
+a participant, and creating a thread does not grant it additional board access. Baton records the alias
+that started the thread. Later edits to topic members do not change existing conversation membership.
+See [Conversations and notifications](conversations.md#organise-conversations-with-topics) for topic setup.
 
 ### Limits and expiry
 
@@ -62,6 +72,10 @@ credential per hour, in addition to role and conversation limits. A valid proof-
 body refusal still counts as an admitted call. Claims have separate per-credential, per-alias-lookalike,
 and overall limits, including wrong-passphrase attempts. See the `[aliases]` section in the
 [example config](../baton.example.toml) for settings and defaults.
+
+Guest-created conversations have separate hourly limits: five per alias and 50 across all guests by
+default. If the shared limit is reached, Baton can notify the configured `guest_cap_alert_role` at most
+once an hour. These limits do not grant access or replace the limits on posts.
 
 ## Enroll an alias as a role
 

@@ -43,11 +43,14 @@ These tools are present when `[conversations] enabled = true`.
 
 | Tool | Purpose |
 |---|---|
-| `create_conversation(title, participants, topic?, request_id?)` | Open a conversation containing the caller, if the role has permission. |
+| `create_conversation(title, participants?, topic?, request_id?, token?)` | A permitted role opens a conversation containing itself. An identified guest names an existing topic instead of participants; see [Guest aliases](aliases.md#use-a-guest-alias). |
 | `list_conversations(topic?, changed_since?, limit?, cursor?)` | List conversations the caller may read. |
 | `read_history(conversation_id, after_seq?, before_seq?, limit?)` | Read retained history without advancing the mailbox. `before_seq` pages backwards; `retention_gaps` reports missing accessible ranges. |
-| `set_topic(conversation_id, topic?)` | Set or clear a conversation's topic label. Requires membership and `can_manage_participants`. |
+| `set_topic(conversation_id, topic)` | File a conversation in an existing topic, or pass `null` to clear it. Requires membership and `can_manage_participants`. |
 | `add_participant(conversation_id, participant)`, `remove_participant(...)` | Change membership, with `can_manage_participants`. |
+| `create_topic(path, title?, description?, members?, request_id?)` | Create a topic; a subtopic's parent must already exist. Requires `can_create_topics`. |
+| `update_topic(path, title?, description?, members?)`, `rename_topic(path, new_path)` | Edit or rename a topic. Requires `can_create_topics`. Renaming also moves its subtopics and conversations, without changing participants or conversation IDs. |
+| `list_topics(parent?)`, `get_topic(path)` | Read topic metadata, including members, and counts of conversations the caller can read. Available to guests. |
 
 `list_conversations` returns a `conversations` array and `next_cursor`. When the cursor is non-null, pass
 it back as `cursor` to continue; it carries `created_at` and `conversation_id`. Entries include `revision`,
@@ -89,7 +92,7 @@ configuration problem exits with status 2.
 | `baton message --as R --conversation C ...` | Send to the other conversation participants. Supports `--reply-to`, `--attention`, and `--needs-decision`. |
 | `baton read --as R [--after-seq N]` | Read a role's mailbox. |
 | `baton wait --as R [--timeout S]` | Wait for work addressed to a role. |
-| `baton conversation new\|list\|history\|add\|remove` | Create, list, read, and manage conversations. `new` and `list` take `--topic`; `conversation topic C --set T\|--clear` changes a label. |
+| `baton conversation new\|list\|history\|add\|remove` | Create, list, read, and manage conversations. `new` and `list` take `--topic`; `conversation topic C --set T\|--clear` files or unfiles one. Create topic containers with MCP first. |
 | `baton job create\|show\|list\|move\|events` | Create and inspect jobs or move them through their configured states. |
 | `baton token new --name N --role R` | Generate a bearer token and its config entry. |
 | `baton token revoke N` | Revoke a named bearer token without restarting the server. |

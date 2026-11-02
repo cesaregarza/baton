@@ -32,7 +32,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
 from starlette.types import ASGIApp
 
-from baton import __version__, aliases, auth, conversations, dashboard, datadir, inbox, jobs, messages, seat
+from baton import __version__, aliases, auth, conversations, dashboard, datadir, inbox, jobs, messages, seat, topics
 from baton import search as search_module
 from baton.config import Config
 from baton.errors import BatonError, Forbidden, InvalidRequest, UnknownRole
@@ -172,16 +172,70 @@ class Tools:
             return messages.read(conn, role, after_seq, limit, config=self._config)
 
     def create_conversation(
-        self, role: str, title: str, participants: list[str],
+        self, role: str, title: str,
+        participants: Annotated[list[str] | None, Field(
+            description="The roles in the conversation, yourself included. A guest leaves this out: its "
+                        "thread goes to the topic's members.")] = None,
         topic: Annotated[str | None, Field(
-            description="An optional readable path of 1-2 lowercase slug segments, such as project or "
-                        "project/subtopic. A label for people, separate from the conversation's id.")] = None,
+            description="The topic to file this thread in: an existing path of 1-2 lowercase slug "
+                        "segments, such as project or project/subtopic. A core role may leave it out; a "
+                        "guest must give one. list_topics shows them.")] = None,
         request_id: str | None = None,
+        identity: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Open a conversation among `participants`, yourself included. Pass a request_id to make a retry safe."""
+        """Start a thread. Name `participants`, or as a guest give a `topic` and its members receive it."""
         with self._conn() as conn:
             return conversations.create(conn, self._config, actor=role, title=title, participants=participants,
-                                        topic=topic, request_id=request_id)
+                                        topic=topic, request_id=request_id, identity=identity)
+
+    def create_topic(
+        self, role: str,
+        path: Annotated[str, Field(description="1-2 lowercase slug segments, such as project or "
+                                               "project/subtopic. A subtopic needs its parent first.")],
+        title: str | None = None,
+        description: str | None = None,
+        members: Annotated[list[str] | None, Field(
+            description="The roles a guest's thread in this topic is delivered to, copied into each new "
+                        "thread. Left out means none, so no guest thread until a core role sets them.")] = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Open a topic for threads to be filed in. Pass a request_id to make a retry safe."""
+        with self._conn() as conn:
+            return topics.create(conn, self._config, actor=role, path=path, title=title,
+                                 description=description, members=members, request_id=request_id)
+
+    def update_topic(
+        self, role: str, path: str, title: str | None = None,
+        description: Annotated[str | None, Field(description="Left out or null keeps the current one.")] = None,
+        members: Annotated[list[str] | None, Field(
+            description="Replaces the members. Left out or null keeps the current list, and an empty "
+                        "list clears it. Threads that already exist keep the participants they "
+                        "were created with.")] = None,
+    ) -> dict[str, Any]:
+        """Change a topic's title, description or members. An argument you leave out is left as it is."""
+        with self._conn() as conn:
+            return topics.update(conn, self._config, actor=role, path=path, title=title,
+                                 description=topics.UNSET if description is None else description,
+                                 members=topics.UNSET if members is None else members)
+
+    def rename_topic(self, role: str, path: str, new_path: str) -> dict[str, Any]:
+        """Move a topic, its subtopics and their threads to a new path. Ids and participants never change."""
+        with self._conn() as conn:
+            return topics.rename(conn, self._config, actor=role, path=path, new_path=new_path)
+
+    def list_topics(
+        self, role: str,
+        parent: Annotated[str | None, Field(
+            description="Only the subtopics directly under this path. Omit it for every topic.")] = None,
+    ) -> dict[str, Any]:
+        """The topics, each with the number of threads in it you can read and when it last had one."""
+        with self._conn() as conn:
+            return {"topics": topics.listing(conn, self._config, reader=role, parent=parent)}
+
+    def get_topic(self, role: str, path: str) -> dict[str, Any]:
+        """One topic: its title, description, members, subtopics and the threads in it you can read."""
+        with self._conn() as conn:
+            return topics.get(conn, self._config, reader=role, path=path)
 
     def list_conversations(
         self, role: str,
@@ -374,6 +428,11 @@ CONVERSATION_TOOLS = (
     ("add_participant", auth.SCOPE_WRITE, False),
     ("remove_participant", auth.SCOPE_WRITE, False),
     ("set_topic", auth.SCOPE_WRITE, False),
+    ("create_topic", auth.SCOPE_WRITE, False),
+    ("update_topic", auth.SCOPE_WRITE, False),
+    ("rename_topic", auth.SCOPE_WRITE, False),
+    ("list_topics", auth.SCOPE_READ, True),
+    ("get_topic", auth.SCOPE_READ, True),
 )
 # Present only when the config enables search.
 SEARCH_TOOLS = (
@@ -385,7 +444,10 @@ ARTIFACT_TOOLS = (
     ("read_artifacts", auth.SCOPE_READ, True),
 )
 GUEST_TOOLS = frozenset({"whoami", "alias_exists", "claim_alias", "list_conversations", "read_history",
-                         "get_message", "search", "send_message"})
+                         "get_message", "search", "send_message", "create_conversation",
+                         "list_topics", "get_topic"})
+# Guest calls whose body is given the alias behind them, so the row it writes is attributed.
+GUEST_IDENTIFIED = frozenset({"send_message", "create_conversation"})
 # Tools whose bodies read the call context itself, not only the role it runs as.
 CALL_TOOLS = frozenset({"whoami", "bind_events", "unbind_events"})
 TOKEN_ARGUMENT = Annotated[str | None, Field(description=(
@@ -432,8 +494,14 @@ class Guard:
                 refusal = self._capability(name, call, kwargs)
                 if refusal is not None:
                     return refuse("forbidden", refusal)
-                if call["role"] == "guest" and name == "send_message":
-                    self._admit_post(principal, call)
+                if call["role"] == "guest" and name in GUEST_IDENTIFIED:
+                    # Both carry the alias through to the body, which attributes the row to it. Only a
+                    # post spends the hourly post quota; a thread has its own caps, counted where it is
+                    # created so that a refusal and its alert commit together.
+                    if name == "send_message":
+                        self._admit_post(principal, call)
+                    elif call["identity"] is None:
+                        raise Forbidden("alias binding is missing, invalid or expired")
                     kwargs["identity"] = call["identity"]
             except BatonError as error:
                 return refuse(error.code, str(error), error.extra)

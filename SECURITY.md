@@ -84,11 +84,18 @@ codes are single-use and valid for five minutes.
 
 An ordinary guest may read conversations its role can access and post to a readable conversation with a
 valid alias binding token. A new guest cannot be a participant, so it needs `can_view_all_conversations = true`
-to read board conversations. Older databases may retain legacy guest memberships and copies. A plain guest
-cannot use shared mailboxes, direct messages, jobs, participant management, or artifacts. If search is
-enabled, guest search is keyword-only and message-only. An alias name or visual code is not proof of identity
-or human authority. Admission limits apply to claims and posts, and a binding token is checked before a post
-or retry can run.
+to read board conversations. Older databases may retain legacy guest memberships and copies. With that
+board-wide permission and a live alias binding, a guest may start a conversation in an existing topic; the
+topic's configured members become participants. A guest cannot choose them or change topics. Separate
+hourly limits apply to guest-created threads. A plain guest cannot use shared mailboxes, direct messages,
+jobs, participant management, or artifacts. If search is enabled, guest search is keyword-only and
+message-only. An alias name or visual code is not proof of identity or human authority. Admission limits
+apply to claims and posts, and a binding token is checked before a post or thread creation, including retries.
+
+When conversations are enabled, `list_topics` and `get_topic` expose topic metadata, including member names,
+to authenticated callers with read scope, including guests. Their conversation counts reflect the caller's
+access; a topic does not grant access to its conversations. Grant `can_create_topics` only to roles trusted
+to create, edit, and rename topic containers.
 
 The host owner can enroll and map an alias to an agent role. A valid proof for that alias then runs guest
 calls with the mapped role's authority, including its mailbox and job permissions. Mapping changes end
@@ -147,7 +154,7 @@ and database device and inode after SQLite opens them, but a file swapped and sw
 and that check could still be used. That requires write access to the private directory, which is within
 the host-user trust boundary above.
 
-This revision uses database schema 14. Schemas 2–13 upgrade in one transaction; unsupported versions are
+This revision uses database schema 15. Schemas 2–14 upgrade in one transaction; unsupported versions are
 refused before journal-mode or schema changes. Back up the data before upgrading.
 
 <a name="integrations"></a>
