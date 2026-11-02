@@ -1,4 +1,4 @@
-"""Messages between roles: sending, reading by sequence cursor, bounds and retention.
+"""Messages between roles: sending, reading by sequence cursor, and bounds.
 
 Each recipient's messages carry a gap-free `seq`. A reader passes the last
 `seq` it has seen and gets what follows; the host also remembers the last seq
@@ -18,7 +18,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from baton import board_read, changes, derived, events
+from baton import board_read, events
 from baton.errors import InvalidRequest, MailboxFull, RequestTooOld
 from baton.store import transaction
 
@@ -30,15 +30,12 @@ MAX_PAGE_BYTES = 512 * 1024
 MAX_PAGE_MESSAGES = 100
 # Past this many unread messages a sender is refused until the recipient reads.
 MAX_UNREAD = 500
-READ_RETENTION = timedelta(days=30)
 
-# A request_id starts with its UTC creation time, so the host can refuse an old
-# one and therefore forget retry identities after a fixed time without ever
-# admitting a stale retry twice.
+# A request_id starts with its UTC creation time, so the host refuses an old
+# one by its date alone and never needs to forget a retry identity.
 REQUEST_ID = re.compile(r"(\d{8}T\d{6}Z)-[A-Za-z0-9._:-]{1,100}")
 REQUEST_MAX_AGE = timedelta(days=30)
 REQUEST_MAX_SKEW = timedelta(minutes=5)
-IDENTITY_RETENTION = REQUEST_MAX_AGE + timedelta(days=1)
 
 # How a page turns one row into a message, given the reader's view of the parent it answers.
 type Shape = Callable[[sqlite3.Row, dict[str, Any] | None], dict[str, Any]]
@@ -102,7 +99,7 @@ def store_copy(conn: sqlite3.Connection, *, message_id: str, sender: str | None,
                attention: list[str] | None = None, needs_decision: bool = False,
                identity: dict[str, str] | None = None) -> int:
     """Store one copy as the recipient's next seq, with its event; the caller holds the write lock and checked room."""
-    last_seq, read_seq = _mailbox(conn, recipient)
+    last_seq = _mailbox(conn, recipient)[0]
     seq = last_seq + 1
     conn.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)"
                  " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq", (recipient, seq))
@@ -114,13 +111,11 @@ def store_copy(conn: sqlite3.Connection, *, message_id: str, sender: str | None,
                   text, json.dumps(relayed) if relayed else None, json.dumps(notice) if notice else None,
                   reply_to, json.dumps(attention) if attention else None, int(needs_decision), events.now(),
                   (identity or {}).get("alias_id"), (identity or {}).get("alias"), (identity or {}).get("code")))
-    # The event carries no text, so retention deleting the message leaves no copy behind.
     # A job-less event uses the message's seq as its own.
     events.append(conn, job_id=job_id, seq=None if job_id else seq, actor=sender or HOST_ACTOR,
                   audience=recipient, kind="message", summary=f"message {seq} from {sender or 'the host'}",
                   data={"message_id": message_id, "seq": seq,
                         **({"alias_id": identity["alias_id"]} if identity else {})})
-    _forget_old(conn, recipient, read_seq)
     return seq
 
 
@@ -153,7 +148,7 @@ def addressed_to(conn: sqlite3.Connection, recipient: str, seq: int) -> bool:
 
     A direct message does, by definition. A conversation message does when it names the recipient for
     attention or asks for a decision; one that does neither still arrives, but singles nobody out. A
-    message retention has already deleted singles nobody out either: there is nothing left to look at.
+    message with no copy left singles nobody out either: there is nothing left to look at.
     """
     row = conn.execute("SELECT conversation_id, attention, needs_decision FROM messages"
                        " WHERE recipient = ? AND seq = ?", (recipient, seq)).fetchone()
@@ -240,13 +235,14 @@ def read(conn: sqlite3.Connection, recipient: str, after_seq: int | None = None,
     """The recipient's messages after `after_seq` (default: after the last one delivered), oldest first.
 
     `next_seq` is where the next page starts, so a short page is not the end.
-    `truncated` is true when retention already deleted messages after `after_seq`.
+    `truncated` is true when the mailbox no longer holds the message right after `after_seq`, because its oldest
+    message comes later. Baton deletes no messages now, and it used to remove only a mailbox's oldest read ones,
+    which this covers; a gap left between kept messages by a change outside Baton is not detected.
     """
     if not 1 <= limit <= MAX_PAGE_MESSAGES or (after_seq is not None and after_seq < 0):
         raise InvalidRequest(f"limit must be 1-{MAX_PAGE_MESSAGES} and after_seq at least 0")
     with transaction(conn):
         last_seq, read_seq = _mailbox(conn, recipient)
-        _forget_old(conn, recipient, read_seq)
         start = read_seq if after_seq is None else after_seq
         rows = conn.execute("SELECT * FROM messages WHERE recipient = ? AND seq > ? ORDER BY seq LIMIT ?",
                             (recipient, start, limit)).fetchall()
@@ -286,13 +282,6 @@ def mark_read(conn: sqlite3.Connection, recipient: str, seq: int) -> None:
                  "   (ordinal IS NULL AND key LIKE 'messages:%' AND CAST(substr(key, 10) AS INTEGER) <= ?)"
                  "   OR (ordinal IS NOT NULL AND baseline_seq < ?))",
                  (events.now(), recipient, seq, seq))
-
-
-def sweep(conn: sqlite3.Connection) -> None:
-    """Apply retention to every mailbox, including ones nobody reads or writes any more."""
-    with transaction(conn):
-        for row in conn.execute("SELECT recipient, read_seq FROM mailboxes").fetchall():
-            _forget_old(conn, row["recipient"], row["read_seq"])
 
 
 def wire_bytes(text: str) -> int:
@@ -371,25 +360,3 @@ def request_time(request_id: str) -> datetime:
     if created_at > current + REQUEST_MAX_SKEW:
         raise InvalidRequest(f"request_id {request_id} is dated in the future")
     return created_at
-
-
-def _forget_old(conn: sqlite3.Connection, recipient: str, read_seq: int) -> None:
-    """Delete read messages, and their job-less events, once past retention; expire old retry identities."""
-    current = datetime.now(UTC)
-    cutoff = (current - READ_RETENTION).isoformat()
-    # Each conversation copy that goes is a change to that conversation's source, logged per copy.
-    expiring = conn.execute("SELECT id, conversation_id, conversation_seq FROM messages WHERE recipient = ?"
-                            " AND seq <= ? AND at < ? AND conversation_id IS NOT NULL ORDER BY seq",
-                            (recipient, read_seq, cutoff)).fetchall()
-    for row in expiring:
-        changes.record(conn, row["conversation_id"], "message_expired", message_id=row["id"], role=recipient)
-    conn.execute("DELETE FROM messages WHERE recipient = ? AND seq <= ? AND at < ?", (recipient, read_seq, cutoff))
-    # A conversation message whose last copy just went takes every derived version made from it down with it.
-    lost = [(row["conversation_id"], row["conversation_seq"]) for row in expiring
-            if conn.execute("SELECT 1 FROM messages WHERE conversation_id = ? AND conversation_seq = ? LIMIT 1",
-                            (row["conversation_id"], row["conversation_seq"])).fetchone() is None]
-    if lost:
-        derived.invalidate_lost(conn, lost)
-    conn.execute("DELETE FROM events WHERE job_id IS NULL AND kind = 'message' AND audience = ? AND seq <= ?"
-                 " AND at < ?", (recipient, read_seq, cutoff))
-    conn.execute("DELETE FROM message_requests WHERE created_at < ?", ((current - IDENTITY_RETENTION).isoformat(),))

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -122,13 +121,10 @@ def test_2_a_reply_to_a_message_from_before_the_sender_joined_is_refused(db, con
                reply_to=early["message_id"])["created"] is True
 
 
-def test_2_a_reply_to_a_parent_retention_has_taken_is_refused(db, config) -> None:
+def test_2_a_reply_to_a_parent_with_no_copy_left_is_refused(db, config) -> None:
     conversation_id = start(db, config)
     parent = say(db, config, "orchestrator", conversation_id, HIDDEN)
-    messages.read(db, "assistant")
-    stale = (datetime.now(UTC) - messages.READ_RETENTION - timedelta(days=1)).isoformat()
-    db.execute("UPDATE messages SET at = ? WHERE recipient = 'assistant' AND seq = 1", (stale,))
-    messages.sweep(db)
+    db.execute("DELETE FROM messages WHERE recipient = 'assistant' AND seq = 1")
 
     refused("invalid_request", say, db, config, "assistant", conversation_id, "answering",
             reply_to=parent["message_id"])
@@ -204,16 +200,13 @@ def test_9_a_late_joiner_sees_the_reply_and_nothing_of_the_parent(db, config) ->
     assert answers(seen) == {"message_id": parent["message_id"], "seq": 1}  # the reviewer was there for it
 
 
-def test_9_a_parent_lost_to_retention_reads_the_same_as_one_never_seen(db, config) -> None:
+def test_9_a_parent_with_no_copy_left_reads_the_same_as_one_never_seen(db, config) -> None:
     conversation_id = start(db, config)
     parent = say(db, config, "orchestrator", conversation_id, HIDDEN)
     say(db, config, "reviewer", conversation_id, "answering", reply_to=parent["message_id"])
     assert answers(one(conversations.history(db, "assistant", conversation_id), "answering"))["seq"] == 1
 
-    messages.read(db, "assistant", limit=1)
-    stale = (datetime.now(UTC) - messages.READ_RETENTION - timedelta(days=1)).isoformat()
-    db.execute("UPDATE messages SET at = ? WHERE recipient = 'assistant' AND seq = 1", (stale,))
-    messages.sweep(db)
+    db.execute("DELETE FROM messages WHERE recipient = 'assistant' AND seq = 1")
 
     page = conversations.history(db, "assistant", conversation_id)
     assert [m["text"] for m in page["messages"]] == ["answering"]

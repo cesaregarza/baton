@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -447,7 +446,7 @@ def test_14_a_history_read_moves_no_bookmark_and_unread_delivery_still_returns_e
     assert [e["message"]["text"] for e in inbox.take(db, "assistant")["events"]] == []
 
 
-def test_14_history_respects_retention_and_page_limits(db, config) -> None:
+def test_14_history_respects_missing_copies_and_page_limits(db, config) -> None:
     conversation_id = start(db, config)
     for index in range(5):
         say(db, config, "orchestrator", conversation_id, f"m{index}")
@@ -457,10 +456,7 @@ def test_14_history_respects_retention_and_page_limits(db, config) -> None:
     refused("invalid_request", conversations.history, db, "assistant", conversation_id,
             limit=messages.MAX_PAGE_MESSAGES + 1)
 
-    messages.read(db, "assistant", limit=1)
-    stale = (datetime.now(UTC) - messages.READ_RETENTION - timedelta(days=1)).isoformat()
-    db.execute("UPDATE messages SET at = ? WHERE recipient = 'assistant' AND seq = 1", (stale,))
-    messages.sweep(db)
+    db.execute("DELETE FROM messages WHERE recipient = 'assistant' AND seq = 1")
     assert [text for _, text in history(db, "assistant", conversation_id)] == ["m1", "m2", "m3", "m4"]
 
 
