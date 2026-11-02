@@ -23,7 +23,7 @@ from typing import Any
 from baton import board_read, events, messages
 from baton.config import Config
 from baton.errors import Forbidden, InvalidRequest, UnknownRole, UnknownTopic
-from baton.store import new_topic_id, transaction
+from baton.store import new_topic_id, snapshot, transaction
 
 MAX_TITLE = 100
 MAX_DESCRIPTION = 1000
@@ -165,10 +165,12 @@ AUDIT_TOOLS = PATH_TOOLS | {"set_topic", "create_conversation", "list_conversati
 
 
 def record_seen(seen: dict[str, Any] | None, path: str, row: sqlite3.Row | None = None, **more: str) -> None:
-    """Note in `seen`, when the caller gave one, the topic this call resolved: its path, and its id if it has a row.
+    """Note in `seen`, when the caller gave one, the topic this call resolved: `path` and the id of `row`, if any.
 
-    The audit line is written after the call's transaction has committed, and by then another writer may have
-    moved this topic and given its path to a different one, so a call records what it resolved while it held it.
+    `path` is what the call named, and `row` the topic its result is, or is in, read while the call held a
+    consistent view. The audit line is written after the call's transaction has committed, and by then another
+    writer may have moved that topic and given its path to a different one, so a call records what it resolved
+    while it held it. A replay therefore passes the path it was asked for, not the path its topic has now.
     """
     if seen is not None:
         seen.update({"topic": path, **({} if row is None else {"topic_id": row["id"]}), **more})
@@ -178,6 +180,17 @@ def note_path(conn: sqlite3.Connection, seen: dict[str, Any] | None, path: str |
     """record_seen for the topic now at `path`, which may be none; a path with no topic records no id."""
     if path is not None and seen is not None:
         record_seen(seen, path, _row(conn, path))
+
+
+def note_replay(conn: sqlite3.Connection, seen: dict[str, Any] | None, path: str | None,
+                filed_in: str | None) -> None:
+    """record_seen for a replay: the path it named, and the id of the topic its returned thread is in now.
+
+    That is `filed_in`, the thread's current topic path, not whatever topic holds `path` today. A thread with no
+    topic now records no id.
+    """
+    if path is not None and seen is not None:
+        record_seen(seen, path, None if filed_in is None else _row(conn, filed_in))
 
 
 def _is_path(value: Any) -> bool:
@@ -197,7 +210,9 @@ def _is_path(value: Any) -> bool:
 def audit_fields(tool: str, arguments: dict[str, Any], outcome: str, seen: dict[str, Any]) -> dict[str, Any]:
     """What a topic tool's audit line adds: the topic and, on success, its id, and a rename's new path.
 
-    A success writes what the call recorded in `seen`. A refusal writes only the path it named, never an id,
+    `topic` is always the path the call named. `topic_id` is the stable id of the topic the call's result is, or
+    is in, read while the call held a consistent view of the database. A success writes what the call recorded
+    in `seen`. A refusal writes only the path it named, never an id,
     because its transaction rolled back and `seen` may hold part of what it did. Either way a topic or new
     path is written only if it is a well-formed topic path: a refused argument is otherwise anything the
     caller sent, a binding token included.
@@ -226,7 +241,7 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
     with transaction(conn):
         existing = events.replayed(conn, "topics", request_id, digest)
         if existing is not None:
-            record_seen(seen, existing["path"], existing)
+            record_seen(seen, checked, existing)
             return {**_summary(existing), "request_id": request_id, "created": False}
         _require_parent(conn, checked)
         if _row(conn, checked) is not None:
@@ -338,17 +353,18 @@ def get(conn: sqlite3.Connection, config: Config, *, reader: str, path: Any,
         seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """One topic, with the number of threads in it this reader may see and the subtopics it may open."""
     checked = _check_path(path)
-    row = _row(conn, checked)
-    if row is None:
-        raise UnknownTopic(f"no topic {checked!r}")
-    record_seen(seen, checked, row)
-    threads, _ = _readable(conn, config, reader, checked)
-    # Filtered, because the subtopic list is the other way this could name a topic the reader may not
-    # see into -- the page renders these as links, and the tool hands them to whoever called it.
-    children = [entry[0] for entry in conn.execute(
-        "SELECT path FROM topics WHERE path LIKE ? ORDER BY path", (f"{checked}/%",))]
-    return {**_summary(row), "threads": threads,
-            "subtopics": [child for child in children if may_open(conn, config, reader, child)]}
+    with snapshot(conn):  # one view, so a rename in between cannot mix two topics into one answer
+        row = _row(conn, checked)
+        if row is None:
+            raise UnknownTopic(f"no topic {checked!r}")
+        record_seen(seen, checked, row)
+        threads, _ = _readable(conn, config, reader, checked)
+        # Filtered, because the subtopic list is the other way this could name a topic the reader may not
+        # see into -- the page renders these as links, and the tool hands them to whoever called it.
+        children = [entry[0] for entry in conn.execute(
+            "SELECT path FROM topics WHERE path LIKE ? ORDER BY path", (f"{checked}/%",))]
+        return {**_summary(row), "threads": threads,
+                "subtopics": [child for child in children if may_open(conn, config, reader, child)]}
 
 
 def listing(conn: sqlite3.Connection, config: Config, *, reader: str,
