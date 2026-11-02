@@ -26,14 +26,21 @@ conversation the seat has left show as content-free placeholders, so they never 
 authenticated seat, bound to that credential. It is not proof against a compromised host, phone or token, and
 it moves no job and marks nothing answered or approved. Each form carries a request id bound to its session and
 conversation, so a resubmitted form stores one copy.
+
+**Starting.** One host serves the seat over a database. A send holds its place in the hourly quota while it is in
+flight, so a crash can leave a place held, and startup frees it. Only the host holding `seat.lock` may: it is
+taken without waiting and kept until the process ends, because a second host, on any port, would reset a live
+send's place. A host that can't take it refuses to start the seat, by the name `seat_already_running`.
 """
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import hmac
 import html
 import json
+import os
 import re
 import secrets
 import socket
@@ -41,6 +48,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,8 +56,8 @@ from typing import Any
 from urllib.parse import parse_qs, parse_qsl, quote, urlsplit
 from zoneinfo import ZoneInfo
 
-from baton import auth, board_read, conversations, jobs, messages
-from baton.config import Config
+from baton import auth, board_read, conversations, datadir, jobs, messages
+from baton.config import Config, ConfigError
 from baton.errors import (
     BatonError,
     ConversationFull,
@@ -91,6 +99,7 @@ INBOX_PAGE = 50
 HISTORY_PAGE = 50
 WARN_UNREAD = 400
 REQUEST_TIMEOUT = 10
+LOCK_FILE = "seat.lock"
 CONVERSATION_PATH = re.compile(r"/seat/c/([A-Za-z0-9_-]{1,64})")
 SEND_PATH = re.compile(r"/seat/c/([A-Za-z0-9_-]{1,64})/send")
 SEQ = re.compile(r"[0-9]{1,19}")
@@ -746,8 +755,9 @@ def _store(config: Config, conn: sqlite3.Connection, session: _Session, conversa
     except BatonError:
         return _retry(config, conn, session, conversation_id, form, 400, "That couldn't be sent as written. "
                       "Nothing was sent.")
-    # Core answers a retry from its record before it checks membership, so a role removed since this request's
-    # own check would be told an earlier send succeeded. It may no longer see the conversation: say so instead.
+    # Core checks membership before it looks a retry up, in one transaction, so it never replays to a role that was
+    # already out. A role can still leave after that transaction; it is then told so, not redirected to the
+    # replayed message that it can no longer open.
     if result.get("created") is False and session.role not in _participants(conn, conversation_id):
         return _not_in(403, "You're no longer in this conversation.")
     seq = conn.execute("SELECT conversation_seq FROM messages WHERE id = ? LIMIT 1",
@@ -913,31 +923,73 @@ class _Handler(BaseHTTPRequestHandler):
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     config: Config
+    lock: int  # the descriptor holding LOCK_FILE's lock, open until the process ends: see `_lock_database`
 
 
 class _V6Server(_Server):
     address_family = socket.AF_INET6
 
 
+class SeatAlreadyRunning(ConfigError):
+    """Another host already serves the seat over this database, and only one may: it frees what a crash left."""
+
+    code = "seat_already_running"
+
+
 def server(config: Config) -> ThreadingHTTPServer | None:
-    """The seat's HTTP server, bound but not yet serving, or None when the config leaves it off."""
+    """The seat's HTTP server, bound but not yet serving, or None when the config leaves it off.
+
+    Startup takes the database's lock, binds, then frees what cut-off sends still hold, in that order. A host that
+    can't take the lock is refused by name before it touches a reservation, and one that can't bind frees nothing.
+    A startup that fails gives back what it took; one that succeeds keeps the lock until the process ends.
+    """
     settings = config.seat
     if not settings.enabled:
         return None
-    _free_cut_off_sends(config)
-    family = _V6Server if ":" in settings.listen_host else _Server
-    bound = family((settings.listen_host, settings.listen_port), _Handler)
+    with ExitStack() as undo:
+        lock = _lock_database(config)
+        undo.callback(os.close, lock)
+        family = _V6Server if ":" in settings.listen_host else _Server
+        bound = family((settings.listen_host, settings.listen_port), _Handler)
+        undo.callback(bound.server_close)
+        _free_cut_off_sends(config)
+        undo.pop_all()  # started: the process keeps the listener and the lock, the lock until it ends
     bound.config = config
+    bound.lock = lock
     return bound
+
+
+def _lock_database(config: Config) -> int:
+    """Take the database's exclusive seat lock without waiting, and return the descriptor that holds it.
+
+    Only the host holding it may free the places that cut-off sends hold: it alone knows no other seat has a send
+    in flight, where a second host, even on another port, would reset a live send's place. The file is opened as
+    the data directory's other lock files are, but nothing here releases it. The kernel does when the process ends,
+    however it ends; closing the server doesn't, since a request thread can outlive `server_close()`.
+    """
+    directory = config.data_dir
+    with datadir.opened(directory) as dir_fd:
+        lock = datadir.open_file(dir_fd, LOCK_FILE, os.O_RDWR | os.O_CREAT, directory=directory)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(lock)
+            raise SeatAlreadyRunning(f"another baton host is already serving the seat over the database in "
+                                     f"{directory}: it holds {directory / LOCK_FILE}. Stop it, or give this host a "
+                                     "data_dir of its own. This startup changed nothing.") from None
+        except BaseException:
+            os.close(lock)
+            raise
+    return lock
 
 
 def _free_cut_off_sends(config: Config) -> None:
     """Give back the hourly places that sends cut off by a crash still hold, in one transaction.
 
     `_send` takes a form's place and gives it back in a `finally`; an exit between the two leaves the place held,
-    and counted until its hour passes. At startup no seat request is in flight, so nothing is legitimately held:
-    every form's holders go to 0, and a form with no stored message (in `message_requests`) has its place freed.
-    A stored send stays counted.
+    and counted until its hour passes. Only the host holding the database's lock calls this, so no other seat has a
+    request in flight and nothing is legitimately held: every form's holders go to 0, and a form with no stored
+    message (in `message_requests`) has its place freed. A stored send stays counted.
     """
     conn = connect(config.db_path)
     try:
