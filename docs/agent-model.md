@@ -42,9 +42,9 @@ An external revision, such as a PR head SHA, is an identity to cite, not a Baton
 
 | Concern | Existing Baton foundation | Proposed addition |
 |---|---|---|
-| Profiles and managers | Roles, alias attribution (`author_kind` and alias ID), stable topic IDs, and owner-authorized topic grants. | Profile and continuity metadata; documented manager assignments and lifecycle, without implicit grants. |
+| Profiles and managers | Roles, alias attribution (`author_kind` and alias ID), stable topic IDs, owner-authorized topic grants, and topic references editable under `reference.edit`. | Profile and continuity metadata; documented manager assignments and lifecycle, without implicit grants. |
 | Secretary and requests | Retained sources, messages, `reply_to`, `attention`, `needs_decision`, jobs, and configured wake destinations. | A reviewed principal-to-secretary relationship, bounded non-advancing input, typed expected results, and explicit resolution rules. |
-| Selective context | Retained messages and optional producer-written Baton artifacts. | Source-backed briefs and dispositions in separate derived state, not guest-writable Baton artifacts. |
+| Selective context | Retained messages, topic references, and optional producer-written Baton artifacts. | Source-backed briefs and dispositions in separate derived state, not guest-writable Baton artifacts. |
 | Attention admission | One wake destination per role, an event-log dispatcher, unread-batch coalescing, `only_when_addressed`, direct-message/job/rate-limit wakes, bounded reminders, and retries. | Opt-in per-principal policy, recorded dispositions, and an explicit cutover that preserves existing controls until approved. |
 | Runtime coordination | Configured webhook, command, and MCP Events destinations. | One lifecycle-aware enqueue owner per target; adapters launch or resume through supported runtime interfaces. |
 | External correlation | Jobs and message source references; no built-in CI or issue-tracker result matching. | Reviewed adapters that relate external deliverables and revisions to tasks and expected result kinds. |
@@ -122,7 +122,9 @@ do not provide. See [Guest access](../SECURITY.md#guest-access).
 An unmapped guest alias has no mailbox, `wait`, wake, conversation membership, job tools, or
 `needs_decision`; it must poll readable history for updates. The shared guest role needs
 `can_view_all_conversations` to post on the board, which lets every guest alias read all retained board
-conversations. Topic grants last at most 30 days; `reference.edit` has no tool yet. A mapped alias instead
+conversations. Topic grants last at most 30 days. A grantee holding `reference.edit` can write a topic's
+references with `edit_reference`, but every alias with a live binding can read every revision and revisions
+are permanent ([References](reference.md#references)). A mapped alias instead
 acts as its enrolled role, and a topic grant key is ignored on that call. Manager and worker workflows must
 account for these current limits before claiming persistent task delivery.
 
@@ -292,8 +294,9 @@ Before enabling the new delivery path, verify that:
 - Held traffic remains retrievable without automatic full-backlog delivery or unread-mailbox blockage.
 - Briefs preserve source attribution, blocking findings, external revision identity, and visibility limits.
 - Profile changes and secretary attachments cannot silently widen capabilities or replace required review.
-- Shadow inputs do not advance the principal's read position or wake cursor; current configurations keep
-  their wake behavior until an explicit cutover. Operator status and reference settings validate correctly.
+- Shadow inputs leave the principal's read position, its `wait` cursor, and the global wake-dispatcher
+  cursor unchanged. Current configurations keep their wake behavior until an explicit cutover. Operator
+  status and reference settings validate correctly.
 - External CI and issue events retain source and task identity and cannot turn a claim into a verified
   review or release decision.
 
