@@ -62,6 +62,7 @@ from baton.integrations import openai_mcp_events as integration
 from baton.store import connect
 
 LAPSED = auth.UNUSED_CLIENT_TTL + 60  # how long ago a registration that has lapsed arrived
+LONG_AGO = 946_684_800  # 2000-01-01, long before any file a test writes, so only a rewrite moves a file off it
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
@@ -109,6 +110,20 @@ def age(host, change) -> None:
 
 def lapse(client_id: str, seconds_ago: float = LAPSED):
     return lambda state: state["unused"].update({client_id: time.time() - seconds_ago})
+
+
+def stamp(host) -> tuple[bytes, int, int]:
+    """The state file's bytes, inode and modification time. A rewrite replaces the file, so it moves the inode and
+    the time even when it writes the same bytes."""
+    path = host.config.oauth_state_path
+    info = os.stat(path)
+    return path.read_bytes(), info.st_ino, info.st_mtime_ns
+
+
+def pinned(host) -> tuple[bytes, int, int]:
+    """The state file's stamp after setting a modification time long past, which only a rewrite replaces."""
+    os.utime(host.config.oauth_state_path, (LONG_AGO, LONG_AGO))
+    return stamp(host)
 
 
 def register_with_secret(host) -> dict[str, Any]:
@@ -199,6 +214,55 @@ def test_a_secret_that_lapsed_while_the_host_was_down_is_cleared_at_startup(star
     stored = oauth_state(host)["clients"][client["client_id"]]
     assert stored["client_secret"] is None and "secret_cleared_at" in stored
     assert client["client_secret"] not in host.config.oauth_state_path.read_text()
+
+
+def test_a_sweep_clears_a_secret_that_lapsed_with_no_write_and_no_restart(start_host) -> None:
+    host = start_host(oauth=True)
+    client = register_with_secret(host)
+    provider = auth.PassphraseProvider(host.config)  # built before the lapse, so no restart follows it
+    age(host, lapse(client["client_id"]))
+    before = oauth_state(host)["clients"][client["client_id"]]
+    assert before["client_secret"] == client["client_secret"], "lapsed and still stored: nothing has written since"
+
+    swept = time.time()
+    provider.sweep()
+
+    stored = oauth_state(host)["clients"][client["client_id"]]
+    assert stored["client_secret"] is None and swept <= stored["secret_cleared_at"] <= time.time()
+    assert {key: value for key, value in stored.items() if key not in ("client_secret", "secret_cleared_at")} == \
+        {key: value for key, value in before.items() if key != "client_secret"}, "the rest of the entry is unchanged"
+    assert client["client_secret"] not in host.config.oauth_state_path.read_text()
+
+
+def test_a_sweep_rewrites_oauth_json_only_while_a_lapsed_secret_is_stored(start_host) -> None:
+    host = start_host(oauth=True)
+    lapsing, live = register_with_secret(host), register_with_secret(host)
+    provider = auth.PassphraseProvider(host.config)
+
+    before = pinned(host)
+    provider.sweep()
+    assert stamp(host) == before, "no registration has lapsed, so a sweep rewrites nothing"
+
+    age(host, lapse(lapsing["client_id"]))
+    provider.sweep()
+    clients = oauth_state(host)["clients"]
+    assert clients[lapsing["client_id"]]["client_secret"] is None, "the lapsed secret is cleared"
+    assert clients[live["client_id"]]["client_secret"] == live["client_secret"], "a live registration keeps its secret"
+
+    before = pinned(host)
+    for _ in range(3):
+        provider.sweep()
+    assert stamp(host) == before, "no lapsed secret is stored any more, so a sweep rewrites nothing"
+
+
+def test_an_authorize_request_sweeps_a_lapsed_secret_out_of_oauth_json(start_host) -> None:
+    host = start_host(oauth=True)
+    client = register_with_secret(host)
+    age(host, lapse(client["client_id"]))
+
+    assert authorize_status(host, client["client_id"]) == 400  # refused; the guard sweeps before it looks at the client
+
+    assert oauth_state(host)["clients"][client["client_id"]]["client_secret"] is None
 
 
 def test_the_ended_record_carries_no_client_secret(start_host) -> None:
