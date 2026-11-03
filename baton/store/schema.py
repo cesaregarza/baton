@@ -41,6 +41,9 @@ _MESSAGES = """CREATE TABLE IF NOT EXISTS messages (
         PRIMARY KEY (recipient, seq)
     )"""
 
+# Created after the upgrade steps, not in `_SCHEMA`: on an older database the column arrives with step 20.
+_BINDINGS_BY_ISSUE = "CREATE UNIQUE INDEX IF NOT EXISTS alias_bindings_by_issue ON alias_bindings (alias_id, issued)"
+
 # One statement per entry: executescript() would commit on its own, outside
 # the transaction that creates the schema.
 _SCHEMA = (
@@ -53,10 +56,13 @@ _SCHEMA = (
         verifier TEXT NOT NULL,
         created_at REAL NOT NULL
     )""",
+    # `issued` orders an alias's bindings oldest first. Neither rowid (a VACUUM may renumber it) nor expiry (a
+    # lifetime change reorders it) is that order.
     """CREATE TABLE IF NOT EXISTS alias_bindings (
         digest TEXT PRIMARY KEY,
         alias_id TEXT NOT NULL REFERENCES aliases(id),
-        expires_at REAL NOT NULL
+        expires_at REAL NOT NULL,
+        issued INTEGER
     )""",
     "CREATE INDEX IF NOT EXISTS alias_bindings_by_alias ON alias_bindings (alias_id, expires_at)",
     # Admitted attempts, successful or refused; bounded by the global hourly claim limit.

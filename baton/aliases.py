@@ -102,7 +102,8 @@ def claim(conn: sqlite3.Connection, config: Config, principal: AccessToken | Non
     """Validate, then renew on the current passphrase, else reset on a live rekey arm, else refuse.
 
     A name nobody holds is created: by a guest unless it is reserved, or by a fixed role enrolling itself. Only a
-    successful armed reset skips the hourly claim caps and the live-binding cap, so recovery works at the caps.
+    successful armed reset skips the hourly claim caps, so recovery works at the caps. A renewal at the live-binding
+    cap replaces the alias's oldest binding.
     """
     credential, role = _credential(principal), auth.role_of(principal)
     _check_lifetimes(config.aliases)
@@ -120,15 +121,29 @@ def claim(conn: sqlite3.Connection, config: Config, principal: AccessToken | Non
         row = conn.execute("SELECT * FROM aliases WHERE name = ?", (name,)).fetchone()
         if row is None:
             row = _create(conn, config, role, name, passphrase, now)
-        elif conn.execute("SELECT COUNT(*) FROM alias_bindings WHERE alias_id = ? AND expires_at > ?",
-                          (row["id"], now)).fetchone()[0] >= config.aliases.max_bindings_per_alias:
-            raise LimitExceeded("alias has reached its live binding capacity", "bindings_per_alias")
         elif not auth.check_passphrase(passphrase, row["verifier"]):
             raise Forbidden("alias is taken; passphrase did not match")
         elif role != "guest" and not conn.execute("SELECT 1 FROM core_enrolment WHERE role = ? AND alias_id = ?",
                                                   (role, row["id"])).fetchone():
             raise Forbidden("a fixed-role credential renews only its own enrolled alias")
+        else:
+            _replace_oldest_at_cap(conn, config.aliases, row["id"], now)
         return _bind(conn, config, row, now)
+
+
+def _replace_oldest_at_cap(conn: sqlite3.Connection, limits: Aliases, alias_id: str, now: float) -> None:
+    """At the live-binding cap, end the alias's oldest live binding to make room for a proven renewal.
+
+    Refusing instead would lock out a client that lost its token until the owner's rekey. Only a claim that
+    proved the passphrase and, for a fixed role, its enrolment reaches here, so no one without them can push a
+    binding out. The replaced token's holder is not told: its next call is refused, like an expired token's.
+    """
+    live = conn.execute("SELECT COUNT(*) FROM alias_bindings WHERE alias_id = ? AND expires_at > ?",
+                        (alias_id, now)).fetchone()[0]
+    if live < limits.max_bindings_per_alias:
+        return
+    conn.execute("DELETE FROM alias_bindings WHERE digest = (SELECT digest FROM alias_bindings"
+                 " WHERE alias_id = ? AND expires_at > ? ORDER BY issued LIMIT 1)", (alias_id, now))
 
 
 def _check_lifetimes(limits: Aliases) -> None:
@@ -172,7 +187,10 @@ def _bind(conn: sqlite3.Connection, config: Config, row: sqlite3.Row, now: float
                 else config.aliases.mapped_binding_ttl_seconds)
     conn.execute("DELETE FROM alias_bindings WHERE expires_at <= ?", (now,))
     proof = secrets.token_urlsafe(32)
-    conn.execute("INSERT INTO alias_bindings VALUES (?, ?, ?)", (auth.token_digest(proof), row["id"], now + lifetime))
+    # One past the alias's newest binding, so its lowest number is always its oldest.
+    conn.execute("INSERT INTO alias_bindings (digest, alias_id, expires_at, issued) VALUES (?, ?, ?,"
+                 " (SELECT COALESCE(MAX(issued), 0) + 1 FROM alias_bindings WHERE alias_id = ?))",
+                 (auth.token_digest(proof), row["id"], now + lifetime, row["id"]))
     return {**identity, "binding_token": proof, "expires_at": now + lifetime}
 
 

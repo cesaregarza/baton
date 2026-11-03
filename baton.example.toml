@@ -57,7 +57,7 @@ description = "Picks up jobs and reports back"
 #                                              # for a decision. Direct messages and job changes still do.
 
 # Alias count is unlimited; names persist. Valid bindings work across authenticated guest credentials.
-# Binding and claim rate limits are positive whole numbers; active-binding capacity refuses without eviction.
+# Binding and claim rate limits are positive whole numbers; a claim at the binding cap replaces the oldest binding.
 # [aliases]
 # binding_ttl_seconds = 86400                  # 24 hours; accepts 1–86400, never changes permanent alias ownership
 # mapped_binding_ttl_seconds = 604800          # an alias enrolled as a role: 7 days; accepts 1–604800

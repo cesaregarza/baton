@@ -254,17 +254,17 @@ def replace_principal(principal, role):
     return principal.model_copy(update={"claims": {"role": role}, "subject": role})
 
 
-def test_binding_capacity_refuses_without_evicting_and_prunes_expired(alias_store, monkeypatch):
+def test_binding_capacity_replaces_the_oldest_binding_and_prunes_expired(alias_store, monkeypatch):
     from baton import aliases
-    from baton.errors import LimitExceeded
+    from baton.errors import Forbidden
     alias_store = with_limits(alias_store, max_bindings_per_alias=1)
     monkeypatch.setattr(aliases.time, "time", lambda: 1000)
     first = claim(alias_store)
-    before = snapshot(alias_store[0])
-    with pytest.raises(LimitExceeded) as refused:
-        claim(alias_store)
-    assert refused.value.extra == {"limit": "bindings_per_alias"}
-    assert snapshot(alias_store[0]) == before
+    replacing = claim(alias_store)
+    assert replacing["alias_id"] == first["alias_id"]
+    with pytest.raises(Forbidden, match="missing, invalid or expired"):
+        aliases.resolve_binding(alias_store[0], first["binding_token"])
+    assert len(snapshot(alias_store[0])["alias_bindings"]) == 1
     monkeypatch.setattr(aliases.time, "time", lambda: 1061)
     resumed = claim(alias_store)
     assert resumed["alias_id"] == first["alias_id"]
