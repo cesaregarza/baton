@@ -31,6 +31,9 @@ conversation, so a resubmitted form stores one copy.
 flight, so a crash can leave a place held, and startup frees it. Only the host holding `seat.lock` may: it is
 taken without waiting and kept until the process ends, because a second host, on any port, would reset a live
 send's place. A host that can't take it refuses to start the seat, by the name `seat_already_running`.
+
+Parsing and rendering live in their own modules, with shared values in models.
+Stateful workflows and the HTTP lifecycle stay here.
 """
 
 from __future__ import annotations
@@ -38,7 +41,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import hmac
-import html
 import json
 import os
 import re
@@ -49,11 +51,9 @@ import threading
 import time
 from collections import deque
 from contextlib import ExitStack
-from dataclasses import dataclass, field
-from datetime import datetime, tzinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, parse_qsl, quote, urlsplit
+from urllib.parse import parse_qs, quote
 from zoneinfo import ZoneInfo
 
 from baton import auth, board_read, conversations, datadir, jobs, messages
@@ -68,24 +68,44 @@ from baton.errors import (
 )
 from baton.store import connect, transaction
 
-SESSION_COOKIE = "__Host-baton_seat"
-PRE_COOKIE = "__Host-baton_seat_pre"
+from .models import Response as Response
+from .models import _Refusal as _Refusal
+from .models import _Request as _Request
+from .models import _Session as _Session
+from .parsing import FIELDS as FIELDS
+from .parsing import FORM as FORM
+from .parsing import MAX_BODY as MAX_BODY
+from .parsing import PRE_COOKIE as PRE_COOKIE
+from .parsing import SEND_PATH as SEND_PATH
+from .parsing import SESSION_COOKIE as SESSION_COOKIE
+from .parsing import SINGLE_HEADERS as SINGLE_HEADERS
+from .parsing import _cookies as _cookies
+from .parsing import _form as _form
+from .parsing import _parse as _parse
+from .rendering import HEADERS as HEADERS
+from .rendering import STYLE as STYLE
+from .rendering import WARN_UNREAD as WARN_UNREAD
+from .rendering import _banner as _banner
+from .rendering import _csrf as _csrf
+from .rendering import _e as _e
+from .rendering import _gap_notice as _gap_notice
+from .rendering import _history_item as _history_item
+from .rendering import _inbox_item as _inbox_item
+from .rendering import _link as _link
+from .rendering import _logout_form as _logout_form
+from .rendering import _message as _message
+from .rendering import _meta as _meta
+from .rendering import _nav as _nav
+from .rendering import _not_found as _not_found
+from .rendering import _not_in as _not_in
+from .rendering import _page as _page
+from .rendering import _redirect as _redirect
+from .rendering import _short as _short
+from .rendering import _topic as _topic
+from .rendering import _when as _when
+from .rendering import _with_gaps as _with_gaps
+
 COOKIE_ATTRIBUTES = "Secure; HttpOnly; SameSite=Strict; Path=/"
-FORM = "application/x-www-form-urlencoded"
-HEADERS = {
-    "Content-Security-Policy": "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'self'; "
-                               "frame-ancestors 'none'",
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
-    "Cache-Control": "no-store",
-    # Not no-referrer: under it Chromium sends `Origin: null` on a same-origin form post, which the exact Origin
-    # check (rightly) refuses. same-origin keeps the real Origin there and sends nothing to other sites.
-    "Referrer-Policy": "same-origin",
-}
-# Headers a request may carry once at most; two of them would leave it ambiguous which one counts.
-SINGLE_HEADERS = ("host", "origin", "cookie", "content-type", "content-length", "sec-fetch-site",
-                  "transfer-encoding")
-MAX_BODY = 16 * 1024
 PRE_TTL = 300
 RECEIPT_TTL = 900
 MAX_PRE = 20
@@ -97,75 +117,15 @@ SENDS_PER_HOUR = 60
 FAILURES_PER_HOUR = 5
 INBOX_PAGE = 50
 HISTORY_PAGE = 50
-WARN_UNREAD = 400
 REQUEST_TIMEOUT = 10
 LOCK_FILE = "seat.lock"
 CONVERSATION_PATH = re.compile(r"/seat/c/([A-Za-z0-9_-]{1,64})")
-SEND_PATH = re.compile(r"/seat/c/([A-Za-z0-9_-]{1,64})/send")
 SEQ = re.compile(r"[0-9]{1,19}")
 # Where the conversation list's next page starts: after a conversation's creation time and id, as the store writes them.
 CURSOR_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,15}(\+00:00|Z)")
 CONVERSATION_ID = re.compile(r"conv_[0-9a-f]{1,64}")
 MAX_SEQ = 2**63 - 1  # SQLite's largest integer
 MESSAGE_ID = re.compile(r"msg_[0-9a-f]{1,64}")
-# Each POST route's fields; anything else, or a field given twice, is refused before it is read.
-FIELDS = {"/seat/login": ({"token", "pre"}, {"token", "pre"}), "/seat/logout": ({"csrf"}, {"csrf"}),
-          "/seat/ack": ({"csrf", "receipt"}, {"csrf", "receipt"}),
-          "send": ({"text", "reply_to", "csrf", "request_id"}, {"text", "csrf", "request_id"})}
-# One column, the phone's own type, 16px so iOS never zooms into a field. The one loud thing is a decision asked
-# of the seat; everything else stays quiet. Buttons are at least 44px tall.
-STYLE = """\
-:root { color-scheme: light dark; --ink: #1d2125; --muted: #5d6670; --rule: #e3e5e8; --paper: #fff;
-        --action: #0d5c63; --on-action: #fff; --ask: #c98a14; --ask-bg: #fdf3dc; --target: #eef6f6; --box: #f3f4f6;
-        --field: #b9bec4; }
-@media (prefers-color-scheme: dark) {
-  :root { --ink: #e4e7ea; --muted: #9ba4ae; --rule: #2d3237; --paper: #15181b; --action: #6cc5cc; --on-action: #0c1416;
-          --ask: #d9a441; --ask-bg: #2b2414; --target: #12292b; --box: #22262a; --field: #4b525a; }
-}
-body { font: 16px/1.5 system-ui, -apple-system, sans-serif; margin: 0 auto; max-width: 40rem; padding: .75rem 1rem 6rem;
-       color: var(--ink); background: var(--paper); }
-a { color: var(--action); }
-a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible {
-  outline: 2px solid var(--action); outline-offset: 2px; }
-nav { font-size: .9rem; }
-nav a { margin-right: 1rem; }
-h1 { font-size: 1.25rem; line-height: 1.3; margin: .9rem 0 .2rem; overflow-wrap: anywhere; }
-h2 { font-size: 1rem; margin: 1.4rem 0 .2rem; color: var(--muted); font-weight: 600; }
-ul { list-style: none; padding: 0; margin: .4rem 0; }
-li { border-bottom: 1px solid var(--rule); padding: .7rem 0; min-width: 0; }
-.muted, .meta time, .reply-to, .note { color: var(--muted); font-size: .875rem; }
-.meta { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; margin: 0; }
-.meta .role { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
-.meta time { margin-left: auto; }
-.reply-to { overflow-wrap: anywhere; }
-.person { font-size: .75rem; border: 1px solid var(--rule); border-radius: 1rem; padding: 0 .45rem;
-          color: var(--muted); }
-.text { white-space: pre-wrap; overflow-wrap: anywhere; margin: .25rem 0 0; }
-.notice { color: var(--muted); font-style: italic; margin: 0; overflow-wrap: anywhere; }
-.relayed { border-left: 3px solid var(--rule); margin: .4rem 0 0; padding: .1rem 0 .1rem .7rem; }
-.relayed p { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-.actions { margin: .3rem 0 0; font-size: .9rem; }
-li.ask { border-left: 4px solid var(--ask); background: var(--ask-bg); padding-left: .7rem; padding-right: .5rem; }
-.ask-label { font-weight: 600; font-size: .875rem; margin: 0 0 .2rem; }
-.placeholder { color: var(--muted); font-style: italic; }
-.in { color: var(--muted); font-size: .8rem; margin: 0 0 .15rem; overflow-wrap: anywhere; }
-.sent { display: none; font-weight: 600; color: var(--action); margin: 0 0 .2rem; }
-li:target { background: var(--target); padding-left: .5rem; padding-right: .5rem; }
-li:target .sent { display: block; }
-.banner { border-left: 4px solid var(--ask); background: var(--ask-bg); padding: .6rem .8rem; margin: .8rem 0; }
-.bar { position: sticky; bottom: 0; background: var(--paper); border-top: 1px solid var(--rule); padding: .6rem 0; }
-button { font: inherit; font-weight: 600; min-height: 44px; padding: .5rem 1.1rem; border: 0; border-radius: .5rem;
-         background: var(--action); color: var(--on-action); }
-button.quiet { background: none; color: var(--action); border: 1px solid var(--rule); }
-.bar button, form.login button, form.compose button { width: 100%; }
-label { display: block; font-weight: 600; margin: .8rem 0 .3rem; }
-input, textarea { font: inherit; width: 100%; box-sizing: border-box; border: 1px solid var(--field);
-                  border-radius: .5rem; padding: .6rem .7rem; color: var(--ink); background: var(--paper); }
-textarea { min-height: 7rem; resize: vertical; }
-form.inline { display: inline; }
-nav button.quiet { min-height: 0; padding: .2rem .6rem; font-weight: 400; font-size: .9rem; }
-.notice-box { border-left: 4px solid var(--muted); padding: .5rem .8rem; margin: .8rem 0; background: var(--box); }
-"""
 
 _failures: dict[str, deque[float]] = {}
 _failures_lock = threading.Lock()
@@ -173,41 +133,6 @@ _failures_lock = threading.Lock()
 
 def _now() -> float:
     return time.time()
-
-
-@dataclass
-class Response:
-    status: int
-    body: bytes = b""
-    headers: dict[str, str] = field(default_factory=dict)
-    cookies: list[str] = field(default_factory=list)
-
-
-class _Refusal(Exception):
-    def __init__(self, response: Response) -> None:
-        self.response = response
-
-
-@dataclass
-class _Request:
-    method: str
-    path: str
-    query: str
-    cookies: dict[str, str]
-    form: dict[str, str]
-
-
-@dataclass
-class _Session:
-    raw: str
-    digest: str
-    role: str
-    zone: tzinfo
-
-    @property
-    def csrf(self) -> str:
-        """Derived from the session id, so it is stored nowhere and differs for every session."""
-        return hmac.new(self.raw.encode(), b"baton seat csrf", hashlib.sha256).hexdigest()
 
 
 def respond(config: Config, method: str, target: str, headers: list[tuple[str, str]], body: bytes) -> Response:
@@ -221,68 +146,6 @@ def respond(config: Config, method: str, target: str, headers: list[tuple[str, s
             conn.close()
     except _Refusal as refusal:
         return refusal.response
-
-
-# Parsing ---------------------------------------------------------------------------------------------------
-
-
-def _parse(config: Config, method: str, target: str, headers: list[tuple[str, str]], body: bytes) -> _Request:
-    named: dict[str, list[str]] = {}
-    for name, value in headers:
-        named.setdefault(name.lower(), []).append(value)
-    if any(len(named.get(name, ())) > 1 for name in SINGLE_HEADERS):
-        raise _Refusal(_page(400, "Bad request", "<p>A header was sent more than once.</p>"))
-    one = {name: values[0] for name, values in named.items()}
-    if one.get("host") != config.seat.host:
-        raise _Refusal(_page(421, "Wrong address", "<p>The seat answers only at its own address.</p>"))
-    if "transfer-encoding" in one:
-        raise _Refusal(_page(400, "Bad request", "<p>Only a plain body with a Content-Length is accepted.</p>"))
-    if method not in ("GET", "HEAD", "POST"):
-        raise _Refusal(Response(405, b"not allowed\n", {**HEADERS, "Allow": "GET, HEAD, POST",
-                                                        "Content-Type": "text/plain; charset=utf-8"}))
-    url = urlsplit(target)
-    cookies = _cookies(one.get("cookie", ""))
-    form: dict[str, str] = {}
-    if method == "POST":
-        if one.get("origin") != config.seat.origin or one.get("sec-fetch-site", "same-origin") != "same-origin":
-            raise _Refusal(_page(403, "Refused", "<p>This form can be sent only from the seat's own pages.</p>"))
-        route = "send" if SEND_PATH.fullmatch(url.path) else url.path
-        if route not in FIELDS:
-            raise _Refusal(_not_found())
-        form = _form(one, body, *FIELDS[route])
-    return _Request(method, url.path, url.query, cookies, form)
-
-
-def _cookies(header: str) -> dict[str, str]:
-    found: dict[str, str] = {}
-    for part in header.split(";"):
-        name, _, value = part.strip().partition("=")
-        if name in (SESSION_COOKIE, PRE_COOKIE):
-            if name in found:
-                raise _Refusal(_page(400, "Bad request", "<p>A cookie was sent more than once.</p>"))
-            found[name] = value
-    return found
-
-
-def _form(headers: dict[str, str], body: bytes, allowed: set[str], required: set[str]) -> dict[str, str]:
-    length = headers.get("content-length")
-    if length is None or not re.fullmatch(r"[0-9]{1,7}", length):
-        raise _Refusal(_page(411 if length is None else 400, "Bad request", "<p>A form needs a Content-Length.</p>"))
-    if int(length) > MAX_BODY:
-        raise _Refusal(_page(413, "Too long", f"<p>A form is at most {MAX_BODY // 1024} KB.</p>"))
-    if int(length) != len(body):
-        raise _Refusal(_page(400, "Bad request", "<p>The body was not the length it said.</p>"))
-    if headers.get("content-type", "").strip().lower() != FORM:
-        raise _Refusal(_page(415, "Bad request", "<p>Only a plain form is accepted.</p>"))
-    try:
-        pairs = parse_qsl(body.decode("ascii"), keep_blank_values=True, strict_parsing=bool(body),
-                          encoding="utf-8", errors="strict")
-    except (UnicodeDecodeError, ValueError):
-        raise _Refusal(_page(400, "Bad request", "<p>The form could not be read.</p>")) from None
-    names = [name for name, _ in pairs]
-    if len(set(names)) != len(names) or not set(names) <= allowed or not required <= set(names):
-        raise _Refusal(_page(400, "Bad request", "<p>The form had a field it shouldn't, or was missing one.</p>"))
-    return dict(pairs)
 
 
 # Routing ---------------------------------------------------------------------------------------------------
@@ -573,12 +436,6 @@ def _needs(config: Config, conn: sqlite3.Connection, session: _Session) -> Respo
     return _page(200, "Needs you", body)
 
 
-def _banner(unread: int) -> str:
-    if unread < WARN_UNREAD:
-        return ""
-    return (f'<p class="banner">{unread} unread. Conversations you\'re in stop accepting messages at '
-            f'{messages.MAX_UNREAD} unread. <a href="/seat/inbox">Mark messages as seen</a> to keep them open.</p>')
-
 def _inbox(config: Config, conn: sqlite3.Connection, session: _Session) -> Response:
     """The mailbox from its cursor, without moving it, and a receipt for exactly the page shown."""
     with transaction(conn):
@@ -619,14 +476,6 @@ def _inbox_entry(row: sqlite3.Row, member: dict[str, str]) -> dict[str, Any]:
     return {**messages.as_dict(row), "conversation_seq": row["conversation_seq"],
             "title": member.get(row["conversation_id"] or "")}
 
-
-def _inbox_item(entry: dict[str, Any], session: _Session) -> str:
-    if entry.get("placeholder"):
-        return '<li class="placeholder">A message from a conversation you\'re no longer in.</li>'
-    where = (f'<p class="actions"><a href="{_link(entry["conversation_id"], entry["conversation_seq"])}">'
-             'Open in conversation</a></p>' if entry["conversation_id"] else "")
-    title = f'<p class="in">{_e(entry["title"])}</p>' if entry.get("title") else ""
-    return _message(entry, session, where, before=title)
 
 def _ack(config: Config, conn: sqlite3.Connection, session: _Session, receipt: str) -> Response:
     with transaction(conn):
@@ -688,32 +537,6 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
             f'{earlier}<ul>{items or "<li class=muted>Nothing yet.</li>"}</ul>{newer}{compose}')
     return _page(status, title, body)
 
-
-def _with_gaps(rendered: list[tuple[int, str]], gaps: list[dict[str, int]]) -> str:
-    """Rendered messages in seq order, with a notice at each gap, where the missing messages were."""
-    out, pending = [], sorted(gaps, key=lambda gap: gap["from_seq"])
-    for seq, item in rendered:
-        while pending and pending[0]["to_seq"] < seq:
-            out.append(_gap_notice(pending.pop(0)))
-        out.append(item)
-    return "".join(out + [_gap_notice(gap) for gap in pending])
-
-
-def _gap_notice(gap: dict[str, int]) -> str:
-    return f'<li class="placeholder">{_e(conversations.gap_words(gap))}</li>'
-
-
-def _history_item(conversation_id: str, item: dict[str, Any], shown: set[int], session: _Session) -> str:
-    parent = item.get("reply_to")
-    marker = ""
-    if parent:
-        marker = ('<p class="reply-to">in reply to a message you can\'t see</p>' if parent.get("seq") is None else
-                  "" if int(parent["seq"]) in shown else
-                  f'<p class="reply-to">in reply to <a href="{_link(conversation_id, int(parent["seq"]))}">'
-                  f'an earlier message</a></p>')
-    actions = (f'<p class="actions"><a href="/seat/c/{_e(conversation_id)}?reply={_e(item["message_id"])}#compose">'
-               'Reply</a></p>' if item.get("from_role") and item.get("from_role") != session.role else "")
-    return _message(item, session, actions, anchor=f"m-{int(item['seq'])}", before=marker)
 
 def _send(config: Config, conn: sqlite3.Connection, session: _Session, conversation_id: str,
           form: dict[str, str]) -> Response:
@@ -807,99 +630,12 @@ def _participants(conn: sqlite3.Connection, conversation_id: str) -> set[str]:
                                                 (conversation_id,)).fetchall()}
 
 
-# Helpers ---------------------------------------------------------------------------------------------------
-
-
-def _link(conversation_id: str, seq: int) -> str:
-    """A message's place in a conversation, by its conversation seq: the page that starts with it."""
-    return f"/seat/c/{conversation_id}?after_seq={seq - 1}#m-{seq}"
-
-
-def _message(item: dict[str, Any], session: _Session, after: str, *, anchor: str = "", before: str = "") -> str:
-    """One message: who and when, what a decision or attention asks of the seat, its words and any relayed quote."""
-    role = session.role
-    ident = f' id="{anchor}"' if anchor else ""
-    if not item.get("from_role"):
-        return f'<li{ident}><p class="notice">{_e(item["text"])}</p></li>'
-    asked = role in (item.get("attention") or [])
-    label = ("Asks you to decide" if asked and item.get("needs_decision") else
-             "Asks for a decision" if item.get("needs_decision") else "Asks you to look" if asked else "")
-    css = ' class="ask"' if asked and item.get("needs_decision") else ""
-    relayed = "".join(f'<blockquote class="relayed"><p class="muted">relayed from {_e(quote.get("source", ""))}</p>'
-                      f'<p>{_e(quote.get("text", ""))}</p></blockquote>' for quote in item.get("relayed") or [])
-    flag = f'<p class="ask-label">{label}</p>' if label else ""
-    sent = '<p class="sent">Sent</p>' if item["from_role"] == role else ""
-    return (f'<li{ident}{css}>{before}{flag}{sent}{_meta(item, session)}<p class="text">{_e(item["text"])}</p>{relayed}'
-            f'{after}</li>')
-
-
-def _meta(item: dict[str, Any], session: _Session) -> str:
-    who = "You" if item["from_role"] == session.role else messages.author_label(item)
-    person = ' <span class="person">person</span>' if item.get("author_kind") == "human" else ""
-    return (f'<p class="meta"><span class="role">{_e(who)}</span>{person}'
-            f'<time datetime="{_e(item.get("at", ""))}">{_e(_when(item.get("at", ""), session.zone))}</time></p>')
-
-
-def _when(at: str, zone: tzinfo) -> str:
-    """`29 Oct, 8:14 pm CDT` from a stored ISO time, in the seat's zone; the stored text itself if it isn't one."""
-    try:
-        moment = datetime.fromisoformat(at).astimezone(zone)
-    except ValueError:
-        return at
-    hour = moment.hour % 12 or 12
-    return f"{moment.day} {moment:%b}, {hour}:{moment:%M} {'am' if moment.hour < 12 else 'pm'} {moment:%Z}"
+# Constant-time comparison ----------------------------------------------------------------------------------
 
 
 def _same(given: str, expected: str) -> bool:
     """A constant-time comparison that refuses, rather than raises on, a value that isn't ASCII."""
     return hmac.compare_digest(given.encode(), expected.encode())
-
-
-def _short(text: str, limit: int = 160) -> str:
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
-def _nav(session: _Session) -> str:
-    return (f'<nav><a href="/seat/">Conversations</a><a href="/seat/inbox">Inbox</a><a href="/seat/needs">Needs you</a>'
-            f'{_logout_form(session)}</nav>')
-
-def _topic(topic: str | None) -> str:
-    return f' <span class="badge">{_e(topic)}</span>' if topic else ""
-
-
-def _csrf(session: _Session) -> str:
-    return f'<input type="hidden" name="csrf" value="{_e(session.csrf)}">'
-
-
-def _logout_form(session: _Session) -> str:
-    return (f'<form class="inline" method="post" action="/seat/logout">{_csrf(session)}'
-            '<button class="quiet" type="submit">Log out</button></form>')
-
-
-def _not_in(status: int = 403, words: str = "You're not in this conversation.") -> Response:
-    return _page(status, "Not available", f'<h1>Not available</h1><p>{_e(words)}</p>'
-                                          '<p><a href="/seat/">Your conversations</a></p>')
-
-
-def _redirect(location: str) -> Response:
-    return Response(303, f'<p><a href="{_e(location)}">Continue</a></p>'.encode(),
-                    {**HEADERS, "Location": location, "Content-Type": "text/html; charset=utf-8"})
-
-
-def _page(status: int, title: str, body: str) -> Response:
-    document = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
-                '<meta name="viewport" content="width=device-width, initial-scale=1">'
-                f'<title>{_e(title)} · baton</title><link rel="stylesheet" href="/seat/style.css"></head>'
-                f'<body>{body}</body></html>')
-    return Response(status, document.encode(), {**HEADERS, "Content-Type": "text/html; charset=utf-8"})
-
-
-def _not_found() -> Response:
-    return _page(404, "Not found", '<p>Nothing here. <a href="/seat/">Seat</a></p>')
-
-
-def _e(value: Any) -> str:
-    return html.escape(str(value), quote=True)
 
 
 # Serving ---------------------------------------------------------------------------------------------------
