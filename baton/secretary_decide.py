@@ -177,7 +177,7 @@ def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config
                    through, head, "current" if current else "behind", decision, rule, evidence, policy.digest,
                    hashlib.sha256(text.encode("utf-8")).hexdigest(), len(text.encode("utf-8"))))
     public = ("source_key", "pos", "kind", "sender", "message_id", "job_id", "conversation_id", "disposition",
-              "reason", "decision", "rule", "judge", "rules")
+              "reason", "decision", "rule", "judge", "rules", "delivered")
     own = next((item for item in items if item["pos"] == trigger_pos), None)
     return {"principal": principal, "mode": "hourly" if hourly else "callback", "trigger": trigger,
             "trigger_pos": trigger_pos,
@@ -217,7 +217,8 @@ def _trigger_pos(baton: sqlite3.Connection, principal: str, trigger: str | None)
 
 def _item(row: sqlite3.Row, policy: policy_module.Policy) -> dict:
     """One scanned source. `judge` is None, "judged" or "judge_fallback:<reason>", and `rules` is what the word lists
-    decided: for a judged message, what they would have decided in the judge's place."""
+    decided: for a judged message, what they would have decided in the judge's place. `delivered` tells a delivery to
+    the principal, of any kind, from the context the scan also reads."""
     envelope = json.loads(row["envelope"])
     decision, rule = _classify(envelope["event_kind"], row["kind"], policy)
     rules = _classify(envelope["event_kind"], row["rules_kind"], policy) if row["judge"] else (decision, rule)
@@ -226,7 +227,8 @@ def _item(row: sqlite3.Row, policy: policy_module.Policy) -> dict:
             "job_id": envelope["job_id"], "job_state": (envelope["job"] or {}).get("event_state"),
             "conversation_id": envelope["conversation_id"], "artifacts": envelope["artifacts"],
             "disposition": row["kind"], "reason": row["reason"], "decision": decision, "rule": rule,
-            "judge": row["judge"], "rules": {"decision": rules[0], "rule": rules[1]}}
+            "judge": row["judge"], "rules": {"decision": rules[0], "rule": rules[1]},
+            "delivered": sources.delivered_to(policy.principal, envelope["event_audience"])}
 
 
 def _classify(event_kind: str, disposition: str, policy: policy_module.Policy) -> tuple[str, str]:

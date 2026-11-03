@@ -157,6 +157,15 @@ def _source_rows(baton: sqlite3.Connection, principal: str, after: int, limit: i
                          " ORDER BY e.pos LIMIT ?", (after, principal, principal, principal, limit)).fetchall()
 
 
+def delivered_to(principal: str, audience: str | None) -> bool:
+    """Whether a row of the principal's stream is a delivery: an event addressed to the principal, whatever its kind.
+
+    Every delivery lands here, so a new kind reaches the read and the wake decision with no change to the secretary.
+    `_source_rows` also selects the principal's own sends and later events on jobs it moved: those are context, which
+    the secretary may read but never treats as a delivery or an alert."""
+    return audience == principal
+
+
 def _actor(meta: dict) -> str | None:
     alias_id = meta["identity"]["alias_id"]
     return f"guest:{alias_id}" if alias_id else meta["identity"]["from_role"]
