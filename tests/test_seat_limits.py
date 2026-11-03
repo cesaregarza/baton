@@ -120,11 +120,11 @@ def test_a_resubmitted_form_is_not_counted_twice(room, monkeypatch) -> None:
     assert len(stored_by_seat(host)) == 1
 
 
-def _rows(host, session: str | None = None) -> int:
+def _rows(host, *, ended: bool = False) -> int:
+    """Form ids still live, which the bound is on; or, with `ended`, those that ended, which are kept."""
     conn = sqlite3.connect(host.config.db_path)
-    if session is None:
-        return conn.execute("SELECT COUNT(*) FROM seat_requests").fetchone()[0]
-    return conn.execute("SELECT COUNT(*) FROM seat_requests WHERE session = ?", (session,)).fetchone()[0]
+    return conn.execute(f"SELECT COUNT(*) FROM seat_requests WHERE ended_at IS {'NOT ' if ended else ''}NULL"
+                        ).fetchone()[0]
 
 
 def test_form_ids_kept_per_session_never_pass_the_bound(room, monkeypatch) -> None:
@@ -135,7 +135,7 @@ def test_form_ids_kept_per_session_never_pass_the_bound(room, monkeypatch) -> No
         post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": f"m{n}"}, cookies=cookies)
     for _ in range(10):
         get(host.config, f"/seat/c/{cid}", cookies=cookies)
-    assert _rows(host) <= 10
+    assert _rows(host) <= 10 and _rows(host, ended=True) > 0, "the bound ends form ids and keeps them"
     assert len(stored_by_seat(host)) == 6
     # the latest form still works after the trimming
     assert post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": "late"},
@@ -151,7 +151,7 @@ def test_form_ids_in_all_never_pass_the_bound(tmp_path: Path, monkeypatch) -> No
         _, cookies = log_in(host.config, host.seat_token)
         for _ in range(8):
             get(host.config, f"/seat/c/{cid}", cookies=cookies)
-    assert _rows(host) <= 3 * 5
+    assert _rows(host) <= 3 * 5 and _rows(host, ended=True) > 0
 
 
 def test_a_huge_cursor_is_refused_before_any_query(room) -> None:
@@ -197,7 +197,7 @@ def test_sends_older_than_the_hour_are_trimmed_too(room, monkeypatch) -> None:
         assert get(host.config, "/seat/", cookies=cookies).status == 200
     for _ in range(12):
         get(host.config, f"/seat/c/{cid}", cookies=cookies)
-    assert _rows(host) <= 10
+    assert _rows(host) <= 10 and _rows(host, ended=True) > 0
 
 
 def test_a_retry_that_stores_while_its_failed_twin_releases_is_still_counted(room, monkeypatch) -> None:

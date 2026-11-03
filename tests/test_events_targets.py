@@ -233,21 +233,22 @@ def offline_events(tmp_path):
     return integration.McpEvents(config, integration.parse_settings(config.integrations["openai_mcp_events"]))
 
 
-def receipt(at):
-    return {"at": at, "wake_id": "wake_synthetic", "subscription": "sub", "owner": "role:worker",
-            "outcome": "accepted"}
+def test_status_never_shows_more_receipts_than_its_cap_and_every_one_is_kept(offline_events, monkeypatch):
+    monkeypatch.setattr(integration, "MAX_RECEIPTS", 3)
+    for n in range(4):
+        offline_events._record(f"wake_{n}", {"id": "sub", "role": "worker"}, "answered 500")
+    shown = integration.status(offline_events.config)["receipts"]
+    assert [receipt["wake_id"] for receipt in shown] == ["wake_1", "wake_2", "wake_3"]
+    db = store.connect(offline_events.config.db_path)
+    assert db.execute("SELECT COUNT(*) FROM events_receipts").fetchone()[0] == 4
+    db.close()
 
 
-def test_receipts_never_exceed_their_cap(offline_events):
-    with offline_events._state() as state:
-        state["receipts"] = [receipt(time.time()) for _ in range(integration.MAX_RECEIPTS)]
-    offline_events._record("wake_new", {"id": "sub", "role": "worker"}, "answered 500")
-    assert len(offline_events._read()["receipts"]) == integration.MAX_RECEIPTS
-    assert offline_events._read()["receipts"][-1]["wake_id"] == "wake_new"
-
-
-def test_status_never_shows_a_receipt_older_than_its_window(offline_events):
-    with offline_events._state() as state:
-        state["receipts"] = [receipt(time.time() - integration.RECEIPT_SECONDS - 60), receipt(time.time())]
+def test_status_never_shows_a_receipt_older_than_its_window(offline_events, monkeypatch):
+    real = time.time
+    monkeypatch.setattr(time, "time", lambda: real() - integration.RECEIPT_SECONDS - 60)
+    offline_events._record("wake_old", {"id": "sub", "role": "worker"}, "accepted")
+    monkeypatch.setattr(time, "time", real)
+    offline_events._record("wake_new", {"id": "sub", "role": "worker"}, "accepted")
     shown = integration.status(offline_events.config)["receipts"]
     assert len(shown) == 1 and shown[0]["at"] > time.time() - integration.RECEIPT_SECONDS

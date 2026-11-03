@@ -393,12 +393,6 @@ def wake_id(role: str, key: str) -> str:
     return "wake_" + hashlib.sha256(f"{role}:{key}".encode()).hexdigest()[:24]
 
 
-def finished_ids(conn: sqlite3.Connection) -> set[str]:
-    """Ids of wakes the core is done with (delivered, failed or superseded). Read-only; for integrations."""
-    rows = conn.execute("SELECT role, key FROM wakes WHERE status IN ('delivered', 'failed', 'superseded')")
-    return {wake_id(row["role"], row["key"]) for row in rows}
-
-
 def recent(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:
     """The latest wakes and how they ended, for `baton wakes`."""
     rows = conn.execute("SELECT role, key, status, attempts, created_at, finished_at FROM wakes"

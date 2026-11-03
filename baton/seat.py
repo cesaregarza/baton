@@ -325,13 +325,19 @@ def _digest(value: str) -> str:
 
 
 def _login_form(conn: sqlite3.Connection, status: int = 200, notice: str = "") -> Response:
+    """A fresh login form, or a refusal once MAX_PRE forms, used or not, were issued in the last PRE_TTL.
+
+    Forms are kept once used or expired, so refusing is what bounds the table: no form is evicted to make room.
+    """
     pre = secrets.token_urlsafe(24)
     now = _now()
     with transaction(conn):
-        conn.execute("DELETE FROM seat_prelogin WHERE expires_at <= ?", (now,))
-        conn.execute("DELETE FROM seat_prelogin WHERE digest NOT IN (SELECT digest FROM seat_prelogin"
-                     " ORDER BY expires_at DESC LIMIT ?)", (MAX_PRE - 1,))
-        conn.execute("INSERT INTO seat_prelogin (digest, expires_at) VALUES (?, ?)", (_digest(pre), now + PRE_TTL))
+        issued = conn.execute("SELECT COUNT(*) FROM seat_prelogin WHERE expires_at > ?", (now,)).fetchone()[0]
+        if issued < MAX_PRE:
+            conn.execute("INSERT INTO seat_prelogin (digest, expires_at) VALUES (?, ?)", (_digest(pre), now + PRE_TTL))
+    if issued >= MAX_PRE:
+        return _page(429, "Log in", f'<h1>Log in to your seat</h1>{notice}<p class="notice-box">Too many login forms '
+                                    'are open. Try again in a few minutes.</p>')
     body = (f'<h1>Log in to your seat</h1>{notice}<form class="login" method="post" action="/seat/login">'
             '<label for="token">Seat token</label>'
             '<input id="token" type="password" name="token" autocomplete="current-password" autocapitalize="off" '
@@ -348,8 +354,8 @@ def _login(config: Config, conn: sqlite3.Connection, request: _Request) -> Respo
     pre = request.form["pre"]
     now = _now()
     with transaction(conn):
-        fresh = conn.execute("DELETE FROM seat_prelogin WHERE digest = ? AND expires_at > ?",
-                             (_digest(pre), now)).rowcount
+        fresh = conn.execute("UPDATE seat_prelogin SET ended_at = ?, end_reason = 'used' WHERE digest = ?"
+                             " AND expires_at > ? AND ended_at IS NULL", (now, _digest(pre), now)).rowcount
     if not fresh or not _same(request.cookies.get(PRE_COOKIE, ""), pre):
         return _login_form(conn, 403, '<p class="notice-box">That login form had expired. Paste the token again.</p>')
     key = str(config.db_path)
@@ -370,13 +376,14 @@ def _login(config: Config, conn: sqlite3.Connection, request: _Request) -> Respo
     authority = auth.credential_authority(access)
     raw = "seat_" + secrets.token_urlsafe(32)
     with transaction(conn):
-        _prune(config, conn, now)
-        conn.execute("DELETE FROM seat_sessions WHERE digest IN (SELECT digest FROM seat_sessions WHERE role = ?"
-                     " ORDER BY last_seen DESC LIMIT -1 OFFSET ?)", (config.seat.role, MAX_SESSIONS - 1))
+        _end_lapsed(config, conn, now)
+        for row in conn.execute("SELECT digest FROM seat_sessions WHERE role = ? AND ended_at IS NULL"
+                                " ORDER BY last_seen DESC LIMIT -1 OFFSET ?",
+                                (config.seat.role, MAX_SESSIONS - 1)).fetchall():
+            _end(conn, row["digest"], now, "cap")
         conn.execute("INSERT INTO seat_sessions (digest, role, authority, created_at, last_seen)"
                      " VALUES (?, ?, ?, ?, ?)",
                      (_digest(raw), config.seat.role, json.dumps(authority, sort_keys=True), now, now))
-        _prune_orphans(conn)
     response = _redirect("/seat/")
     response.cookies += [f"{SESSION_COOKIE}={raw}; {COOKIE_ATTRIBUTES}",
                          f"{PRE_COOKIE}=; Max-Age=0; {COOKIE_ATTRIBUTES}"]
@@ -389,13 +396,13 @@ def _seat_role_ok(config: Config) -> bool:
 
 
 def _session(config: Config, conn: sqlite3.Connection, raw: str | None) -> _Session | None:
-    """The live session `raw` names, or None; a session that no longer holds is deleted on the spot."""
+    """The live session `raw` names, or None; a session that no longer holds is ended on the spot."""
     if not raw:
         return None
     digest, now = _digest(raw), _now()
     with transaction(conn):
         row = conn.execute("SELECT * FROM seat_sessions WHERE digest = ?", (digest,)).fetchone()
-        if row is None:
+        if row is None or row["ended_at"] is not None:
             return None
         authority = json.loads(row["authority"])
         live = (now - row["last_seen"] <= config.seat.idle_seconds
@@ -403,34 +410,35 @@ def _session(config: Config, conn: sqlite3.Connection, raw: str | None) -> _Sess
                 and row["role"] == config.seat.role == authority.get("role") and _seat_role_ok(config)
                 and auth.authority_live(config, authority))
         if not live:
-            _end(conn, digest)
+            _end(conn, digest, now, "lapsed")
             return None
         conn.execute("UPDATE seat_sessions SET last_seen = ? WHERE digest = ?", (now, digest))
     return _Session(raw, digest, row["role"], ZoneInfo(config.seat.timezone))
 
 
-def _end(conn: sqlite3.Connection, digest: str) -> None:
-    for table, column in (("seat_sessions", "digest"), ("seat_receipts", "session"), ("seat_requests", "session")):
-        conn.execute(f"DELETE FROM {table} WHERE {column} = ?", (digest,))
-
-
-def _prune(config: Config, conn: sqlite3.Connection, now: float) -> None:
-    for row in conn.execute("SELECT digest FROM seat_sessions WHERE last_seen < ? OR created_at < ?",
-                            (now - config.seat.idle_seconds, now - config.seat.absolute_seconds)).fetchall():
-        _end(conn, row["digest"])
-    conn.execute("DELETE FROM seat_receipts WHERE expires_at <= ?", (now,))
-    conn.execute("DELETE FROM seat_requests WHERE created_at < ?", (now - REQUEST_TTL,))
-
-
-def _prune_orphans(conn: sqlite3.Connection) -> None:
-    """Receipts and form ids of sessions that are gone, such as one evicted at the session cap."""
+def _end(conn: sqlite3.Connection, digest: str, now: float, reason: str) -> None:
+    """End a session, and the receipts and form ids still live under it, by state; every row stays."""
+    conn.execute("UPDATE seat_sessions SET ended_at = ?, end_reason = ? WHERE digest = ? AND ended_at IS NULL",
+                 (now, reason, digest))
     for table in ("seat_receipts", "seat_requests"):
-        conn.execute(f"DELETE FROM {table} WHERE session NOT IN (SELECT digest FROM seat_sessions)")
+        conn.execute(f"UPDATE {table} SET ended_at = ?, end_reason = 'session' WHERE session = ? AND ended_at IS NULL",
+                     (now, digest))
+
+
+def _end_lapsed(config: Config, conn: sqlite3.Connection, now: float) -> None:
+    """End idle or old sessions, and form ids older than REQUEST_TTL. An expired receipt needs nothing: its own
+    `expires_at` refuses it."""
+    for row in conn.execute("SELECT digest FROM seat_sessions WHERE ended_at IS NULL AND (last_seen < ? OR"
+                            " created_at < ?)", (now - config.seat.idle_seconds,
+                                                 now - config.seat.absolute_seconds)).fetchall():
+        _end(conn, row["digest"], now, "lapsed")
+    conn.execute("UPDATE seat_requests SET ended_at = ?, end_reason = 'expired' WHERE ended_at IS NULL"
+                 " AND created_at < ?", (now, now - REQUEST_TTL))
 
 
 def _logout(conn: sqlite3.Connection, session: _Session) -> Response:
     with transaction(conn):
-        _end(conn, session.digest)
+        _end(conn, session.digest, _now(), "logout")
     return _to_login()
 
 
@@ -439,10 +447,10 @@ def logout_all(config: Config) -> int:
     conn = connect(config.db_path)
     try:
         with transaction(conn):
-            ended = conn.execute("DELETE FROM seat_sessions").rowcount
-            conn.execute("DELETE FROM seat_receipts")
-            conn.execute("DELETE FROM seat_requests")
-        return ended
+            live, now = conn.execute("SELECT digest FROM seat_sessions WHERE ended_at IS NULL").fetchall(), _now()
+            for row in live:
+                _end(conn, row["digest"], now, "logout_all")
+        return len(live)
     finally:
         conn.close()
 
@@ -576,9 +584,10 @@ def _inbox(config: Config, conn: sqlite3.Connection, session: _Session) -> Respo
             conn.execute("INSERT INTO seat_receipts (digest, session, role, start_seq, last_seq, expires_at)"
                          " VALUES (?, ?, ?, ?, ?, ?)", (_digest(receipt), session.digest, session.role, start,
                                                         page[-1]["seq"], _now() + RECEIPT_TTL))
-            conn.execute("DELETE FROM seat_receipts WHERE session = ? AND digest NOT IN (SELECT digest FROM"
-                         " seat_receipts WHERE session = ? ORDER BY expires_at DESC LIMIT ?)",
-                         (session.digest, session.digest, MAX_RECEIPTS))
+            conn.execute("UPDATE seat_receipts SET ended_at = ?, end_reason = 'cap' WHERE session = ? AND ended_at IS"
+                         " NULL AND digest NOT IN (SELECT digest FROM seat_receipts WHERE session = ? AND ended_at IS"
+                         " NULL ORDER BY expires_at DESC LIMIT ?)", (_now(), session.digest, session.digest,
+                                                                     MAX_RECEIPTS))
     unread = messages.unread(conn, session.role)
     items = "".join(_inbox_item(entry, session) for entry in page)
     ack = (f'<form class="bar" method="post" action="/seat/ack">{_csrf(session)}'
@@ -612,9 +621,12 @@ def _ack(config: Config, conn: sqlite3.Connection, session: _Session, receipt: s
     with transaction(conn):
         row = conn.execute("SELECT * FROM seat_receipts WHERE digest = ? AND session = ?",
                            (_digest(receipt), session.digest)).fetchone()
-        conn.execute("DELETE FROM seat_receipts WHERE digest = ?", (_digest(receipt),))
+        # Single use, as before: any attempt spends it, whether or not it moves the cursor.
+        conn.execute("UPDATE seat_receipts SET ended_at = ?, end_reason = 'used' WHERE digest = ? AND ended_at IS NULL",
+                     (_now(), _digest(receipt)))
         current = messages.read_seq(conn, session.role)
-        if row is None or row["expires_at"] <= _now() or row["role"] != session.role or row["start_seq"] != current:
+        if (row is None or row["ended_at"] is not None or row["expires_at"] <= _now() or row["role"] != session.role
+                or row["start_seq"] != current):
             stale = True
         else:
             stale = False
@@ -705,7 +717,8 @@ def _send(config: Config, conn: sqlite3.Connection, session: _Session, conversat
     # take the last place, and a failed attempt can't free a place its own retry is about to use.
     with transaction(conn):
         bound = conn.execute("SELECT * FROM seat_requests WHERE request_id = ?", (request_id,)).fetchone()
-        mine = bound is not None and bound["session"] == session.digest and bound["conversation_id"] == conversation_id
+        mine = (bound is not None and bound["ended_at"] is None and bound["session"] == session.digest
+                and bound["conversation_id"] == conversation_id)
         full = False
         if mine and bound["sent_at"] is None:
             taken = conn.execute("SELECT COUNT(*) FROM seat_requests WHERE session = ? AND sent_at > ?",
@@ -764,11 +777,12 @@ def _mint_request(conn: sqlite3.Connection, session: _Session, conversation_id: 
     with transaction(conn):
         conn.execute("INSERT INTO seat_requests (request_id, session, conversation_id, created_at) VALUES"
                      " (?, ?, ?, ?)", (request_id, session.digest, conversation_id, _now()))
-        # At most MAX_REQUESTS kept per session, sent or not: this hour's sends first (the quota counts them),
-        # then the newest forms. With MAX_SESSIONS sessions at most, that bounds the table.
-        conn.execute("DELETE FROM seat_requests WHERE session = ? AND request_id NOT IN (SELECT request_id FROM"
-                     " seat_requests WHERE session = ? ORDER BY (sent_at IS NOT NULL AND sent_at > ?) DESC,"
-                     " created_at DESC LIMIT ?)", (session.digest, session.digest, _now() - 3600, MAX_REQUESTS))
+        # At most MAX_REQUESTS live per session, sent or not: this hour's sends first (the quota counts them),
+        # then the newest forms. The rest end by state and stay.
+        conn.execute("UPDATE seat_requests SET ended_at = ?, end_reason = 'cap' WHERE session = ? AND ended_at IS NULL"
+                     " AND request_id NOT IN (SELECT request_id FROM seat_requests WHERE session = ? AND ended_at IS"
+                     " NULL ORDER BY (sent_at IS NOT NULL AND sent_at > ?) DESC, created_at DESC LIMIT ?)",
+                     (_now(), session.digest, session.digest, _now() - 3600, MAX_REQUESTS))
     return request_id
 
 

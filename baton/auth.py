@@ -18,7 +18,8 @@ token's `claims["role"]`; tools act as that role and nothing else.
 
 OAuth tokens are opaque and stored only as SHA-256 digests in one 0600 JSON
 file in the checked data directory (`baton.datadir`). Access tokens last an
-hour; refresh tokens last 30 days and rotate on every use.
+hour; refresh tokens last 30 days and rotate on every use. A token that ends
+stays in the file, marked, and moves to an append-only record 30 days later.
 """
 
 from __future__ import annotations
@@ -189,8 +190,8 @@ def authority_live(config: Config, authority: dict) -> bool:
     """Whether the credential described by `credential_authority` still exists with the same role.
 
     A bearer token must still be configured under the same name, digest and
-    role. An OAuth grant must still have an unexpired token, its role must still
-    be one OAuth may grant, and it must be for this resource with read scope.
+    role. An OAuth grant must still have a token in force (`_in_force`), its role
+    must still be one OAuth may grant, and it must be for this resource with read scope.
     `baton oauth revoke-all` and a normal refresh behave as expected: the first
     ends the grant, the second keeps it.
     """
@@ -201,11 +202,13 @@ def authority_live(config: Config, authority: dict) -> bool:
     if (authority.get("kind") != "oauth" or not config.oauth.enabled or authority.get("grant") is None
             or authority["role"] not in config.oauth.roles or authority["resource"] != config.resource_url):
         return False
-    store = TokenStore.load(config.oauth_state_path)
+    # Parsed again only when the file changed: ended tokens stay in it, so it only grows.
+    store = _live_stores.setdefault(config.oauth_state_path, TokenStore(config.oauth_state_path))
+    store.sync()
     now = time.time()
     return any((grant["client_id"], grant.get("grant"), grant["role"]) == (authority["client_id"], authority["grant"],
                                                                           authority["role"])
-               and grant["expires_at"] > now and SCOPE_READ in grant["scopes"]
+               and _in_force(grant, now) and SCOPE_READ in grant["scopes"]
                and grant.get("resource") == authority["resource"]
                for grant in [*store.access.values(), *store.refresh.values()])
 
@@ -243,6 +246,18 @@ def valid_redirect_uri(uri: str, config: Config) -> bool:
             and parsed.username is None and parsed.password is None and not parsed.fragment)
 
 
+def _in_force(token: dict, now: float) -> bool:
+    """A token holds until it ends or expires. Either refuses it alone, so an ended one stays refused if the clock
+    steps back."""
+    return "ended" not in token and token["expires_at"] >= now
+
+
+def _end_token(token: dict, how: str, now: float) -> None:
+    """Keep a revoked or spent token, marked, with its expiry moved back to now, so code that reads only the expiry
+    (an older baton after a rollback) refuses it too."""
+    token.update(ended=how, issued_expires_at=token["expires_at"], expires_at=now)
+
+
 @dataclass
 class TokenStore:
     """Clients and token digests in one 0600 JSON file, which is the source of truth.
@@ -250,6 +265,11 @@ class TokenStore:
     Reads re-load the file when it has changed, so `baton oauth revoke-all`
     takes effect at once. Writes run inside `mutation()`, under an exclusive
     lock and after a fresh load, so a write never resurrects a revoked grant.
+
+    Nothing is deleted. A revoked or spent token stays, ended (`_end_token`).
+    A registration still unused after UNUSED_CLIENT_TTL has lapsed: it stays,
+    refused and not counted, and the next write clears its client secret. An
+    entry REFRESH_TTL past its end moves to the append-only ended record.
     """
 
     path: Path
@@ -293,11 +313,49 @@ class TokenStore:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 self._signature = None
                 self.sync()
-                self._drop_expired()
                 yield self
+                self._settle(dir_fd, time.time())
                 self._save(dir_fd)
             finally:
                 os.close(lock)
+
+    def lapsed(self, client_id: str, now: float) -> bool:
+        arrived = self.unused.get(client_id)
+        return arrived is not None and arrived < now - UNUSED_CLIENT_TTL
+
+    def live_clients(self, now: float) -> int:
+        """The registrations the cap counts."""
+        return sum(not self.lapsed(client_id, now) for client_id in self.clients)
+
+    def holds_lapsed_secret(self, now: float) -> bool:
+        return any(self.lapsed(client_id, now) and self.clients.get(client_id, {}).get("client_secret")
+                   for client_id in self.unused)
+
+    def _settle(self, dir_fd: int, now: float) -> None:
+        """Clear every lapsed registration's secret, and move each entry REFRESH_TTL past its end to the ended record.
+
+        Runs after the change and before the rewrite, so a refused change writes neither file. The moved entries
+        are synced to the record before the rewrite drops them: a crash in between repeats a line, never loses one.
+        """
+        moved = []
+        for client_id in [client_id for client_id in self.unused if self.lapsed(client_id, now)]:
+            client = self.clients.get(client_id)
+            if client is not None and client.get("client_secret"):
+                self.clients[client_id] = {**client, "client_secret": None, "secret_cleared_at": now}
+            if self.unused[client_id] < now - UNUSED_CLIENT_TTL - REFRESH_TTL:
+                moved.append({"table": "clients", "key": client_id, "entry": self.clients.pop(client_id, None),
+                              "unused_since": self.unused.pop(client_id)})
+        for name, table in (("access", self.access), ("refresh", self.refresh)):
+            for key in [key for key, token in table.items() if token["expires_at"] < now - REFRESH_TTL]:
+                moved.append({"table": name, "key": key, "entry": table.pop(key)})
+        if moved:
+            fd = datadir.open_file(dir_fd, self.path.stem + "-ended.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                                   directory=self.path.parent)
+            with os.fdopen(fd, "ab") as record:
+                record.write("".join(json.dumps({"moved_at": now, **line}) + "\n" for line in moved).encode())
+                record.flush()
+                os.fsync(record.fileno())
+            os.fsync(dir_fd)
 
     def _save(self, dir_fd: int) -> None:
         body = json.dumps({"clients": self.clients, "access": self.access, "refresh": self.refresh,
@@ -305,22 +363,19 @@ class TokenStore:
         info = datadir.replace_file(dir_fd, self.path.name, body)
         self._signature = (info.st_ino, info.st_mtime_ns, info.st_size)
 
-    def _drop_expired(self) -> None:
-        now = time.time()
-        self.access = {key: value for key, value in self.access.items() if value["expires_at"] > now}
-        self.refresh = {key: value for key, value in self.refresh.items() if value["expires_at"] > now}
-        for client_id in [cid for cid, at in self.unused.items() if at < now - UNUSED_CLIENT_TTL]:
-            self.clients.pop(client_id, None)
-            del self.unused[client_id]
+
+_live_stores: dict[Path, TokenStore] = {}
 
 
 def revoke_all(state_path: Path) -> int:
-    """End every OAuth grant; registrations stay, so a client can authorize again."""
+    """End every OAuth grant still in force; registrations stay, so a client can authorize again."""
     store = TokenStore.load(state_path)
     with store.mutation():
-        revoked = len(store.access) + len(store.refresh)
-        store.access, store.refresh = {}, {}
-    return revoked
+        now = time.time()
+        live = [token for token in [*store.access.values(), *store.refresh.values()] if _in_force(token, now)]
+        for token in live:
+            _end_token(token, "revoked", now)
+    return len(live)
 
 
 @dataclass
@@ -336,6 +391,9 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
         self.config = config
         self.issuer = config.public_url  # exactly the metadata's `issuer`; RFC 9207 clients compare it as a string
         self.store = TokenStore.load(config.oauth_state_path)
+        if self.store.holds_lapsed_secret(time.time()):
+            with self.store.mutation():
+                pass  # a registration that lapsed while the host was down still holds its secret; the write clears it
         self.codes: dict[str, tuple[AuthorizationCode, str]] = {}  # code -> (code, role)
         self.pending: dict[str, PendingLogin] = {}
         self.login_failures: list[float] = []
@@ -343,7 +401,7 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         self.store.sync()
         data = self.store.clients.get(client_id)
-        if not data:
+        if not data or self.store.lapsed(client_id, time.time()):
             return None
         # A client stored before callbacks with their own iss were refused is unusable: the host adds iss.
         if any(carries_iss(str(uri)) for uri in data.get("redirect_uris") or []):
@@ -361,10 +419,12 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
                 log.warning("registration refused: redirect URI not allowed: %s", loggable_uri(str(uri)))
                 raise RegistrationError("invalid_redirect_uri", "redirect URI is not on the host's allowlist")
         with self.store.mutation() as store:
-            if len(store.clients) >= MAX_CLIENTS:
-                raise RegistrationError("invalid_client_metadata", "too many registered clients")
-            store.clients[client_info.client_id] = client_info.model_dump(mode="json")
-            store.unused[client_info.client_id] = time.time()
+            full = store.live_clients(time.time()) >= MAX_CLIENTS
+            if not full:
+                store.clients[client_info.client_id] = client_info.model_dump(mode="json")
+                store.unused[client_info.client_id] = time.time()
+        if full:  # raised outside the lock, as in exchange_refresh_token
+            raise RegistrationError("invalid_client_metadata", "too many registered clients")
         log.info("registered client %s", client_info.client_id)
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
@@ -435,7 +495,7 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
     async def load_refresh_token(self, client: OAuthClientInformationFull, refresh_token: str):
         self.store.sync()
         data = self.store.refresh.get(token_digest(refresh_token))
-        if data is None or data["client_id"] != client.client_id or data["expires_at"] < time.time():
+        if data is None or data["client_id"] != client.client_id or not _in_force(data, time.time()):
             return None
         return RefreshToken(token=refresh_token, client_id=data["client_id"], scopes=data["scopes"],
                             expires_at=data["expires_at"], resource=data["resource"], subject=data["role"])
@@ -445,12 +505,18 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
         if scopes and not set(scopes) <= set(refresh_token.scopes):
             raise TokenError("invalid_scope")
         with self.store.mutation() as store:
-            # Rotation: the presented token is spent. One revoked since it was loaded is refused.
-            spent = store.refresh.pop(token_digest(refresh_token.token), None)
-            if spent is None:
-                raise TokenError("invalid_grant", "refresh token is no longer valid")
-            return self._issue(client.client_id, scopes or refresh_token.scopes, spent["role"],
-                               spent.get("grant") or secrets.token_hex(16))
+            # Rotation: the presented token is spent. One revoked or spent since it was loaded is refused.
+            presented, now = store.refresh.get(token_digest(refresh_token.token)), time.time()
+            live = presented is not None and _in_force(presented, now)
+            if live:
+                _end_token(presented, "spent", now)
+                tokens = self._issue(client.client_id, scopes or refresh_token.scopes, presented["role"],
+                                     presented.get("grant") or secrets.token_hex(16))
+        if not live:
+            # Raised once the lock is released. The SDK's errors are frozen dataclasses, and contextlib sets the
+            # traceback of an exception leaving a `with`, so raised inside it this became a server error.
+            raise TokenError("invalid_grant", "refresh token is no longer valid")
+        return tokens
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         static = static_token(self.config, token)
@@ -458,7 +524,7 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
             return static
         self.store.sync()
         data = self.store.access.get(token_digest(token))
-        if data is None or data["expires_at"] < time.time() or data["role"] not in self.config.oauth.roles:
+        if data is None or not _in_force(data, time.time()) or data["role"] not in self.config.oauth.roles:
             return None
         # The SDK refuses a token whose resource is not this server's (validate_token_resource).
         return AccessToken(token=token, client_id=data["client_id"], scopes=data["scopes"],
@@ -468,9 +534,10 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         """Revoking either token ends every grant the client holds."""
         with self.store.mutation() as store:
-            for table in (store.access, store.refresh):
-                for key in [key for key, value in table.items() if value["client_id"] == token.client_id]:
-                    del table[key]
+            now = time.time()
+            for held in [*store.access.values(), *store.refresh.values()]:
+                if held["client_id"] == token.client_id and _in_force(held, now):
+                    _end_token(held, "revoked", now)
 
     def sweep(self) -> None:
         now = time.time()
@@ -518,10 +585,9 @@ class EndpointGuard:
         if path == "/authorize" and len(scope.get("query_string", b"")) > MAX_AUTHORIZE_QUERY:
             return 414, "request_too_long"
         self._provider.sweep()
-        if path == "/register" and len(self._provider.store.clients) >= MAX_CLIENTS:
-            with self._provider.store.mutation():
-                pass  # drops registrations never used in time, so they stop counting
-            if len(self._provider.store.clients) >= MAX_CLIENTS:
+        if path == "/register":
+            self._provider.store.sync()
+            if self._provider.store.live_clients(time.time()) >= MAX_CLIENTS:
                 return 429, "too_many_clients"
         if path == "/authorize" and len(self._provider.pending) >= MAX_PENDING_LOGINS:
             return 429, "too_many_pending_logins"

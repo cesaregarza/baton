@@ -149,7 +149,7 @@ def test_logout_ends_the_session(room) -> None:
 
 
 @pytest.mark.parametrize("limit", ["idle", "absolute"])
-def test_an_expired_session_is_refused_and_deleted(room, monkeypatch, limit: str) -> None:
+def test_an_expired_session_is_refused_and_ended(room, monkeypatch, limit: str) -> None:
     import sqlite3
 
     host, _, cookies = room
@@ -164,7 +164,8 @@ def test_an_expired_session_is_refused_and_deleted(room, monkeypatch, limit: str
     else:
         monkeypatch.setattr(seat, "_now", lambda: start + host.config.seat.idle_seconds + 1)
     assert get(host.config, "/seat/", cookies=cookies).status == 303
-    assert sqlite3.connect(host.config.db_path).execute("SELECT COUNT(*) FROM seat_sessions").fetchone()[0] == 0
+    assert sqlite3.connect(host.config.db_path).execute("SELECT end_reason FROM seat_sessions").fetchall() == [
+        ("lapsed",)], "kept, and ended by state"
 
 
 def test_no_token_session_csrf_or_text_reaches_a_log_record(room, caplog) -> None:
