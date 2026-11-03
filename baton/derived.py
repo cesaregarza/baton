@@ -391,8 +391,9 @@ def generation_drop(conn: sqlite3.Connection, config: Config, producer: str, gen
             if row["active"]:
                 raise GenerationActive(f"{generation} is serving; activate another before dropping it")
             conn.execute("UPDATE generations SET dropped_at = ? WHERE id = ?", (_now(), row["id"]))
-            conn.execute("UPDATE batches SET state = 'discarded' WHERE generation = ? AND state = 'open'",
-                         (row["id"],))
+            # Only the unexpired ones, which hold the producer's open-batch slots; an expired one is left as it is.
+            conn.execute("UPDATE batches SET state = 'discarded' WHERE generation = ? AND state = 'open'"
+                         " AND expires_at > ?", (row["id"], time.time()))
     return {"generation": row["id"], "dropped": True}
 
 
@@ -729,6 +730,7 @@ def _open_batch(conn: sqlite3.Connection, producer: str, batch_id: str) -> sqlit
     if batch["producer"] != producer:
         raise Forbidden(f"batch {batch_id} belongs to another producer")
     dropped = conn.execute("SELECT dropped_at FROM generations WHERE id = ?", (batch["generation"],)).fetchone()
+    # Checked before the expiry: retiring or dropping a generation leaves its expired batches open, so this closes them.
     if batch["state"] != "open" or dropped is None or dropped[0] is not None:
         raise BatchClosed(f"batch {batch_id} is closed: committed, or its generation was dropped")
     if batch["expires_at"] <= time.time():
@@ -912,10 +914,10 @@ def _cannot_advance(conn: sqlite3.Connection, config: Config, conversation_id: s
 
 
 def _retire_generations(conn: sqlite3.Connection, config: Config) -> None:
-    """Retire a generation replaced longer ago than its retention: mark it dropped and close its open batches.
+    """Retire a generation replaced longer ago than its retention: mark it dropped.
 
     Its rows stay, so anything naming it fails closed. The active generation never retires, and one with an open
-    batch still running waits for it.
+    batch still running waits for it, so the batches it leaves open have all expired; none is rewritten.
     """
     retired = (datetime.now(UTC) - timedelta(days=config.indexer.generation_retention_days)).isoformat()
     # A replaced generation ages from when it was replaced, one never activated from its last write.
@@ -925,7 +927,6 @@ def _retire_generations(conn: sqlite3.Connection, config: Config) -> None:
             " AND NOT EXISTS (SELECT 1 FROM batches WHERE generation = generations.id AND state = 'open'"
             " AND expires_at > ?)", (retired, time.time())).fetchall():
         conn.execute("UPDATE generations SET dropped_at = ? WHERE id = ?", (_now(), generation))
-        conn.execute("UPDATE batches SET state = 'discarded' WHERE generation = ? AND state = 'open'", (generation,))
 
 
 def _inputs(conn: sqlite3.Connection, version_id: str) -> list[list[int]]:
