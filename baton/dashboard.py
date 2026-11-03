@@ -46,6 +46,7 @@ import html
 import re
 import socket
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -450,19 +451,16 @@ def _needs_topic(query: str) -> str | None | bool:
         return False
 
 
-def _visible(config: Config, conn: Any, topic: str | None = None) -> tuple[list[dict[str, Any]], str, bool]:
-    """Every conversation the viewer may see, newest first and optionally under one topic, read page by page so
-    none is left out; a phrase saying which; and whether that is every conversation. A filter only narrows."""
+def _visible(config: Config, conn: Any, topic: str | None = None) -> Iterator[dict[str, Any]]:
+    """Every readable conversation, newest first, fetching another page only when needed."""
     viewer = config.dashboard.viewer_role
-    every = board_read.sees_all(config, viewer)
-    found: list[dict[str, Any]] = []
+    before = None
     while True:
-        before = conversations.page_cursor(found[-1]) if found else None
         page = conversations.list_readable(conn, config, viewer, topic, before=before)
-        found += page
+        yield from page
         if len(page) < conversations.MAX_LISTED:
-            break
-    return found, "every conversation" if every else f"the conversations {viewer} is in", every
+            return
+        before = conversations.page_cursor(page[-1])
 
 
 def _topic_header(config: Config, conn: Any, topic: str) -> str:
@@ -523,11 +521,13 @@ def _directory(config: Config, conn: Any) -> str:
 
 def _index(config: Config, conn: Any, topic: str | None = None, page: int = 1) -> str:
     viewer = config.dashboard.viewer_role
-    listed, scope, _ = _visible(config, conn, topic)
+    listed = list(_visible(config, conn, topic))
+    scope = "every conversation" if board_read.sees_all(config, viewer) else f"the conversations {viewer} is in"
     needs = f"Needs {_e(_attention_label(config))}"
-    heading = (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}. '
-               f'<a href="/needs">{needs}</a></p>' + _directory(config, conn))
-    if topic is not None:
+    if topic is None:
+        heading = (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}. '
+                   f'<a href="/needs">{needs}</a></p>' + _directory(config, conn))
+    else:
         heading = (f'<p><a href="/">All conversations</a> · {_e(" › ".join(topic.split("/")))}</p>'
                    f'<h1>{_e(topic)}</h1><p class="muted">Read-only. Showing {_e(scope)} under this topic, as '
                    f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">{needs} here</a></p>'
@@ -650,22 +650,15 @@ def _asking(config: Config, conn: Any, topic: str | None,
     a person's, so an agent relaying or quoting the person never counts.
     """
     viewer = config.dashboard.viewer_role
-    listed, _, _ = _visible(config, conn, topic)
     found, replied = [], set()
-    for conversation in listed:
-        after = 0
-        while True:
-            page = conversations.history(conn, viewer, conversation["conversation_id"], after, MAX_NEEDS,
-                                         config=config)
-            if not page["messages"]:
-                break
+    for conversation in _visible(config, conn, topic):
+        for page in _history_pages(config, conn, conversation["conversation_id"], MAX_NEEDS):
             found += [(conversation, item) for item in page["messages"]
                       if item["from_role"] not in (None, viewer, subject)
                       and (item.get("needs_decision") or subject in (item.get("attention") or []))]
             replied |= {item["reply_to"]["message_id"] for item in page["messages"]
                         if item["from_role"] == subject and item.get("reply_to")
                         and (subject == viewer or item.get("author_kind") == "human")}
-            after = page["next_seq"]
     return sorted(found, key=lambda pair: (pair[1]["at"], pair[1]["seq"]), reverse=True), replied
 
 
@@ -728,14 +721,27 @@ def _after_seq(value: str) -> int | None:
 
 
 def _read(config: Config, conn: Any, conversation_id: str, after_seq: int, limit: int) -> dict[str, Any]:
-    """A page of a thread read as the viewer: the one read that the thread's page and its copy both make."""
+    """Read a thread page under the dashboard viewer's permissions."""
     return conversations.history(conn, config.dashboard.viewer_role, conversation_id, after_seq, limit, config=config)
+
+
+def _history_pages(config: Config, conn: Any, conversation_id: str, limit: int) -> Iterator[dict[str, Any]]:
+    """Read through short byte-limited pages, including the final empty page's retention gaps."""
+    after = 0
+    while True:
+        page = _read(config, conn, conversation_id, after, limit)
+        yield page
+        if not page["messages"]:
+            return
+        after = page["next_seq"]
 
 
 def _title(config: Config, conn: Any, conversation_id: str) -> str:
     """A thread's title as the viewer's list gives it, or its id when that list does not hold it."""
-    visible = {item["conversation_id"]: item for item in _visible(config, conn)[0]}
-    return visible[conversation_id]["title"] if conversation_id in visible else conversation_id
+    for item in _visible(config, conn):
+        if item["conversation_id"] == conversation_id:
+            return item["title"]
+    return conversation_id
 
 
 def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -> Response:
@@ -825,28 +831,17 @@ def _gap_measure(gaps: list[dict[str, int]]) -> str:
 def _gap_bar(measure: bool = False) -> str:
     """The bar's markup, built once for both the arrival bar and its hidden copy, so their contents can't drift apart.
     The copy has no id or for, and is hidden from assistive technology."""
-    if measure:
-        return ('<p class="gap-bar gap-measure" aria-hidden="true">Some messages on this page are no longer kept'
-                '<span class="gap-sep"> · </span><span class="gap-actions"><a href="#missing">view ranges</a>'
-                '<label>Dismiss</label></span></p>')
-    return ('<p class="gap-bar">Some messages on this page are no longer kept<span class="gap-sep"> · </span>'
+    attributes = 'class="gap-bar gap-measure" aria-hidden="true"' if measure else 'class="gap-bar"'
+    dismiss = "" if measure else ' for="gap-dismiss"'
+    return (f'<p {attributes}>Some messages on this page are no longer kept<span class="gap-sep"> · </span>'
             '<span class="gap-actions"><a href="#missing">view ranges</a>'
-            '<label for="gap-dismiss">Dismiss</label></span></p>')
-
-
-def _notice_words(notice: dict[str, Any], item: dict[str, Any]) -> str:
-    """What a host notice says. A topic move is a sentence the host wrote, naming no participant."""
-    if notice["event"] == "topic_moved":
-        return item["text"]
-    verb = "added" if notice["event"] == "participant_added" else "removed"
-    return f'{notice["participant"]} was {verb} by {notice["by"]}'
+            f'<label{dismiss}>Dismiss</label></span></p>')
 
 
 def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | set[int] = frozenset(),
              conversation_id: str = "", parents: dict[int, dict[str, Any]] | None = None) -> str:
-    notice = item.get("notice")
-    if notice:
-        return f'<li class="notice">{_e(_notice_words(notice, item))} · {_time(item["at"])}{replies}</li>'
+    if item.get("notice"):
+        return f'<li class="notice">{_e(_notice_line(item))} · {_time(item["at"])}{replies}</li>'
     relayed = "".join(
         f'<blockquote class="relayed"><p class="source">relayed from {_e(entry["source"])} at {_e(entry["at"])}'
         f'</p><p class="relayed-text">{_e(entry["text"])}</p></blockquote>' for entry in item.get("relayed") or [])
@@ -890,15 +885,10 @@ def _thread_text(config: Config, conn: Any, conversation_id: str) -> Response:
     and it refuses what the page refuses. Where that history reports messages no longer kept, a line says so.
     """
     found: dict[int, str] = {}  # by seq, and a gap by its first seq, so one that two pages both report is kept once
-    after = 0
     try:
-        while True:
-            page = _read(config, conn, conversation_id, after, messages.MAX_PAGE_MESSAGES)
+        for page in _history_pages(config, conn, conversation_id, messages.MAX_PAGE_MESSAGES):
             found.update({gap["from_seq"]: conversations.gap_words(gap) for gap in page["retention_gaps"]})
             found.update({item["seq"]: _plain(item) for item in page["messages"]})
-            if not page["messages"]:
-                break
-            after = page["next_seq"]
     except BatonError:  # unknown, or one the viewer can't see: the same answer, so neither is revealed
         return _not_found()
     body = "\n\n".join(found[seq] for seq in sorted(found)) or "No messages yet."

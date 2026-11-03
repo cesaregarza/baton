@@ -94,6 +94,22 @@ def test_a_topic_page_heads_with_its_own_details(host):
     assert "A thread" in page
 
 
+def test_a_topic_page_does_not_load_the_whole_directory(host, monkeypatch):
+    config, conn = host
+    conversations.create(conn, config, actor="orchestrator", title="A thread", participants=MINE,
+                         topic="baton")
+
+    def unexpected_directory(*args, **kwargs):
+        pytest.fail("A topic page should not query the whole topic directory")
+
+    monkeypatch.setattr(topics, "listing", unexpected_directory)
+    response = get(config, "/t/baton")
+    assert response.status == 200
+    page = text(response)
+    assert "The board" in page and "Where the work is discussed" in page
+    assert "A thread" in page and "/t/baton/development" in page
+
+
 def test_a_guest_thread_shows_the_alias_that_started_it(host):
     config, conn = host
     conversations.create(conn, config, actor="guest", title="A guest thread", participants=None,
