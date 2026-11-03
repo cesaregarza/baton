@@ -190,6 +190,7 @@ configuration problem exits with status 2.
 | `baton events status\|unbind` | Inspect event subscriptions and receipts, or unbind a guest grant's event target. |
 | `baton seat logout-all` | End all browser-seat sessions. |
 | `baton secretary --state FILE --policy FILE scan\|replay\|show\|cancel\|decide` | Build and inspect local attention records from retained Baton events. |
+| `baton secretary --policy FILE read --after POS\|--ids IDS` | Read the messages the principal can see, text included, for a secretary thread. |
 
 `--as` defaults to `BATON_ROLE` in local mode and cannot select a human role. `--config` defaults to
 `BATON_CONFIG`, then `~/.config/baton/baton.toml`. `--host` defaults to `BATON_HOST`: it uses the remote
@@ -217,6 +218,13 @@ hourly digest never use it. Each result counts the decisions a judge made (`judg
 wake's own item (`trigger_item`) while it is in the window, so a caller can tell a trigger the judge
 decided from one it did not. The
 policy and state formats are versioned. This interface does not deliver, approve, or modify Baton work.
+`read` is the one secretary action that returns message text, for a host-local secretary thread: after an event
+position (`--after`), the principal's messages in the stream the scan reads, each listed once; or the given message
+ids (`--ids`), listing any the principal can't read as missing. Each message carries its id, position,
+conversation or direct recipient, sender, time, `reply_to`, text and relayed entries. A page holds at most
+`--limit` messages (default 20, at most 100) and `--max-bytes` (default 256 KiB), always at least one, and
+`through_pos` is where the next page starts. It opens the database read-only, needs no `--state`, and writes
+nothing; `python -m baton.secretary_read` takes the same options.
 The projection reads events addressed to or authored by the principal, plus later events for jobs whose
 earlier create or move event the principal authored. It derives job facts from those event rows and
 rechecks message visibility before retaining a cited message. Envelope version 1 refuses unknown stored

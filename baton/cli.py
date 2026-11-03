@@ -30,7 +30,10 @@ from baton.store import connect, connect_read_only
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.command == "secretary" and args.state is None and args.secretary_command != "read":
+        parser.error("the following arguments are required: --state")  # only `read` keeps no state of its own
     if args.command == "hash-passphrase":
         return _hash_passphrase()
     try:
@@ -139,7 +142,7 @@ def _parser() -> argparse.ArgumentParser:
 def _add_secretary_commands(commands: Any) -> None:
     """Host-only offline attention records. There is no MCP surface or acting role."""
     group = commands.add_parser("secretary", help="scan, replay and inspect offline attention records")
-    group.add_argument("--state", type=Path, required=True, help="private SQLite state file")
+    group.add_argument("--state", type=Path, help="private SQLite state file (every action but read)")
     group.add_argument("--policy", type=Path, required=True, help="versioned JSON relationship and rules")
     actions = group.add_subparsers(dest="secretary_command", required=True)
     scan = actions.add_parser("scan", help="read a bounded page of Baton events without advancing Baton cursors")
@@ -154,16 +157,22 @@ def _add_secretary_commands(commands: Any) -> None:
     cancel.add_argument("expectation_id")
     cancel.add_argument("--reason", required=True)
     cancel.set_defaults(handler=lambda config, args: _secretary(config, args, "cancel"))
-    from baton import secretary_decide  # one set of options for this and its faster `python -m` entry point
+    # One set of options for each of these and its faster `python -m` entry point.
+    from baton import secretary_decide, secretary_read
 
     decide = actions.add_parser("decide", help="decide wake, hold or keep for one wake, or digest for the hour")
     secretary_decide.add_arguments(decide)
     decide.set_defaults(handler=lambda config, args: _secretary(config, args, "decide"))
+    read = actions.add_parser("read", help="the messages the principal can see, text included: the thread's read")
+    secretary_read.add_arguments(read)
+    read.set_defaults(handler=lambda config, args: _secretary(config, args, "read"))
 
 
 def _secretary(config: Config, args: argparse.Namespace, action: str) -> dict:
-    from baton import secretary, secretary_decide
+    from baton import secretary, secretary_decide, secretary_read
 
+    if action == "read":
+        return secretary_read.read(config, args.policy, **secretary_read.options(args))
     if action == "decide":
         return secretary_decide.decide(config, args.state, args.policy, **secretary_decide.options(args))
     if action == "scan":
