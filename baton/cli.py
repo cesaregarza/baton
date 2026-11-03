@@ -34,6 +34,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hash-passphrase":
         return _hash_passphrase()
     try:
+        if args.command == "secretary" and args.host:
+            raise ConfigError("secretary commands are host-local; --host is not supported")
         if args.host:
             result = _remote(args)
             _print(result)
@@ -128,9 +130,42 @@ def _parser() -> argparse.ArgumentParser:
     oauth = commands.add_parser("oauth", help="OAuth grants").add_subparsers(dest="oauth_command", required=True)
     oauth.add_parser("revoke-all", help="end every OAuth access and refresh grant").set_defaults(handler=_revoke_all)
     _add_index_commands(commands)
+    _add_secretary_commands(commands)
     commands.add_parser("wakes", help="show recent wakes and how they ended").set_defaults(
         handler=lambda config, args: _db(config, wakes.recent))
     return parser
+
+
+def _add_secretary_commands(commands: Any) -> None:
+    """Host-only offline attention records. There is no MCP surface or acting role."""
+    group = commands.add_parser("secretary", help="scan, replay and inspect offline attention records")
+    group.add_argument("--state", type=Path, required=True, help="private SQLite state file")
+    group.add_argument("--policy", type=Path, required=True, help="versioned JSON relationship and rules")
+    actions = group.add_subparsers(dest="secretary_command", required=True)
+    scan = actions.add_parser("scan", help="read a bounded page of Baton events without advancing Baton cursors")
+    scan.add_argument("--limit", type=int, default=100)
+    scan.set_defaults(handler=lambda config, args: _secretary(config, args, "scan"))
+    actions.add_parser("replay", help="compare a recomputation without changing saved records").set_defaults(
+        handler=lambda config, args: _secretary(config, args, "replay"))
+    show = actions.add_parser("show", help="inspect one principal and render visible source excerpts")
+    show.add_argument("--source", dest="source_key")
+    show.set_defaults(handler=lambda config, args: _secretary(config, args, "show"))
+    cancel = actions.add_parser("cancel", help="explicitly cancel an expectation with a reason")
+    cancel.add_argument("expectation_id")
+    cancel.add_argument("--reason", required=True)
+    cancel.set_defaults(handler=lambda config, args: _secretary(config, args, "cancel"))
+
+
+def _secretary(config: Config, args: argparse.Namespace, action: str) -> dict:
+    from baton import secretary
+
+    if action == "scan":
+        return secretary.scan(config, args.state, args.policy, limit=args.limit)
+    if action == "replay":
+        return secretary.replay(config, args.state, args.policy)
+    if action == "show":
+        return secretary.show(config, args.state, args.policy, source_key=args.source_key)
+    return secretary.cancel(config, args.state, args.policy, args.expectation_id, args.reason)
 
 
 def _add_owner_alias_commands(commands: Any) -> None:

@@ -225,6 +225,10 @@ The data directory contains the following. Protect backups as carefully as the l
 - `audit.jsonl`: call time, credential and effective roles, credential identifier, tool, relevant IDs,
   outcome, and any alias ID and code. It excludes message text, job bodies, passphrases, and credentials.
   Malformed secret-bearing calls are refused before validation can echo their input.
+- An optional `0600` secretary state file holds source references, digests, bounded metadata, expectations,
+  dispositions, and append-only brief versions. It stores no message text. `show` reads excerpts from
+  `baton.db` at inspection time and rechecks the principal's visibility. This local projection cannot grant
+  authority, approve work, advance a delivery cursor, or send a wake.
 
 The host's stderr logs record events such as registration, consent outcomes, and wake failures without
 message text or secrets. Operator-configured webhook signing secrets are read from named environment
