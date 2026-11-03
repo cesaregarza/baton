@@ -258,8 +258,8 @@ can also send replies.
 ## Storage
 
 The host uses one SQLite database in WAL mode. Writes use `BEGIN IMMEDIATE` transactions to serialize
-dependent updates across the server, CLI, and dispatcher. This revision uses schema 18 and upgrades
-schemas 2 through 17 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
+dependent updates across the server, CLI, and dispatcher. This revision uses schema 19 and upgrades
+schemas 2 through 18 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
 
 The upgrade creates topic records for existing conversation topic paths and any missing parents. It derives
 each topic's members from participants in conversations filed directly there, excluding `guest`. A topic
@@ -272,14 +272,18 @@ the upgrade rather than being discarded.
 |---|---|
 | Messages, mailboxes, topics, conversations, participants | Retained copies, delivery positions, topic metadata, and conversation membership. |
 | Jobs, job moves, events, cursors, wakes | Job state and history, event delivery, wake status, and retry records. |
-| Aliases, bindings, mappings | Alias continuity, digests of live proofs, and enrolled-role mappings. |
+| Aliases, bindings, mappings, rekeys | Alias continuity, digests of live proofs, enrolled-role mappings, and when each armed rekey replaced a verifier. Neither verifier is kept. |
 | Topic grants and their events | Owner grants on topics: their terms and digests, hashes of their keys, revocations, and a log. Keys are never stored. |
 | Reference documents and revisions | Text kept with topics, by topic id: every revision of every document, with who wrote it, under which grant, and its retry identity. Never edited or deleted. |
 | Change log, generations, batches, artifacts, vectors | Optional indexing state and producer-supplied derived data. |
-| Seat sessions, receipts, requests | Optional browser-seat session and delivery state. |
+| Seat sessions, login forms, receipts, requests | Optional browser-seat session and delivery state. A row that ends (used, evicted at a cap, logged out, lapsed, or expired) is kept with when and how it ended, and refused by that. |
+| MCP Events records | Each wake's first occurrence time and per-destination outcomes, every delivery receipt, and when each signing secret was rotated, never the secret. None is pruned. |
 
 OAuth state is stored separately in a `0600` JSON file, atomically replaced after writing and syncing a
-unique temporary file. Integrations keep their own state under the data directory. Baton checks the data
+unique temporary file. Revoked and spent tokens stay in it, marked. A client registration left unused for 24
+hours is the one record deleted, by the next write. An entry 30 days past its end moves to the append-only
+`oauth-ended.jsonl`, synced before the file is rewritten without it. Integrations keep their own state under
+the data directory; MCP Events keeps only its subscriptions there and its records in the database. Baton checks the data
 directory and its contents for unsafe ownership, permissions, and links; see
 [Security: the data directory](../SECURITY.md#the-data-directory) for the exact boundary and limitations.
 

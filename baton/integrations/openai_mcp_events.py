@@ -37,7 +37,9 @@ Defences, all of them on every request:
 Retries, backoff, coalescing and `baton wakes` stay in the core. `deliver`
 keeps an outcome for each (wake, subscription): a destination that answered
 2xx, 410 or 413 is done with that wake, and the wake counts as delivered only
-when every live destination is done and at least one accepted it.
+when every live destination is done and at least one accepted it. Outcomes,
+occurrence times, delivery receipts and a record of each secret rotation live
+in the host database and are never pruned; the state file holds subscriptions.
 """
 
 from __future__ import annotations
@@ -72,9 +74,9 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver import MCPServer
 from mcp.shared.exceptions import MCPError
 
-from baton import aliases, auth, datadir, wakes
+from baton import aliases, auth, datadir
 from baton.config import Config, ConfigError
-from baton.store import connect
+from baton.store import connect, transaction
 
 log = logging.getLogger("baton.integrations.openai_mcp_events")
 
@@ -91,8 +93,8 @@ RESOLVER_QUEUE = 4
 # Answers after which a destination is done with a wake: accepted, gone, or a body it will never take.
 FINAL_STATUSES = (410, 413)
 FINAL_OUTCOMES = ("accepted", "gone", "too_large")
-# Delivery receipts outlive a wake's outcomes, which go once the core finishes the wake, so an owner can match
-# one with what a client saw (`status`). Bounded both ways.
+# Every delivery attempt leaves a receipt, kept for good. `status` shows an owner the recent ones, to match with
+# what a client saw: those of the last RECEIPT_SECONDS, newest MAX_RECEIPTS of them.
 RECEIPT_SECONDS = 3 * 86400
 MAX_RECEIPTS = 500
 # The fields of a core wake that may appear in an event. Anything else stays out.
@@ -379,9 +381,13 @@ class McpEvents:
             self._check_rotation(state, sub_id, secret)
             existing = state["subscriptions"].get(sub_id)
             if existing and existing["secret"] != secret:
-                # A rotation: the replaced secret is the only previous one, for one overlap window.
+                # A rotation: the replaced secret is the only previous one, for one overlap window. Only the rotation
+                # is recorded, never a secret, and before the file is written: a failed write over-records.
                 previous = [{"secret": existing["secret"], "until": now + self.settings.rotation_overlap_seconds}]
                 rotated_at = now
+                with self._db() as conn:
+                    conn.execute("INSERT INTO events_rotations (subscription, owner, at) VALUES (?, ?, ?)",
+                                 (sub_id, owner, now))
             else:
                 previous = [p for p in (existing or {}).get("previous_secrets", [])[:1]
                             if p["until"] > now and p["secret"] != secret]
@@ -569,33 +575,45 @@ class McpEvents:
         return [sub["secret"], *previous]
 
     def _occurrence(self, wake_id: str) -> str:
-        """When the host first handled this wake; every retry carries the same time."""
-        with self._state() as state:
-            entry = state["outcomes"].setdefault(wake_id, {"at": time.time(), "destinations": {}})
-            return datetime.fromtimestamp(entry["at"], UTC).isoformat()
+        """When the host first handled this wake; every retry carries the same time. Its state pass drops expired
+        subscriptions and replaced secrets, as every delivery always has."""
+        with self._state(), self._db() as conn:
+            conn.execute("INSERT OR IGNORE INTO events_occurrences (wake_id, at) VALUES (?, ?)", (wake_id, time.time()))
+            at = conn.execute("SELECT at FROM events_occurrences WHERE wake_id = ?", (wake_id,)).fetchone()["at"]
+        return datetime.fromtimestamp(at, UTC).isoformat()
 
     def _outcomes(self, wake_id: str) -> dict[str, str]:
-        return self._read()["outcomes"].get(wake_id, {}).get("destinations", {})
+        conn = connect(self.config.db_path)
+        try:
+            return {row["subscription"]: row["outcome"] for row in conn.execute(
+                "SELECT subscription, outcome FROM events_outcomes WHERE wake_id = ?", (wake_id,))}
+        finally:
+            conn.close()
 
     def _record(self, wake_id: str, sub: dict[str, Any], outcome: str) -> None:
-        """A final outcome, which ends this wake for this destination; every outcome is also a receipt."""
-        with self._state() as state:
+        """A final outcome, which ends this wake for this destination and is never replaced; every outcome is also a
+        receipt. Both are kept."""
+        now = time.time()
+        with self._state(), self._db() as conn:
             if outcome in FINAL_OUTCOMES:
-                entry = state["outcomes"].setdefault(wake_id, {"at": time.time(), "destinations": {}})
-                entry["destinations"][sub["id"]] = outcome
-            state["receipts"] = _recent([*state["receipts"], {
-                "at": time.time(), "wake_id": wake_id, "subscription": sub["id"], "owner": _shown_owner(sub),
-                "outcome": outcome}])
+                conn.execute("INSERT OR IGNORE INTO events_occurrences (wake_id, at) VALUES (?, ?)", (wake_id, now))
+                conn.execute("INSERT OR IGNORE INTO events_outcomes (wake_id, subscription, outcome) VALUES (?, ?, ?)",
+                             (wake_id, sub["id"], outcome))
+            conn.execute("INSERT OR IGNORE INTO events_receipts (at, wake_id, subscription, owner, outcome)"
+                         " VALUES (?, ?, ?, ?, ?)", (now, wake_id, sub["id"], _shown_owner(sub), outcome))
 
     def _deactivate(self, sub_id: str) -> None:
         with self._state() as state:
             if sub_id in state["subscriptions"]:
                 state["subscriptions"][sub_id] = {**state["subscriptions"][sub_id], "active": False}
 
-    def _finished_wakes(self) -> set[str]:
+    @contextmanager
+    def _db(self) -> Iterator[Any]:
+        """One transaction on the host database. Always taken inside the state lock, never around it."""
         conn = connect(self.config.db_path)
         try:
-            return wakes.finished_ids(conn)
+            with transaction(conn):
+                yield conn
         finally:
             conn.close()
 
@@ -607,29 +625,38 @@ class McpEvents:
 
     @contextmanager
     def _state(self) -> Iterator[dict[str, Any]]:
-        """Read, change and write the state file under an exclusive lock; expired entries are dropped."""
+        """Read, change and write the state file under an exclusive lock; expired subscriptions and replaced secrets
+        past their overlap are dropped."""
         directory = self.config.data_dir
         with datadir.opened(directory) as dir_fd:
             lock = datadir.open_file(dir_fd, LOCK_FILE, os.O_RDWR | os.O_CREAT, directory=directory)
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 found = datadir.read_file(dir_fd, STATE_FILE, directory=directory)
-                state = _shape(json.loads(found[1]) if found else {})
+                stored = json.loads(found[1]) if found else {}
+                if stored.get("receipts") or stored.get("outcomes"):
+                    self._import(stored)
+                state = _shape(stored)
                 now = time.time()
                 state["subscriptions"] = {key: sub for key, sub in state["subscriptions"].items() if _unexpired(sub)}
                 for sub in state["subscriptions"].values():
                     sub["previous_secrets"] = [p for p in sub.get("previous_secrets", []) if p["until"] > now]
-                state["receipts"] = _recent(state["receipts"])
-                if state["outcomes"]:
-                    # A wake's outcomes and occurrence time live exactly as long as the core wake: they are
-                    # dropped once the core reports it delivered, failed or superseded, and not before.
-                    finished = self._finished_wakes()
-                    state["outcomes"] = {key: entry for key, entry in state["outcomes"].items()
-                                         if key not in finished}
                 yield state
                 datadir.replace_file(dir_fd, STATE_FILE, json.dumps(state).encode())
             finally:
                 os.close(lock)
+
+    def _import(self, stored: dict[str, Any]) -> None:
+        """Copy the receipts and outcomes an earlier version kept in the state file into their tables. The rewrite
+        that follows leaves them out of the file; a crash before it imports them again, which the tables ignore."""
+        with self._db() as conn:
+            for wake_id, entry in stored.get("outcomes", {}).items():
+                conn.execute("INSERT OR IGNORE INTO events_occurrences (wake_id, at) VALUES (?, ?)",
+                             (wake_id, entry["at"]))
+                conn.executemany("INSERT OR IGNORE INTO events_outcomes (wake_id, subscription, outcome)"
+                                 " VALUES (?, ?, ?)", [(wake_id, *pair) for pair in entry["destinations"].items()])
+            conn.executemany("INSERT OR IGNORE INTO events_receipts (at, wake_id, subscription, owner, outcome)"
+                             " VALUES (:at, :wake_id, :subscription, :owner, :outcome)", stored.get("receipts", []))
 
     def with_settings(self, **changes: Any) -> McpEvents:
         """A copy with changed settings (used by tests)."""
@@ -660,7 +687,7 @@ def _owner_of(sub: dict[str, Any]) -> str:
 
 
 def _recent(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The receipts inside the window, newest MAX_RECEIPTS of them; applied on every write and on display."""
+    """The receipts `status` shows: those inside the window, newest MAX_RECEIPTS of them, oldest first."""
     since = time.time() - RECEIPT_SECONDS
     return [receipt for receipt in receipts if receipt["at"] > since][-MAX_RECEIPTS:]
 
@@ -674,10 +701,19 @@ def status(config: Config) -> dict[str, Any]:
     directory = config.data_dir
     with datadir.opened(directory) as dir_fd:
         found = datadir.read_file(dir_fd, STATE_FILE, directory=directory)
-    state = _shape(json.loads(found[1]) if found else {})
+    stored = json.loads(found[1]) if found else {}
+    conn = connect(config.db_path)
+    try:
+        kept = [dict(row) for row in conn.execute(
+            "SELECT at, wake_id, subscription, owner, outcome FROM events_receipts WHERE at > ? ORDER BY at DESC"
+            " LIMIT ?", (time.time() - RECEIPT_SECONDS, MAX_RECEIPTS))]
+    finally:
+        conn.close()
+    # With receipts still in a state file that no write has passed through since the upgrade, until one moves them.
+    receipts = {(r["wake_id"], r["subscription"], r["at"]): r for r in [*stored.get("receipts", []), *kept]}
     return {"subscriptions": [{"id": sub["id"], "owner": _shown_owner(sub), "expires_at": sub["expires_at"],
-                               "active": sub["active"]} for sub in state["subscriptions"].values()],
-            "receipts": _recent(state["receipts"])}
+                               "active": sub["active"]} for sub in _shape(stored)["subscriptions"].values()],
+            "receipts": _recent(sorted(receipts.values(), key=lambda receipt: receipt["at"]))}
 
 
 async def _advertise_events(ctx: Any, call_next: Any) -> Any:
@@ -689,8 +725,7 @@ async def _advertise_events(ctx: Any, call_next: Any) -> Any:
 
 
 def _shape(state: dict[str, Any]) -> dict[str, Any]:
-    return {"subscriptions": state.get("subscriptions", {}), "outcomes": state.get("outcomes", {}),
-            "receipts": state.get("receipts", [])}
+    return {"subscriptions": state.get("subscriptions", {})}
 
 
 def _valid_secret(secret: str) -> bool:

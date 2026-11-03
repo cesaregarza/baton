@@ -77,7 +77,7 @@ def test_a_change_to_the_credential_ends_its_sessions(seat_host, tmp_path: Path,
     assert response.status in (303, 401)
     assert b"/seat/login" in response.body or response.headers.get("Location") == "/seat/login"
     conn = sqlite3.connect(seat_host.config.db_path)
-    assert conn.execute("SELECT COUNT(*) FROM seat_sessions").fetchone()[0] == 0
+    assert conn.execute("SELECT end_reason FROM seat_sessions").fetchall() == [("lapsed",)], "kept, and ended by state"
 
 
 def test_a_session_cookie_sent_before_login_is_never_adopted(seat_host) -> None:

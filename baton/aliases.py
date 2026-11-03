@@ -159,6 +159,7 @@ def _reset(conn: sqlite3.Connection, config: Config, name: str, passphrase: str,
             return None
         row = conn.execute("SELECT * FROM aliases WHERE name = ?", (name,)).fetchone()
         conn.execute("UPDATE aliases SET verifier = ? WHERE id = ?", (auth.hash_passphrase(passphrase), row["id"]))
+        conn.execute("INSERT INTO alias_rekeys (alias_id, at) VALUES (?, ?)", (row["id"], now))  # neither verifier
         conn.execute("DELETE FROM alias_bindings WHERE alias_id = ?", (row["id"],))
         return _bind(conn, config, row, now)
 
