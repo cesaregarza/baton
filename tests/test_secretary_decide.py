@@ -25,8 +25,13 @@ def _decide(world, **options) -> dict:
 
 
 def _after(result: dict, **options) -> dict:
-    """The baseline a caller passes once a brief was delivered or nothing was: the same floor and since."""
+    """The baseline a caller passes when nothing was delivered: the same floor and since."""
     return {"since": result["since"], "floor": result["floor"], **options}
+
+
+def _delivered(result: dict, **options) -> dict:
+    """The baseline a caller passes once the result's brief or digest was delivered: since moves to what it covered."""
+    return {"since": result["covered_through"], "floor": result["floor"], **options}
 
 
 def _direct(world, text: str) -> tuple[dict, str]:
@@ -113,6 +118,29 @@ def test_items_before_activation_never_wake_and_are_only_counted(tmp_path) -> No
         assert "1 opened before activation" in digest["brief"]
 
 
+def test_a_first_decision_killed_mid_scan_leaves_its_retry_the_same_activation_floor(tmp_path, monkeypatch) -> None:
+    """The host's timeout can kill the first decide after a scan batch committed. Baton's retry must keep the floor
+    where the catch-up stopped, or the owed message that batch scanned would count as before activation."""
+    with make_world(tmp_path) as world:
+        activation = secretary.scan(world.config, world.state_path, world.policy_path, limit=1000)["through_pos"]
+        sent, trigger = _direct(world, "Please decide")
+        scan = secretary.scan
+
+        def scan_then_killed(*args, **kwargs) -> None:
+            scan(*args, **kwargs)  # the batch commits with its position
+            raise TimeoutError("killed by the host's timeout")
+
+        monkeypatch.setattr(secretary, "scan", scan_then_killed)
+        with pytest.raises(TimeoutError):
+            _decide(world, trigger=trigger)
+        monkeypatch.undo()
+        retry = _decide(world, trigger=trigger)
+        assert retry["floor"] == retry["since"] == activation
+        assert (retry["decision"], retry["evidence"]) == ("wake", f"message:{sent['message_id']}")
+        digest = _decide(world, **_after(retry, hourly=True))
+        assert sent["message_id"] in digest["brief"] and "0 opened before activation" in digest["brief"]
+
+
 def test_job_events_never_wake_unless_the_policy_key_allows(tmp_path) -> None:
     with make_world(tmp_path) as world:
         _catch_up(world)
@@ -173,9 +201,9 @@ def test_uncertain_item_is_held_and_tagged_with_its_evidence_id(tmp_path) -> Non
         assert line.startswith(f"- hold, uncertain, evidence message:{ambiguous['message_id']}:")
 
 
-def test_brief_bound_drops_whole_items_from_the_end_awaited_first(tmp_path) -> None:
+def test_brief_bound_keeps_the_oldest_whole_items_and_lists_the_most_pressing_first(tmp_path) -> None:
     with make_world(tmp_path) as world:
-        policy(world, brief_bytes=512)
+        policy(world, brief_bytes=768)
         room = conversation(world)
         _catch_up(world)
         asks = [say(world, room, "planner", f"Please check {index}", attention=["worker"]) for index in range(2)]
@@ -183,12 +211,35 @@ def test_brief_bound_drops_whole_items_from_the_end_awaited_first(tmp_path) -> N
         owed = [_direct(world, f"Please decide {index}")[0] for index in range(5)]
         result = _decide(world, trigger=f"message:{answers[0]['seqs']['planner']}")
         brief = result["brief"]
-        assert result["decision"] == "wake" and len(brief.encode()) <= 512
-        shown = _lines(brief)
-        assert 0 < len(shown) < len(answers) + len(owed)
-        assert all(any(sent["message_id"] in line for sent in owed) for line in shown)
-        assert f"{len(answers) + len(owed) - len(shown)} more not shown" in brief
-        assert all(line.endswith("(principal owes a response)") for line in shown)
+        assert result["decision"] == "wake" and len(brief.encode()) <= 768
+        # In stream order: the two answers the principal awaited, then five messages it owes a response to.
+        stream = [sent["message_id"] for sent in answers + owed]
+        listed = [next(message_id for message_id in stream if message_id in line) for line in _lines(brief)]
+        assert 2 < len(listed) < len(stream)
+        assert sorted(listed, key=stream.index) == stream[:len(listed)]  # the oldest, as whole lines
+        assert listed == stream[2:len(listed)] + stream[:2]  # what the principal owes before what it awaited
+        assert f"{len(stream) - len(listed)} more not shown (bound 768 bytes)" in brief
+        position = {item["message_id"]: item["pos"] for item in result["new"]}
+        assert result.get("covered_through") == position[stream[len(listed)]] - 1  # just before the first left out
+
+
+def test_what_a_bounded_brief_leaves_out_comes_in_the_next_digest_and_never_twice(tmp_path) -> None:
+    """30 owed messages overflow the default 2,048-byte brief. Once it is delivered, the next digest lists exactly
+    the ones it left out, and once that digest is delivered, none of them comes again."""
+    with make_world(tmp_path) as world:
+        _catch_up(world)
+        sent = [_direct(world, f"Please decide {index}") for index in range(30)]
+        owed = [message["message_id"] for message, _ in sent]
+        brief = _decide(world, trigger=sent[0][1])
+        shown = [message_id for message_id in owed if message_id in brief["brief"]]
+        assert brief["decision"] == "wake" and len(brief["brief"].encode()) <= 2048
+        assert 0 < len(shown) < len(owed) and shown == owed[:len(shown)]
+        position = {item["message_id"]: item["pos"] for item in brief["new"]}
+        assert brief.get("covered_through") == position[owed[len(shown)]] - 1
+        digest = _decide(world, **_delivered(brief, hourly=True))
+        assert [message_id for message_id in owed if message_id in digest["brief"]] == owed[len(shown):]
+        after = _decide(world, **_delivered(digest, hourly=True))
+        assert not any(message_id in after["brief"] for message_id in owed)
 
 
 def test_digest_never_cites_a_source_the_principal_can_no_longer_see(tmp_path) -> None:
