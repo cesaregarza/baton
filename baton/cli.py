@@ -154,11 +154,18 @@ def _add_secretary_commands(commands: Any) -> None:
     cancel.add_argument("expectation_id")
     cancel.add_argument("--reason", required=True)
     cancel.set_defaults(handler=lambda config, args: _secretary(config, args, "cancel"))
+    from baton import secretary_decide  # one set of options for this and its faster `python -m` entry point
+
+    decide = actions.add_parser("decide", help="decide wake, hold or keep for one wake, or digest for the hour")
+    secretary_decide.add_arguments(decide)
+    decide.set_defaults(handler=lambda config, args: _secretary(config, args, "decide"))
 
 
 def _secretary(config: Config, args: argparse.Namespace, action: str) -> dict:
-    from baton import secretary
+    from baton import secretary, secretary_decide
 
+    if action == "decide":
+        return secretary_decide.decide(config, args.state, args.policy, **secretary_decide.options(args))
     if action == "scan":
         return secretary.scan(config, args.state, args.policy, limit=args.limit)
     if action == "replay":
