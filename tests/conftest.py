@@ -6,14 +6,14 @@ import json
 import socket
 import sqlite3
 import textwrap
-import threading
-import time
 from collections.abc import Callable, Iterator
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 import uvicorn
+from server_support import running_server
 
 from baton import config as config_module
 from baton.auth import hash_passphrase, new_token
@@ -103,7 +103,7 @@ def start_host(tmp_path: Path) -> Iterator[Callable[..., Host]]:
     """Start a real host on a free port; it stops when the test ends."""
     from baton.app import create_app
 
-    servers: list[uvicorn.Server] = []
+    servers = ExitStack()
 
     def start(integrations: Callable[[Config], dict] | None = None, **kwargs: object) -> Host:
         """`integrations`, when given, builds the integrations the app uses from the host's config."""
@@ -112,13 +112,9 @@ def start_host(tmp_path: Path) -> Iterator[Callable[..., Host]]:
         host.integrations = integrations(host.config) if integrations else None
         server = uvicorn.Server(uvicorn.Config(create_app(host.config, host.integrations), host="127.0.0.1",
                                                port=port, log_level="warning"))
-        threading.Thread(target=server.run, daemon=True).start()
-        while not server.started:
-            time.sleep(0.02)
-        servers.append(server)
+        servers.enter_context(running_server(server))
         host.base = f"http://127.0.0.1:{port}"
         return host
 
-    yield start
-    for server in servers:
-        server.should_exit = True
+    with servers:
+        yield start
