@@ -423,6 +423,30 @@ def test_replay_reuses_the_stored_verdicts_and_never_asks_again(tmp_path) -> Non
         assert len(judge.requests) == 1
 
 
+def test_each_decision_names_its_wakes_own_item_and_counts_what_the_judge_decided(tmp_path) -> None:
+    with make_world(tmp_path) as world:
+        Judge(world, tmp_path, {"when": "fails", "exit": 1},
+              {"when": "asks", "reply": {**NOTHING, "opens_owed": 0.9, "needs_now": 0.9}})
+        _catch_up(world)
+        failed, trigger = _direct(world, "This fails")
+        _direct(world, "This asks for a review")
+        first = _decide(world, trigger=trigger)
+        assert first.get("trigger_item") == _item(first, failed)
+        assert first["trigger_item"]["judge"] == "judge_fallback:error"
+        assert first["counts"] == {"wake": 2, "hold": 0, "keep": 0}
+        assert first.get("judged_counts") == {"wake": 1, "hold": 0, "keep": 0}
+        # A reminder decides the same wake again: its message is no longer new, and the result still names it.
+        again = _decide(world, **_after(first, trigger=trigger))
+        assert again["new"] == [] and again.get("trigger_item") == first["trigger_item"]
+        assert again.get("judged_counts") == first["judged_counts"]
+        # Past the window, or for a wake that names no message, there is no such item.
+        past = _decide(world, since=first["through_pos"], floor=first["floor"], trigger=trigger)
+        assert past.get("trigger_item", "absent") is None
+        assert past.get("judged_counts") == {"wake": 0, "hold": 0, "keep": 0}
+        assert _decide(world, **_after(first, trigger="conversation")).get("trigger_item", "absent") is None
+        assert _decide(world, **_after(first, hourly=True)).get("trigger_item", "absent") is None
+
+
 def test_a_principal_direct_message_awaits_its_recipient_unless_it_answers_them(tmp_path) -> None:
     with make_world(tmp_path) as world:
         judge = Judge(world, tmp_path, {"when": "All green", "reply": {**NOTHING, "relation": "answers", "item": 0}})
