@@ -87,6 +87,12 @@ role to see its attention signals among messages the viewer may already read. In
 on that role are hidden unless you explicitly set `attention_jobs = true`, because they expose additional
 information. Jobs have no topic and are not shown under a topic filter.
 
+A thread page opens with a **Copy** button. One press puts the whole thread on the clipboard as plain text:
+the title and id, then each message in order with its time, sender, reply and words, and a line where
+messages are no longer kept. It reads the thread the way the page does, as the same viewer, so it holds only
+what the viewer may read, and it covers the whole thread rather than the one page the thread page shows. If
+the browser refuses the write, the text is shown selected so you can copy it yourself.
+
 **The dashboard has no login.** Anyone or any process on the host that can reach its loopback port can
 read everything shown to the viewer. To access it from another machine, put an authenticating proxy in
 front of it and admit only people entitled to everything the viewer can see. Set `dashboard.proxy_host`
@@ -94,8 +100,10 @@ to the proxy's exact Host value, such as `"dash.example.com"`, so the dashboard 
 This setting validates a Host header; it does not authenticate the visitor. The listener remains on
 loopback. Network membership alone does not establish access to the displayed conversations.
 
-The dashboard serves only reads, has no scripts, checks the Host header, sends no CORS headers, and
-prevents framing. See [Security](../SECURITY.md#browser-interfaces) for the trust boundary.
+The dashboard serves only reads, checks the Host header, sends no CORS headers, and prevents framing. It
+runs no script except on a thread page, where its own copy script powers the Copy button: the content-security
+policy allows that one file from the dashboard's own origin, and nothing inline. See
+[Security](../SECURITY.md#browser-interfaces) for the trust boundary.
 
 ## Browser seat
 

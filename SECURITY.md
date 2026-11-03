@@ -141,8 +141,9 @@ topic or its subtopics. This differs from the MCP `list_topics` and `get_topic` 
 metadata to callers with read scope, as described under [Guest access](#guest-access).
 
 The dashboard accepts reads only, checks the Host header, sends no CORS headers, prevents framing, and
-serves script-free pages with a restrictive content-security policy. These protections do not make a local
-port private from other users or processes on the machine.
+serves pages under a restrictive content-security policy that allows no script, except that a thread page may
+load the dashboard's own copy script, for its Copy button, and fetch the thread's text from the same origin.
+These protections do not make a local port private from other users or processes on the machine.
 
 The optional human seat has a login and also binds to loopback. An HTTPS proxy must terminate TLS at its
 configured origin. The seat uses the person's bearer token for login, keeps a credential-bound session

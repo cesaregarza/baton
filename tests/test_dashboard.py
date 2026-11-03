@@ -33,6 +33,8 @@ GROUP = ["orchestrator", "reviewer", "operator"]
 OTHERS = ["orchestrator", "assistant"]
 WAKE = {"wake": {"command": ["true"]}}
 PAYLOAD = '<script>alert(1)</script><img src=x onerror="alert(2)">'
+# The one script a thread page loads: the dashboard's own file, for its Copy button. No other page loads any.
+COPY_SCRIPT = '<script src="/copy.js" defer></script>'
 
 
 def view_config(tmp_path: Path, *, view_all: bool = False, dashboard_table: dict[str, Any] | None = None,
@@ -255,7 +257,7 @@ def test_message_text_title_and_relayed_words_render_inert(tmp_path) -> None:
     finally:
         conn.close()
     for target in ("/", f"/c/{cid}"):
-        body = text(get(config, target))
+        body = text(get(config, target)).replace(COPY_SCRIPT, "")
         assert "<script" not in body and "<img" not in body
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
 
@@ -270,7 +272,8 @@ def test_every_response_carries_a_strict_csp_and_the_pages_load_nothing_from_els
         policy = response.headers["Content-Security-Policy"]
         directives = dict(part.strip().split(" ", 1) for part in policy.split(";") if part.strip())
         assert directives["default-src"] == "'none'"
-        assert directives.get("script-src", "'none'") == "'none'"
+        # Only the thread page may run a script, and then only the dashboard's own (see test_dashboard_copy).
+        assert directives.get("script-src", "'none'") == ("'self'" if response is responses[1] else "'none'")
         assert directives["style-src"] == "'self'"
         assert directives["frame-ancestors"] == "'none'"
         assert directives["form-action"] == "'none'"
@@ -279,7 +282,7 @@ def test_every_response_carries_a_strict_csp_and_the_pages_load_nothing_from_els
         assert response.headers["Cache-Control"] == "no-store"
         assert response.headers["Referrer-Policy"] == "no-referrer"
     for response in responses[:2]:
-        body = text(response)
+        body = text(response).replace(COPY_SCRIPT, "")
         assert "<script" not in body and "<form" not in body and "<textarea" not in body
         links = re.findall(r"""(?:src|href)\s*=\s*["']?([^"'\s>]*)""", body)
         assert links and all(link.startswith("/") and not link.startswith("//") for link in links), links
