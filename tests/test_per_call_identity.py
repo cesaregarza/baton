@@ -13,8 +13,8 @@ from conftest import make_config
 from test_aliases import dispatch, payload, rpc
 from test_messages import rid
 
-from baton import app as app_module
 from baton import auth, cli, store
+from baton.app import guard
 
 SECRET = "synthetic enrol secret"
 OTHER = "synthetic other secret"
@@ -241,7 +241,7 @@ def test_audit_lines_carry_both_identities_and_never_the_proof(host):
 
 
 def test_mapped_calls_use_the_effective_roles_hourly_budget(host, monkeypatch):
-    monkeypatch.setattr(app_module, "HOURLY_LIMITS", {auth.SCOPE_READ: 3, auth.SCOPE_WRITE: 300})
+    monkeypatch.setattr(guard, "HOURLY_LIMITS", {auth.SCOPE_READ: 3, auth.SCOPE_WRITE: 300})
 
     async def scenario(client):
         await enrol(client, host)

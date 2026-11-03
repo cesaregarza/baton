@@ -17,7 +17,7 @@ from test_dashboard_pages import MINE, THEIRS, get, made, page_config
 
 from baton import conversations, dashboard, messages
 from baton.config import Config
-from baton.store import connect
+from baton.store import connect, transaction
 
 HEADER = "Thread: {title}\nId: {cid}\n\n"
 
@@ -217,6 +217,26 @@ def test_a_host_notice_is_copied_in_the_words_the_page_gives_it_at_its_place_in_
     in_order(copied, ["before the notices", lines[0], lines[1], "after the notices"])
 
 
+def test_a_topic_move_notice_has_the_same_words_in_the_page_and_copy(tmp_path) -> None:
+    config = page_config(tmp_path)
+    cid = open_thread(config, "Moved thread")
+    words = f"alias {PAYLOAD} moved this thread from alpha to beta"
+    conn = connect(config.db_path)
+    try:
+        with transaction(conn):
+            conversations._fan_out(conn, cid, MINE, sender=None, text=words,
+                                   notice={"event": "topic_moved", "from": "alpha", "to": "beta",
+                                           "by": "orchestrator"})
+    finally:
+        conn.close()
+    page = text(get(config, f"/c/{cid}"))
+    [notice] = Shown(page).notices
+    assert notice["words"].rstrip(" ·") == words
+    assert PAYLOAD not in page, "the page must escape the notice's words"
+    assert copy_of(config, cid) == (HEADER.format(title="Moved thread", cid=cid)
+                                   + f"#1 · {notice['at']} · notice: {words}\n")
+
+
 def test_a_thread_with_nothing_in_it_says_so_as_the_page_does(tmp_path) -> None:
     config = page_config(tmp_path)
     cid = open_thread(config, "Quiet")
@@ -263,6 +283,19 @@ def test_messages_no_longer_kept_are_named_where_they_were_and_once(tmp_path) ->
                       "Message #5 is no longer kept."])
     assert copied.count("no longer kept") == 2
     assert "second note" not in copied and "fifth note" not in copied
+
+
+def test_a_copy_keeps_the_gap_when_no_messages_remain(tmp_path) -> None:
+    config = page_config(tmp_path)
+    cid = open_thread(config, "Expired thread")
+    say(config, cid, "orchestrator", "an expired message")
+    conn = connect(config.db_path)
+    try:
+        conn.execute("DELETE FROM messages WHERE conversation_id = ?", (cid,))
+    finally:
+        conn.close()
+    assert copy_of(config, cid) == (HEADER.format(title="Expired thread", cid=cid)
+                                   + "Message #1 is no longer kept.\n")
 
 
 # 3. What the viewer cannot see is never copied ------------------------------------------------------------

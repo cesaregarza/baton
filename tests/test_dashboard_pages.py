@@ -18,14 +18,9 @@ from test_dashboard import PAYLOAD, snapshot, text
 from topic_backing import back_topics
 
 from baton import config as config_module
-from baton import conversations, jobs
+from baton import conversations, dashboard, jobs
 from baton.config import Config, ConfigError
 from baton.store import connect
-
-try:
-    from baton import dashboard
-except ImportError:  # written before the module: each test then fails on its own instead of the whole run stopping
-    dashboard = None  # type: ignore[assignment]
 
 MINE = ["orchestrator", "reviewer", "operator"]
 THEIRS = ["orchestrator", "assistant"]

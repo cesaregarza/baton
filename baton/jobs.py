@@ -100,24 +100,27 @@ def get(conn: sqlite3.Connection, job_id: str) -> dict[str, Any]:
 def list_jobs(conn: sqlite3.Connection, *, state: str | None = None, waiting_on: str | None = None,
               limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
     """Recent jobs, newest first, without their bodies."""
-    query, params = "SELECT * FROM jobs WHERE 1 = 1", []
-    for column, value in (("state", state), ("waiting_on", waiting_on)):
-        if value is not None:
-            query += f" AND {column} = ?"
-            params.append(value)
-    rows = conn.execute(query + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-                        (*params, max(1, min(limit, 200)), max(0, offset))).fetchall()
-    return [{key: value for key, value in _as_dict(row).items() if key != "body"} for row in rows]
+    where, params = _filters(state, waiting_on)
+    query = ("SELECT id, title, state, waiting_on, revision, created_by, created_at, updated_at"
+             f" FROM jobs WHERE {where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
+    rows = conn.execute(query, (*params, max(1, min(limit, 200)), max(0, offset))).fetchall()
+    return [dict(row) for row in rows]
 
 
 def count_jobs(conn: sqlite3.Connection, *, state: str | None = None, waiting_on: str | None = None) -> int:
     """How many jobs `list_jobs` would match with no limit."""
-    query, params = "SELECT COUNT(*) FROM jobs WHERE 1 = 1", []
+    where, params = _filters(state, waiting_on)
+    return conn.execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", params).fetchone()[0]
+
+
+def _filters(state: str | None, waiting_on: str | None) -> tuple[str, list[str]]:
+    """The optional filters shared by job lists and counts."""
+    where, params = "1 = 1", []
     for column, value in (("state", state), ("waiting_on", waiting_on)):
         if value is not None:
-            query += f" AND {column} = ?"
+            where += f" AND {column} = ?"
             params.append(value)
-    return conn.execute(query, params).fetchone()[0]
+    return where, params
 
 
 def read_events(conn: sqlite3.Connection, job_id: str, after_seq: int = 0, limit: int = 50) -> dict[str, Any]:

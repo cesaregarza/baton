@@ -32,7 +32,6 @@ a job.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -52,37 +51,16 @@ from baton.errors import (
     UnknownRole,
 )
 from baton.store import snapshot, transaction
+from baton.topic_paths import MAX_TOPIC_SEGMENT as MAX_TOPIC_SEGMENT
+from baton.topic_paths import MAX_TOPIC_SEGMENTS as MAX_TOPIC_SEGMENTS
+from baton.topic_paths import TOPIC_SEGMENT as TOPIC_SEGMENT
+from baton.topic_paths import check_topic as check_topic
 
 MAX_TITLE = 200
 MIN_PARTICIPANTS = 2
 RATE_WINDOW = timedelta(hours=1)
-# A topic is one or two lowercase slug segments: `project` or `project/subtopic`. A segment is lowercase
-# ASCII letters, digits and inner hyphens, so it can never carry a SQL LIKE metacharacter and a prefix
-# filter is safe to match literally. It is a label for people, separate from the conversation's id.
 # The most conversations one list_for or list_all call returns.
 MAX_LISTED = 200
-MAX_TOPIC_SEGMENT = 40
-MAX_TOPIC_SEGMENTS = 2
-TOPIC_SEGMENT = re.compile(rf"[a-z0-9](?:[a-z0-9-]{{0,{MAX_TOPIC_SEGMENT - 2}}}[a-z0-9])?")
-
-
-def check_topic(topic: Any, field: str = "topic") -> str | None:
-    """A topic as stored: one or two lowercase slug segments, or None for no topic at all.
-
-    None is how "no topic" arrives, and setting it clears one. Anything else must match the grammar
-    whole: a refusal names the field. Because a segment admits neither of SQL's LIKE metacharacters, a
-    validated topic is safe to match literally in a prefix filter.
-    """
-    if topic is None:
-        return None
-    if not isinstance(topic, str):
-        raise InvalidRequest(f"{field} must be a path of 1-{MAX_TOPIC_SEGMENTS} lowercase slug segments, "
-                             "such as project or project/subtopic, or left out")
-    segments = topic.split("/")
-    if not 1 <= len(segments) <= MAX_TOPIC_SEGMENTS or not all(TOPIC_SEGMENT.fullmatch(s) for s in segments):
-        raise InvalidRequest(f"{field} {topic!r} must be 1-{MAX_TOPIC_SEGMENTS} segments joined by /, each "
-                             f"1-{MAX_TOPIC_SEGMENT} characters of a-z, 0-9 and inner hyphens")
-    return topic
 
 
 def set_topic(conn: sqlite3.Connection, config: Config, conversation_id: str, topic: Any, *,

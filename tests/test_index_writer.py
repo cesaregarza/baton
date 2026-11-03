@@ -20,6 +20,7 @@ import pytest
 from baton import cli, conversations, search, store
 from baton import config as config_module
 from baton.config import Config, ConfigError
+from baton.derived import provenance, storage
 from baton.errors import BatonError
 from baton.store import connect
 
@@ -191,6 +192,7 @@ def test_24_no_mcp_tool_writes_derived_data_or_names_a_producer(config) -> None:
     import inspect
 
     from baton import app
+    from baton.app import catalog, guard, tools
     registered = [name for name, _, _ in app.TOOLS + app.CONVERSATION_TOOLS + app.SEARCH_TOOLS + app.ARTIFACT_TOOLS]
     writer_words = ("batch", "generation", "dirty", "commit", "index", "producer")
     assert not [name for name in registered if any(word in name for word in writer_words)]
@@ -198,7 +200,7 @@ def test_24_no_mcp_tool_writes_derived_data_or_names_a_producer(config) -> None:
     for name in registered:  # no tool takes a producer as who is calling; reads take one only as a filter
         if name not in ("read_artifacts", "search"):
             assert "producer" not in inspect.signature(getattr(app.Tools, name)).parameters, name
-    source = inspect.getsource(app)
+    source = "\n".join(inspect.getsource(module) for module in (app, catalog, guard, tools))
     assert not [call for call in ("begin_batch", "read_batch", "commit_batch") if call in source]
     assert "producer" not in app.Tools(config).whoami("reviewer")
 
@@ -401,7 +403,7 @@ def test_7_a_crash_mid_commit_leaves_the_old_version_and_a_retry_succeeds(db, co
     manifest = begin(db, config, conversation_id, kinds=("summary", "decisions"))
     read_all(db, config, manifest)
     before = snapshot(db)
-    real = derived._write_version
+    real = storage._write_version
     calls = []
 
     def crash_on_second(*args, **kwargs):
@@ -410,11 +412,11 @@ def test_7_a_crash_mid_commit_leaves_the_old_version_and_a_retry_succeeds(db, co
             raise RuntimeError("power cut")
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(derived, "_write_version", crash_on_second)
+    monkeypatch.setattr(storage, "_write_version", crash_on_second)
     with pytest.raises(RuntimeError):
         commit(db, config, manifest)
     assert snapshot(db) == before  # neither kind, no receipt, the batch still open
-    monkeypatch.setattr(derived, "_write_version", real)
+    monkeypatch.setattr(storage, "_write_version", real)
     result = commit(db, config, manifest)
     assert result["created"] is True and {v["kind"] for v in result["versions"]} == {"summary", "decisions"}
 
@@ -778,14 +780,14 @@ def test_a_batch_reads_a_bounded_number_of_rows(tmp_path: Path, monkeypatch) -> 
     db = connect(config.db_path)
     conversation_id, _ = converse(db, config, 30)
     loaded = []
-    real = derived._present
+    real = provenance._present
 
     def counting(*args, **kwargs):
         rows = real(*args, **kwargs)
         loaded.append(len(rows))
         return rows
 
-    monkeypatch.setattr(derived, "_present", counting)
+    monkeypatch.setattr(provenance, "_present", counting)
     begin(db, config, conversation_id)
     assert loaded and max(loaded) <= config.indexer.max_manifest_items + 1  # never the whole history
     db.close()

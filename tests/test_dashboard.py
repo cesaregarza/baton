@@ -20,14 +20,9 @@ from conftest import free_port
 
 from baton import app as app_module
 from baton import config as config_module
-from baton import conversations, messages
+from baton import conversations, dashboard, messages
 from baton.config import Config, ConfigError
 from baton.store import connect
-
-try:
-    from baton import dashboard
-except ImportError:  # written before the module: each test then fails on its own instead of the whole run stopping
-    dashboard = None  # type: ignore[assignment]
 
 GROUP = ["orchestrator", "reviewer", "operator"]
 OTHERS = ["orchestrator", "assistant"]

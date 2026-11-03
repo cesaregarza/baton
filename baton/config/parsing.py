@@ -1,29 +1,41 @@
-"""The host's configuration: one TOML file names the roles, the auth, the job states and every path.
+"""Ordered TOML validation and construction of configuration values.
 
-Nothing about a deployment is hard-coded. `load()` reads the file named by
-`--config`, then `$BATON_CONFIG`, then `~/.config/baton/baton.toml`, and
-refuses a file that is internally inconsistent (an unknown role, a job state
-that names no state) before the host starts.
-"""
+parse keeps cross-section checks and construction order together so the first refusal stays
+predictable. Integration tables remain raw data; this module never loads integration code."""
 
 from __future__ import annotations
 
 import os
 import re
-import tomllib
-from dataclasses import dataclass, field
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-CONFIG_ENV = "BATON_CONFIG"
-DEFAULT_CONFIG = Path("~/.config/baton/baton.toml")
+from .models import (
+    Aliases,
+    Config,
+    ConfigError,
+    Conversations,
+    Dashboard,
+    Indexer,
+    Jobs,
+    JobState,
+    OAuth,
+    Role,
+    Search,
+    Seat,
+    StaticToken,
+    Wake,
+)
+
 ROLE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 # A DNS name of lowercase labels, then an optional port of 1-5 digits without a leading zero.
 PROXY_HOST = re.compile(r"(?P<name>[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)"
                         r"(?::(?P<port>[1-9][0-9]{0,4}))?")
 INTEGRATION_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
 
 # Used when the config has no [jobs] table: a plain open → working → done flow.
 DEFAULT_JOB_STATES: dict[str, dict[str, Any]] = {
@@ -35,164 +47,12 @@ DEFAULT_JOB_STATES: dict[str, dict[str, Any]] = {
 }
 
 
-class ConfigError(ValueError):
-    """The configuration file is missing, malformed or inconsistent."""
-
-
-@dataclass(frozen=True)
-class Wake:
-    """How a role is told something is waiting for it: at most one of a webhook, a command or an integration.
-
-    `only_when_addressed` narrows *when*: the role still receives every message, but a conversation
-    message wakes it only if it singles the role out for attention or asks for a decision. Anything else
-    addressed to the role alone -- a direct message, a job change, an escalation -- wakes it either way.
-    """
-
-    webhook: str | None = None
-    secret_env: str | None = None
-    command: tuple[str, ...] = ()
-    integration: str | None = None
-    timeout_seconds: float = 10.0
-    only_when_addressed: bool = False
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.webhook or self.command or self.integration)
-
-
-@dataclass(frozen=True)
-class Role:
-    name: str
-    description: str = ""
-    wake: Wake = field(default_factory=Wake)
-    can_create_conversations: bool = False
-    can_manage_participants: bool = False
-    # Lets this role open, edit and rename a topic. Starting a thread inside one needs no such flag:
-    # any identified caller may do that, which is what makes a topic a container rather than a label.
-    can_create_topics: bool = False
-    # Lets the dashboard's viewer see every conversation, not only the ones this role is in.
-    can_view_all_conversations: bool = False
-    # A person, not an agent: acts only with its own bearer token, never through OAuth or `--as`.
-    human: bool = False
-    # An identity that only displays, like the dashboard's viewer: it never holds a credential of any kind.
-    display_only: bool = False
-    # How pages name the role, such as a person's name; the role name when unset.
-    display_name: str = ""
-    # Whether this role may create or move jobs. Defaults on to preserve existing fixed-role behavior.
-    job_authority: bool = True
-
-    @property
-    def label(self) -> str:
-        return self.display_name or self.name
-
-
-@dataclass(frozen=True)
-class StaticToken:
-    """A bearer token for one role, stored only as its SHA-256 hex digest."""
-
-    name: str
-    role: str
-    sha256: str
-
-
-@dataclass(frozen=True)
-class OAuth:
-    enabled: bool = False
-    passphrase_hash: str = ""
-    roles: tuple[str, ...] = ()
-    redirect_uris: tuple[str, ...] = ()
-    allow_loopback_redirects: bool = True
-
-
-@dataclass(frozen=True)
-class JobState:
-    name: str
-    waiting_on: str | None
-    next: frozenset[str]
-
-    @property
-    def terminal(self) -> bool:
-        return not self.next
-
-
-@dataclass(frozen=True)
-class Jobs:
-    initial: str
-    states: dict[str, JobState]
-
-
-@dataclass(frozen=True)
-class Conversations:
-    """Group conversations, off unless enabled. The limits apply to each conversation."""
-
-    enabled: bool = False
-    max_participants: int = 8
-    max_messages_per_hour: int = 30
-    # Woken once an hour at most while a conversation is over its limit.
-    escalation_role: str | None = None
-
-
-@dataclass(frozen=True)
-class Aliases:
-    """Guest alias storage and hourly admission bounds; continuity never grants role authority."""
-
-    binding_ttl_seconds: int = 86400
-    # For an alias mapped to a role: re-arming costs the owner a go, so at most weekly by default.
-    mapped_binding_ttl_seconds: int = 604800
-    max_bindings_per_alias: int = 20
-    max_posts_per_alias_per_hour: int = 30
-    max_posts_per_credential_per_hour: int = 300
-    max_claims_per_credential_per_hour: int = 20
-    max_claims_per_alias_per_hour: int = 5
-    max_claims_per_hour: int = 100
-    # New threads a guest may start in a rolling hour, per alias and across every alias together.
-    max_threads_per_alias_per_hour: int = 5
-    max_threads_per_guest_per_hour: int = 50
-    # Who hears that the guest-wide thread cap filled, at most once an hour. Unset means nobody is told.
-    guest_cap_alert_role: str | None = None
-
-
 ALIAS_LIMITS = {"max_posts_per_alias_per_hour": (1, 10000), "max_posts_per_credential_per_hour": (1, 10000),
                 "binding_ttl_seconds": (1, 86400), "mapped_binding_ttl_seconds": (1, 604800),
                 "max_bindings_per_alias": (1, 1000),
                 "max_claims_per_credential_per_hour": (1, 10000), "max_claims_per_alias_per_hour": (1, 10000),
                 "max_claims_per_hour": (1, 10000),
                 "max_threads_per_alias_per_hour": (1, 10000), "max_threads_per_guest_per_hour": (1, 10000)}
-
-
-@dataclass(frozen=True)
-class Search:
-    """Keyword search over messages for roles, off unless enabled. Each role finds only what it may read."""
-
-    enabled: bool = False
-    # Off at 0. Otherwise a producer may also write `summary_recent`, over at most this many latest messages.
-    rolling_window_messages: int = 0
-    # The largest vector a generation's embedding profile may declare.
-    max_vector_dim: int = 1024
-    # Off unless set: generations may embed, commits then carry vectors, and search takes a query vector.
-    embeddings: bool = False
-
-
-@dataclass(frozen=True)
-class Indexer:
-    """The host owner's local indexing worker: the producer names its writer commands may act as, and the bounds
-    every batch and commit is held to. Empty `producers` turns the writer off; the read-only commands need none."""
-
-    producers: tuple[str, ...] = ()
-    max_artifact_bytes: int = 16384
-    max_citations: int = 64
-    max_manifest_items: int = 500
-    max_manifest_segments: int = 64
-    page_items: int = 100
-    max_open_batches: int = 4
-    batch_ttl_seconds: int = 900
-    max_input_segments: int = 256
-    max_commits_per_hour: int = 60
-    receipt_retention_days: int = 30
-    max_generations: int = 3
-    generation_retention_days: int = 30
-    max_activation_reconcile: int = 10000
-    max_vectors_per_generation: int = 1000000
 
 
 # Each limit and its accepted range; the defaults are the dataclass's.
@@ -210,131 +70,25 @@ LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 SEAT_ORIGIN = re.compile(r"https://[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[1-9][0-9]{0,4})?")
 
 
-@dataclass(frozen=True)
-class Dashboard:
-    """The optional read-only view of conversations, off unless enabled. It shows what `viewer_role` may see."""
-
-    enabled: bool = False
-    viewer_role: str | None = None
-    listen_host: str = "127.0.0.1"
-    listen_port: int = 8766
-    # One more Host the view answers to, exactly, for an authenticating proxy in front of it. Off by default.
-    proxy_host: str | None = None
-    # Whose attention the Needs page is about: `viewer_role` unless set. Visibility stays `viewer_role`'s; this
-    # only chooses which of the messages the viewer may already read are listed as needing that role.
-    attention_role: str | None = None
-    # Whether the Needs page lists the jobs waiting on `attention_role` when that isn't the viewer. Off: showing
-    # them widens what the view's audience sees, so it is a decision of its own.
-    attention_jobs: bool = False
-
-
-@dataclass(frozen=True)
-class Seat:
-    """The optional browser seat for one human role, off unless enabled; see `baton.seat`."""
-
-    enabled: bool = False
-    role: str | None = None
-    listen_host: str = "127.0.0.1"
-    listen_port: int = 8767
-    # The one exact https origin the seat is reached at, through a proxy that terminates TLS.
-    origin: str = ""
-    # A seat on a host name other services share hands them its cookie: allowed only when written down here.
-    same_host_trust_accepted: bool = False
-    idle_seconds: int = 3600
-    absolute_seconds: int = 12 * 3600
-    # The one zone the pages show times in; they run no scripts, so they can't ask the phone for its own.
-    timezone: str = "UTC"
-
-    @property
-    def host(self) -> str:
-        return urlparse(self.origin).netloc
-
-
-@dataclass(frozen=True)
-class Config:
-    public_url: str
-    listen_host: str
-    listen_port: int
-    data_dir: Path
-    roles: dict[str, Role]
-    tokens: tuple[StaticToken, ...]
-    oauth: OAuth
-    jobs: Jobs
-    allowed_origins: tuple[str, ...] = ()
-    # Raw `[integrations.<name>]` tables; each integration validates its own (see baton.integrations).
-    integrations: dict[str, dict[str, Any]] = field(default_factory=dict)
-    conversations: Conversations = field(default_factory=Conversations)
-    dashboard: Dashboard = field(default_factory=Dashboard)
-    seat: Seat = field(default_factory=Seat)
-    search: Search = field(default_factory=Search)
-    indexer: Indexer = field(default_factory=Indexer)
-    aliases: Aliases = field(default_factory=Aliases)
-
-    @property
-    def resource_url(self) -> str:
-        return self.public_url + "/mcp"
-
-    @property
-    def db_path(self) -> Path:
-        return self.data_dir / "baton.db"
-
-    @property
-    def oauth_state_path(self) -> Path:
-        return self.data_dir / "oauth.json"
-
-    @property
-    def audit_path(self) -> Path:
-        return self.data_dir / "audit.jsonl"
-
-    @property
-    def revoked_tokens_path(self) -> Path:
-        return self.data_dir / "revoked_tokens.json"
-
-    @property
-    def human_roles(self) -> frozenset[str]:
-        return frozenset(name for name, role in self.roles.items() if role.human)
-
-    def author_kind(self, role: str) -> str:
-        """What a message from `role` is recorded as when sent: `human` for a human role, otherwise `agent`."""
-        entry = self.roles.get(role)
-        return "human" if entry is not None and entry.human else "agent"
-
-    def require_role(self, name: str) -> Role:
-        role = self.roles.get(name)
-        if role is None:
-            raise ConfigError(f"unknown role {name!r}; configured roles: {', '.join(sorted(self.roles))}")
-        return role
-
-
-def config_path(explicit: str | os.PathLike[str] | None = None) -> Path:
-    return Path(explicit or os.environ.get(CONFIG_ENV) or DEFAULT_CONFIG).expanduser()
-
-
-def load(explicit: str | os.PathLike[str] | None = None) -> Config:
-    path = config_path(explicit)
-    try:
-        raw = tomllib.loads(path.read_text())
-    except FileNotFoundError:
-        raise ConfigError(f"no config file at {path}; see the README quickstart") from None
-    except tomllib.TOMLDecodeError as error:
-        raise ConfigError(f"{path}: {error}") from None
-    return parse(raw, base=path.parent)
-
-
 def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
     _refuse_reserved(raw)
-    host = raw.get("host", {})
+    host = _table(raw.get("host", {}), "host")
     public_url = str(host.get("public_url", "")).rstrip("/")
     if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", public_url):
         raise ConfigError("host.public_url must be the http(s) URL clients reach the host at, without /mcp")
     _require_canonical(public_url)
     data_dir = Path(str(host.get("data_dir", "~/.local/share/baton"))).expanduser()
-    roles = {name: _role(name, table) for name, table in raw.get("roles", {}).items()}
+    roles = {name: _role(name, table) for name, table in _table(raw.get("roles", {}), "roles").items()}
     if not roles:
         raise ConfigError("define at least one role under [roles.<name>]")
     integrations = _integrations(raw.get("integrations", {}), roles)
-    auth = raw.get("auth", {})
-    tokens = tuple(_token(index, table, roles) for index, table in enumerate(auth.get("tokens", [])))
+    auth = _table(raw.get("auth", {}), "auth")
+    token_values = auth.get("tokens", [])
+    try:
+        token_tables = iter(token_values)
+    except TypeError:
+        raise ConfigError("auth.tokens must be an array of tables") from None
+    tokens = tuple(_token(index, table, roles) for index, table in enumerate(token_tables))
     if len({token.sha256 for token in tokens}) != len(tokens):
         raise ConfigError("two auth.tokens entries share a digest")
     names = [token.name for token in tokens]
@@ -348,7 +102,7 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         raise ConfigError(f"auth.tokens entry {displayed[0].name!r} is for {displayed[0].role!r}, a display_only "
                           "role: a role that only displays never holds a credential")
     dashboard = _dashboard(raw.get("dashboard", {}), roles, conversations)
-    search_table = raw.get("search", {})
+    search_table = _table(raw.get("search", {}), "search")
     search = Search(enabled=_boolean(search_table, "enabled", False, "search.enabled"),
                     rolling_window_messages=_number(search_table, "rolling_window_messages", 0,
                                                     "search.rolling_window_messages", 0, 10000, integer=True),
@@ -395,7 +149,8 @@ def _aliases(table: dict[str, Any], roles: dict[str, Role]) -> Aliases:
                       for key, (low, high) in ALIAS_LIMITS.items()})
 
 
-def _indexer(table: dict[str, Any], roles: dict[str, Role]) -> Indexer:
+def _indexer(table: Mapping[str, Any], roles: dict[str, Role]) -> Indexer:
+    table = _table(table, "indexer")
     producers = table.get("producers", [])
     if not isinstance(producers, list) or not all(isinstance(name, str) for name in producers):
         raise ConfigError("indexer.producers must be a list of names")
@@ -463,7 +218,14 @@ def _require_canonical(public_url: str) -> None:
                           f"compare the issuer character for character: write public_url = {canonical!r}")
 
 
-def _boolean(table: dict[str, Any], key: str, default: bool, where: str) -> bool:
+def _table(value: Any, where: str) -> Mapping[str, Any]:
+    """Require a section to be a table without including its potentially sensitive contents in the error."""
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"{where} must be a table")
+    return value
+
+
+def _boolean(table: Mapping[str, Any], key: str, default: bool, where: str) -> bool:
     """A TOML boolean, or `default` when the key is missing. Never truthiness: the string "false" is refused."""
     value = table.get(key, default)
     if not isinstance(value, bool):
@@ -471,7 +233,7 @@ def _boolean(table: dict[str, Any], key: str, default: bool, where: str) -> bool
     return value
 
 
-def _number(table: dict[str, Any], key: str, default: float, where: str, low: float, high: float, *,
+def _number(table: Mapping[str, Any], key: str, default: float, where: str, low: float, high: float, *,
             integer: bool = False) -> Any:
     """A TOML number within [low, high], or `default` when missing. Strings and booleans are refused."""
     value = table.get(key, default)
@@ -482,10 +244,11 @@ def _number(table: dict[str, Any], key: str, default: float, where: str, low: fl
     return value
 
 
-def _role(name: str, table: dict[str, Any]) -> Role:
+def _role(name: str, table: Mapping[str, Any]) -> Role:
     if not ROLE_NAME.fullmatch(name):
         raise ConfigError(f"role name {name!r} must match {ROLE_NAME.pattern}")
-    wake = table.get("wake", {})
+    table = _table(table, f"roles.{name}")
+    wake = _table(table.get("wake", {}), f"roles.{name}.wake")
     if sum(bool(wake.get(key)) for key in ("webhook", "command", "integration")) > 1:
         raise ConfigError(f"roles.{name}.wake may use only one of webhook, command and integration, not both")
     webhook = wake.get("webhook")
@@ -504,13 +267,20 @@ def _role(name: str, table: dict[str, Any]) -> Role:
     integration = wake.get("integration")
     if integration is not None and not INTEGRATION_NAME.fullmatch(str(integration)):
         raise ConfigError(f"roles.{name}.wake.integration must match {INTEGRATION_NAME.pattern}")
-    return Role(name, str(table.get("description", "")), Wake(
-        webhook=webhook, secret_env=wake.get("secret_env"), command=tuple(command), integration=integration,
+    description = str(table.get("description", ""))
+    wake_settings = Wake(
+        webhook=webhook,
+        secret_env=wake.get("secret_env"),
+        command=tuple(command),
+        integration=integration,
         timeout_seconds=_number(wake, "timeout_seconds", 10.0, f"roles.{name}.wake.timeout_seconds", 0.1, 300),
         only_when_addressed=_boolean(wake, "only_when_addressed", False,
                                      f"roles.{name}.wake.only_when_addressed"),
-    ),
-        # Named rather than positional: a flag added in the middle would otherwise shift every one after it.
+    )
+    return Role(
+        name=name,
+        description=description,
+        wake=wake_settings,
         can_create_conversations=_boolean(table, "can_create_conversations", False,
                                           f"roles.{name}.can_create_conversations"),
         can_manage_participants=_boolean(table, "can_manage_participants", False,
@@ -521,7 +291,8 @@ def _role(name: str, table: dict[str, Any]) -> Role:
         human=_boolean(table, "human", False, f"roles.{name}.human"),
         display_only=_boolean(table, "display_only", False, f"roles.{name}.display_only"),
         display_name=str(table.get("display_name", "")),
-        job_authority=_boolean(table, "job_authority", True, f"roles.{name}.job_authority"))
+        job_authority=_boolean(table, "job_authority", True, f"roles.{name}.job_authority"),
+    )
 
 
 def _valid_webhook(url: str) -> bool:
@@ -533,7 +304,8 @@ def _valid_webhook(url: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.hostname)
 
 
-def _conversations(table: dict[str, Any], roles: dict[str, Role]) -> Conversations:
+def _conversations(table: Mapping[str, Any], roles: dict[str, Role]) -> Conversations:
+    table = _table(table, "conversations")
     escalation_role = table.get("escalation_role")
     if escalation_role is not None and escalation_role not in roles:
         raise ConfigError(f"conversations.escalation_role names unknown role {escalation_role!r}")
@@ -547,7 +319,8 @@ def _conversations(table: dict[str, Any], roles: dict[str, Role]) -> Conversatio
     )
 
 
-def _dashboard(table: dict[str, Any], roles: dict[str, Role], conversations: Conversations) -> Dashboard:
+def _dashboard(table: Mapping[str, Any], roles: dict[str, Role], conversations: Conversations) -> Dashboard:
+    table = _table(table, "dashboard")
     if not _boolean(table, "enabled", False, "dashboard.enabled"):
         return Dashboard()
     viewer_role = table.get("viewer_role")
@@ -565,13 +338,19 @@ def _dashboard(table: dict[str, Any], roles: dict[str, Role], conversations: Con
     attention_role = table.get("attention_role", viewer_role)
     if not isinstance(attention_role, str) or attention_role not in roles:
         raise ConfigError(f"dashboard.attention_role must name a configured role; got {attention_role!r}")
-    return Dashboard(True, viewer_role, listen_host,
-                     _number(table, "listen_port", 8766, "dashboard.listen_port", 1, 65535, integer=True),
-                     _proxy_host(table.get("proxy_host")), attention_role,
-                     _boolean(table, "attention_jobs", False, "dashboard.attention_jobs"))
+    return Dashboard(
+        enabled=True,
+        viewer_role=viewer_role,
+        listen_host=listen_host,
+        listen_port=_number(table, "listen_port", 8766, "dashboard.listen_port", 1, 65535, integer=True),
+        proxy_host=_proxy_host(table.get("proxy_host")),
+        attention_role=attention_role,
+        attention_jobs=_boolean(table, "attention_jobs", False, "dashboard.attention_jobs"),
+    )
 
 
-def _seat(table: dict[str, Any], roles: dict[str, Role], public_url: str, dashboard: Dashboard) -> Seat:
+def _seat(table: Mapping[str, Any], roles: dict[str, Role], public_url: str, dashboard: Dashboard) -> Seat:
+    table = _table(table, "seat")
     if not _boolean(table, "enabled", False, "seat.enabled"):
         return Seat()
     role = table.get("role")
@@ -604,11 +383,18 @@ def _seat(table: dict[str, Any], roles: dict[str, Role], public_url: str, dashbo
     except (ValueError, ZoneInfoNotFoundError):
         raise ConfigError(f"seat.timezone must be an IANA time zone such as America/Chicago; "
                           f"got {timezone!r}") from None
-    return Seat(True, role, listen_host,
-                _number(table, "listen_port", 8767, "seat.listen_port", 1, 65535, integer=True), origin, trusted,
-                _number(table, "idle_seconds", 3600, "seat.idle_seconds", 60, 24 * 3600, integer=True),
-                _number(table, "absolute_seconds", 12 * 3600, "seat.absolute_seconds", 60, 7 * 86400, integer=True),
-                timezone)
+    return Seat(
+        enabled=True,
+        role=role,
+        listen_host=listen_host,
+        listen_port=_number(table, "listen_port", 8767, "seat.listen_port", 1, 65535, integer=True),
+        origin=origin,
+        same_host_trust_accepted=trusted,
+        idle_seconds=_number(table, "idle_seconds", 3600, "seat.idle_seconds", 60, 24 * 3600, integer=True),
+        absolute_seconds=_number(table, "absolute_seconds", 12 * 3600, "seat.absolute_seconds", 60, 7 * 86400,
+                                 integer=True),
+        timezone=timezone,
+    )
 
 
 def _proxy_host(value: Any) -> str | None:
@@ -627,8 +413,9 @@ def _proxy_host(value: Any) -> str | None:
     return value
 
 
-def _integrations(tables: dict[str, Any], roles: dict[str, Role]) -> dict[str, dict[str, Any]]:
+def _integrations(tables: Mapping[str, Any], roles: dict[str, Role]) -> dict[str, dict[str, Any]]:
     """Enabled `[integrations.<name>]` tables. A role may only name an enabled integration as its wake."""
+    tables = _table(tables, "integrations")
     enabled = {}
     for name, table in tables.items():
         if not INTEGRATION_NAME.fullmatch(name) or not isinstance(table, dict):
@@ -644,7 +431,8 @@ def _integrations(tables: dict[str, Any], roles: dict[str, Role]) -> dict[str, d
     return enabled
 
 
-def _token(index: int, table: dict[str, Any], roles: dict[str, Role]) -> StaticToken:
+def _token(index: int, table: Mapping[str, Any], roles: dict[str, Role]) -> StaticToken:
+    table = _table(table, f"auth.tokens[{index}]")
     name, role, digest = table.get("name", f"token-{index}"), table.get("role"), str(table.get("sha256", ""))
     if role not in roles:
         raise ConfigError(f"auth.tokens[{index}] names unknown role {role!r}")
@@ -653,7 +441,8 @@ def _token(index: int, table: dict[str, Any], roles: dict[str, Role]) -> StaticT
     return StaticToken(str(name), role, digest)
 
 
-def _oauth(table: dict[str, Any], roles: dict[str, Role]) -> OAuth:
+def _oauth(table: Mapping[str, Any], roles: dict[str, Role]) -> OAuth:
+    table = _table(table, "auth.oauth")
     if not _boolean(table, "enabled", False, "auth.oauth.enabled"):
         return OAuth()
     passphrase_hash = table.get("passphrase_hash") or os.environ.get(table.get("passphrase_hash_env", ""), "")
@@ -675,15 +464,22 @@ def _oauth(table: dict[str, Any], roles: dict[str, Role]) -> OAuth:
         if any(key.lower() == "iss" for key, _ in parse_qsl(urlparse(str(uri)).query, keep_blank_values=True)):
             raise ConfigError(f"auth.oauth.redirect_uris has {uri!r}, which carries an iss parameter: the host adds "
                               "iss itself (RFC 9207), so a callback may not carry one")
-    return OAuth(True, str(passphrase_hash), oauth_roles, redirect_uris,
-                 _boolean(table, "allow_loopback_redirects", True, "auth.oauth.allow_loopback_redirects"))
+    return OAuth(
+        enabled=True,
+        passphrase_hash=str(passphrase_hash),
+        roles=oauth_roles,
+        redirect_uris=redirect_uris,
+        allow_loopback_redirects=_boolean(table, "allow_loopback_redirects", True,
+                                         "auth.oauth.allow_loopback_redirects"),
+    )
 
 
-def _jobs(table: dict[str, Any] | None, roles: dict[str, Role]) -> Jobs:
-    table = table or {}
-    raw_states = table.get("states") or DEFAULT_JOB_STATES
+def _jobs(table: Mapping[str, Any] | None, roles: dict[str, Role]) -> Jobs:
+    table = _table(table or {}, "jobs")
+    raw_states = _table(table.get("states") or DEFAULT_JOB_STATES, "jobs.states")
     states: dict[str, JobState] = {}
     for name, spec in raw_states.items():
+        spec = _table(spec, f"jobs.states.{name}")
         waiting_on = spec.get("waiting_on")
         if waiting_on is not None and waiting_on not in roles:
             raise ConfigError(f"jobs.states.{name}.waiting_on names unknown role {waiting_on!r}")
