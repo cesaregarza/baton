@@ -208,7 +208,7 @@ def _decision(items: list[dict], trigger: str | None, policy: secretary.Policy) 
     first = min(items, key=lambda item: (RANK[item["decision"]], item["pos"]))
     message_wake = trigger is None or trigger.startswith("message:")
     if first["decision"] == "wake" and not (message_wake or (trigger.startswith("job:") and policy.job_events_wake)):
-        # Cesar, 2026-11-01: job events stay held until he says otherwise. Holding issues nothing, so the item
+        # By design, job events stay held unless job_events_wake lets them wake. Holding issues nothing, so the item
         # still wakes the principal through its own message wake, or is listed in the hourly digest.
         return "hold", "hold:non-message-trigger", first["source_key"]
     return first["decision"], first["rule"], first["source_key"]
