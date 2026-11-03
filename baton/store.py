@@ -263,6 +263,7 @@ _SCHEMA = (
     " outcome TEXT NOT NULL, PRIMARY KEY (wake_id, subscription))",
     "CREATE TABLE IF NOT EXISTS events_receipts (at REAL NOT NULL, wake_id TEXT NOT NULL, subscription TEXT NOT NULL,"
     " owner TEXT NOT NULL, outcome TEXT NOT NULL, UNIQUE (wake_id, subscription, at))",
+    "CREATE INDEX IF NOT EXISTS events_receipts_by_time ON events_receipts (at)",  # `status` reads the recent ones
     # Admitted guest post attempts, bounded by hourly alias/credential limits; never proof values.
     """CREATE TABLE IF NOT EXISTS alias_posts (
         alias_id TEXT NOT NULL REFERENCES aliases(id),
@@ -437,6 +438,10 @@ _SCHEMA = (
         created_at TEXT NOT NULL,
         expires_at REAL NOT NULL
     )""",
+    # Batches are kept once committed or expired. The writer's open-batch count and the retirement probe read only
+    # open ones, by producer or generation and expiry, so these index nothing else.
+    "CREATE INDEX IF NOT EXISTS open_batches_by_producer ON batches (producer, expires_at) WHERE state = 'open'",
+    "CREATE INDEX IF NOT EXISTS open_batches_by_generation ON batches (generation, expires_at) WHERE state = 'open'",
     """CREATE TABLE IF NOT EXISTS batch_pages (
         batch_id TEXT NOT NULL,
         page INTEGER NOT NULL,
@@ -500,6 +505,7 @@ _SCHEMA = (
         expires_at TEXT NOT NULL,
         PRIMARY KEY (producer, request_id)
     )""",
+    "CREATE INDEX IF NOT EXISTS commits_by_producer_time ON commit_requests (producer, committed_at)",  # hourly count
     """CREATE TABLE IF NOT EXISTS participants (
         conversation_id TEXT NOT NULL REFERENCES conversations(id),
         role TEXT NOT NULL,
@@ -600,6 +606,10 @@ _SCHEMA = (
         ended_at REAL,
         end_reason TEXT
     )""",
+    # Ended seat rows are kept, so each cap check finds its live rows through these instead of scanning them all.
+    "CREATE INDEX IF NOT EXISTS seat_prelogin_by_expiry ON seat_prelogin (expires_at)",
+    "CREATE INDEX IF NOT EXISTS seat_receipts_by_session ON seat_receipts (session)",
+    "CREATE INDEX IF NOT EXISTS seat_requests_by_session ON seat_requests (session)",
 )
 
 
