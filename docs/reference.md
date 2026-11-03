@@ -205,7 +205,9 @@ renders currently visible source excerpts; `cancel ID --reason TEXT` records an 
 `decide --budget-seconds N` scans within the budget, then decides wake, hold or keep for one wake
 (`--trigger`; a job event wakes only with policy `job_events_wake`) with a brief of at most `brief_bytes`
 (default 2048), or digests for the hourly turn (`--hourly`), over what is new since `--since` and never at or
-before `--floor`. It records each decision and never delivers;
+before `--floor`. Once a brief or digest is delivered, its `covered_through` is the next `--since`: a bound keeps
+the oldest whole lines, so what it leaves out comes next. Without `--since`, the first decision records the floor
+before it scans. It records each decision and never delivers;
 `python -m baton.secretary_decide` takes the same options without the CLI's import time. The
 policy and state formats are versioned. This interface does not deliver, approve, or modify Baton work.
 The projection reads events addressed to or authored by the principal, plus later events for jobs whose

@@ -47,6 +47,8 @@ SCHEMA = (
         head INTEGER NOT NULL, coverage TEXT NOT NULL, decision TEXT, rule TEXT, evidence TEXT,
         policy_digest TEXT NOT NULL, brief_sha256 TEXT NOT NULL, brief_bytes INTEGER NOT NULL,
         PRIMARY KEY(principal, seq))""",
+    # The activation floor, recorded by the first `decide` before it scans anything.
+    "CREATE TABLE activation (principal TEXT PRIMARY KEY, floor_pos INTEGER NOT NULL, at TEXT NOT NULL)",
     "CREATE INDEX items_by_principal_pos ON items(principal, event_pos)",
     "CREATE INDEX evidence_by_source ON expectation_evidence(principal, source_key)",
 )
@@ -65,7 +67,7 @@ def _init(conn: sqlite3.Connection) -> None:
     tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if tables:
         if "schema_version" not in tables or not {"sources", "items", "expectations", "expectation_evidence",
-                                                   "dispositions", "briefs", "decisions"} <= tables:
+                                                   "dispositions", "briefs", "decisions", "activation"} <= tables:
             raise ConfigError("secretary state path contains another or incomplete database")
         version = conn.execute("SELECT version FROM schema_version").fetchone()
         if version is None or version["version"] != SCHEMA_VERSION:
