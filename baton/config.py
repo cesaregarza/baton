@@ -504,13 +504,20 @@ def _role(name: str, table: dict[str, Any]) -> Role:
     integration = wake.get("integration")
     if integration is not None and not INTEGRATION_NAME.fullmatch(str(integration)):
         raise ConfigError(f"roles.{name}.wake.integration must match {INTEGRATION_NAME.pattern}")
-    return Role(name, str(table.get("description", "")), Wake(
-        webhook=webhook, secret_env=wake.get("secret_env"), command=tuple(command), integration=integration,
+    description = str(table.get("description", ""))
+    wake_settings = Wake(
+        webhook=webhook,
+        secret_env=wake.get("secret_env"),
+        command=tuple(command),
+        integration=integration,
         timeout_seconds=_number(wake, "timeout_seconds", 10.0, f"roles.{name}.wake.timeout_seconds", 0.1, 300),
         only_when_addressed=_boolean(wake, "only_when_addressed", False,
                                      f"roles.{name}.wake.only_when_addressed"),
-    ),
-        # Named rather than positional: a flag added in the middle would otherwise shift every one after it.
+    )
+    return Role(
+        name=name,
+        description=description,
+        wake=wake_settings,
         can_create_conversations=_boolean(table, "can_create_conversations", False,
                                           f"roles.{name}.can_create_conversations"),
         can_manage_participants=_boolean(table, "can_manage_participants", False,
@@ -521,7 +528,8 @@ def _role(name: str, table: dict[str, Any]) -> Role:
         human=_boolean(table, "human", False, f"roles.{name}.human"),
         display_only=_boolean(table, "display_only", False, f"roles.{name}.display_only"),
         display_name=str(table.get("display_name", "")),
-        job_authority=_boolean(table, "job_authority", True, f"roles.{name}.job_authority"))
+        job_authority=_boolean(table, "job_authority", True, f"roles.{name}.job_authority"),
+    )
 
 
 def _valid_webhook(url: str) -> bool:
@@ -565,10 +573,15 @@ def _dashboard(table: dict[str, Any], roles: dict[str, Role], conversations: Con
     attention_role = table.get("attention_role", viewer_role)
     if not isinstance(attention_role, str) or attention_role not in roles:
         raise ConfigError(f"dashboard.attention_role must name a configured role; got {attention_role!r}")
-    return Dashboard(True, viewer_role, listen_host,
-                     _number(table, "listen_port", 8766, "dashboard.listen_port", 1, 65535, integer=True),
-                     _proxy_host(table.get("proxy_host")), attention_role,
-                     _boolean(table, "attention_jobs", False, "dashboard.attention_jobs"))
+    return Dashboard(
+        enabled=True,
+        viewer_role=viewer_role,
+        listen_host=listen_host,
+        listen_port=_number(table, "listen_port", 8766, "dashboard.listen_port", 1, 65535, integer=True),
+        proxy_host=_proxy_host(table.get("proxy_host")),
+        attention_role=attention_role,
+        attention_jobs=_boolean(table, "attention_jobs", False, "dashboard.attention_jobs"),
+    )
 
 
 def _seat(table: dict[str, Any], roles: dict[str, Role], public_url: str, dashboard: Dashboard) -> Seat:
@@ -604,11 +617,18 @@ def _seat(table: dict[str, Any], roles: dict[str, Role], public_url: str, dashbo
     except (ValueError, ZoneInfoNotFoundError):
         raise ConfigError(f"seat.timezone must be an IANA time zone such as America/Chicago; "
                           f"got {timezone!r}") from None
-    return Seat(True, role, listen_host,
-                _number(table, "listen_port", 8767, "seat.listen_port", 1, 65535, integer=True), origin, trusted,
-                _number(table, "idle_seconds", 3600, "seat.idle_seconds", 60, 24 * 3600, integer=True),
-                _number(table, "absolute_seconds", 12 * 3600, "seat.absolute_seconds", 60, 7 * 86400, integer=True),
-                timezone)
+    return Seat(
+        enabled=True,
+        role=role,
+        listen_host=listen_host,
+        listen_port=_number(table, "listen_port", 8767, "seat.listen_port", 1, 65535, integer=True),
+        origin=origin,
+        same_host_trust_accepted=trusted,
+        idle_seconds=_number(table, "idle_seconds", 3600, "seat.idle_seconds", 60, 24 * 3600, integer=True),
+        absolute_seconds=_number(table, "absolute_seconds", 12 * 3600, "seat.absolute_seconds", 60, 7 * 86400,
+                                 integer=True),
+        timezone=timezone,
+    )
 
 
 def _proxy_host(value: Any) -> str | None:
@@ -675,8 +695,14 @@ def _oauth(table: dict[str, Any], roles: dict[str, Role]) -> OAuth:
         if any(key.lower() == "iss" for key, _ in parse_qsl(urlparse(str(uri)).query, keep_blank_values=True)):
             raise ConfigError(f"auth.oauth.redirect_uris has {uri!r}, which carries an iss parameter: the host adds "
                               "iss itself (RFC 9207), so a callback may not carry one")
-    return OAuth(True, str(passphrase_hash), oauth_roles, redirect_uris,
-                 _boolean(table, "allow_loopback_redirects", True, "auth.oauth.allow_loopback_redirects"))
+    return OAuth(
+        enabled=True,
+        passphrase_hash=str(passphrase_hash),
+        roles=oauth_roles,
+        redirect_uris=redirect_uris,
+        allow_loopback_redirects=_boolean(table, "allow_loopback_redirects", True,
+                                         "auth.oauth.allow_loopback_redirects"),
+    )
 
 
 def _jobs(table: dict[str, Any] | None, roles: dict[str, Role]) -> Jobs:
