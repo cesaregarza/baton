@@ -211,8 +211,9 @@ before it scans. It records each decision and never delivers;
 `python -m baton.secretary_decide` takes the same options without the CLI's import time. An optional policy
 `judge` block (`command`, an absolute argv; `timeout_seconds`; `questions_sha256`; and optionally
 `owed_digest_below` and `wake_at`) lets a wake's `decide` put at most two new messages to that host command,
-and a failed, late or malformed answer leaves a message to the deterministic rules; the catch-up scan and
-the hourly digest never use it. The
+and a failed, late or malformed answer leaves a message to the deterministic rules, as does one that ties it
+to none of the items offered when it had a candidate the judge was not offered; the catch-up scan and the
+hourly digest never use it. The
 policy and state formats are versioned. This interface does not deliver, approve, or modify Baton work.
 The projection reads events addressed to or authored by the principal, plus later events for jobs whose
 earlier create or move event the principal authored. It derives job facts from those event rows and

@@ -4,16 +4,21 @@ The policy's optional `judge` block names the command, an absolute argv, with it
 file the command asks and the two thresholds below, so the policy digest freezes all of them. The package names no
 provider and stores no message text: the text goes to the command on stdin and nowhere else. A failed, late or
 malformed answer is never a verdict. The word lists decide that message, and its record says
-`judge_fallback:<reason>`: error, timeout, invalid_json, wrong_shape or declined, or budget when the decision had no
-call or time left for a message it had to cover.
+`judge_fallback:<reason>`: error, timeout, invalid_json, wrong_shape or declined; budget when the decision had no
+call or time left for a message it had to cover; or unoffered, below.
 
 The request, on the command's stdin, is one JSON object:
     {"version": 1, "principal": ROLE, "questions_sha256": HEX, "timeout_seconds": SECONDS,
      "message": {"id", "from", "from_kind", "at", "channel", "conversation_id", "job_id", "attention", "reply_to",
                  "replies_to_principal", "artifacts", "relayed", "notice", "text"},
      "items": [{"id", "direction", "counterpart", "job_id", "artifact", "state", "title", "relayed"}, ...]}
-`text` is the authored text only, never relayed text. `items` are at most 4 of the message's candidate items, each
-with the first words of its opening message as `title`. The verdict, on stdout, is one JSON object:
+`text` is the authored text only, never relayed text. `items` are at most 4 of the message's candidate items, the
+most recently opened that the principal can still read, each with the first words of its opening message as
+`title`. When the message has a candidate the judge was not offered, a verdict that ties it to none of the offered
+items (relation `none`, or no `item`) is not used: the word lists decide the message, as they would without a judge,
+and its record says `judge_fallback:unoffered`. A judge that saw only some candidates can't rule the others out, so
+its "none" never keeps a message the word lists would hold for reconciliation. The verdict, on stdout, is one JSON
+object:
     {"relation": "answers" | "acknowledges" | "changes_or_cancels" | "none", "item": ITEM_ID | null,
      "opens_owed": 0..1, "needs_now": 0..1}
 or {"declined": REASON} when the command won't judge the message, for example private text.
@@ -110,8 +115,14 @@ class Session:
         timeout = min(policy.judge["timeout_seconds"], self.deadline - self.clock())
         request = _request(state, baton, config, policy, meta, text, candidates)
         self.calls_left, self.calls = self.calls_left - 1, self.calls + 1
+        offered = [item["id"] for item in request["items"]]
         verdict, status = ask(policy.judge["command"], {**request, "timeout_seconds": round(timeout, 3)}, timeout,
-                              [item["id"] for item in request["items"]])
+                              offered)
+        if (verdict is not None and len(offered) < len(candidates)
+                and (verdict.relation == "none" or verdict.item is None)):
+            # The judge saw only some of the open items this message could answer. Its "none" can't rule out one it
+            # never saw, so the word lists decide, as on any fallback.
+            verdict, status = None, FALLBACK + "unoffered"
         self.fallbacks += verdict is None
         return _apply(state, baton, config, policy, meta, text, candidates, verdict, status)
 
