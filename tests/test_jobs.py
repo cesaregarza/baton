@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -69,6 +70,62 @@ def test_list_filters_and_messages_can_name_a_job(host, conn) -> None:
     assert jobs.read_events(conn, first["job_id"])["events"][-1]["kind"] == "message"
     with pytest.raises(UnknownJob):
         messages.send(conn, sender="planner", recipient="worker", text="x", job_id="job_missing")
+
+
+def test_listing_jobs_does_not_read_bodies_or_retry_fields(host, conn) -> None:
+    created = jobs.create(conn, host.config.jobs, request_id="summary", actor="planner", title="Large job",
+                          body="x" * jobs.MAX_BODY_BYTES)
+    full = jobs.get(conn, created["job_id"])
+
+    def summaries_only(action, table, column, database, source):
+        if action == sqlite3.SQLITE_READ and table == "jobs" and column in {"body", "request_id", "request_digest"}:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(summaries_only)
+    try:
+        [summary] = jobs.list_jobs(conn)
+    finally:
+        conn.set_authorizer(None)
+    assert summary == {key: value for key, value in full.items() if key != "body"}
+    assert list(summary) == ["id", "title", "state", "waiting_on", "revision", "created_by", "created_at", "updated_at"]
+
+
+@pytest.mark.parametrize(("state", "waiting_on", "titles"), [
+    (None, None, {"Open", "Review", "Cancelled"}),
+    ("open", None, {"Open"}),
+    (None, "planner", {"Review"}),
+    ("review", "planner", {"Review"}),
+    ("review", "worker", set()),
+    ("", None, set()),
+    (None, "", set()),
+])
+def test_job_lists_and_counts_use_the_same_optional_filters(host, conn, state, waiting_on, titles) -> None:
+    graph = host.config.jobs
+    jobs.create(conn, graph, request_id="open", actor="planner", title="Open")
+    review = jobs.create(conn, graph, request_id="review", actor="planner", title="Review")["job_id"]
+    jobs.move(conn, graph, review, "working", actor="worker")
+    jobs.move(conn, graph, review, "review", actor="worker")
+    cancelled = jobs.create(conn, graph, request_id="cancelled", actor="planner", title="Cancelled")["job_id"]
+    jobs.move(conn, graph, cancelled, "cancelled", actor="planner")
+    listed = jobs.list_jobs(conn, state=state, waiting_on=waiting_on)
+    assert {job["title"] for job in listed} == titles
+    assert jobs.count_jobs(conn, state=state, waiting_on=waiting_on) == len(titles)
+
+
+def test_job_paging_keeps_timestamp_ties_and_limit_bounds(host, conn, monkeypatch) -> None:
+    monkeypatch.setattr(jobs.events, "now", lambda: "2026-01-01T00:00:00+00:00")
+    ids = [jobs.create(conn, host.config.jobs, request_id=f"page-{number}",
+                       actor="planner", title=str(number))["job_id"]
+           for number in range(205)]
+    expected = sorted(ids, reverse=True)
+    assert [job["id"] for job in jobs.list_jobs(conn)] == expected[:50]
+    assert [job["id"] for job in jobs.list_jobs(conn, limit=999)] == expected[:200]
+    assert [job["id"] for job in jobs.list_jobs(conn, limit=0, offset=-1)] == expected[:1]
+    assert [job["id"] for job in jobs.list_jobs(conn, limit=-1, offset=1)] == expected[1:2]
+    assert [job["id"] for job in jobs.list_jobs(conn, limit=200, offset=200)] == expected[200:]
+    assert jobs.list_jobs(conn, offset=205) == []
+    assert jobs.count_jobs(conn) == 205
 
 
 def test_moves_carry_a_revision_and_a_retry_identity(host, conn) -> None:
