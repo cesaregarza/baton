@@ -54,7 +54,7 @@ from typing import Any
 
 import httpx
 
-from baton import events, messages
+from baton import auth, events, messages
 from baton.config import Config, Wake
 from baton.store import connect, transaction
 
@@ -73,6 +73,9 @@ REMINDER_CAP = 6
 REMINDER_WINDOW_SECONDS = 3600.0
 LEASE_SECONDS = 60.0
 MAX_BACKOFF_SECONDS = 3600.0
+# A registration lapses with time, not with a request, so a host that sees no OAuth write would keep its client
+# secret indefinitely. The dispatcher's loop is the one thing the host always runs, so it looks this often.
+LAPSED_SECRET_CHECK_SECONDS = 60.0
 
 # (wake config, wake id, JSON body) -> delivered?
 Deliver = Callable[[Wake, str, bytes], bool]
@@ -122,7 +125,10 @@ def _post(wake: Wake, wake_id: str, body: bytes) -> bool:
 
 
 class Dispatcher:
-    """Turns events into wakes and delivers them. One runs beside the MCP server, on its own thread."""
+    """Turns events into wakes and delivers them. One runs beside the MCP server, on its own thread.
+
+    Its loop also clears the client secrets of lapsed OAuth registrations (`_clear_lapsed_secrets`).
+    """
 
     def __init__(self, config: Config, deliver: Deliver = deliver,
                  integrations: dict[str, Any] | None = None) -> None:
@@ -130,6 +136,7 @@ class Dispatcher:
         self._deliver = deliver
         # Roles whose wake names an integration hand it the last step; see baton.integrations.
         self._integrations = integrations or {}
+        self._secrets_checked: float | None = None  # when the lapsed-secret check last finished
 
     def run(self, stop: threading.Event, poll_seconds: float = 1.0) -> None:
         while not stop.is_set():
@@ -138,7 +145,27 @@ class Dispatcher:
             except Exception as error:
                 # The type only: exception text can carry a webhook URL, and a token in it.
                 log.error("wake dispatch pass failed: %s", type(error).__name__)
+            self._clear_lapsed_secrets()
             stop.wait(poll_seconds)
+
+    def _clear_lapsed_secrets(self) -> None:
+        """Clear the client secret of any OAuth registration that has lapsed, no more than once every
+        LAPSED_SECRET_CHECK_SECONDS. It reads the state file afresh: this runs on the dispatcher's thread, and the
+        server's own copy belongs to the thread that serves requests. A failure is logged and tried again on the
+        next turn."""
+        if not self._config.oauth.enabled:
+            return
+        now = _now()
+        last = self._secrets_checked
+        if last is not None and last <= now < last + LAPSED_SECRET_CHECK_SECONDS:  # a clock set back reads as due
+            return
+        try:
+            auth.TokenStore.load(self._config.oauth_state_path).clear_lapsed_secrets()
+        except Exception as error:
+            # The type only: the state file holds client secrets, and exception text can quote what it was reading.
+            log.error("clearing lapsed client secrets failed: %s", type(error).__name__)
+        else:
+            self._secrets_checked = now
 
     def pass_once(self) -> int:
         """Retry wakes whose lease ran out, then wake for every new event; return how many deliveries were tried."""

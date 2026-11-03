@@ -335,7 +335,8 @@ class TokenStore:
 
     def clear_lapsed_secrets(self) -> None:
         """Rewrite the file if a lapsed registration still holds its client secret; the rewrite clears it. Time lapses
-        a registration, not a write, so without this its secret would wait for the next write."""
+        a registration, not a write, so without this its secret would wait for the next write. The host calls this
+        at startup and, from the wake dispatcher, once a minute."""
         self.sync()
         if self.holds_lapsed_secret(time.time()):
             with self.mutation():
@@ -548,13 +549,11 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
                     _end_token(held, "revoked", now)
 
     def sweep(self) -> None:
-        """Forget expired logins and codes, and clear the secret of a lapsed registration. Called when a request
-        reaches /register or /authorize and when a login is submitted, never on a timer: a lapsed secret waits for
-        one of those, unless an OAuth write comes first."""
+        """Forget expired logins and codes. It touches memory only, since it runs inside requests and a failed file
+        write must not fail one; the wake dispatcher clears lapsed client secrets."""
         now = time.time()
         self.pending = {key: login for key, login in self.pending.items() if login.expires_at > now}
         self.codes = {key: entry for key, entry in self.codes.items() if entry[0].expires_at > now}
-        self.store.clear_lapsed_secrets()
 
     def _issue(self, client_id: str, scopes: list[str], role: str, grant_id: str | None) -> OAuthToken:
         """Mint a token pair; the caller holds `store.mutation()`. `grant_id` stays the same across refreshes."""
