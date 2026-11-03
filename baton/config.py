@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -323,18 +324,23 @@ def load(explicit: str | os.PathLike[str] | None = None) -> Config:
 
 def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
     _refuse_reserved(raw)
-    host = raw.get("host", {})
+    host = _table(raw.get("host", {}), "host")
     public_url = str(host.get("public_url", "")).rstrip("/")
     if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", public_url):
         raise ConfigError("host.public_url must be the http(s) URL clients reach the host at, without /mcp")
     _require_canonical(public_url)
     data_dir = Path(str(host.get("data_dir", "~/.local/share/baton"))).expanduser()
-    roles = {name: _role(name, table) for name, table in raw.get("roles", {}).items()}
+    roles = {name: _role(name, table) for name, table in _table(raw.get("roles", {}), "roles").items()}
     if not roles:
         raise ConfigError("define at least one role under [roles.<name>]")
     integrations = _integrations(raw.get("integrations", {}), roles)
-    auth = raw.get("auth", {})
-    tokens = tuple(_token(index, table, roles) for index, table in enumerate(auth.get("tokens", [])))
+    auth = _table(raw.get("auth", {}), "auth")
+    token_values = auth.get("tokens", [])
+    try:
+        token_tables = iter(token_values)
+    except TypeError:
+        raise ConfigError("auth.tokens must be an array of tables") from None
+    tokens = tuple(_token(index, table, roles) for index, table in enumerate(token_tables))
     if len({token.sha256 for token in tokens}) != len(tokens):
         raise ConfigError("two auth.tokens entries share a digest")
     names = [token.name for token in tokens]
@@ -348,7 +354,7 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         raise ConfigError(f"auth.tokens entry {displayed[0].name!r} is for {displayed[0].role!r}, a display_only "
                           "role: a role that only displays never holds a credential")
     dashboard = _dashboard(raw.get("dashboard", {}), roles, conversations)
-    search_table = raw.get("search", {})
+    search_table = _table(raw.get("search", {}), "search")
     search = Search(enabled=_boolean(search_table, "enabled", False, "search.enabled"),
                     rolling_window_messages=_number(search_table, "rolling_window_messages", 0,
                                                     "search.rolling_window_messages", 0, 10000, integer=True),
@@ -395,7 +401,8 @@ def _aliases(table: dict[str, Any], roles: dict[str, Role]) -> Aliases:
                       for key, (low, high) in ALIAS_LIMITS.items()})
 
 
-def _indexer(table: dict[str, Any], roles: dict[str, Role]) -> Indexer:
+def _indexer(table: Mapping[str, Any], roles: dict[str, Role]) -> Indexer:
+    table = _table(table, "indexer")
     producers = table.get("producers", [])
     if not isinstance(producers, list) or not all(isinstance(name, str) for name in producers):
         raise ConfigError("indexer.producers must be a list of names")
@@ -463,7 +470,14 @@ def _require_canonical(public_url: str) -> None:
                           f"compare the issuer character for character: write public_url = {canonical!r}")
 
 
-def _boolean(table: dict[str, Any], key: str, default: bool, where: str) -> bool:
+def _table(value: Any, where: str) -> Mapping[str, Any]:
+    """Require a section to be a table without including its potentially sensitive contents in the error."""
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"{where} must be a table")
+    return value
+
+
+def _boolean(table: Mapping[str, Any], key: str, default: bool, where: str) -> bool:
     """A TOML boolean, or `default` when the key is missing. Never truthiness: the string "false" is refused."""
     value = table.get(key, default)
     if not isinstance(value, bool):
@@ -471,7 +485,7 @@ def _boolean(table: dict[str, Any], key: str, default: bool, where: str) -> bool
     return value
 
 
-def _number(table: dict[str, Any], key: str, default: float, where: str, low: float, high: float, *,
+def _number(table: Mapping[str, Any], key: str, default: float, where: str, low: float, high: float, *,
             integer: bool = False) -> Any:
     """A TOML number within [low, high], or `default` when missing. Strings and booleans are refused."""
     value = table.get(key, default)
@@ -482,10 +496,11 @@ def _number(table: dict[str, Any], key: str, default: float, where: str, low: fl
     return value
 
 
-def _role(name: str, table: dict[str, Any]) -> Role:
+def _role(name: str, table: Mapping[str, Any]) -> Role:
     if not ROLE_NAME.fullmatch(name):
         raise ConfigError(f"role name {name!r} must match {ROLE_NAME.pattern}")
-    wake = table.get("wake", {})
+    table = _table(table, f"roles.{name}")
+    wake = _table(table.get("wake", {}), f"roles.{name}.wake")
     if sum(bool(wake.get(key)) for key in ("webhook", "command", "integration")) > 1:
         raise ConfigError(f"roles.{name}.wake may use only one of webhook, command and integration, not both")
     webhook = wake.get("webhook")
@@ -533,7 +548,8 @@ def _valid_webhook(url: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.hostname)
 
 
-def _conversations(table: dict[str, Any], roles: dict[str, Role]) -> Conversations:
+def _conversations(table: Mapping[str, Any], roles: dict[str, Role]) -> Conversations:
+    table = _table(table, "conversations")
     escalation_role = table.get("escalation_role")
     if escalation_role is not None and escalation_role not in roles:
         raise ConfigError(f"conversations.escalation_role names unknown role {escalation_role!r}")
@@ -547,7 +563,8 @@ def _conversations(table: dict[str, Any], roles: dict[str, Role]) -> Conversatio
     )
 
 
-def _dashboard(table: dict[str, Any], roles: dict[str, Role], conversations: Conversations) -> Dashboard:
+def _dashboard(table: Mapping[str, Any], roles: dict[str, Role], conversations: Conversations) -> Dashboard:
+    table = _table(table, "dashboard")
     if not _boolean(table, "enabled", False, "dashboard.enabled"):
         return Dashboard()
     viewer_role = table.get("viewer_role")
@@ -571,7 +588,8 @@ def _dashboard(table: dict[str, Any], roles: dict[str, Role], conversations: Con
                      _boolean(table, "attention_jobs", False, "dashboard.attention_jobs"))
 
 
-def _seat(table: dict[str, Any], roles: dict[str, Role], public_url: str, dashboard: Dashboard) -> Seat:
+def _seat(table: Mapping[str, Any], roles: dict[str, Role], public_url: str, dashboard: Dashboard) -> Seat:
+    table = _table(table, "seat")
     if not _boolean(table, "enabled", False, "seat.enabled"):
         return Seat()
     role = table.get("role")
@@ -627,8 +645,9 @@ def _proxy_host(value: Any) -> str | None:
     return value
 
 
-def _integrations(tables: dict[str, Any], roles: dict[str, Role]) -> dict[str, dict[str, Any]]:
+def _integrations(tables: Mapping[str, Any], roles: dict[str, Role]) -> dict[str, dict[str, Any]]:
     """Enabled `[integrations.<name>]` tables. A role may only name an enabled integration as its wake."""
+    tables = _table(tables, "integrations")
     enabled = {}
     for name, table in tables.items():
         if not INTEGRATION_NAME.fullmatch(name) or not isinstance(table, dict):
@@ -644,7 +663,8 @@ def _integrations(tables: dict[str, Any], roles: dict[str, Role]) -> dict[str, d
     return enabled
 
 
-def _token(index: int, table: dict[str, Any], roles: dict[str, Role]) -> StaticToken:
+def _token(index: int, table: Mapping[str, Any], roles: dict[str, Role]) -> StaticToken:
+    table = _table(table, f"auth.tokens[{index}]")
     name, role, digest = table.get("name", f"token-{index}"), table.get("role"), str(table.get("sha256", ""))
     if role not in roles:
         raise ConfigError(f"auth.tokens[{index}] names unknown role {role!r}")
@@ -653,7 +673,8 @@ def _token(index: int, table: dict[str, Any], roles: dict[str, Role]) -> StaticT
     return StaticToken(str(name), role, digest)
 
 
-def _oauth(table: dict[str, Any], roles: dict[str, Role]) -> OAuth:
+def _oauth(table: Mapping[str, Any], roles: dict[str, Role]) -> OAuth:
+    table = _table(table, "auth.oauth")
     if not _boolean(table, "enabled", False, "auth.oauth.enabled"):
         return OAuth()
     passphrase_hash = table.get("passphrase_hash") or os.environ.get(table.get("passphrase_hash_env", ""), "")
@@ -679,11 +700,12 @@ def _oauth(table: dict[str, Any], roles: dict[str, Role]) -> OAuth:
                  _boolean(table, "allow_loopback_redirects", True, "auth.oauth.allow_loopback_redirects"))
 
 
-def _jobs(table: dict[str, Any] | None, roles: dict[str, Role]) -> Jobs:
-    table = table or {}
-    raw_states = table.get("states") or DEFAULT_JOB_STATES
+def _jobs(table: Mapping[str, Any] | None, roles: dict[str, Role]) -> Jobs:
+    table = _table(table or {}, "jobs")
+    raw_states = _table(table.get("states") or DEFAULT_JOB_STATES, "jobs.states")
     states: dict[str, JobState] = {}
     for name, spec in raw_states.items():
+        spec = _table(spec, f"jobs.states.{name}")
         waiting_on = spec.get("waiting_on")
         if waiting_on is not None and waiting_on not in roles:
             raise ConfigError(f"jobs.states.{name}.waiting_on names unknown role {waiting_on!r}")
