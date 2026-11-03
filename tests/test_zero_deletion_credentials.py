@@ -8,15 +8,16 @@ before, when the record was gone, and must go on holding now that it is kept.
 A record kept in a table this change adds is read through `table_rows`, which finds nothing while the table does
 not exist, and delivery receipts and outcomes are looked for both in the integration's state file, where they
 used to be, and in their tables. So on the code before this change every other test fails by assertion.
+
+The one record still deleted is a client registration left unused for a day. It is refused from the moment it
+lapses and deleted, with its client secret, by the next write, and never moves to the ended record.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
-import secrets
 import sqlite3
 import stat
 import time
@@ -57,7 +58,6 @@ from test_openai_mcp_events import (
     subscribe,
 )
 from test_per_call_identity import OTHER, build_host, claim, owner
-from test_reminder_wakes import Clock
 
 from baton import auth, datadir, derived, seat, store, wakes
 from baton.errors import BatonError
@@ -136,14 +136,6 @@ def register_with_secret(host) -> dict[str, Any]:
     return response.json()
 
 
-def store_secret(host) -> dict[str, str]:
-    """A client registered with a secret straight into the state file, with no server running."""
-    client = OAuthClientInformationFull(client_id=secrets.token_hex(8), client_secret=secrets.token_hex(16),
-                                        redirect_uris=[REDIRECT])
-    anyio.run(auth.PassphraseProvider(host.config).register_client, client)
-    return {"client_id": client.client_id, "client_secret": client.client_secret}
-
-
 def authorize_status(host, client_id: str) -> int:
     challenge = hashlib.sha256(b"a synthetic code verifier for the tests").hexdigest()
     return httpx.get(host.base + "/authorize", params={
@@ -175,51 +167,19 @@ def refusal(operation, *args: Any) -> str | None:
     return None
 
 
-class Turns:
-    """Stands in for the dispatcher's stop event: its loop takes `count` turns, and the clock moves by hand at each."""
-
-    def __init__(self, clock: Clock, count: int) -> None:
-        self.clock, self.left = clock, count
-
-    def is_set(self) -> bool:
-        return self.left <= 0
-
-    def wait(self, seconds: float) -> bool:
-        self.left -= 1
-        self.clock.advance(seconds)
-        return self.is_set()
-
-
-def take_turns(dispatcher: wakes.Dispatcher, clock: Clock, count: int) -> str | None:
-    """Run the dispatcher's loop for `count` one-second turns on the hand-moved clock; the type that stopped it."""
-    try:
-        dispatcher.run(Turns(clock, count), poll_seconds=1.0)
-    except Exception as error:
-        return type(error).__name__
-    return None
-
-
-@pytest.fixture
-def clock(monkeypatch) -> Clock:
-    """The dispatcher's clock, moved by hand, so a minute costs nothing."""
-    moved = Clock()
-    monkeypatch.setattr(wakes, "_now", moved)
-    return moved
-
-
-def test_a_lapsed_registration_is_kept_refused_and_not_counted(start_host, monkeypatch) -> None:
+def test_a_lapsed_registration_is_refused_and_not_counted(start_host, monkeypatch) -> None:
     monkeypatch.setattr(auth, "MAX_CLIENTS", 2)
     host = start_host(oauth=True)
     lapsed = register(host).json()["client_id"]
+    assert register(host).status_code == 201  # the cap is now full
     age(host, lapse(lapsed))
 
     assert authorize_status(host, lapsed) == 400, "refused from the moment it lapses, before any write"
-    assert register(host).status_code == 201  # a write, which used to delete it
-    assert lapsed in oauth_state(host)["clients"], "the lapsed registration is kept"
     assert register(host).status_code == 201, "it does not count against the cap"
+    assert lapsed not in oauth_state(host)["clients"], "and that write deleted it"
     over = register(host)
     assert (over.status_code, over.json()) == (429, {"error": "too_many_clients"})
-    assert len(oauth_state(host)["clients"]) == 3, "nothing is stored for the refusal"
+    assert len(oauth_state(host)["clients"]) == 2, "nothing is stored for the refusal"
 
 
 def test_guard_a_lapsed_registration_cannot_authorize_after_a_write(start_host) -> None:
@@ -231,110 +191,36 @@ def test_guard_a_lapsed_registration_cannot_authorize_after_a_write(start_host) 
     assert authorize_status(host, lapsed) == 400
 
 
-def test_a_lapsed_registration_keeps_no_client_secret(start_host) -> None:
+def test_a_registration_unused_for_a_day_is_refused_at_once_and_deleted_by_the_next_write(start_host) -> None:
     host = start_host(oauth=True)
     client = register_with_secret(host)
     age(host, lapse(client["client_id"]))
-    before = oauth_state(host)["clients"][client["client_id"]]
+
+    assert authorize_status(host, client["client_id"]) == 400, "refused from the moment it lapses"
+    assert client["client_id"] in oauth_state(host)["clients"], "and still stored: only a write deletes it"
 
     assert register(host).status_code == 201  # the next write
 
-    stored = oauth_state(host)["clients"].get(client["client_id"])
-    assert stored is not None, "the lapsed registration is kept"
-    assert stored["client_secret"] is None and stored["secret_cleared_at"] <= time.time()
-    assert {key: value for key, value in stored.items() if key not in ("client_secret", "secret_cleared_at")} == \
-        {key: value for key, value in before.items() if key != "client_secret"}, "the rest of the entry is unchanged"
-    assert client["client_secret"] not in host.config.oauth_state_path.read_text()
+    stored = oauth_state(host)
+    assert client["client_id"] not in stored["clients"] and client["client_id"] not in stored["unused"], "deleted"
+    assert client["client_secret"] not in host.config.oauth_state_path.read_text(), "with its client secret"
 
 
-def test_a_secret_that_lapsed_while_the_host_was_down_is_cleared_at_startup(start_host) -> None:
+def test_a_registration_that_was_used_is_never_deleted_for_going_unused(start_host, monkeypatch) -> None:
     host = start_host(oauth=True)
-    client = register_with_secret(host)
-    age(host, lapse(client["client_id"]))
+    used = authorize(host)["client_id"]  # authorizing is what uses a registration
+    idle = register(host).json()["client_id"]
+    real = time.time
+    monkeypatch.setattr(time, "time", lambda: real() + 2 * auth.UNUSED_CLIENT_TTL)  # two days on
 
-    auth.PassphraseProvider(host.config)  # what a restart builds first
+    assert register(host).status_code == 201  # the next write
 
-    stored = oauth_state(host)["clients"][client["client_id"]]
-    assert stored["client_secret"] is None and "secret_cleared_at" in stored
-    assert client["client_secret"] not in host.config.oauth_state_path.read_text()
-
-
-def test_the_dispatcher_clears_a_lapsed_secret_with_no_request_at_all(tmp_path: Path, clock) -> None:
-    host = make_config(tmp_path, oauth=True)  # no server runs, so only the dispatcher can touch the file
-    client = store_secret(host)
-    age(host, lapse(client["client_id"]))
-    before = oauth_state(host)["clients"][client["client_id"]]
-    assert before["client_secret"] == client["client_secret"], "lapsed and still stored: nothing has written since"
-
-    started = time.time()
-    take_turns(wakes.Dispatcher(host.config), clock, 1)
-
-    stored = oauth_state(host)["clients"][client["client_id"]]
-    assert stored["client_secret"] is None and started <= stored["secret_cleared_at"] <= time.time()
-    assert {key: value for key, value in stored.items() if key not in ("client_secret", "secret_cleared_at")} == \
-        {key: value for key, value in before.items() if key != "client_secret"}, "the rest of the entry is unchanged"
-    assert client["client_secret"] not in host.config.oauth_state_path.read_text()
-
-
-def test_the_dispatcher_rewrites_oauth_json_only_while_a_lapsed_secret_is_stored(tmp_path: Path, clock) -> None:
-    host = make_config(tmp_path, oauth=True)
-    lapsing, live = store_secret(host), store_secret(host)
-    dispatcher = wakes.Dispatcher(host.config)
-
-    before = pinned(host)
-    take_turns(dispatcher, clock, 1)  # its first check
-    assert stamp(host) == before, "no registration has lapsed, so the check rewrites nothing"
-
-    age(host, lapse(lapsing["client_id"]))
-    take_turns(dispatcher, clock, 60)  # the next check comes a minute after the first
     clients = oauth_state(host)["clients"]
-    assert clients[lapsing["client_id"]]["client_secret"] is None, "the lapsed secret is cleared"
-    assert clients[live["client_id"]]["client_secret"] == live["client_secret"], "a live registration keeps its secret"
-
-    before = pinned(host)
-    take_turns(dispatcher, clock, 60)  # and the one after that
-    assert stamp(host) == before, "no lapsed secret is stored any more, so the check rewrites nothing"
+    assert used in clients, "a registration that was used stays, however long ago it was made"
+    assert idle not in clients, "one that was not used does not"
 
 
-def test_the_dispatcher_checks_for_lapsed_secrets_at_most_once_a_minute(tmp_path: Path, clock, monkeypatch) -> None:
-    host = make_config(tmp_path, oauth=True)
-    checks: list[float] = []
-    monkeypatch.setattr(auth.TokenStore, "clear_lapsed_secrets", lambda store: checks.append(clock()))
-    dispatcher = wakes.Dispatcher(host.config)
-
-    take_turns(dispatcher, clock, 60)  # a minute of one-second turns
-    assert len(checks) == 1, "the store is checked once in the first minute"
-    take_turns(dispatcher, clock, 60)
-    assert len(checks) == 2 and checks[1] - checks[0] >= 60, "and again a minute after"
-
-
-def test_a_clock_set_back_does_not_hold_the_dispatchers_check_off(tmp_path: Path, clock, monkeypatch) -> None:
-    host = make_config(tmp_path, oauth=True)
-    checks: list[float] = []
-    monkeypatch.setattr(auth.TokenStore, "clear_lapsed_secrets", lambda store: checks.append(clock()))
-    dispatcher = wakes.Dispatcher(host.config)
-
-    take_turns(dispatcher, clock, 1)
-    clock.advance(-3600)  # the wall clock is set back an hour
-    take_turns(dispatcher, clock, 1)
-
-    assert len(checks) == 2, "a check is not put off for as long as the clock was set back"
-
-
-def test_the_dispatcher_clears_secrets_only_where_oauth_is_on(tmp_path: Path, clock) -> None:
-    off, on = make_config(tmp_path), make_config(tmp_path, oauth=True)  # one data directory
-    client = store_secret(on)
-    age(on, lapse(client["client_id"]))
-    before = pinned(on)
-
-    take_turns(wakes.Dispatcher(off.config), clock, 1)
-    assert stamp(on) == before, "OAuth is off there, so its state is not touched"
-
-    take_turns(wakes.Dispatcher(on.config), clock, 1)
-    assert oauth_state(on)["clients"][client["client_id"]]["client_secret"] is None
-
-
-def test_an_authorize_request_leaves_oauth_json_untouched_when_a_secret_has_lapsed(start_host) -> None:
+def test_an_authorize_request_leaves_oauth_json_untouched_when_a_registration_has_lapsed(start_host) -> None:
     host = start_host(oauth=True)
     client = register_with_secret(host)
     age(host, lapse(client["client_id"]))
@@ -345,50 +231,29 @@ def test_an_authorize_request_leaves_oauth_json_untouched_when_a_secret_has_laps
     assert stamp(host) == before, "the request wrote nothing, so a failed write cannot fail it"
 
 
-def test_a_write_error_in_the_dispatcher_is_logged_without_secrets_and_retried(tmp_path: Path, clock, monkeypatch,
-                                                                              caplog) -> None:
-    host = make_config(tmp_path, oauth=True)
-    client = store_secret(host)
-    age(host, lapse(client["client_id"]))
-    # What a real error might carry: the secret being written, and a URL with a token in it.
-    sentinel = f"no space left writing {client['client_secret']} for https://hook.invalid/t/sentinel-must-not-be-logged"
-    failures, real = [OSError(sentinel)], datadir.replace_file
-
-    def fails_once(dir_fd: int, name: str, data: bytes):
-        if failures and name == host.config.oauth_state_path.name:
-            raise failures.pop()
-        return real(dir_fd, name, data)
-
-    monkeypatch.setattr(datadir, "replace_file", fails_once)
-    caplog.set_level(logging.DEBUG)
-    dispatcher = wakes.Dispatcher(host.config)
-
-    assert take_turns(dispatcher, clock, 1) is None, "the dispatcher kept running"
-    assert oauth_state(host)["clients"][client["client_id"]]["client_secret"] == client["client_secret"], \
-        "the failed write changed nothing"
-    ours = [record for record in caplog.records if record.name == "baton.wakes"]
-    assert any("OSError" in record.getMessage() for record in ours), "the failure was not logged by its type"
-    assert client["client_secret"] not in caplog.text and "sentinel-must-not-be-logged" not in caplog.text
-    assert all(record.exc_info is None for record in ours), "a traceback would carry the message"
-
-    assert take_turns(dispatcher, clock, 1) is None
-    assert oauth_state(host)["clients"][client["client_id"]]["client_secret"] is None, "retried on the next turn"
-
-
-def test_the_ended_record_carries_no_client_secret(start_host) -> None:
+def test_the_ended_record_takes_ended_tokens_but_never_an_unused_registration(start_host) -> None:
     host = start_host(oauth=True)
-    client = register_with_secret(host)
-    # Lapsed more than thirty days ago with no write since, so the secret is still stored when the entry moves.
-    age(host, lapse(client["client_id"], LAPSED + auth.REFRESH_TTL))
+    tokens = authorize(host)
+    auth.revoke_all(host.config.oauth_state_path)
+    idle = register_with_secret(host)
+    long_ago = time.time() - auth.REFRESH_TTL - 60
 
-    assert register(host).status_code == 201
+    def backdate(state: dict[str, Any]) -> None:
+        for table in ("access", "refresh"):
+            for entry in state[table].values():
+                entry["expires_at"] = long_ago
+        lapse(idle["client_id"], LAPSED + auth.REFRESH_TTL)(state)  # unused for more than thirty days as well
 
-    moved = [line for line in ended_record(host) if line["key"] == client["client_id"]]
-    assert len(moved) == 1, "the registration moved to the ended record"
-    assert client["client_id"] not in oauth_state(host)["clients"]
-    assert (moved[0]["table"], moved[0]["entry"]["client_secret"]) == ("clients", None)
-    assert "secret_cleared_at" in moved[0]["entry"]
-    assert client["client_secret"] not in ended_path(host).read_text()
+    age(host, backdate)
+
+    assert register(host).status_code == 201  # the write that moves what is due
+
+    archived = {(line["table"], line["key"]) for line in ended_record(host)}
+    assert archived == {("access", auth.token_digest(tokens["access_token"])),
+                        ("refresh", auth.token_digest(tokens["refresh_token"]))}, "the ended tokens, and nothing else"
+    assert all(line["entry"]["ended"] == "revoked" for line in ended_record(host)), "marked as they ended"
+    assert idle["client_id"] not in oauth_state(host)["clients"], "the unused registration is deleted"
+    assert idle["client_secret"] not in ended_path(host).read_text()
 
 
 def test_a_spent_refresh_token_is_kept_marked_spent(start_host) -> None:
