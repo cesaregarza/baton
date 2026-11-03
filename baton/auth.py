@@ -269,8 +269,9 @@ class TokenStore:
 
     Nothing is deleted. A revoked or spent token stays, ended (`_end_token`).
     A registration still unused after UNUSED_CLIENT_TTL has lapsed: it stays,
-    refused and not counted, and the next write clears its client secret. An
-    entry REFRESH_TTL past its end moves to the append-only ended record.
+    refused and not counted, and the next write clears its client secret
+    (`clear_lapsed_secrets` makes one if none comes). An entry REFRESH_TTL
+    past its end moves to the append-only ended record.
     """
 
     path: Path
@@ -332,6 +333,14 @@ class TokenStore:
         return any(self.lapsed(client_id, now) and self.clients.get(client_id, {}).get("client_secret")
                    for client_id in self.unused)
 
+    def clear_lapsed_secrets(self) -> None:
+        """Rewrite the file if a lapsed registration still holds its client secret; the rewrite clears it. Time lapses
+        a registration, not a write, so without this its secret would wait for the next write."""
+        self.sync()
+        if self.holds_lapsed_secret(time.time()):
+            with self.mutation():
+                pass
+
     def _settle(self, dir_fd: int, now: float) -> None:
         """Clear every lapsed registration's secret, and move each entry REFRESH_TTL past its end to the ended record.
 
@@ -392,9 +401,7 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
         self.config = config
         self.issuer = config.public_url  # exactly the metadata's `issuer`; RFC 9207 clients compare it as a string
         self.store = TokenStore.load(config.oauth_state_path)
-        if self.store.holds_lapsed_secret(time.time()):
-            with self.store.mutation():
-                pass  # a registration that lapsed while the host was down still holds its secret; the write clears it
+        self.store.clear_lapsed_secrets()  # a registration that lapsed while the host was down still holds its secret
         self.codes: dict[str, tuple[AuthorizationCode, str]] = {}  # code -> (code, role)
         self.pending: dict[str, PendingLogin] = {}
         self.login_failures: list[float] = []
@@ -541,9 +548,13 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
                     _end_token(held, "revoked", now)
 
     def sweep(self) -> None:
+        """Forget expired logins and codes, and clear the secret of a lapsed registration. Called when a request
+        reaches /register or /authorize and when a login is submitted, never on a timer: a lapsed secret waits for
+        one of those, unless an OAuth write comes first."""
         now = time.time()
         self.pending = {key: login for key, login in self.pending.items() if login.expires_at > now}
         self.codes = {key: entry for key, entry in self.codes.items() if entry[0].expires_at > now}
+        self.store.clear_lapsed_secrets()
 
     def _issue(self, client_id: str, scopes: list[str], role: str, grant_id: str | None) -> OAuthToken:
         """Mint a token pair; the caller holds `store.mutation()`. `grant_id` stays the same across refreshes."""
