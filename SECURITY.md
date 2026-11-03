@@ -79,10 +79,11 @@ Access and refresh tokens are opaque and stored only as digests. Access tokens l
 tokens rotate and last 30 days. `baton oauth revoke-all` ends every grant. A revoked or spent token stays,
 marked, with its expiry moved back to when it ended, and moves to the append-only `oauth-ended.jsonl` 30 days
 later. Registration and authorization endpoints have size, rate, and state limits. A client registration
-unused after 24 hours lapses: it is refused from that moment, so its client secret can no longer be used,
-and it no longer counts against the registration limit. The secret is cleared from `oauth.json` within about
-a minute of lapsing, by the background loop the server already runs for wakes, and at startup. Authorization
-codes are single-use and valid for five minutes.
+left unused for 24 hours is refused from then on, so its client secret can no longer be used, and it no
+longer counts against the registration limit. The next write to `oauth.json` (a registration, code exchange,
+refresh or revocation) deletes it with its secret. No timer does, so until then it stays in the file,
+refused. It is the one credential record that is deleted rather than kept. Authorization codes are
+single-use and valid for five minutes.
 
 ### Guest access
 
@@ -224,10 +225,10 @@ The data directory contains the following. Protect backups as carefully as the l
   attempts are retained for their hourly windows. Guest post copies include alias attribution; a mapped
   alias call acts as its mapped role. Proofs and passphrases are not stored in plaintext.
 - `oauth.json`: client metadata and token digests, expiry, scopes, roles, and how and when a token ended; no
-  cleartext OAuth tokens. A confidential client's secret is stored as issued, and cleared within about a minute
-  of its registration lapsing unused.
+  cleartext OAuth tokens. A confidential client's secret is stored as issued, and deleted with its
+  registration by the first write after the registration has been left unused for 24 hours.
 - `oauth-ended.jsonl`: entries moved out of `oauth.json` 30 days after they ended, appended and never
-  rewritten. A lapsed registration arrives here without its client secret.
+  rewritten.
 - `revoked_tokens.json`: the digest, name, role, and revocation time of each revoked bearer token.
 - With MCP Events enabled, its `0600` state file contains subscription ownership, callback URLs, expiry, and
   signing secrets. Delete the file to drop all subscriptions. Its delivery receipts, outcomes and rotation

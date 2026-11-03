@@ -280,10 +280,10 @@ the upgrade rather than being discarded.
 | MCP Events records | Each wake's first occurrence time and per-destination outcomes, every delivery receipt, and when each signing secret was rotated, never the secret. None is pruned. |
 
 OAuth state is stored separately in a `0600` JSON file, atomically replaced after writing and syncing a
-unique temporary file. Revoked and spent tokens stay in it, marked, and a lapsed registration stays without
-its client secret. An entry 30 days past its end moves to the append-only `oauth-ended.jsonl`, synced before
-the file is rewritten without it. Integrations keep their own state under the data directory; MCP Events
-keeps only its subscriptions there and its records in the database. Baton checks the data
+unique temporary file. Revoked and spent tokens stay in it, marked. A client registration left unused for 24
+hours is the one record deleted, by the next write. An entry 30 days past its end moves to the append-only
+`oauth-ended.jsonl`, synced before the file is rewritten without it. Integrations keep their own state under
+the data directory; MCP Events keeps only its subscriptions there and its records in the database. Baton checks the data
 directory and its contents for unsafe ownership, permissions, and links; see
 [Security: the data directory](../SECURITY.md#the-data-directory) for the exact boundary and limitations.
 
