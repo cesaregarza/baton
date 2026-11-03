@@ -20,7 +20,7 @@ import json
 import sqlite3
 from typing import Any
 
-from baton import board_read, events, messages, topic_grants
+from baton import board_read, events, messages, topic_grants, topic_paths
 from baton.config import Config
 from baton.errors import Forbidden, InvalidRequest, UnknownRole, UnknownTopic
 from baton.store import new_topic_id, snapshot, transaction
@@ -38,9 +38,7 @@ def _may_manage(config: Config, actor: str) -> None:
 
 
 def check_path(path: Any, field: str = "path") -> str:
-    from baton import conversations  # lazily: conversations imports this module
-
-    checked = conversations.check_topic(path, field=field)
+    checked = topic_paths.check_topic(path, field=field)
     if checked is None:
         raise InvalidRequest(f"{field} is required: a topic is 1-2 lowercase slug segments")
     return checked
@@ -215,15 +213,13 @@ def note_replay(conn: sqlite3.Connection, seen: dict[str, Any] | None, path: str
 
 
 def _is_path(value: Any) -> bool:
-    """Whether `value` is a topic path as conversations.check_topic accepts it.
+    """Whether `value` is a topic path as topic_paths.check_topic accepts it.
 
     No binding token passes: it is secrets.token_urlsafe(32), 43 characters with no slash, and a topic
     segment is at most MAX_TOPIC_SEGMENT (40) characters.
     """
-    from baton import conversations  # lazily: conversations imports this module
-
     try:
-        return conversations.check_topic(value) is not None
+        return topic_paths.check_topic(value) is not None
     except InvalidRequest:
         return False
 
@@ -234,9 +230,7 @@ def _well_formed(key: str, value: Any) -> bool:
     if key in ("topic", "new_path"):
         return _is_path(value)
     if key == "reference":
-        from baton import references  # lazily: references imports this module
-
-        return references.is_name(value)
+        return topic_paths.is_segment(value)
     return True
 
 

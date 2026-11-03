@@ -21,7 +21,7 @@ import secrets
 import sqlite3
 from typing import Any
 
-from baton import conversations, events, messages, topic_grants, topics
+from baton import events, messages, topic_grants, topic_paths, topics
 from baton.config import Config
 from baton.errors import Forbidden, InvalidRequest, LimitExceeded, StaleReference, UnknownReference
 from baton.store import snapshot, transaction
@@ -29,7 +29,7 @@ from baton.store import snapshot, transaction
 CAPABILITY = "reference.edit"
 MAX_BODY_BYTES = 32768
 MAX_DOCS_PER_TOPIC = 20
-MAX_NAME = conversations.MAX_TOPIC_SEGMENT
+MAX_NAME = topic_paths.MAX_TOPIC_SEGMENT
 MAX_HISTORY_PAGE = 100
 # A revision as every answer describes it, without its text. SQLite counts the size in UTF-8 bytes, so a list of
 # documents or a page of history never loads a body.
@@ -39,7 +39,7 @@ _DESCRIBED = ("revision, base_revision, at, author_role, author_alias_id, author
 
 def is_name(value: Any) -> bool:
     """Whether `value` is a reference name: one topic segment, which no binding token or grant key ever is."""
-    return isinstance(value, str) and conversations.TOPIC_SEGMENT.fullmatch(value) is not None
+    return topic_paths.is_segment(value)
 
 
 def _is_count(value: Any, minimum: int) -> bool:
