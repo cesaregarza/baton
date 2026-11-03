@@ -12,6 +12,11 @@ Over the items scanned after `since`:
 * keep: routed and retained records, which the hourly digest only counts.
 Nothing at or before the activation floor wakes: the first decision records the catch-up scan's position as the
 floor before it scans, and takes it as both.
+
+When the policy names a judge (`secretary_judge`), a wake's decision puts at most two new messages to it, from the
+wake's own message on, and past its wake's own event the scan stops before a third. The catch-up scan and the hourly
+digest use the word lists alone: nothing they scan wakes the principal, and the digest's scan never waits for a
+judge.
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from baton import board_read, datadir, secretary, secretary_store
+from baton import board_read, datadir, secretary, secretary_judge, secretary_store
 from baton import config as config_module
 from baton.config import Config, ConfigError
 from baton.errors import BatonError, InvalidRequest
@@ -44,8 +49,10 @@ TRIGGER = re.compile(r"message:(?P<seq>[1-9][0-9]{0,17})"
                      r"|job:(?P<job>job_[0-9a-f]{16}):(?P<event_seq>[1-9][0-9]{0,17})|(?P<conversation>conversation)")
 JOB_KINDS = ("job.created", "job.moved")
 RANK = {"wake": 0, "hold": 1, "keep": 2}
-WINDOW = ("SELECT i.source_key, i.event_pos, i.envelope, d.kind, d.reason FROM items i"
+WINDOW = ("SELECT i.source_key, i.event_pos, i.envelope, d.kind, d.reason,"
+          " j.status AS judge, j.rules_kind, j.rules_reason FROM items i"
           " JOIN dispositions d ON d.principal = i.principal AND d.source_key = i.source_key"
+          " LEFT JOIN judgments j ON j.principal = i.principal AND j.source_key = i.source_key"
           " WHERE i.principal = ? AND i.event_pos > ? AND i.event_pos <= ? ORDER BY i.event_pos")
 
 
@@ -57,8 +64,9 @@ def decide(config: Config, state_path: Path, policy_path: Path, *, budget_second
     start, activation = _catch_up_position(config, state_path, policy_path, first=since is None)
     if since is None:
         since = floor = activation  # the first decision: everything up to the floor predates activation
+    judge = None if hourly else _judge(config, policy_path, trigger, deadline, clock)
     # Each batch commits with its position, so running out of time loses nothing; the next call continues.
-    while (secretary.scan(config, state_path, policy_path, limit=BATCH)["events_seen"] == BATCH
+    while (secretary.scan(config, state_path, policy_path, limit=BATCH, judge=judge)["events_seen"] == BATCH
            and clock() < deadline):
         pass
     baton = connect_read_only(config.db_path)
@@ -69,7 +77,7 @@ def decide(config: Config, state_path: Path, policy_path: Path, *, budget_second
             try:
                 with transaction(state):
                     return _decide(baton, state, config, policy, start=start, since=since, floor=floor,
-                                   trigger=trigger, hourly=hourly)
+                                   trigger=trigger, hourly=hourly, judge=judge)
             finally:
                 state.close()
     finally:
@@ -123,8 +131,27 @@ def _catch_up_position(config: Config, state_path: Path, policy_path: Path, *,
         state.close()
 
 
+def _judge(config: Config, policy_path: Path, trigger: str | None, deadline: float,
+           clock: Callable[[], float]) -> secretary_judge.Session | None:
+    """This decision's judge, when the policy names one. A message wake judges from its own message on: one before it
+    had its wake decided when it came, so the word lists read it, as they read the catch-up. A job or conversation
+    wake names no message, so it judges from the scan's position."""
+    baton = connect_read_only(config.db_path)
+    try:
+        with snapshot(baton):
+            policy = secretary.load_policy(config, baton, policy_path)
+            if policy.judge is None:
+                return None
+            trigger_pos = _trigger_pos(baton, policy.principal, trigger)
+    finally:
+        baton.close()
+    start = trigger_pos if trigger and trigger.startswith("message:") else None
+    return secretary_judge.Session(deadline=deadline, clock=clock, start_pos=start, trigger_pos=trigger_pos)
+
+
 def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config, policy: secretary.Policy, *,
-            start: int, since: int, floor: int, trigger: str | None, hourly: bool) -> dict:
+            start: int, since: int, floor: int, trigger: str | None, hourly: bool,
+            judge: secretary_judge.Session | None = None) -> dict:
     principal = policy.principal
     through = state.execute("SELECT through_pos FROM sources WHERE principal=?", (principal,)).fetchone()[0]
     head = baton.execute("SELECT COALESCE(MAX(pos), 0) FROM events").fetchone()[0]
@@ -148,7 +175,7 @@ def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config
                    through, head, "current" if current else "behind", decision, rule, evidence, policy.digest,
                    hashlib.sha256(text.encode("utf-8")).hexdigest(), len(text.encode("utf-8"))))
     public = ("source_key", "pos", "kind", "sender", "message_id", "job_id", "conversation_id", "disposition",
-              "reason", "decision", "rule")
+              "reason", "decision", "rule", "judge", "rules")
     return {"principal": principal, "mode": "hourly" if hourly else "callback", "trigger": trigger,
             "trigger_pos": trigger_pos,
             # A wake raised for an event the scan has not reached yet is not this decision's to make.
@@ -161,6 +188,7 @@ def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config
             "decision": decision, "rule": rule, "evidence": evidence,
             "counts": {kind: sum(item["decision"] == kind for item in items) for kind in RANK},
             "new": [{key: item[key] for key in public} for item in items if item["pos"] > start],
+            "judge": {"calls": judge.calls, "fallbacks": judge.fallbacks} if judge else None,
             "brief": text, "decision_seq": seq}
 
 
@@ -179,13 +207,17 @@ def _trigger_pos(baton: sqlite3.Connection, principal: str, trigger: str | None)
 
 
 def _item(row: sqlite3.Row, policy: secretary.Policy) -> dict:
+    """One scanned source. `judge` is None, "judged" or "judge_fallback:<reason>", and `rules` is what the word lists
+    decided: for a judged message, what they would have decided in the judge's place."""
     envelope = json.loads(row["envelope"])
     decision, rule = _classify(envelope["event_kind"], row["kind"], policy)
+    rules = _classify(envelope["event_kind"], row["rules_kind"], policy) if row["judge"] else (decision, rule)
     return {"source_key": row["source_key"], "pos": row["event_pos"], "kind": envelope["event_kind"],
             "sender": secretary._actor(envelope), "message_id": envelope["message_id"],
             "job_id": envelope["job_id"], "job_state": (envelope["job"] or {}).get("event_state"),
             "conversation_id": envelope["conversation_id"], "artifacts": envelope["artifacts"],
-            "disposition": row["kind"], "reason": row["reason"], "decision": decision, "rule": rule}
+            "disposition": row["kind"], "reason": row["reason"], "decision": decision, "rule": rule,
+            "judge": row["judge"], "rules": {"decision": rules[0], "rule": rules[1]}}
 
 
 def _classify(event_kind: str, disposition: str, policy: secretary.Policy) -> tuple[str, str]:

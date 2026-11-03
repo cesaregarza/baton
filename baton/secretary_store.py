@@ -13,7 +13,7 @@ from baton import datadir
 from baton.config import ConfigError
 from baton.store import transaction
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = (
     "CREATE TABLE schema_version (version INTEGER NOT NULL)",
@@ -49,6 +49,12 @@ SCHEMA = (
         PRIMARY KEY(principal, seq))""",
     # The activation floor, recorded by the first `decide` before it scans anything.
     "CREATE TABLE activation (principal TEXT PRIMARY KEY, floor_pos INTEGER NOT NULL, at TEXT NOT NULL)",
+    # One row per message put to the judge: how it answered, or why it fell back, beside what the word lists decided.
+    # Never message text: the four answers are a relation, an expectation id and two probabilities.
+    """CREATE TABLE judgments (
+        principal TEXT NOT NULL, source_key TEXT NOT NULL, status TEXT NOT NULL, relation TEXT, item TEXT,
+        opens_owed REAL, needs_now REAL, rules_kind TEXT NOT NULL, rules_reason TEXT NOT NULL,
+        PRIMARY KEY(principal, source_key))""",
     "CREATE INDEX items_by_principal_pos ON items(principal, event_pos)",
     "CREATE INDEX evidence_by_source ON expectation_evidence(principal, source_key)",
 )
@@ -67,7 +73,8 @@ def _init(conn: sqlite3.Connection) -> None:
     tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if tables:
         if "schema_version" not in tables or not {"sources", "items", "expectations", "expectation_evidence",
-                                                   "dispositions", "briefs", "decisions", "activation"} <= tables:
+                                                   "dispositions", "briefs", "decisions", "activation",
+                                                   "judgments"} <= tables:
             raise ConfigError("secretary state path contains another or incomplete database")
         version = conn.execute("SELECT version FROM schema_version").fetchone()
         if version is None or version["version"] != SCHEMA_VERSION:
@@ -154,12 +161,19 @@ def add_evidence(conn: sqlite3.Connection, principal: str, expectation_id: str, 
                  (principal, expectation_id, source_key, kind, rule_id, *artifact, observed_kind))
 
 
+def put_judgment(conn: sqlite3.Connection, principal: str, source_key: str, status: str,
+                 answers: tuple[str | None, str | None, float | None, float | None], rules: tuple[str, str]) -> None:
+    conn.execute("INSERT INTO judgments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (principal, source_key, status, *answers, *rules))
+
+
 def export(conn: sqlite3.Connection, principal: str) -> dict:
     """A deterministic export for restart, replay, and isolation comparisons."""
     result = {}
     for table, order in (("sources", "principal"), ("items", "seq"), ("expectations", "id"),
                          ("expectation_evidence", "expectation_id, source_key, kind"),
-                         ("dispositions", "source_key, policy_digest"), ("briefs", "work_key, version")):
+                         ("dispositions", "source_key, policy_digest"), ("briefs", "work_key, version"),
+                         ("judgments", "source_key")):
         result[table] = [dict(row) for row in conn.execute(f"SELECT * FROM {table} WHERE principal=? ORDER BY {order}",
                                                     (principal,))]
     return result

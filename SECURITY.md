@@ -226,8 +226,10 @@ The data directory contains the following. Protect backups as carefully as the l
   outcome, and any alias ID and code. It excludes message text, job bodies, passphrases, and credentials.
   Malformed secret-bearing calls are refused before validation can echo their input.
 - An optional `0600` secretary state file holds source references, digests, bounded metadata, expectations,
-  dispositions, append-only brief versions, and `decide` records with only a digest of each brief. It stores
-  no message text. `show` reads excerpts from
+  dispositions, append-only brief versions, `decide` records with only a digest of each brief, and each judge
+  verdict beside the deterministic rules' verdict. It stores no message text. With a policy `judge` block,
+  `decide` writes a new message's authored text and its candidate items' first words to that host command's
+  stdin only. `show` reads excerpts from
   `baton.db` at inspection time and rechecks the principal's visibility. This local projection cannot grant
   authority, approve work, advance a delivery cursor, or send a wake.
 
