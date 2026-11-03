@@ -176,6 +176,7 @@ def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config
                    hashlib.sha256(text.encode("utf-8")).hexdigest(), len(text.encode("utf-8"))))
     public = ("source_key", "pos", "kind", "sender", "message_id", "job_id", "conversation_id", "disposition",
               "reason", "decision", "rule", "judge", "rules")
+    own = next((item for item in items if item["pos"] == trigger_pos), None)
     return {"principal": principal, "mode": "hourly" if hourly else "callback", "trigger": trigger,
             "trigger_pos": trigger_pos,
             # A wake raised for an event the scan has not reached yet is not this decision's to make.
@@ -187,6 +188,12 @@ def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config
             "coverage": "current" if current else "behind", "scanned_at": at,
             "decision": decision, "rule": rule, "evidence": evidence,
             "counts": {kind: sum(item["decision"] == kind for item in items) for kind in RANK},
+            # Of those, the decisions a judge's verdict made.
+            "judged_counts": {kind: sum(item["decision"] == kind and item["judge"] == secretary_judge.JUDGED
+                                        for item in items) for kind in RANK},
+            # The item this wake was raised for, while it is in the window, new or not: its own decision and whether
+            # a judge made it, so the caller can tell a trigger the judge decided from one it did not.
+            "trigger_item": {key: own[key] for key in public} if own else None,
             "new": [{key: item[key] for key in public} for item in items if item["pos"] > start],
             "judge": {"calls": judge.calls, "fallbacks": judge.fallbacks} if judge else None,
             "brief": text, "decision_seq": seq}

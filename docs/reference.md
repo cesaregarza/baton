@@ -213,7 +213,9 @@ before it scans. It records each decision and never delivers;
 `owed_digest_below` and `wake_at`) lets a wake's `decide` put at most two new messages to that host command,
 and a failed, late or malformed answer leaves a message to the deterministic rules, as does one that ties it
 to none of the items offered when it had a candidate the judge was not offered; the catch-up scan and the
-hourly digest never use it. The
+hourly digest never use it. Each result counts the decisions a judge made (`judged_counts`) and names the
+wake's own item (`trigger_item`) while it is in the window, so a caller can tell a trigger the judge
+decided from one it did not. The
 policy and state formats are versioned. This interface does not deliver, approve, or modify Baton work.
 The projection reads events addressed to or authored by the principal, plus later events for jobs whose
 earlier create or move event the principal authored. It derives job facts from those event rows and
