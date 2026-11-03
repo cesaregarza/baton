@@ -76,11 +76,21 @@ def call(host: str, bearer: str, tool: str, arguments: dict[str, Any]) -> Any:
         detail = _innermost(error)
         code = "unauthorized" if 401 in statuses else "host_unreachable"
         raise RemoteRefusal(code, f"{mcp_url(host)}: {detail}") from None
+    return _decode_result(result)
+
+
+def _decode_result(result: Any) -> Any:
+    """Decode an MCP response, preserving Baton refusal codes and plain-text tool errors."""
     text = result.content[0].text if result.content else ""
     if result.structured_content is not None:
         value = result.structured_content.get("result", result.structured_content)
     else:
-        value = json.loads(text) if text else None
+        try:
+            value = json.loads(text) if text else None
+        except json.JSONDecodeError:
+            if result.is_error:
+                raise RemoteRefusal("tool_error", text) from None
+            raise
     if result.is_error and not isinstance(value, dict):
         raise RemoteRefusal("tool_error", text)
     if isinstance(value, dict) and "error" in value:
