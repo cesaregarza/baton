@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from baton import board_read, messages, secretary_store
 from baton.config import Config, ConfigError
@@ -21,7 +22,7 @@ from baton.errors import InvalidRequest
 from baton.store import connect_read_only, snapshot, transaction
 
 ENVELOPE_VERSION = 1
-RULES_VERSION = 6
+RULES_VERSION = 7
 POLICY_VERSION = 1
 MAX_POLICY_BYTES = 16 * 1024
 DEFAULT_BATCH = 100
@@ -38,6 +39,7 @@ SUPERSEDES = re.compile(r"\bsupersedes\s+(?P<key>[\w./-]+#\d+)@(?P<rev>[0-9a-fA-
 DEFAULT_ANSWERS = ("PASS", "FAIL", "BLOCK", "CHANGES REQUIRED", "APPROVED")
 DEFAULT_ACKS = ("claimed", "starting", "received", "recorded")
 BRIEF_BYTES = (512, 2048, 16 * 1024)  # the least, default and most bytes `decide` may append to a wake
+JUDGE_THRESHOLDS = {"owed_digest_below": 0.4, "wake_at": 0.8}  # their defaults; secretary_judge says how they apply
 
 
 @dataclass(frozen=True)
@@ -49,8 +51,23 @@ class Policy:
     terminal_job_states: tuple[str, ...]
     job_events_wake: bool
     brief_bytes: int
+    judge: dict[str, Any] | None
     raw: dict[str, Any]
     digest: str
+
+
+class Judge(Protocol):
+    """What `scan` asks of a judge: secretary_judge.Session in `decide`, secretary_judge.Stored in `replay`."""
+
+    def wants(self, policy: Policy, meta: dict) -> bool:
+        """Whether this source goes to the judge rather than to the word lists."""
+
+    def stops_before(self, meta: dict) -> bool:
+        """Whether its budget is gone and the scan should stop before this source rather than read it."""
+
+    def outcome(self, state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: Policy,
+                meta: dict, text: str) -> tuple[str, str, list[str]]:
+        """The source's disposition, reason and answer words, with both verdicts recorded."""
 
 
 def _words(value: Any, field: str, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -74,7 +91,7 @@ def load_policy(config: Config, baton: sqlite3.Connection, path: Path) -> Policy
     except (UnicodeError, json.JSONDecodeError) as error:
         raise ConfigError(f"invalid secretary policy JSON: {error}") from error
     fields = {"version", "principal", "secretary_alias_id", "answer_words", "ack_words", "terminal_job_states",
-              "job_events_wake", "brief_bytes"}
+              "job_events_wake", "brief_bytes", "judge"}
     if not isinstance(raw, dict) or not {"version", "principal", "secretary_alias_id"} <= raw.keys() \
             or raw.keys() - fields:
         raise ConfigError("secretary policy fields are invalid")
@@ -104,11 +121,41 @@ def load_policy(config: Config, baton: sqlite3.Connection, path: Path) -> Policy
     brief_bytes = raw.get("brief_bytes", default)
     if type(brief_bytes) is not int or not least <= brief_bytes <= most:
         raise ConfigError(f"policy.brief_bytes must be an integer from {least} to {most}")
+    judge = _judge_block(raw.get("judge"))
     normalized = {"version": POLICY_VERSION, "principal": principal, "secretary_alias_id": alias_id,
                   "answer_words": list(answers), "ack_words": list(acks), "terminal_job_states": list(terminal),
-                  "job_events_wake": job_wakes, "brief_bytes": brief_bytes}
-    return Policy(principal, alias_id, answers, acks, terminal, job_wakes, brief_bytes, normalized,
+                  "job_events_wake": job_wakes, "brief_bytes": brief_bytes, **({"judge": judge} if judge else {})}
+    return Policy(principal, alias_id, answers, acks, terminal, job_wakes, brief_bytes, judge, normalized,
                   secretary_store.digest(normalized))
+
+
+def _judge_block(value: Any) -> dict[str, Any] | None:
+    """The optional judge: its command, its timeout, the sha256 of the question file it asks, and the two
+    thresholds. All of them are in the policy digest, so a recorded decision names exactly the judge it used."""
+    if value is None:
+        return None
+    fields = {"command", "timeout_seconds", "questions_sha256", *JUDGE_THRESHOLDS}
+    if not isinstance(value, dict) or not {"command", "timeout_seconds", "questions_sha256"} <= value.keys() \
+            or value.keys() - fields:
+        raise ConfigError("policy.judge fields are invalid")
+    block = {**JUDGE_THRESHOLDS, **value}
+    command = block["command"]
+    if not isinstance(command, list) or not 1 <= len(command) <= 16 or not all(
+            isinstance(part, str) and 0 < len(part) <= 4096 and "\0" not in part for part in command) \
+            or not command[0].startswith("/"):
+        raise ConfigError("policy.judge.command must be an argv list that starts with an absolute path")
+    if not _finite(block["timeout_seconds"]) or not 0 < block["timeout_seconds"] <= 10:
+        raise ConfigError("policy.judge.timeout_seconds must be more than 0 and at most 10")
+    if not isinstance(block["questions_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", block["questions_sha256"]):
+        raise ConfigError("policy.judge.questions_sha256 must be a lowercase hex sha256")
+    if not all(_finite(block[key]) for key in JUDGE_THRESHOLDS) or not (
+            0 <= block["owed_digest_below"] <= block["wake_at"] <= 1):
+        raise ConfigError("policy.judge needs 0 <= owed_digest_below <= wake_at <= 1")
+    return block
+
+
+def _finite(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
 
 
 def _epoch(baton: sqlite3.Connection) -> str:
@@ -304,6 +351,11 @@ def _actor(meta: dict) -> str | None:
     return f"guest:{alias_id}" if alias_id else meta["identity"]["from_role"]
 
 
+def _task_ref(meta: dict) -> str | None:
+    return (f"job:{meta['job_id']}" if meta["job_id"] else
+            f"conversation:{meta['conversation_id']}" if meta["conversation_id"] else None)
+
+
 def _evidence(state: sqlite3.Connection, principal: str, expected: sqlite3.Row, meta: dict,
               kind: str, rule: str, observed_kind: str | None = None) -> bool:
     count = state.execute("SELECT COUNT(*) FROM expectation_evidence WHERE principal=? AND expectation_id=?",
@@ -347,10 +399,8 @@ def _open(state: sqlite3.Connection, policy: Policy, meta: dict, direction: str,
         matching = [row for row in candidates if _revision_matches(row["artifact_rev"], predecessor["rev"])]
         if len(matching) == 1:
             _close(state, principal, matching[0], meta, "superseded", "explicit-predecessor")
-    task_ref = f"job:{meta['job_id']}" if meta["job_id"] else (
-        f"conversation:{meta['conversation_id']}" if meta["conversation_id"] else None)
     state.execute("INSERT OR IGNORE INTO expectations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL)",
-                  (principal, expectation_id, direction, requester, responder, task_ref, key, rev,
+                  (principal, expectation_id, direction, requester, responder, _task_ref(meta), key, rev,
                    expected_kind, meta["source_key"], opening_message_id))
     return expectation_id
 
@@ -451,15 +501,56 @@ def _uncertain_candidates(state: sqlite3.Connection, principal: str, meta: dict,
             "multiple open expectations match this message")
 
 
+def _candidates(state: sqlite3.Connection, principal: str, meta: dict) -> list[sqlite3.Row]:
+    """The open items a message could answer on structure alone: what its author owes in the same job or
+    conversation and, for a reply, the item its parent opened."""
+    rows = state.execute("SELECT * FROM expectations WHERE principal=? AND state='open' AND responder=? ORDER BY id",
+                         (principal, _actor(meta))).fetchall()
+    return [row for row in rows if row["task_ref"] == _task_ref(meta) and
+            (not meta["reply_to"] or meta["reply_to"] == row["opening_message_id"])]
+
+
+def _direct_request(state: sqlite3.Connection, principal: str, expected: sqlite3.Row) -> bool:
+    """An item a principal's direct message opened (`_await_recipient`)."""
+    if expected["direction"] != "awaited" or expected["opening_message_id"] is None:
+        return False
+    opening = state.execute("SELECT envelope FROM items WHERE principal=? AND source_key=?",
+                            (principal, expected["opening_source"])).fetchone()
+    return opening is not None and json.loads(opening["envelope"])["conversation_id"] is None
+
+
+def _addressed(baton: sqlite3.Connection, config: Config, principal: str, meta: dict) -> bool:
+    """A direct message to the principal, a post naming it in `attention`, or a reply to its own message."""
+    parent = _visible_message(baton, config, principal, meta["reply_to"]) if meta["reply_to"] else None
+    return ((meta["conversation_id"] is None and meta["recipient"] == principal)
+            or principal in (meta["attention"] or []) or (parent is not None and parent["sender"] == principal))
+
+
+def _await_recipient(state: sqlite3.Connection, policy: Policy, meta: dict, text: str,
+                     outcome: tuple[str, str]) -> tuple[str, str]:
+    """With a judge, a principal's direct message awaits its recipient, as a post's `attention` does, unless it
+    answered one of the recipient's own requests. A direct message carries neither `attention` nor `reply_to`, so
+    only the judge can tell what later answers it; the word lists leave such an item out of their candidates."""
+    principal = policy.principal
+    if (policy.judge is None or meta["conversation_id"] is not None or meta["recipient"] == principal
+            or state.execute("SELECT 1 FROM expectation_evidence WHERE principal=? AND source_key=?"
+                             " AND kind='satisfied'", (principal, meta["source_key"])).fetchone()):
+        return outcome
+    if _open(state, policy, meta, "awaited", principal, meta["recipient"], _request_artifact(meta),
+             meta["message_id"], _result_kind(text)) is None:
+        return _choose_disposition(outcome, ("reconcile", "open expectation limit reached"))
+    return outcome
+
+
 def _message_disposition(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config,
                          policy: Policy, meta: dict, text: str) -> tuple[str, str, list[str]]:
+    """The word lists' reading of one message."""
     principal = policy.principal
     kind, reason = "retain", "no new principal action"
     author = _actor(meta)
     answers, acks = _signals(text, policy)
     observed_kind = _result_kind(text)
-    current_ref = (f"job:{meta['job_id']}" if meta["job_id"] else
-                   f"conversation:{meta['conversation_id']}" if meta["conversation_id"] else None)
+    current_ref = _task_ref(meta)
     open_rows = state.execute("SELECT * FROM expectations WHERE principal=? AND state='open'"
                               " AND responder=? ORDER BY id", (principal, author)).fetchall()
     direct_pair = (meta["conversation_id"] is None and author == principal and
@@ -472,8 +563,8 @@ def _message_disposition(state: sqlite3.Connection, baton: sqlite3.Connection, c
             return kind, reason, answers
         open_rows = [row for row in pair if row["task_ref"] == current_ref]
     else:
-        open_rows = [row for row in open_rows if row["task_ref"] == current_ref and
-                     (not meta["reply_to"] or meta["reply_to"] == row["opening_message_id"])]
+        open_rows = [row for row in _candidates(state, principal, meta)
+                     if not _direct_request(state, principal, row)]
         if not meta["reply_to"] and not meta["artifacts"]:
             # An ordinary principal post is not an untagged answer to an owed request.
             open_rows = [row for row in open_rows if row["direction"] == "awaited"]
@@ -544,11 +635,7 @@ def _message_disposition(state: sqlite3.Connection, baton: sqlite3.Connection, c
                 else:
                     kind, reason = "retain", "existing responder owns the next action"
         elif author is not None and author != principal:
-            direct = meta["conversation_id"] is None and meta["recipient"] == principal
-            parent = (_visible_message(baton, config, principal, meta["reply_to"])
-                      if meta["reply_to"] else None)
-            addressed = direct or principal in attention or (parent is not None and parent["sender"] == principal)
-            if addressed:
+            if _addressed(baton, config, principal, meta):
                 if _open(state, policy, meta, "owed", author, principal,
                          _request_artifact(meta), meta["message_id"],
                          _result_kind(text)) is None:
@@ -618,9 +705,17 @@ def _job_disposition(state: sqlite3.Connection, config: Config, policy: Policy,
     return kind, reason
 
 
+def _over_limit(meta: dict, text: str) -> bool:
+    return meta["artifact_over_limit"] or len(text.encode("utf-8")) > messages.MAX_MESSAGE_BYTES
+
+
 def _process(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: Policy,
-             meta: dict, text: str) -> bool:
-    """Apply one source inside the caller's sidecar transaction. Returns whether it was new."""
+             meta: dict, text: str, judge: Judge | None = None) -> bool:
+    """Apply one source inside the caller's sidecar transaction. Returns whether it was new.
+
+    A judge reads only a message inside every bound: the bounds, like the activation floor, the job-event policy and
+    visibility, are decided before any judge is asked, and nothing it answers changes them.
+    """
     principal = policy.principal
     if meta["version"] != ENVELOPE_VERSION:
         raise ConfigError("unsupported secretary envelope version")
@@ -638,10 +733,14 @@ def _process(state: sqlite3.Connection, baton: sqlite3.Connection, config: Confi
             kind, reason = "retain", "operator cancelled expectation"
         else:
             kind, reason = "retain", "expectation already closed or evidence limit reached"
-    elif meta["artifact_over_limit"] or len(text.encode("utf-8")) > messages.MAX_MESSAGE_BYTES:
+    elif _over_limit(meta, text):
         kind, reason = "reconcile", "source exceeds a bounded input limit"
+    elif meta["event_kind"] == "message" and judge is not None and judge.wants(policy, meta):
+        kind, reason, answers = judge.outcome(state, baton, config, policy, meta, text)
     elif meta["event_kind"] == "message":
         kind, reason, answers = _message_disposition(state, baton, config, policy, meta, text)
+        if _actor(meta) == policy.principal:
+            kind, reason = _await_recipient(state, policy, meta, text, (kind, reason))
     elif meta["event_kind"] in {"job.created", "job.moved"}:
         kind, reason = _job_disposition(state, config, policy, meta)
     brief = _brief(state, policy, meta, kind, reason, answers)
@@ -654,7 +753,9 @@ def _process(state: sqlite3.Connection, baton: sqlite3.Connection, config: Confi
 
 
 def scan(config: Config, state_path: Path, policy_path: Path, *, limit: int = DEFAULT_BATCH,
-         inject: Callable[[str], None] | None = None) -> dict:
+         inject: Callable[[str], None] | None = None, judge: Judge | None = None) -> dict:
+    """Interpret the next page of the principal's events. Only `decide` passes a judge: the catch-up scan, like
+    every scan before activation, reads with the word lists alone."""
     if type(limit) is not int or not 1 <= limit <= MAX_BATCH:
         raise InvalidRequest(f"scan limit must be 1-{MAX_BATCH}")
     baton = connect_read_only(config.db_path)
@@ -669,27 +770,39 @@ def scan(config: Config, state_path: Path, policy_path: Path, *, limit: int = DE
                     _check_stored_envelope_version(state, policy.principal)
                     rows = _source_rows(baton, policy.principal, through, limit)
                     added = invisible = 0
+                    seen = []
                     for event in rows:
                         mapped = _envelope(baton, config, policy.principal, event)
                         if mapped is None:
                             invisible += 1
                         else:
                             meta, text = mapped
-                            added += _process(state, baton, config, policy, meta, text)
+                            if judge is not None and _waits_for_judge(state, policy, meta, text, judge):
+                                break  # the next decision's scan starts at this message, with a fresh budget
+                            added += _process(state, baton, config, policy, meta, text, judge)
+                        seen.append(event["pos"])
                         if inject:
                             inject("mid_batch")
-                    if rows:
-                        secretary_store.set_position(state, policy.principal, rows[-1]["pos"])
+                    if seen:
+                        secretary_store.set_position(state, policy.principal, seen[-1])
                     if inject:
                         inject("before_commit")
-                return {"principal": policy.principal, "policy_digest": policy.digest, "events_seen": len(rows),
+                return {"principal": policy.principal, "policy_digest": policy.digest, "events_seen": len(seen),
                         "items_added": added, "invisible": invisible,
-                        "through_pos": rows[-1]["pos"] if rows else through,
+                        "through_pos": seen[-1] if seen else through,
                         "export_sha256": secretary_store.export_digest(state, policy.principal)}
             finally:
                 state.close()
     finally:
         baton.close()
+
+
+def _waits_for_judge(state: sqlite3.Connection, policy: Policy, meta: dict, text: str, judge: Judge) -> bool:
+    """A new message the judge would read once its budget is gone, past the wake's own event: the scan stops before
+    it and reports itself behind, rather than leave the message to the word lists for want of time."""
+    return (judge.wants(policy, meta) and judge.stops_before(meta) and not _over_limit(meta, text)
+            and state.execute("SELECT 1 FROM items WHERE principal=? AND source_key=?",
+                              (policy.principal, meta["source_key"])).fetchone() is None)
 
 
 def _check_stored_envelope_version(state: sqlite3.Connection, principal: str) -> None:
@@ -742,6 +855,11 @@ def replay(config: Config, state_path: Path, policy_path: Path) -> dict:
                 previous = {row["source_key"]: dict(row) for row in state.execute(
                     "SELECT source_key, kind, reason, policy_digest FROM dispositions WHERE principal=?",
                     (policy.principal,))}
+                from baton import secretary_judge  # it builds on this module, so it is imported here, late
+
+                # Each judged message reads as it was first judged: replay never runs the judge.
+                judged = secretary_judge.Stored({row["source_key"]: row for row in state.execute(
+                    "SELECT * FROM judgments WHERE principal=?", (policy.principal,))})
                 inputs = []
                 unavailable = []
                 for row in rows:
@@ -763,7 +881,7 @@ def replay(config: Config, state_path: Path, policy_path: Path) -> dict:
                     with transaction(trial):
                         secretary_store.source_position(trial, policy.principal, epoch)
                         for meta, source_text in inputs:
-                            _process(trial, baton, config, policy, meta, source_text)
+                            _process(trial, baton, config, policy, meta, source_text, judged)
                         secretary_store.set_position(trial, policy.principal, through)
                     now = {row["source_key"]: dict(row) for row in trial.execute(
                         "SELECT source_key, kind, reason, policy_digest FROM dispositions WHERE principal=?",

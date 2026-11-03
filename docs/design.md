@@ -288,7 +288,7 @@ directory and its contents for unsafe ownership, permissions, and links; see
 [Security: the data directory](../SECURITY.md#the-data-directory) for the exact boundary and limitations.
 
 The optional host-local secretary projection opens `baton.db` read-only under a snapshot and keeps its own
-SQLite state file, with schema version 1 and a separate `(principal, log_epoch, through_pos)` position.
+SQLite state file, with schema version 2 and a separate `(principal, log_epoch, through_pos)` position.
 Items, expectation evidence, dispositions, and brief versions are retained by principal. A batch and its
 position commit together. The projection cites Baton records but owns no jobs, messages, permissions, or
 delivery cursors. Its deterministic interpretation uses a versioned policy file and can be replayed without
