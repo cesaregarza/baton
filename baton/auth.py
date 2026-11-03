@@ -267,11 +267,11 @@ class TokenStore:
     takes effect at once. Writes run inside `mutation()`, under an exclusive
     lock and after a fresh load, so a write never resurrects a revoked grant.
 
-    Nothing is deleted. A revoked or spent token stays, ended (`_end_token`).
-    A registration still unused after UNUSED_CLIENT_TTL has lapsed: it stays,
-    refused and not counted, and the next write clears its client secret
-    (`clear_lapsed_secrets` makes one if none comes). An entry REFRESH_TTL
-    past its end moves to the append-only ended record.
+    Nothing is deleted but a registration left unused for UNUSED_CLIENT_TTL. A
+    revoked or spent token stays, ended (`_end_token`), and an entry
+    REFRESH_TTL past its end moves to the append-only ended record. A
+    registration that lapses is refused and not counted from that moment
+    (`lapsed`), and the next write deletes it, with its client secret.
     """
 
     path: Path
@@ -315,6 +315,7 @@ class TokenStore:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 self._signature = None
                 self.sync()
+                self._drop_unused()
                 yield self
                 self._settle(dir_fd, time.time())
                 self._save(dir_fd)
@@ -329,33 +330,21 @@ class TokenStore:
         """The registrations the cap counts."""
         return sum(not self.lapsed(client_id, now) for client_id in self.clients)
 
-    def holds_lapsed_secret(self, now: float) -> bool:
-        return any(self.lapsed(client_id, now) and self.clients.get(client_id, {}).get("client_secret")
-                   for client_id in self.unused)
-
-    def clear_lapsed_secrets(self) -> None:
-        """Rewrite the file if a lapsed registration still holds its client secret; the rewrite clears it. Time lapses
-        a registration, not a write, so without this its secret would wait for the next write. The host calls this
-        at startup and, from the wake dispatcher, once a minute."""
-        self.sync()
-        if self.holds_lapsed_secret(time.time()):
-            with self.mutation():
-                pass
+    def _drop_unused(self) -> None:
+        """Delete every registration left unused past UNUSED_CLIENT_TTL, with its client secret: the one record that
+        is not kept. It is refused from the moment it lapses, so deleting it only waits for the next write."""
+        now = time.time()
+        for client_id in [client_id for client_id in self.unused if self.lapsed(client_id, now)]:
+            self.clients.pop(client_id, None)
+            del self.unused[client_id]
 
     def _settle(self, dir_fd: int, now: float) -> None:
-        """Clear every lapsed registration's secret, and move each entry REFRESH_TTL past its end to the ended record.
+        """Move each entry REFRESH_TTL past its end to the ended record.
 
         Runs after the change and before the rewrite, so a refused change writes neither file. The moved entries
         are synced to the record before the rewrite drops them: a crash in between repeats a line, never loses one.
         """
         moved = []
-        for client_id in [client_id for client_id in self.unused if self.lapsed(client_id, now)]:
-            client = self.clients.get(client_id)
-            if client is not None and client.get("client_secret"):
-                self.clients[client_id] = {**client, "client_secret": None, "secret_cleared_at": now}
-            if self.unused[client_id] < now - UNUSED_CLIENT_TTL - REFRESH_TTL:
-                moved.append({"table": "clients", "key": client_id, "entry": self.clients.pop(client_id, None),
-                              "unused_since": self.unused.pop(client_id)})
         for name, table in (("access", self.access), ("refresh", self.refresh)):
             for key in [key for key, token in table.items() if token["expires_at"] < now - REFRESH_TTL]:
                 moved.append({"table": name, "key": key, "entry": table.pop(key)})
@@ -402,7 +391,6 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
         self.config = config
         self.issuer = config.public_url  # exactly the metadata's `issuer`; RFC 9207 clients compare it as a string
         self.store = TokenStore.load(config.oauth_state_path)
-        self.store.clear_lapsed_secrets()  # a registration that lapsed while the host was down still holds its secret
         self.codes: dict[str, tuple[AuthorizationCode, str]] = {}  # code -> (code, role)
         self.pending: dict[str, PendingLogin] = {}
         self.login_failures: list[float] = []
@@ -549,8 +537,6 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
                     _end_token(held, "revoked", now)
 
     def sweep(self) -> None:
-        """Forget expired logins and codes. It touches memory only, since it runs inside requests and a failed file
-        write must not fail one; the wake dispatcher clears lapsed client secrets."""
         now = time.time()
         self.pending = {key: login for key, login in self.pending.items() if login.expires_at > now}
         self.codes = {key: entry for key, entry in self.codes.items() if entry[0].expires_at > now}
