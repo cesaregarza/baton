@@ -37,6 +37,7 @@ SUPERSEDES = re.compile(r"\bsupersedes\s+(?P<key>[\w./-]+#\d+)@(?P<rev>[0-9a-fA-
                         r"(?![0-9a-fA-F])", re.IGNORECASE)
 DEFAULT_ANSWERS = ("PASS", "FAIL", "BLOCK", "CHANGES REQUIRED", "APPROVED")
 DEFAULT_ACKS = ("claimed", "starting", "received", "recorded")
+BRIEF_BYTES = (512, 2048, 16 * 1024)  # the least, default and most bytes `decide` may append to a wake
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,8 @@ class Policy:
     answer_words: tuple[str, ...]
     ack_words: tuple[str, ...]
     terminal_job_states: tuple[str, ...]
+    job_events_wake: bool
+    brief_bytes: int
     raw: dict[str, Any]
     digest: str
 
@@ -70,7 +73,8 @@ def load_policy(config: Config, baton: sqlite3.Connection, path: Path) -> Policy
         raw = json.loads(data)
     except (UnicodeError, json.JSONDecodeError) as error:
         raise ConfigError(f"invalid secretary policy JSON: {error}") from error
-    fields = {"version", "principal", "secretary_alias_id", "answer_words", "ack_words", "terminal_job_states"}
+    fields = {"version", "principal", "secretary_alias_id", "answer_words", "ack_words", "terminal_job_states",
+              "job_events_wake", "brief_bytes"}
     if not isinstance(raw, dict) or not {"version", "principal", "secretary_alias_id"} <= raw.keys() \
             or raw.keys() - fields:
         raise ConfigError("secretary policy fields are invalid")
@@ -92,9 +96,19 @@ def load_policy(config: Config, baton: sqlite3.Connection, path: Path) -> Policy
                       tuple(name for name, state in config.jobs.states.items() if state.terminal))
     if any(name not in config.jobs.states or not config.jobs.states[name].terminal for name in terminal):
         raise ConfigError("policy.terminal_job_states must name configured terminal states")
+    # Job events never wake the principal on their own unless this key says so (decide).
+    job_wakes = raw.get("job_events_wake", False)
+    if type(job_wakes) is not bool:
+        raise ConfigError("policy.job_events_wake must be true or false")
+    least, default, most = BRIEF_BYTES
+    brief_bytes = raw.get("brief_bytes", default)
+    if type(brief_bytes) is not int or not least <= brief_bytes <= most:
+        raise ConfigError(f"policy.brief_bytes must be an integer from {least} to {most}")
     normalized = {"version": POLICY_VERSION, "principal": principal, "secretary_alias_id": alias_id,
-                  "answer_words": list(answers), "ack_words": list(acks), "terminal_job_states": list(terminal)}
-    return Policy(principal, alias_id, answers, acks, terminal, normalized, secretary_store.digest(normalized))
+                  "answer_words": list(answers), "ack_words": list(acks), "terminal_job_states": list(terminal),
+                  "job_events_wake": job_wakes, "brief_bytes": brief_bytes}
+    return Policy(principal, alias_id, answers, acks, terminal, job_wakes, brief_bytes, normalized,
+                  secretary_store.digest(normalized))
 
 
 def _epoch(baton: sqlite3.Connection) -> str:
