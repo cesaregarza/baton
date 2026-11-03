@@ -584,6 +584,35 @@ def test_login_forms_over_the_live_cap_are_refused(room, monkeypatch) -> None:
     assert get(host.config, "/seat/login").status == 200, "forms issued over five minutes ago no longer count"
 
 
+def test_the_pause_notice_stands_alone_at_the_login_form_cap(room, monkeypatch) -> None:
+    host, _ = room
+    monkeypatch.setattr(seat, "MAX_PRE", 3)
+    monkeypatch.setattr(seat, "FAILURES_PER_HOUR", 1)
+    _, second, third = (get(host.config, "/seat/login") for _ in range(3))  # three live forms: the cap
+    cap = b"Too many login forms are open"
+
+    def refused(response) -> bytes:
+        """The body of a refusal at the cap, which is always a 429 with no form and no cookie."""
+        assert response.status == 429 and response.cookies == []
+        assert b"<form" not in response.body and b'name="pre"' not in response.body
+        return response.body
+
+    def wrong_token(form):
+        return post(host.config, "/seat/login", {"token": "not the token", "pre": hidden(form.body, "pre")},
+                    cookies={PRE_COOKIE: cookie_value(form, PRE_COOKIE)})
+
+    plain = refused(get(host.config, "/seat/login"))
+    assert cap in plain and plain.count(b'class="notice-box"') == 1
+    expired = refused(post(host.config, "/seat/login", {"token": "not the token", "pre": "never issued"}))
+    assert b"That login form had expired" in expired and cap in expired, "the other refusals keep their notices"
+    rejected = refused(wrong_token(third))
+    assert b"That token was not accepted" in rejected and cap in rejected, "the other refusals keep their notices"
+
+    paused = refused(wrong_token(second))  # the one failure an hour that this test allows was just spent
+    assert b"Logging in is paused for up to an hour" in paused
+    assert cap not in paused and paused.count(b'class="notice-box"') == 1, "the pause notice stands alone"
+
+
 def test_guard_a_used_or_expired_form_cannot_log_in(room, monkeypatch) -> None:
     host, _ = room
     form = get(host.config, "/seat/login")
