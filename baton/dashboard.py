@@ -24,12 +24,18 @@ board-read predicate. A role with `can_view_all_conversations` sees every
 retained conversation, including history from before it joined. Reading is bookmark-neutral:
 viewing marks nothing read and moves no cursor.
 
+A thread page has a Copy button. One press copies the whole thread as plain text, which `/c/<id>/text` serves:
+read the way the page reads it (the same viewer and predicate, a page at a time), so it holds what the viewer
+may see and no more, and it reaches past the one page of the thread that the page shows.
+
 The threat model is the machine it runs on. The view has no login, so any
 person or process that can reach the port can read it; on a shared machine,
 choose a viewer role that sees little. Against other sites in a browser on
 the same machine, it answers only to its own loopback Host name (so DNS
 rebinding gets nothing), sends no CORS headers, can't be framed, takes no
-writes, and pages carry no scripts under a CSP that allows none. Reaching it
+writes, and runs no script under a CSP that allows none, with one exception:
+a thread page may load the Copy button's own `/copy.js` and fetch the thread's
+text, from this origin alone and with nothing inline. Reaching it
 from anywhere else needs its own auth in front of it, and is the operator's
 separate decision.
 """
@@ -59,10 +65,14 @@ HEADERS = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
 }
+# A thread page alone may also run a script, and only the dashboard's own `/copy.js`, which fetches the thread's text
+# from this origin. Nothing else about the policy changes, and no other response is given either directive.
+COPY_POLICY = HEADERS["Content-Security-Policy"] + "; script-src 'self'; connect-src 'self'"
 READS = ("GET", "HEAD")
 # Every refusal offers the way back that the not-found page does, so none of them is a dead end.
 BACK = ' <a href="/">All conversations</a>'
-CONVERSATION_PATH = re.compile(r"/c/([A-Za-z0-9_-]{1,64})")
+# A thread's page, or the thread as plain text for the Copy button (the second group).
+CONVERSATION_PATH = re.compile(r"/c/([A-Za-z0-9_-]{1,64})(/text)?")
 # A page number: 1-6 ASCII digits, no leading zero.
 PAGE = re.compile(r"[1-9][0-9]{0,5}")
 PAGE_PARAMS = ("page", "others_page", "jobs_page")
@@ -204,6 +214,66 @@ li:has(> a:first-child), li:has(> .meta > a:first-child) { padding-top: 0; }
   h1 { font-size: 1.75rem; }
   .replies { margin-left: .5rem; padding-left: 1rem; }
 }
+/* a thread page's top row: the way back, then Copy at the right, and below them a line saying how the copy went */
+.top { display: flex; flex-wrap: wrap; align-items: center; column-gap: .75rem; }
+.top .crumbs { margin-right: auto; }
+.copy { font: inherit; font-weight: 600; min-height: 2.75rem; padding: 0 1.1rem; color: var(--link);
+        background: var(--surface); border: 1px solid var(--line-strong); border-radius: .5rem; cursor: pointer; }
+.copy:hover { color: var(--link-hover); border-color: var(--link-line); }
+.copy:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.copy-note { flex-basis: 100%; margin: 0; color: var(--muted); font-size: .875rem; }
+.copy-text { display: block; width: 100%; height: 16rem; margin: .5rem 0 1rem; padding: .6rem; color: var(--text);
+             background: var(--surface); border: 1px solid var(--line-strong); border-radius: .375rem;
+             font: .8125rem/1.5 var(--mono); }
+"""
+# The Copy button's script, served beside the stylesheet. The write to the clipboard starts inside the tap and is given
+# the text as a promise, which is how Safari lets a write wait for the network; if the browser refuses it, the thread
+# is shown selected instead, so an ordinary copy works. It sets only text and a value, never markup.
+SCRIPT = """\
+(function () {
+  "use strict";
+  var button = document.getElementById("copy");
+  var note = document.getElementById("copy-note");
+  if (!button || !note) { return; }
+
+  function show(words) {
+    var area = document.getElementById("copy-text") || document.createElement("textarea");
+    area.id = "copy-text";
+    area.className = "copy-text";
+    area.readOnly = true;
+    area.setAttribute("aria-label", "The thread as plain text");
+    area.value = words;
+    button.parentNode.after(area);
+    area.focus();
+    area.select();
+    area.setSelectionRange(0, words.length);
+    area.scrollTop = 0;
+    note.textContent = "Copying was blocked. The thread is selected below: copy it as you usually do.";
+  }
+
+  function write(words) {
+    if (!(navigator.clipboard && window.ClipboardItem)) { return Promise.reject(new Error("no clipboard")); }
+    try {
+      var blob = words.then(function (text) { return new Blob([text], { type: "text/plain" }); });
+      return navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  button.addEventListener("click", function () {
+    var words = fetch(button.dataset.src).then(function (response) {
+      if (!response.ok) { throw new Error("status " + response.status); }
+      return response.text();
+    });
+    note.textContent = "";
+    write(words).then(function () {
+      note.textContent = "Copied";
+    }, function () {
+      words.then(show, function () { note.textContent = "The thread could not be read."; });
+    });
+  });
+})();
 """
 
 
@@ -224,6 +294,8 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
     url = urlsplit(target)
     if url.path == "/style.css":
         return Response(200, STYLE.encode(), {**HEADERS, "Content-Type": "text/css; charset=utf-8"})
+    if url.path == "/copy.js":
+        return Response(200, SCRIPT.encode(), {**HEADERS, "Content-Type": "text/javascript; charset=utf-8"})
     match = CONVERSATION_PATH.fullmatch(url.path)
     topic = _topic_route(url.path) if url.path.startswith("/t/") else None
     if (url.path.startswith("/t/") and topic is None) or (url.path == "/needs" and _needs_topic(url.query) is False):
@@ -251,6 +323,8 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
             return _page(200, topic, _index(config, conn, topic, pages["page"]))
         if match is None:
             return _page(200, "Conversations", _index(config, conn, None, pages["page"]))
+        if match.group(2):
+            return _thread_text(config, conn, match.group(1))
         after = _after_seq(parse_qs(url.query, keep_blank_values=True).get("after_seq", ["0"])[-1])
         if after is None:
             return _page(400, "Bad request",
@@ -653,18 +727,27 @@ def _after_seq(value: str) -> int | None:
     return int(value)
 
 
+def _read(config: Config, conn: Any, conversation_id: str, after_seq: int, limit: int) -> dict[str, Any]:
+    """A page of a thread read as the viewer: the one read that the thread's page and its copy both make."""
+    return conversations.history(conn, config.dashboard.viewer_role, conversation_id, after_seq, limit, config=config)
+
+
+def _title(config: Config, conn: Any, conversation_id: str) -> str:
+    """A thread's title as the viewer's list gives it, or its id when that list does not hold it."""
+    visible = {item["conversation_id"]: item for item in _visible(config, conn)[0]}
+    return visible[conversation_id]["title"] if conversation_id in visible else conversation_id
+
+
 def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -> Response:
-    viewer = config.dashboard.viewer_role
     def read(after_seq: int, limit: int) -> dict[str, Any]:
-        return conversations.history(conn, viewer, conversation_id, after_seq, limit, config=config)
+        return _read(config, conn, conversation_id, after_seq, limit)
     try:
         page = read(after, messages.MAX_PAGE_MESSAGES)
         # A page ends at a byte budget as well as a row count, so ask whether anything follows it.
         later = bool(page["messages"]) and bool(read(page["next_seq"], 1)["messages"])
     except BatonError:  # unknown, or one the viewer can't see: the same answer, so neither is revealed
         return _not_found()
-    visible = {item["conversation_id"]: item for item in _visible(config, conn)[0]}
-    title = visible[conversation_id]["title"] if conversation_id in visible else conversation_id
+    title = _title(config, conn, conversation_id)
     on_page = {item["seq"] for item in page["messages"]}
     # The parent of a reply that starts this page, or sits on an earlier one, read the way the page is read,
     # so a parent the viewer can't see stays unavailable (its seq is None) and is never fetched.
@@ -683,9 +766,19 @@ def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -
     earlier = (f'<p class="pager"><a href="/c/{_e(conversation_id)}'
                f'?after_seq={max(0, after - messages.MAX_PAGE_MESSAGES)}">Earlier messages</a></p>'
                if after > 0 else "")
-    return _page(200, title, '<p class="crumbs"><a href="/">All conversations</a></p>'
+    return _page(200, title, scripts=True, body=_thread_top(conversation_id) +
                              f'<h1>{_e(title)}</h1>{earlier}{missing}'
                              f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{measure}{more}')
+
+
+def _thread_top(conversation_id: str) -> str:
+    """A thread page's top row: the way back, the Copy button, and the line that says how the copy went. The
+    button is wired by `/copy.js`, the one script any page loads, and fetches the thread's text from `data-src`."""
+    return ('<div class="top"><p class="crumbs"><a href="/">All conversations</a></p>'
+            f'<button type="button" id="copy" class="copy" data-src="/c/{_e(conversation_id)}/text" '
+            'title="Copy the whole thread as plain text">Copy</button>'
+            '<p id="copy-note" class="copy-note" role="status"></p></div>'
+            '<script src="/copy.js" defer></script>')
 
 
 def _thread(items: list[dict[str, Any]], conversation_id: str = "",
@@ -789,13 +882,62 @@ def _reply_marker(reply_to: dict[str, Any] | None, on_page: frozenset[int] | set
     return f'<p class="reply-to">in reply to {link}{quote}</p>'
 
 
+def _thread_text(config: Config, conn: Any, conversation_id: str) -> Response:
+    """The whole thread as plain text, for the Copy button: the title and id, then each message in order.
 
-def _page(status: int, title: str, body: str) -> Response:
+    It reads as its page does (`_read`, the viewer's own history, a page at a time until one comes back empty, since
+    a page can end at its byte budget before its 100 messages), so it holds what the viewer may see and no more,
+    and it refuses what the page refuses. Where that history reports messages no longer kept, a line says so.
+    """
+    found: dict[int, str] = {}  # by seq, and a gap by its first seq, so one that two pages both report is kept once
+    after = 0
+    try:
+        while True:
+            page = _read(config, conn, conversation_id, after, messages.MAX_PAGE_MESSAGES)
+            found.update({gap["from_seq"]: conversations.gap_words(gap) for gap in page["retention_gaps"]})
+            found.update({item["seq"]: _plain(item) for item in page["messages"]})
+            if not page["messages"]:
+                break
+            after = page["next_seq"]
+    except BatonError:  # unknown, or one the viewer can't see: the same answer, so neither is revealed
+        return _not_found()
+    body = "\n\n".join(found[seq] for seq in sorted(found)) or "No messages yet."
+    return Response(200, f"Thread: {_title(config, conn, conversation_id)}\nId: {conversation_id}\n\n{body}\n".encode(),
+                    {**HEADERS, "Content-Type": "text/plain; charset=utf-8"})
+
+
+def _plain(item: dict[str, Any]) -> str:
+    """One message as plain text: its number, time and sender, where it answers, then its words and any it relays."""
+    head = [f'#{item["seq"]}', item["at"]]
+    if item.get("notice"):
+        return " · ".join([*head, f"notice: {_notice_line(item)}"])
+    head.append(messages.author_label(item))
+    reply = item.get("reply_to")
+    if reply:
+        head.append(f'in reply to #{reply["seq"]}' if reply.get("seq") is not None else "parent unavailable")
+    relayed = "".join(f'\n\nrelayed from {entry["source"]} at {entry["at"]}:\n{entry["text"]}'
+                      for entry in item.get("relayed") or [])
+    return " · ".join(head) + "\n" + item["text"] + relayed
+
+
+def _notice_line(item: dict[str, Any]) -> str:
+    """The words the page gives a host notice: who was added or removed by whom, else the host's own sentence."""
+    notice = item["notice"]
+    if notice["event"] in ("participant_added", "participant_removed"):
+        verb = "added" if notice["event"] == "participant_added" else "removed"
+        return f'{notice["participant"]} was {verb} by {notice["by"]}'
+    return item["text"]
+
+
+def _page(status: int, title: str, body: str, scripts: bool = False) -> Response:
+    """An HTML page. `scripts` is for a thread page alone, whose policy also lets it run the Copy button's script."""
     document = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
                 '<meta name="viewport" content="width=device-width, initial-scale=1">'
                 f'<title>{_e(title)} · baton</title><link rel="stylesheet" href="/style.css"></head>'
                 f'<body>{body}</body></html>')
-    return Response(status, document.encode(), {**HEADERS, "Content-Type": "text/html; charset=utf-8"})
+    policy = COPY_POLICY if scripts else HEADERS["Content-Security-Policy"]
+    return Response(status, document.encode(), {**HEADERS, "Content-Security-Policy": policy,
+                                                "Content-Type": "text/html; charset=utf-8"})
 
 
 def _not_found() -> Response:

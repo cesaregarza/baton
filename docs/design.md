@@ -287,6 +287,23 @@ keeps only its subscriptions there and its records in the database. Baton checks
 directory and its contents for unsafe ownership, permissions, and links; see
 [Security: the data directory](../SECURITY.md#the-data-directory) for the exact boundary and limitations.
 
+The optional host-local secretary projection opens `baton.db` read-only under a snapshot and keeps its own
+SQLite state file, with schema version 1 and a separate `(principal, log_epoch, through_pos)` position.
+Items, expectation evidence, dispositions, and brief versions are retained by principal. A batch and its
+position commit together. The projection cites Baton records but owns no jobs, messages, permissions, or
+delivery cursors. Its deterministic interpretation uses a versioned policy file and can be replayed without
+changing the stored projection. No model is needed for this initial offline interface.
+Each brief version cites only that version's new source rather than repeating all prior sources.
+An outgoing job event can open an awaited result. Later events for that tracked job remain in the
+principal's projection even if another actor addresses a different role. The tracked set is reconstructed
+from earlier source events in position order. Job envelopes use event state and the audience as the next
+actor only for nonterminal states; a terminal move instead addresses the creator. They do not sample the
+mutable `jobs` row. Conversation envelopes also omit current conversation fields, so fresh
+scans through the same source position produce the same derived record under the same config,
+policy, and visibility. A hidden message on a tracked job contributes no message text or citation.
+Only a change in next actor can supersede an expectation opened by a job event. A job move does not
+supersede a request opened by a message on that job.
+
 ## Design directions
 
 <a name="open-pull-requests"></a>
