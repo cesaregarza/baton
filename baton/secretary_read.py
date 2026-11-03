@@ -4,8 +4,8 @@ This is the one secretary interface that carries message text, and it is for the
 the gate's log and the kernel's state stay text-free. A read opens Baton's database through the kernel's read-only
 opener, in one snapshot, and applies the kernel's own visibility rule for the policy's principal:
 * after a position: the message events the kernel's scan reads for the principal, each through the copy its event
-  names (`secretary._source_rows`, `secretary._event_message`), so a page lists exactly what a scan would record;
-* by id: the copy the principal can read (`secretary._visible_message`). An id it can't read is listed as missing,
+  names (`sources._source_rows`, `sources._event_message`), so a page lists exactly what a scan would record;
+* by id: the copy the principal can read (`sources._visible_message`). An id it can't read is listed as missing,
   whether or not it exists.
 It never reads a mailbox through a cursor, marks anything delivered, writes a file or keeps the text it returns.
 
@@ -29,9 +29,11 @@ import sqlite3
 from pathlib import Path
 
 from baton import config as config_module
-from baton import datadir, messages, secretary, store
+from baton import datadir, messages, store
 from baton.config import Config, ConfigError
 from baton.errors import BatonError, InvalidRequest
+from baton.secretary import policy as policy_module
+from baton.secretary import sources
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
@@ -48,7 +50,7 @@ def read(config: Config, policy_path: Path, *, after: int | None = None, ids: li
     baton = store.connect_read_only(config.db_path)
     try:
         with store.snapshot(baton):
-            principal = secretary.load_policy(config, baton, policy_path).principal
+            principal = policy_module.load_policy(config, baton, policy_path).principal
             if ids is not None:
                 return {"principal": principal, **_by_id(baton, config, principal, ids, limit, max_bytes)}
             return {"principal": principal, "after": after,
@@ -78,7 +80,7 @@ def _after(baton: sqlite3.Connection, config: Config, principal: str, after: int
     listed: set[str] = set()
     through, size, scanned = after, 0, 0
     while scanned < MAX_SCANNED:
-        rows = secretary._source_rows(baton, principal, through, secretary.DEFAULT_BATCH)
+        rows = sources._source_rows(baton, principal, through, sources.DEFAULT_BATCH)
         if not rows:
             return {"through_pos": through, "more": False, "messages": page}
         for event in rows:
@@ -101,7 +103,7 @@ def _message(baton: sqlite3.Connection, config: Config, principal: str, event: s
     message_id, seq = data.get("message_id"), data.get("seq")
     if not isinstance(message_id, str) or type(seq) is not int:
         raise InvalidRequest("message event has no message_id or seq")
-    row = secretary._event_message(baton, config, principal, message_id, seq, event["audience"])
+    row = sources._event_message(baton, config, principal, message_id, seq, event["audience"])
     return None if row is None else _shape(row, event["pos"])
 
 
@@ -111,7 +113,7 @@ def _by_id(baton: sqlite3.Connection, config: Config, principal: str, ids: list[
     missing: list[str] = []
     size = 0
     for index, message_id in enumerate(ids):
-        row = secretary._visible_message(baton, config, principal, message_id)
+        row = sources._visible_message(baton, config, principal, message_id)
         if row is None:
             missing.append(message_id)
             continue
