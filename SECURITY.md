@@ -79,9 +79,10 @@ Access and refresh tokens are opaque and stored only as digests. Access tokens l
 tokens rotate and last 30 days. `baton oauth revoke-all` ends every grant. A revoked or spent token stays,
 marked, with its expiry moved back to when it ended, and moves to the append-only `oauth-ended.jsonl` 30 days
 later. Registration and authorization endpoints have size, rate, and state limits. A client registration
-unused after 24 hours lapses: it is refused and no longer counts against the registration limit, and its
-client secret is cleared at the next OAuth write or restart. Authorization codes are single-use and valid
-for five minutes.
+unused after 24 hours lapses: it is refused from that moment, so its client secret can no longer be used,
+and it no longer counts against the registration limit. The secret is cleared from `oauth.json` within about
+a minute of lapsing, by the background loop the server already runs for wakes, and at startup. Authorization
+codes are single-use and valid for five minutes.
 
 ### Guest access
 
@@ -222,8 +223,8 @@ The data directory contains the following. Protect backups as carefully as the l
   attempts are retained for their hourly windows. Guest post copies include alias attribution; a mapped
   alias call acts as its mapped role. Proofs and passphrases are not stored in plaintext.
 - `oauth.json`: client metadata and token digests, expiry, scopes, roles, and how and when a token ended; no
-  cleartext OAuth tokens. A confidential client's secret is stored as issued, and cleared once its registration
-  lapses unused.
+  cleartext OAuth tokens. A confidential client's secret is stored as issued, and cleared within about a minute
+  of its registration lapsing unused.
 - `oauth-ended.jsonl`: entries moved out of `oauth.json` 30 days after they ended, appended and never
   rewritten. A lapsed registration arrives here without its client secret.
 - `revoked_tokens.json`: the digest, name, role, and revocation time of each revoked bearer token.
