@@ -254,8 +254,9 @@ def _in_force(token: dict, now: float) -> bool:
 
 def _end_token(token: dict, how: str, now: float) -> None:
     """Keep a revoked or spent token, marked, with its expiry moved back to now, so code that reads only the expiry
-    (an older baton after a rollback) refuses it too."""
-    token.update(ended=how, issued_expires_at=token["expires_at"], expires_at=now)
+    (an older baton after a rollback) refuses it too. Whole seconds, as issued: the SDK's token types refuse a
+    fractional expiry."""
+    token.update(ended=how, issued_expires_at=token["expires_at"], expires_at=int(now))
 
 
 @dataclass

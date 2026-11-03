@@ -230,6 +230,7 @@ def test_a_spent_refresh_token_is_kept_marked_spent(start_host) -> None:
     assert spent is not None, "the spent refresh token is kept"
     assert (spent["ended"], spent["issued_expires_at"]) == ("spent", issued)
     assert spent["expires_at"] <= time.time(), "its expiry moved back to when it was spent"
+    assert isinstance(spent["expires_at"], int), "in whole seconds, as issued"
 
 
 @pytest.mark.parametrize("how", ["revoke_all", "revoke"])
