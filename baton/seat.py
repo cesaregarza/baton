@@ -333,10 +333,12 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _login_form(conn: sqlite3.Connection, status: int = 200, notice: str = "") -> Response:
+def _login_form(conn: sqlite3.Connection, status: int = 200, notice: str = "", *, paused: bool = False) -> Response:
     """A fresh login form, or a refusal once MAX_PRE forms, used or not, were issued in the last PRE_TTL.
 
     Forms are kept once used or expired, so refusing is what bounds the table: no form is evicted to make room.
+    The refusal adds its own notice under the caller's, unless the caller is `paused`: that notice already says how
+    long to wait, and a second wait under it would contradict the first.
     """
     pre = secrets.token_urlsafe(24)
     now = _now()
@@ -345,8 +347,8 @@ def _login_form(conn: sqlite3.Connection, status: int = 200, notice: str = "") -
         if issued < MAX_PRE:
             conn.execute("INSERT INTO seat_prelogin (digest, expires_at) VALUES (?, ?)", (_digest(pre), now + PRE_TTL))
     if issued >= MAX_PRE:
-        return _page(429, "Log in", f'<h1>Log in to your seat</h1>{notice}<p class="notice-box">Too many login forms '
-                                    'are open. Try again in a few minutes.</p>')
+        cap = "" if paused else '<p class="notice-box">Too many login forms are open. Try again in a few minutes.</p>'
+        return _page(429, "Log in", f'<h1>Log in to your seat</h1>{notice}{cap}')
     body = (f'<h1>Log in to your seat</h1>{notice}<form class="login" method="post" action="/seat/login">'
             '<label for="token">Seat token</label>'
             '<input id="token" type="password" name="token" autocomplete="current-password" autocapitalize="off" '
@@ -374,7 +376,7 @@ def _login(config: Config, conn: sqlite3.Connection, request: _Request) -> Respo
             failures.popleft()
         if len(failures) >= FAILURES_PER_HOUR:
             return _login_form(conn, 429, '<p class="notice-box">Too many tries. Logging in is paused for up '
-                                          'to an hour.</p>')
+                                          'to an hour.</p>', paused=True)
     token = request.form["token"].strip()
     access = auth.static_token(config, token) if token else None
     if access is None or auth.role_of(access) != config.seat.role or not _seat_role_ok(config):
