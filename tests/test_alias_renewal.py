@@ -108,7 +108,7 @@ def test_recovery_works_at_the_claim_and_binding_caps(host):
     async def scenario(client):
         await enrol(client, host)
         assert "binding_token" in await claim(client, host)
-        assert (await claim(client, host)).get("error") == "limit_exceeded"
+        assert "binding_token" in await claim(client, host), "a renewal at the binding cap replaces the oldest"
         assert (await claim(client, host)).get("error") == "limit_exceeded"
         assert owner(host, "alias", "arm-rekey", "hilary") == 0
         assert (await claim(client, host)).get("error") == "limit_exceeded", "an ordinary renewal keeps the caps"
