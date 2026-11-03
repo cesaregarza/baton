@@ -189,11 +189,33 @@ configuration problem exits with status 2.
 | `baton alias arm-enrol\|arm-rekey\|map\|unmap` | Manage enrolled aliases on the host. |
 | `baton events status\|unbind` | Inspect event subscriptions and receipts, or unbind a guest grant's event target. |
 | `baton seat logout-all` | End all browser-seat sessions. |
+| `baton secretary --state FILE --policy FILE scan\|replay\|show\|cancel` | Build and inspect local attention records from retained Baton events. |
 
 `--as` defaults to `BATON_ROLE` in local mode and cannot select a human role. `--config` defaults to
 `BATON_CONFIG`, then `~/.config/baton/baton.toml`. `--host` defaults to `BATON_HOST`: it uses the remote
 host and the role of `BATON_TOKEN` or `BATON_TOKEN_COMMAND` for `message`, `read`, `wait`, and the
 `conversation new`, `list`, `topic`, and `history` subcommands. Administration commands require local mode.
+
+`secretary` is host-local and refuses `--host`. Its JSON policy names one existing non-human principal role
+and one existing, unmapped guest alias ID for attribution; it grants neither authority. For example:
+`{"version":1,"principal":"planner","secretary_alias_id":"al_existing"}`. `scan` reads up to 100 events
+by default (`--limit` allows 1–1000) and stores only metadata, references, and digests in the separate
+`--state` SQLite file. `replay` compares a fresh interpretation without changing saved records; `show`
+renders currently visible source excerpts; `cancel ID --reason TEXT` records an explicit closure. The
+policy and state formats are versioned. This interface does not deliver, approve, or modify Baton work.
+The projection reads events addressed to or authored by the principal, plus later events for jobs whose
+earlier create or move event the principal authored. It derives job facts from those event rows and
+rechecks message visibility before retaining a cited message. Envelope version 1 refuses unknown stored
+representations. If source visibility later narrows, `replay` reports unavailable sources as differences
+without recomputing a misleading partial digest.
+Direct replies correlate to an owed request only when one open request exists between the two roles;
+ambiguous replies leave every candidate open. An untagged acknowledgment without an artifact needs one
+matching expectation. Each brief version contains only the new cited source for that version.
+An incoming direct message opens its own owed record even if it also provides evidence for an awaited
+job result. A job move supersedes only a job-event-origin expectation when the next actor changes.
+An external revision token is an identity, not an ordered version: a later request must explicitly name
+`supersedes repo#7@oldsha` alongside its new `repo#7@newsha` to close the cited predecessor. A review or
+release result requires the matching result kind; `CI PASS` can only satisfy a check expectation.
 
 ## Local indexing interface
 
