@@ -154,17 +154,44 @@ def _query_profiles(conn: sqlite3.Connection, config: Config, query_vector: Any,
 def _rerank(conn: sqlite3.Connection, hits: list[dict], query_vector: list[float], model: str,
             profiles: dict[str, dict]) -> list[dict]:
     """Keyword matches with a vector first, most similar first; then the rest, in keyword order."""
-    marks = ", ".join("?" for _ in profiles)
-    scored = []
-    for order, hit in enumerate(hits):
-        item_kind, item_id = ("artifact", hit["version_id"]) if hit["derived"] else ("message", hit["message_id"])
-        rows = conn.execute(f"SELECT generation, dim, data FROM vectors WHERE item_kind = ? AND item_id = ?"
-                            f" AND model = ? AND generation IN ({marks})", (item_kind, item_id, model, *profiles))
-        similarities = [_similarity(query_vector, list(struct.unpack(f"<{dim}f", data)), profiles[generation])
-                        for generation, dim, data in rows]
-        hit["similarity"] = max(similarities) if similarities else None
-        scored.append((hit["similarity"] is None, -(hit["similarity"] or 0.0), order, hit))
-    return [hit for *_, hit in sorted(scored, key=lambda entry: entry[:3])]
+    candidates = [("artifact", hit["version_id"]) if hit["derived"] else ("message", hit["message_id"])
+                  for hit in hits]
+    scores = _vector_scores(conn, candidates, query_vector, model, profiles)
+    for hit, key in zip(hits, candidates, strict=True):
+        hit["similarity"] = scores.get(key)
+
+    def sort_key(hit: dict) -> tuple[bool, float]:
+        score = hit["similarity"]
+        return (True, 0.0) if score is None else (False, -score)
+
+    # Python's stable sort keeps keyword order for equal scores and for missing vectors.
+    return sorted(hits, key=sort_key)
+
+
+def _vector_scores(conn: sqlite3.Connection, candidates: list[tuple[str, str]], query_vector: list[float],
+                   model: str, profiles: dict[str, dict]) -> dict[tuple[str, str], float]:
+    """Best similarity across allowed generations, reading only the authorized keyword candidates."""
+    generation_marks = ", ".join("?" for _ in profiles)
+    # Reserve bindings for the generations, item kind and model; each remaining binding holds one item id.
+    batch_size = max(1, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - len(profiles) - 2)
+    scores: dict[tuple[str, str], float] = {}
+    for item_kind in ("message", "artifact"):
+        item_ids = [item_id for kind, item_id in candidates if kind == item_kind]
+        for start in range(0, len(item_ids), batch_size):
+            batch = item_ids[start:start + batch_size]
+            item_marks = ", ".join("?" for _ in batch)
+            rows = conn.execute(
+                "SELECT item_id, generation, dim, data FROM vectors WHERE item_kind = ? AND model = ?"
+                f" AND generation IN ({generation_marks}) AND item_id IN ({item_marks})",
+                (item_kind, model, *profiles, *batch))
+            for item_id, generation, dim, data in rows:
+                vector = list(struct.unpack(f"<{dim}f", data))
+                score = _similarity(query_vector, vector, profiles[generation])
+                key = (item_kind, item_id)
+                previous = scores.get(key)
+                if previous is None or score > previous:
+                    scores[key] = score
+    return scores
 
 
 def _similarity(a: list[float], b: list[float], embedding: dict) -> float:
