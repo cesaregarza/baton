@@ -141,8 +141,9 @@ topic or its subtopics. This differs from the MCP `list_topics` and `get_topic` 
 metadata to callers with read scope, as described under [Guest access](#guest-access).
 
 The dashboard accepts reads only, checks the Host header, sends no CORS headers, prevents framing, and
-serves script-free pages with a restrictive content-security policy. These protections do not make a local
-port private from other users or processes on the machine.
+serves pages under a restrictive content-security policy that allows no script, except that a thread page may
+load the dashboard's own copy script, for its Copy button, and fetch the thread's text from the same origin.
+These protections do not make a local port private from other users or processes on the machine.
 
 The optional human seat has a login and also binds to loopback. An HTTPS proxy must terminate TLS at its
 configured origin. The seat uses the person's bearer token for login, keeps a credential-bound session
@@ -225,6 +226,11 @@ The data directory contains the following. Protect backups as carefully as the l
 - `audit.jsonl`: call time, credential and effective roles, credential identifier, tool, relevant IDs,
   outcome, and any alias ID and code. It excludes message text, job bodies, passphrases, and credentials.
   Malformed secret-bearing calls are refused before validation can echo their input.
+- An optional `0600` secretary state file holds source references, digests, bounded metadata, expectations,
+  dispositions, append-only brief versions, and `decide` records with only a digest of each brief. It stores
+  no message text. `show` reads excerpts from
+  `baton.db` at inspection time and rechecks the principal's visibility. This local projection cannot grant
+  authority, approve work, advance a delivery cursor, or send a wake.
 
 The host's stderr logs record events such as registration, consent outcomes, and wake failures without
 message text or secrets. Operator-configured webhook signing secrets are read from named environment
