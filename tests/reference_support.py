@@ -38,6 +38,7 @@ from topic_grant_tools_support import Grantee, Scene, build_host, tool
 
 from baton import aliases, store
 from baton import app as app_module
+from baton.app import guard, tools
 from baton.errors import BatonError
 
 REFERENCE_TABLES = ("reference_docs", "reference_revisions")
@@ -447,7 +448,8 @@ class Staging:
                 conn.set_trace_callback(lambda sql: staging._trace(sql, conn))
                 return conn
 
-            monkeypatch.setattr(app_module, "connect", traced_connect)
+            for module in (app_module, guard, tools):
+                monkeypatch.setattr(module, "connect", traced_connect)
             return
 
         @contextmanager

@@ -35,6 +35,7 @@ from topic_grant_tools_support import play, stage, succeeded, tool
 
 from baton import app as app_module
 from baton import auth
+from baton.app import guard, tools
 
 build_scene = refs.build_scene  # the fixture, under the name the tests ask for
 
@@ -67,7 +68,7 @@ def bounds(spec):
     return found
 
 
-REAL_ACCESS_TOKEN = app_module.get_access_token  # captured once, whatever is patched over it later
+REAL_ACCESS_TOKEN = guard.get_access_token  # captured once, whatever is patched over it later
 
 
 def only_scopes(monkeypatch, *scopes):
@@ -77,7 +78,8 @@ def only_scopes(monkeypatch, *scopes):
         principal = REAL_ACCESS_TOKEN()
         return None if principal is None else principal.model_copy(update={"scopes": list(scopes)})
 
-    monkeypatch.setattr(app_module, "get_access_token", limited)
+    for module in (guard, tools):
+        monkeypatch.setattr(module, "get_access_token", limited)
 
 
 # 1. The list and the schemas ------------------------------------------------------------------------------
