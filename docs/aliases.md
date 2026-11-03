@@ -65,8 +65,11 @@ See [Conversations and notifications](conversations.md#organise-conversations-wi
 ### Limits and expiry
 
 Guest binding tokens last 24 hours by default. The `[aliases] binding_ttl_seconds` setting accepts 1–86400
-seconds. Baton keeps alias ownership indefinitely and stores only a digest of each binding token. Active
-binding capacity refuses a new claim rather than evicting someone else's active proof.
+seconds. Baton keeps alias ownership indefinitely and stores only a digest of each binding token. An alias
+holds at most `max_bindings_per_alias` live tokens, 20 by default. A claim with the current passphrase at that
+limit replaces the alias's oldest token. If the replaced token has not expired, it stops working at its next
+check, and Baton does not notify its holder. A wrong passphrase, or a fixed-role credential renewing an alias it
+is not enrolled to, is refused and replaces nothing.
 
 By default, posting is limited to 30 admitted calls per alias per hour and 300 per authenticated guest
 credential per hour, in addition to role and conversation limits. A valid proof-bearing retry or a later

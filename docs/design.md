@@ -258,8 +258,8 @@ can also send replies.
 ## Storage
 
 The host uses one SQLite database in WAL mode. Writes use `BEGIN IMMEDIATE` transactions to serialize
-dependent updates across the server, CLI, and dispatcher. This revision uses schema 19 and upgrades
-schemas 2 through 18 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
+dependent updates across the server, CLI, and dispatcher. This revision uses schema 20 and upgrades
+schemas 2 through 19 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
 
 The upgrade creates topic records for existing conversation topic paths and any missing parents. It derives
 each topic's members from participants in conversations filed directly there, excluding `guest`. A topic
@@ -272,7 +272,7 @@ the upgrade rather than being discarded.
 |---|---|
 | Messages, mailboxes, topics, conversations, participants | Retained copies, delivery positions, topic metadata, and conversation membership. |
 | Jobs, job moves, events, cursors, wakes | Job state and history, event delivery, wake status, and retry records. |
-| Aliases, bindings, mappings, rekeys | Alias continuity, digests of live proofs, enrolled-role mappings, and when each armed rekey replaced a verifier. Neither verifier is kept. |
+| Aliases, bindings, mappings, rekeys | Alias continuity, digests of live proofs in the order they were issued, enrolled-role mappings, and when each armed rekey replaced a verifier. Neither verifier is kept. |
 | Topic grants and their events | Owner grants on topics: their terms and digests, hashes of their keys, revocations, and a log. Keys are never stored. |
 | Reference documents and revisions | Text kept with topics, by topic id: every revision of every document, with who wrote it, under which grant, and its retry identity. Never edited or deleted. |
 | Change log, generations, batches, artifacts, vectors | Optional indexing state and producer-supplied derived data. |

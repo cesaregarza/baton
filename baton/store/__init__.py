@@ -23,13 +23,13 @@ from urllib.parse import quote
 from baton import datadir
 from baton.config import ConfigError
 
+from .schema import _BINDINGS_BY_ISSUE, _SCHEMA
 from .schema import _MESSAGE_REQUESTS as _MESSAGE_REQUESTS
 from .schema import _MESSAGES as _MESSAGES
-from .schema import _SCHEMA
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)
 
 
 # The version-2 tables a migration rebuilds, with the columns they keep.
@@ -72,6 +72,8 @@ _ADDED_COLUMNS = {
     # When and how a seat row ended. A row that ends is kept, and every check refuses it by this state.
     19: {table: ("ended_at REAL", "end_reason TEXT")
          for table in ("seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests")},
+    # Each binding's place in its alias's issuance order, which picks the one a claim at the cap replaces.
+    20: {"alias_bindings": ("issued INTEGER",)},
 }
 _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
@@ -163,10 +165,22 @@ def _give_topic_ids(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS topics_by_id ON topics (id)")
 
 
+def _number_bindings(conn: sqlite3.Connection) -> None:
+    """Give every carried-over binding its place in issuance order, which schema 19 did not record.
+
+    Expiry is the nearest record of it, since each binding's lifetime was fixed when it was issued; rowid
+    breaks ties, so the order is deterministic.
+    """
+    ordered = conn.execute("SELECT digest FROM alias_bindings ORDER BY expires_at, rowid").fetchall()
+    conn.executemany("UPDATE alias_bindings SET issued = ? WHERE digest = ?",
+                     [(issued, digest) for issued, (digest,) in enumerate(ordered, 1)])
+
+
 # Steps a plain statement cannot express, because they read the data and may refuse the upgrade.
 _PROCEDURES: dict[int, tuple[Callable[[sqlite3.Connection], None], ...]] = {
     15: (_discover_topics,),
     16: (_give_topic_ids,),
+    20: (_number_bindings,),
 }
 _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys() | _PROCEDURES.keys()))
 
@@ -290,6 +304,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                 conn.execute(statement)
             for procedure in _PROCEDURES.get(step, ()):
                 procedure(conn)
+        conn.execute(_BINDINGS_BY_ISSUE)
         # A random epoch no client can already hold, written once: at creation, or at the upgrade adding the log.
         conn.execute("INSERT OR IGNORE INTO log_meta (key, value) VALUES ('log_epoch', ?), ('pruned_through', '0')",
                      (secrets.token_hex(16),))
