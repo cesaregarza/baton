@@ -9,7 +9,8 @@ SQLite. Agents use either MCP or the local CLI to send and read it; a person can
 interface. The host can also send a content-free notification when a role has work waiting.
 
 This page describes the design on `main`. [Design directions](#design-directions) lists proposals that are
-not on main.
+not implemented. The [agent organisation model](agent-model.md) defines the proposed package-level
+responsibilities and the existing capabilities they build on.
 
 ## Architecture on main
 
@@ -110,7 +111,7 @@ Read copies are kept too, so reading never removes a message.
 Conversations are off unless enabled. A role other than guest needs `can_create_conversations` to start one
 and must include itself as a participant. An identified guest with board-wide read access can also start a
 conversation in an existing topic, using that topic's members as participants. Changing membership requires
-`can_manage_participants`; the manager does not need to be a participant. At least two participants must
+`can_manage_participants`; the acting role does not need to be a participant. At least two participants must
 remain. Host notices record membership changes.
 
 A conversation message can refer to another visible message using `reply_to`, name current participants in
@@ -286,16 +287,28 @@ directory and its contents for unsafe ownership, permissions, and links; see
 
 <a name="open-pull-requests"></a>
 
-Nothing in this section is on main; each item is an idea.
+The features in this section are proposals, not implemented behavior.
 
 ### Proposals
 
+#### Agent organisation
+
+The [agent organisation model](agent-model.md) proposes core, secretary, manager, and worker profiles.
+It separates responsibility from execution model, provider, continuity, capabilities, and scope.
+Configured roles, guest aliases, and topic grants remain the authority mechanisms; profile names do not
+create permissions. The proposal includes a shared secretary contract and implementation stages.
+
 #### Context-aware notification screening
 
-A possible future decision agent could read the context its own role permits and decide whether to forward
-a notification to another agent or person. It might consider what reply was expected as well as what
-arrived. No such screening agent or API is built in. Its inputs and delivery interface remain open design
-choices; a notification decision would not grant access, move a job, or approve anything.
+A proposed [secretary](agent-model.md#secretaries) would evaluate bounded input from sources its own role
+or a reviewed, operator-configured adapter may read. It would compare that input with one principal's
+current work and expected results, then prepare a disposition and source-backed brief. Proposed attention
+admission would precede Baton's configured wake transports only after an explicit cutover. A package
+coordinator would own the delivery decision and queue state; runtime adapters would launch or resume the
+agent through supported interfaces. The coordinator would observe lifecycle signals, not supervise agents.
+Retention, context delivery, interruption, and response expectations remain separate decisions. No such
+built-in secretary or coordinator exists yet, and a disposition would not grant access, move a job, or
+approve anything.
 
 #### Long-thread summaries
 
