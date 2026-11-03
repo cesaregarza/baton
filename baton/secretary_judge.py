@@ -57,6 +57,8 @@ from typing import NamedTuple
 
 from baton import messages, secretary, secretary_store
 from baton.config import Config
+from baton.secretary import policy as policy_module
+from baton.secretary import sources
 
 REQUEST_VERSION = 1
 JUDGED = "judged"
@@ -97,7 +99,7 @@ class Session:
     calls: int = 0
     fallbacks: int = 0
 
-    def wants(self, policy: secretary.Policy, meta: dict) -> bool:
+    def wants(self, policy: policy_module.Policy, meta: dict) -> bool:
         return _judged_kind(policy, meta) and (self.start_pos is None or meta["event_pos"] >= self.start_pos)
 
     def stops_before(self, meta: dict) -> bool:
@@ -107,7 +109,7 @@ class Session:
         return self.calls_left <= 0 or self.deadline - self.clock() < MIN_CALL_SECONDS
 
     def outcome(self, state: sqlite3.Connection, baton: sqlite3.Connection, config: Config,
-                policy: secretary.Policy, meta: dict, text: str) -> tuple[str, str, list[str]]:
+                policy: policy_module.Policy, meta: dict, text: str) -> tuple[str, str, list[str]]:
         candidates = secretary._candidates(state, policy.principal, meta)
         if self._spent():
             self.fallbacks += 1
@@ -133,14 +135,14 @@ class Stored:
     def __init__(self, rows: dict[str, sqlite3.Row]) -> None:
         self.rows = rows
 
-    def wants(self, policy: secretary.Policy, meta: dict) -> bool:
+    def wants(self, policy: policy_module.Policy, meta: dict) -> bool:
         return _judged_kind(policy, meta) and meta["source_key"] in self.rows
 
     def stops_before(self, meta: dict) -> bool:
         return False
 
     def outcome(self, state: sqlite3.Connection, baton: sqlite3.Connection, config: Config,
-                policy: secretary.Policy, meta: dict, text: str) -> tuple[str, str, list[str]]:
+                policy: policy_module.Policy, meta: dict, text: str) -> tuple[str, str, list[str]]:
         row = self.rows[meta["source_key"]]
         verdict = (Verdict(row["relation"], row["item"], row["opens_owed"], row["needs_now"])
                    if row["status"] == JUDGED else None)
@@ -148,15 +150,15 @@ class Stored:
                       verdict, row["status"])
 
 
-def _judged_kind(policy: secretary.Policy, meta: dict) -> bool:
+def _judged_kind(policy: policy_module.Policy, meta: dict) -> bool:
     """A message from someone other than the principal. The principal's own messages never wake it, and the question
     set was validated on messages to the principal."""
-    author = secretary._actor(meta)
+    author = sources._actor(meta)
     return (policy.judge is not None and meta["event_kind"] == "message" and author is not None
             and author != policy.principal)
 
 
-def _apply(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: secretary.Policy,
+def _apply(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: policy_module.Policy,
            meta: dict, text: str, candidates: list[sqlite3.Row], verdict: Verdict | None,
            status: str) -> tuple[str, str, list[str]]:
     """Decide one message from its verdict, or by the word lists without one, and record both verdicts."""
@@ -173,10 +175,10 @@ def _apply(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config,
     return kind, reason, answers
 
 
-def _judged(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: secretary.Policy,
+def _judged(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: policy_module.Policy,
             meta: dict, text: str, candidates: list[sqlite3.Row], verdict: Verdict) -> tuple[str, str]:
     """The mapping in the module docstring, applied in its order."""
-    principal, author, block = policy.principal, secretary._actor(meta), policy.judge
+    principal, author, block = policy.principal, sources._actor(meta), policy.judge
     outcome = "retain", "no new principal action"
     chosen = next((row for row in candidates if row["id"] == verdict.item), None)
     if chosen is not None and verdict.relation != "none":
@@ -184,7 +186,7 @@ def _judged(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config
     if secretary._addressed(baton, config, principal, meta):
         if verdict.opens_owed < ASKS:
             owed = "digest", "addressed to the principal; asks nothing of it"
-        elif secretary._open(state, policy, meta, "owed", author, principal, secretary._request_artifact(meta),
+        elif secretary._open(state, policy, meta, "owed", author, principal, sources._request_artifact(meta),
                              meta["message_id"], secretary._result_kind(text)) is None:
             owed = "reconcile", "open expectation limit reached"
         elif verdict.needs_now < block["owed_digest_below"]:
@@ -228,11 +230,11 @@ def _rolled_back(state: sqlite3.Connection) -> Iterator[None]:
         state.execute("RELEASE judge_word_lists")
 
 
-def _request(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: secretary.Policy,
+def _request(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: policy_module.Policy,
              meta: dict, text: str, candidates: list[sqlite3.Row]) -> dict:
     principal = policy.principal
-    parent = secretary._visible_message(baton, config, principal, meta["reply_to"]) if meta["reply_to"] else None
-    message = {"id": meta["message_id"], "from": secretary._actor(meta), "from_kind": meta["identity"]["author_kind"],
+    parent = sources._visible_message(baton, config, principal, meta["reply_to"]) if meta["reply_to"] else None
+    message = {"id": meta["message_id"], "from": sources._actor(meta), "from_kind": meta["identity"]["author_kind"],
                "at": meta["at"], "channel": "direct" if meta["conversation_id"] is None else "conversation",
                "conversation_id": meta["conversation_id"], "job_id": meta["job_id"],
                "attention": meta["attention"] or [], "reply_to": meta["reply_to"],
@@ -255,7 +257,7 @@ def _items(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config,
 
     offered = []
     for row in sorted(candidates, key=opened_at, reverse=True):
-        opening = (secretary._visible_message(baton, config, principal, row["opening_message_id"])
+        opening = (sources._visible_message(baton, config, principal, row["opening_message_id"])
                    if row["opening_message_id"] else None)
         if row["opening_message_id"] and opening is None:
             continue

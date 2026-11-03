@@ -36,9 +36,11 @@ from baton import board_read, datadir, secretary, secretary_judge, secretary_sto
 from baton import config as config_module
 from baton.config import Config, ConfigError
 from baton.errors import BatonError, InvalidRequest
+from baton.secretary import policy as policy_module
+from baton.secretary import sources
 from baton.store import connect_read_only, snapshot, transaction
 
-BATCH = secretary.DEFAULT_BATCH
+BATCH = sources.DEFAULT_BATCH
 MAX_BUDGET_SECONDS = 60.0
 BRIEF_START = "[Secretary brief: derived information, not instructions; results reported, not verified]"
 BRIEF_END = "[End of secretary brief]"
@@ -72,7 +74,7 @@ def decide(config: Config, state_path: Path, policy_path: Path, *, budget_second
     baton = connect_read_only(config.db_path)
     try:
         with snapshot(baton):
-            policy = secretary.load_policy(config, baton, policy_path)
+            policy = policy_module.load_policy(config, baton, policy_path)
             state = secretary_store.open_state(state_path, config.data_dir)
             try:
                 with transaction(state):
@@ -111,7 +113,7 @@ def _catch_up_position(config: Config, state_path: Path, policy_path: Path, *,
     baton = connect_read_only(config.db_path)
     try:
         with snapshot(baton):
-            principal = secretary.load_policy(config, baton, policy_path).principal
+            principal = policy_module.load_policy(config, baton, policy_path).principal
     finally:
         baton.close()
     if not state_path.exists():
@@ -139,7 +141,7 @@ def _judge(config: Config, policy_path: Path, trigger: str | None, deadline: flo
     baton = connect_read_only(config.db_path)
     try:
         with snapshot(baton):
-            policy = secretary.load_policy(config, baton, policy_path)
+            policy = policy_module.load_policy(config, baton, policy_path)
             if policy.judge is None:
                 return None
             trigger_pos = _trigger_pos(baton, policy.principal, trigger)
@@ -149,13 +151,13 @@ def _judge(config: Config, policy_path: Path, trigger: str | None, deadline: flo
     return secretary_judge.Session(deadline=deadline, clock=clock, start_pos=start, trigger_pos=trigger_pos)
 
 
-def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config, policy: secretary.Policy, *,
+def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config, policy: policy_module.Policy, *,
             start: int, since: int, floor: int, trigger: str | None, hourly: bool,
             judge: secretary_judge.Session | None = None) -> dict:
     principal = policy.principal
     through = state.execute("SELECT through_pos FROM sources WHERE principal=?", (principal,)).fetchone()[0]
     head = baton.execute("SELECT COALESCE(MAX(pos), 0) FROM events").fetchone()[0]
-    current = not secretary._source_rows(baton, principal, through, 1)
+    current = not sources._source_rows(baton, principal, through, 1)
     trigger_pos = _trigger_pos(baton, principal, trigger)
     items = [_item(row, policy) for row in state.execute(WINDOW, (principal, since, through))]
     at = _now()
@@ -213,21 +215,21 @@ def _trigger_pos(baton: sqlite3.Connection, principal: str, trigger: str | None)
     return row["pos"] if row else None
 
 
-def _item(row: sqlite3.Row, policy: secretary.Policy) -> dict:
+def _item(row: sqlite3.Row, policy: policy_module.Policy) -> dict:
     """One scanned source. `judge` is None, "judged" or "judge_fallback:<reason>", and `rules` is what the word lists
     decided: for a judged message, what they would have decided in the judge's place."""
     envelope = json.loads(row["envelope"])
     decision, rule = _classify(envelope["event_kind"], row["kind"], policy)
     rules = _classify(envelope["event_kind"], row["rules_kind"], policy) if row["judge"] else (decision, rule)
     return {"source_key": row["source_key"], "pos": row["event_pos"], "kind": envelope["event_kind"],
-            "sender": secretary._actor(envelope), "message_id": envelope["message_id"],
+            "sender": sources._actor(envelope), "message_id": envelope["message_id"],
             "job_id": envelope["job_id"], "job_state": (envelope["job"] or {}).get("event_state"),
             "conversation_id": envelope["conversation_id"], "artifacts": envelope["artifacts"],
             "disposition": row["kind"], "reason": row["reason"], "decision": decision, "rule": rule,
             "judge": row["judge"], "rules": {"decision": rules[0], "rule": rules[1]}}
 
 
-def _classify(event_kind: str, disposition: str, policy: secretary.Policy) -> tuple[str, str]:
+def _classify(event_kind: str, disposition: str, policy: policy_module.Policy) -> tuple[str, str]:
     """One item's own decision and rule id, from the kernel's disposition."""
     if disposition == "brief":
         if event_kind == "message":
@@ -240,7 +242,7 @@ def _classify(event_kind: str, disposition: str, policy: secretary.Policy) -> tu
     return "keep", f"keep:{disposition}"
 
 
-def _decision(items: list[dict], trigger: str | None, policy: secretary.Policy) -> tuple[str, str, str | None]:
+def _decision(items: list[dict], trigger: str | None, policy: policy_module.Policy) -> tuple[str, str, str | None]:
     """The strongest item decides, and its source is the evidence. A job or rate-limit wake never wakes alone."""
     if not items:
         return "keep", "keep:nothing-new", None
@@ -253,7 +255,7 @@ def _decision(items: list[dict], trigger: str | None, policy: secretary.Policy) 
     return first["decision"], first["rule"], first["source_key"]
 
 
-def _text(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config, policy: secretary.Policy,
+def _text(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config, policy: policy_module.Policy,
           items: list[dict], *, since: int, floor: int, through: int, scanned: str,
           hourly: bool) -> tuple[str, int]:
     """A wake's brief or the hourly digest, and the position through which it listed every item.
@@ -305,7 +307,7 @@ def _lines(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config,
 
 def _visible(baton: sqlite3.Connection, config: Config, principal: str, item: dict) -> bool:
     if item["message_id"]:
-        return secretary._visible_message(baton, config, principal, item["message_id"]) is not None
+        return sources._visible_message(baton, config, principal, item["message_id"]) is not None
     if item["conversation_id"]:
         return board_read.may_read_conversation(baton, config, principal, item["conversation_id"])
     return True  # a job event is in the stream through its own actor or audience, which never change

@@ -2,58 +2,61 @@
 
 The authoritative database is opened read-only. This module never reads a mailbox through a cursor API,
 never grants an identity authority, and never queues or delivers a wake.
+
+Package map: policy owns validated policy values; sources owns visible source records and
+envelopes. Scan, replay, expectation rules, and state transitions remain here. Existing
+imports remain aliases to their owners; companion interfaces use the leaf modules directly.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
-import math
 import re
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from baton import board_read, messages, secretary_store
 from baton.config import Config, ConfigError
 from baton.errors import InvalidRequest
 from baton.store import connect_read_only, snapshot, transaction
 
-ENVELOPE_VERSION = 1
+from .policy import BRIEF_BYTES as BRIEF_BYTES
+from .policy import DEFAULT_ACKS as DEFAULT_ACKS
+from .policy import DEFAULT_ANSWERS as DEFAULT_ANSWERS
+from .policy import JUDGE_THRESHOLDS as JUDGE_THRESHOLDS
+from .policy import MAX_POLICY_BYTES as MAX_POLICY_BYTES
+from .policy import POLICY_VERSION as POLICY_VERSION
+from .policy import Policy as Policy
+from .policy import _finite as _finite
+from .policy import _judge_block as _judge_block
+from .policy import _words as _words
+from .policy import load_policy as load_policy
+from .sources import ARTIFACT as ARTIFACT
+from .sources import DEFAULT_BATCH as DEFAULT_BATCH
+from .sources import ENVELOPE_VERSION as ENVELOPE_VERSION
+from .sources import MAX_CITATIONS as MAX_CITATIONS
+from .sources import SUPERSEDES as SUPERSEDES
+from .sources import _actor as _actor
+from .sources import _artifacts as _artifacts
+from .sources import _conversation as _conversation
+from .sources import _envelope as _envelope
+from .sources import _epoch as _epoch
+from .sources import _event_message as _event_message
+from .sources import _job as _job
+from .sources import _request_artifact as _request_artifact
+from .sources import _sha_text as _sha_text
+from .sources import _source_rows as _source_rows
+from .sources import _supersedes as _supersedes
+from .sources import _visible_message as _visible_message
+
 RULES_VERSION = 7
-POLICY_VERSION = 1
-MAX_POLICY_BYTES = 16 * 1024
-DEFAULT_BATCH = 100
 MAX_BATCH = 1000
 MAX_OPEN = 500
 MAX_EVIDENCE = 64
-MAX_CITATIONS = 64
 MAX_BRIEF_BYTES = 16 * 1024
 ACTIVE = ("open",)
-ARTIFACT = re.compile(r"(?<![\w/.-])(?P<key>[\w./-]+#\d+)@(?P<rev>[0-9a-fA-F]{7,40})(?![0-9a-fA-F])"
-                      r"|(?<![0-9a-fA-F])(?P<sha>[0-9a-fA-F]{40})(?![0-9a-fA-F])")
-SUPERSEDES = re.compile(r"\bsupersedes\s+(?P<key>[\w./-]+#\d+)@(?P<rev>[0-9a-fA-F]{7,40})"
-                        r"(?![0-9a-fA-F])", re.IGNORECASE)
-DEFAULT_ANSWERS = ("PASS", "FAIL", "BLOCK", "CHANGES REQUIRED", "APPROVED")
-DEFAULT_ACKS = ("claimed", "starting", "received", "recorded")
-BRIEF_BYTES = (512, 2048, 16 * 1024)  # the least, default and most bytes `decide` may append to a wake
-JUDGE_THRESHOLDS = {"owed_digest_below": 0.4, "wake_at": 0.8}  # their defaults; secretary_judge says how they apply
-
-
-@dataclass(frozen=True)
-class Policy:
-    principal: str
-    secretary_alias_id: str
-    answer_words: tuple[str, ...]
-    ack_words: tuple[str, ...]
-    terminal_job_states: tuple[str, ...]
-    job_events_wake: bool
-    brief_bytes: int
-    judge: dict[str, Any] | None
-    raw: dict[str, Any]
-    digest: str
 
 
 class Judge(Protocol):
@@ -68,227 +71,6 @@ class Judge(Protocol):
     def outcome(self, state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: Policy,
                 meta: dict, text: str) -> tuple[str, str, list[str]]:
         """The source's disposition, reason and answer words, with both verdicts recorded."""
-
-
-def _words(value: Any, field: str, default: tuple[str, ...]) -> tuple[str, ...]:
-    words = value if value is not None else list(default)
-    if not isinstance(words, list) or not words or len(words) > 32 or not all(
-        isinstance(word, str) and 1 <= len(word) <= 40 and word.strip() == word for word in words
-    ) or len(set(words)) != len(words):
-        raise ConfigError(f"policy.{field} must be 1-32 distinct short words or phrases")
-    return tuple(words)
-
-
-def load_policy(config: Config, baton: sqlite3.Connection, path: Path) -> Policy:
-    try:
-        data = path.read_bytes()
-    except OSError as error:
-        raise ConfigError(f"cannot read secretary policy: {error}") from error
-    if len(data) > MAX_POLICY_BYTES:
-        raise ConfigError("secretary policy exceeds 16 KiB")
-    try:
-        raw = json.loads(data)
-    except (UnicodeError, json.JSONDecodeError) as error:
-        raise ConfigError(f"invalid secretary policy JSON: {error}") from error
-    fields = {"version", "principal", "secretary_alias_id", "answer_words", "ack_words", "terminal_job_states",
-              "job_events_wake", "brief_bytes", "judge"}
-    if not isinstance(raw, dict) or not {"version", "principal", "secretary_alias_id"} <= raw.keys() \
-            or raw.keys() - fields:
-        raise ConfigError("secretary policy fields are invalid")
-    if type(raw["version"]) is not int or raw["version"] != POLICY_VERSION:
-        raise ConfigError("unsupported secretary policy version")
-    principal, alias_id = raw["principal"], raw["secretary_alias_id"]
-    role = config.roles.get(principal) if isinstance(principal, str) else None
-    if role is None or principal == "guest" or role.human or role.display_only:
-        raise ConfigError("secretary principal must be an existing non-human, non-display agent role")
-    if not isinstance(alias_id, str) or not alias_id or alias_id == principal:
-        raise ConfigError("secretary must name an existing, different guest alias ID")
-    if baton.execute("SELECT 1 FROM aliases WHERE id=?", (alias_id,)).fetchone() is None:
-        raise ConfigError("secretary alias does not exist")
-    if baton.execute("SELECT 1 FROM alias_roles WHERE alias_id=?", (alias_id,)).fetchone() is not None:
-        raise ConfigError("secretary alias is mapped to a role")
-    answers = _words(raw.get("answer_words"), "answer_words", DEFAULT_ANSWERS)
-    acks = _words(raw.get("ack_words"), "ack_words", DEFAULT_ACKS)
-    terminal = _words(raw.get("terminal_job_states"), "terminal_job_states",
-                      tuple(name for name, state in config.jobs.states.items() if state.terminal))
-    if any(name not in config.jobs.states or not config.jobs.states[name].terminal for name in terminal):
-        raise ConfigError("policy.terminal_job_states must name configured terminal states")
-    # Job events never wake the principal on their own unless this key says so (decide).
-    job_wakes = raw.get("job_events_wake", False)
-    if type(job_wakes) is not bool:
-        raise ConfigError("policy.job_events_wake must be true or false")
-    least, default, most = BRIEF_BYTES
-    brief_bytes = raw.get("brief_bytes", default)
-    if type(brief_bytes) is not int or not least <= brief_bytes <= most:
-        raise ConfigError(f"policy.brief_bytes must be an integer from {least} to {most}")
-    judge = _judge_block(raw.get("judge"))
-    normalized = {"version": POLICY_VERSION, "principal": principal, "secretary_alias_id": alias_id,
-                  "answer_words": list(answers), "ack_words": list(acks), "terminal_job_states": list(terminal),
-                  "job_events_wake": job_wakes, "brief_bytes": brief_bytes, **({"judge": judge} if judge else {})}
-    return Policy(principal, alias_id, answers, acks, terminal, job_wakes, brief_bytes, judge, normalized,
-                  secretary_store.digest(normalized))
-
-
-def _judge_block(value: Any) -> dict[str, Any] | None:
-    """The optional judge: its command, its timeout, the sha256 of the question file it asks, and the two
-    thresholds. All of them are in the policy digest, so a recorded decision names exactly the judge it used."""
-    if value is None:
-        return None
-    fields = {"command", "timeout_seconds", "questions_sha256", *JUDGE_THRESHOLDS}
-    if not isinstance(value, dict) or not {"command", "timeout_seconds", "questions_sha256"} <= value.keys() \
-            or value.keys() - fields:
-        raise ConfigError("policy.judge fields are invalid")
-    block = {**JUDGE_THRESHOLDS, **value}
-    command = block["command"]
-    if not isinstance(command, list) or not 1 <= len(command) <= 16 or not all(
-            isinstance(part, str) and 0 < len(part) <= 4096 and "\0" not in part for part in command) \
-            or not command[0].startswith("/"):
-        raise ConfigError("policy.judge.command must be an argv list that starts with an absolute path")
-    if not _finite(block["timeout_seconds"]) or not 0 < block["timeout_seconds"] <= 10:
-        raise ConfigError("policy.judge.timeout_seconds must be more than 0 and at most 10")
-    if not isinstance(block["questions_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", block["questions_sha256"]):
-        raise ConfigError("policy.judge.questions_sha256 must be a lowercase hex sha256")
-    if not all(_finite(block[key]) for key in JUDGE_THRESHOLDS) or not (
-            0 <= block["owed_digest_below"] <= block["wake_at"] <= 1):
-        raise ConfigError("policy.judge needs 0 <= owed_digest_below <= wake_at <= 1")
-    return block
-
-
-def _finite(value: Any) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)
-
-
-def _epoch(baton: sqlite3.Connection) -> str:
-    row = baton.execute("SELECT value FROM log_meta WHERE key='log_epoch'").fetchone()
-    if row is None:
-        raise ConfigError("Baton log_epoch is missing")
-    return row["value"]
-
-
-def _sha_text(text: str | None) -> str | None:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest() if text is not None else None
-
-
-def _artifacts(text: str) -> tuple[list[dict], bool]:
-    found = []
-    for match in ARTIFACT.finditer(text):
-        if len(found) == MAX_CITATIONS:
-            return found, True
-        found.append({"key": match["key"] or "sha", "rev": (match["rev"] or match["sha"]).lower()})
-    return found, False
-
-
-def _supersedes(text: str) -> dict | None:
-    matches = list(SUPERSEDES.finditer(text))
-    if len(matches) != 1:
-        return None
-    match = matches[0]
-    return {"key": match["key"], "rev": match["rev"].lower()}
-
-
-def _request_artifact(meta: dict) -> dict | None:
-    predecessor = meta["supersedes"]
-    candidates = [item for item in meta["artifacts"] if item != predecessor]
-    return candidates[0] if len(candidates) == 1 else None
-
-
-def _visible_message(baton: sqlite3.Connection, config: Config, principal: str,
-                     message_id: str) -> sqlite3.Row | None:
-    condition, params = board_read.message_condition(config, principal)
-    return baton.execute(f"SELECT m.* FROM messages m WHERE m.id=:message_id AND {condition}"
-                         " ORDER BY (m.recipient = :reader) DESC, m.seq LIMIT 1",
-                         {**params, "message_id": message_id}).fetchone()
-
-
-def _event_message(baton: sqlite3.Connection, config: Config, principal: str,
-                   message_id: str, seq: int, recipient: str) -> sqlite3.Row | None:
-    condition, params = board_read.message_condition(config, principal)
-    return baton.execute(f"SELECT m.* FROM messages m WHERE m.id=:message_id AND m.seq=:seq"
-                         f" AND m.recipient=:recipient AND {condition}",
-                         {**params, "message_id": message_id, "seq": seq, "recipient": recipient}).fetchone()
-
-
-def _job(config: Config, job_id: str | None, event: sqlite3.Row, data: dict) -> dict | None:
-    if job_id is None:
-        return None
-    event_state = (data.get("state") if event["kind"] == "job.created" else data.get("to")
-                   if event["kind"] == "job.moved" else None)
-    entered = config.jobs.states.get(event_state)
-    return {"id": job_id, "event_state": event_state, "event_revision": data.get("revision"),
-            "event_from_state": data.get("from") if event["kind"] == "job.moved" else None,
-            "event_waiting_on": event["audience"] if entered is not None and not entered.terminal else None}
-
-
-def _conversation(baton: sqlite3.Connection, conversation_id: str | None, message_id: str | None) -> dict | None:
-    if conversation_id is None:
-        return None
-    change = baton.execute("SELECT revision FROM change_log WHERE conversation_id=? AND message_id=?"
-                           " ORDER BY revision DESC LIMIT 1", (conversation_id, message_id)).fetchone()
-    return {"id": conversation_id, "message_revision": change["revision"] if change else None}
-
-
-def _envelope(baton: sqlite3.Connection, config: Config, principal: str,
-              event: sqlite3.Row) -> tuple[dict, str] | None:
-    """Map one real Baton event to metadata plus transient authored text. Never persist the latter."""
-    data = json.loads(event["data"])
-    message = None
-    text = ""
-    if event["kind"] == "message":
-        message_id = data.get("message_id")
-        message_seq = data.get("seq")
-        if not isinstance(message_id, str) or type(message_seq) is not int:
-            raise InvalidRequest("message event has no message_id or seq")
-        message = _event_message(baton, config, principal, message_id, message_seq, event["audience"])
-        if message is None:
-            if baton.execute("SELECT 1 FROM messages WHERE id=? AND seq=? AND recipient=?",
-                             (message_id, message_seq, event["audience"])).fetchone() is None:
-                raise InvalidRequest("message event has no corresponding message copy")
-            return None  # visibility may have narrowed since this event was appended
-        shaped = messages.as_dict(message)
-        text = shaped["text"]
-        source_key = f"message:{message_id}"
-        identity = {key: shaped.get(key) for key in ("from_role", "author_kind", "alias_id", "alias", "code")}
-        relayed, notice = shaped["relayed"], shaped["notice"]
-        conversation_id = message["conversation_id"]
-        job_id = message["job_id"]
-        detail = {"message_id": message_id, "seq": message["seq"], "recipient": message["recipient"],
-                  "conversation_seq": message["conversation_seq"], "reply_to": message["reply_to"],
-                  "attention": shaped["attention"], "needs_decision": shaped["needs_decision"],
-                  "text_sha256": _sha_text(text),
-                  "relayed_sha256": secretary_store.digest(relayed) if relayed is not None else None,
-                  "notice_sha256": secretary_store.digest(notice) if notice is not None else None,
-                  "relayed_count": len(relayed) if relayed else 0, "has_notice": notice is not None}
-    else:
-        source_key = f"event:{event['pos']}"
-        identity = {"from_role": event["actor"], "author_kind": None, "alias_id": None,
-                    "alias": None, "code": None}
-        job_id = event["job_id"]
-        conversation_id = data.get("conversation_id") if event["kind"] == "conversation.rate_limited" else None
-        if conversation_id and not board_read.may_read_conversation(baton, config, principal, conversation_id):
-            return None
-        detail = {"message_id": None, "seq": event["seq"], "recipient": event["audience"],
-                  "conversation_seq": None, "reply_to": None, "attention": None, "needs_decision": False,
-                  "text_sha256": None, "relayed_sha256": None, "notice_sha256": None,
-                  "relayed_count": 0, "has_notice": False}
-    artifacts, too_many = _artifacts(text)
-    meta = {"version": ENVELOPE_VERSION, "source_key": source_key, "event_pos": event["pos"],
-            "event_kind": event["kind"], "event_actor": event["actor"], "event_audience": event["audience"],
-            "at": event["at"], "identity": identity, "conversation_id": conversation_id, "job_id": job_id,
-            "job": _job(config, job_id, event, data),
-            "conversation": _conversation(baton, conversation_id, detail["message_id"]),
-            "can_view_all_conversations": board_read.sees_all(config, principal),
-            "artifacts": artifacts, "supersedes": _supersedes(text),
-            "artifact_over_limit": too_many, **detail}
-    return meta, text
-
-
-def _source_rows(baton: sqlite3.Connection, principal: str, after: int, limit: int) -> list[sqlite3.Row]:
-    # An earlier job event authored by P is in P's stream and seeds job tracking. The correlated
-    # source-event predicate rebuilds that set across batch boundaries without mutable job state.
-    return baton.execute("SELECT e.* FROM events e WHERE e.pos>? AND (e.audience=? OR e.actor=? OR"
-                         " (e.job_id IS NOT NULL AND EXISTS (SELECT 1 FROM events seed WHERE seed.job_id=e.job_id"
-                         " AND seed.pos<e.pos AND seed.actor=? AND seed.kind IN ('job.created','job.moved'))))"
-                         " ORDER BY e.pos LIMIT ?", (after, principal, principal, principal, limit)).fetchall()
 
 
 def _tokens(value: str) -> list[str]:
@@ -344,11 +126,6 @@ def _work_key(meta: dict) -> str:
     if meta["conversation_id"]:
         return f"conversation:{meta['conversation_id']}"
     return meta["source_key"]
-
-
-def _actor(meta: dict) -> str | None:
-    alias_id = meta["identity"]["alias_id"]
-    return f"guest:{alias_id}" if alias_id else meta["identity"]["from_role"]
 
 
 def _task_ref(meta: dict) -> str | None:
