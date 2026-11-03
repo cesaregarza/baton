@@ -90,13 +90,13 @@ again. The core considers the wake delivered when every live destination has a f
 one accepted it. Otherwise, the core retries only destinations without a final outcome and eventually
 marks the wake failed if none accepts it.
 
-Per-destination outcomes and the original occurrence time remain until the core wake is delivered, failed,
-or superseded. This preserves retry behavior across a restart. Before each attempt, Baton checks that the
+Per-destination outcomes and the original occurrence time are kept in the host database and never pruned.
+This preserves retry behavior across a restart. Before each attempt, Baton checks that the
 subscription is still active and unexpired and that its credential still holds the role. The core also
 handles wake coalescing, leases, backoff, and supersession by a read. `baton wakes` shows wake outcomes.
 
 `baton events status` shows subscription IDs, owners, expiry and state, plus recent delivery receipts
-(three days, at most 500). Receipts outlive a wake's per-destination outcomes and can help match a
+(the last three days, at most 500). Every receipt is kept in the host database. Receipts can help match a
 server-side acceptance with an event the client actually received. The command does not print callback
 URLs, headers, tokens, or secrets.
 

@@ -76,9 +76,12 @@ The MCP endpoint's token audience is `<public_url>/mcp`. See [the network guide]
 changing this URL or placing the host behind a proxy.
 
 Access and refresh tokens are opaque and stored only as digests. Access tokens last one hour; refresh
-tokens rotate and last 30 days. `baton oauth revoke-all` ends every grant. Registration and authorization
-endpoints have size, rate, and state limits. Unused client registrations expire after 24 hours; authorization
-codes are single-use and valid for five minutes.
+tokens rotate and last 30 days. `baton oauth revoke-all` ends every grant. A revoked or spent token stays,
+marked, with its expiry moved back to when it ended, and moves to the append-only `oauth-ended.jsonl` 30 days
+later. Registration and authorization endpoints have size, rate, and state limits. A client registration
+unused after 24 hours lapses: it is refused and no longer counts against the registration limit, and its
+client secret is cleared at the next OAuth write or restart. Authorization codes are single-use and valid
+for five minutes.
 
 ### Guest access
 
@@ -179,7 +182,7 @@ and database device and inode after SQLite opens them, but a file swapped and sw
 and that check could still be used. That requires write access to the private directory, which is within
 the host-user trust boundary above.
 
-This revision uses database schema 18. Schemas 2–17 upgrade in one transaction; unsupported versions are
+This revision uses database schema 19. Schemas 2–18 upgrade in one transaction; unsupported versions are
 refused before journal-mode or schema changes. Back up the data before upgrading.
 
 <a name="integrations"></a>
@@ -208,20 +211,25 @@ an operator-configured endpoint. Its failure and retry behavior is different fro
 The data directory contains the following. Protect backups as carefully as the live directory.
 
 - `baton.db`: message text, senders, recipients, times, authorship markers, and relayed words; conversation
-  titles and participants; jobs and their state history; event and wake state; retry digests; aliases and
-  their mappings; and optional indexing and seat state. Message copies, read or unread, and conversation
-  metadata and job history remain until the database is deleted.
+  titles and participants; jobs and their state history; event and wake state; retry digests; aliases,
+  their mappings and the times of their rekeys; and optional indexing, seat and MCP Events state. Message
+  copies, read or unread, conversation metadata, job history, ended seat rows and MCP Events receipts,
+  outcomes and rotation times remain until the database is deleted.
 - Message-request and job-move retry digests and outcomes are kept until the database is deleted. Wake
   records contain roles, reasons, status, and attempts, not message text.
 - Alias records include a normalized name, lookalike skeleton, random ID, salted scrypt passphrase verifier,
   and creation time. Ownership is not evicted. Binding tokens are stored as digests with expiry. Admission
   attempts are retained for their hourly windows. Guest post copies include alias attribution; a mapped
   alias call acts as its mapped role. Proofs and passphrases are not stored in plaintext.
-- `oauth.json`: client metadata and token digests, expiry, scopes, and roles; no cleartext OAuth tokens.
+- `oauth.json`: client metadata and token digests, expiry, scopes, roles, and how and when a token ended; no
+  cleartext OAuth tokens. A confidential client's secret is stored as issued, and cleared once its registration
+  lapses unused.
+- `oauth-ended.jsonl`: entries moved out of `oauth.json` 30 days after they ended, appended and never
+  rewritten. A lapsed registration arrives here without its client secret.
 - `revoked_tokens.json`: the digest, name, role, and revocation time of each revoked bearer token.
 - With MCP Events enabled, its `0600` state file contains subscription ownership, callback URLs, expiry, and
-  signing secrets, plus delivery receipts kept for up to three days and at most 500 records. Delete the
-  file to drop all subscriptions. `baton events status` omits URLs and secrets.
+  signing secrets. Delete the file to drop all subscriptions. Its delivery receipts, outcomes and rotation
+  times, which hold no secret, are kept in `baton.db`. `baton events status` omits URLs and secrets.
 - `audit.jsonl`: call time, credential and effective roles, credential identifier, tool, relevant IDs,
   outcome, and any alias ID and code. It excludes message text, job bodies, passphrases, and credentials.
   Malformed secret-bearing calls are refused before validation can echo their input.
