@@ -254,4 +254,4 @@ def test_the_topic_step_names_the_table_it_alters() -> None:
     # a new table has to be added here deliberately, which is the point of the assertion.
     assert {table for step in store._ADDED_COLUMNS.values() for table in step} \
         == {"messages", "conversations", "wakes", "generations", "topics", "seat_sessions", "seat_prelogin",
-            "seat_receipts", "seat_requests"}
+            "seat_receipts", "seat_requests", "alias_bindings"}
