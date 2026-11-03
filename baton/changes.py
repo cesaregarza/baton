@@ -98,10 +98,18 @@ def _position(conn: sqlite3.Connection, cursor: str | None) -> int:
     if cursor is None:
         return pruned
     stamp, _, number = str(cursor).partition(":")
+    invalid_detail = "a cursor is <log_epoch>:<change_seq>, as next_cursor gave it"
     if not number.isdigit():
-        raise InvalidRequest("a cursor is <log_epoch>:<change_seq>, as next_cursor gave it")
-    if stamp != current or int(number) < pruned:
-        raise CursorExpired("that cursor is from another log or older than the oldest change kept; rebuild from "
-                            "state, then continue from reset_cursor", f"{current}:{pruned}")
-    return int(number)
+        raise InvalidRequest(invalid_detail)
+    if stamp == current:
+        try:
+            position = int(number)
+        except ValueError:
+            raise InvalidRequest(invalid_detail) from None
+        if position >= pruned:
+            if position > 2**63 - 1:  # SQLite stores change_seq as a signed 64-bit integer.
+                raise InvalidRequest(invalid_detail)
+            return position
+    raise CursorExpired("that cursor is from another log or older than the oldest change kept; rebuild from "
+                        "state, then continue from reset_cursor", f"{current}:{pruned}")
 
