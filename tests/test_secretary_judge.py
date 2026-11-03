@@ -217,12 +217,93 @@ def test_the_judge_sees_only_what_the_principal_can_see(tmp_path) -> None:
         messages.send(world.baton, sender="worker", recipient="reviewer", text=f"Between us: {SECRET}",
                       job_id=made["job_id"])
         sent, trigger = _direct(world, "Where do we stand?", job_id=made["job_id"])
-        _decide(world, trigger=trigger)
+        result = _decide(world, trigger=trigger)
         # One request: the direct message. The other two aren't the principal's to read now, nor is the item the
         # conversation post opened, so neither its title nor the item itself reaches the judge.
         assert [(request["message"]["id"], request["items"]) for request in judge.requests] == [
             (sent["message_id"], [])]
         assert SECRET not in judge.log.read_text()
+        # That item is still a candidate the judge never saw, so its "none" can't rule it out: the word lists decide.
+        assert _item(result, sent)["judge"] == "judge_fallback:unoffered"
+
+
+def _requests_to_worker(world, room: str, count: int) -> list[dict]:
+    """The principal's open requests to one worker in one conversation, oldest first."""
+    return [say(world, room, "planner", f"Please run check {index}", attention=["worker"]) for index in range(count)]
+
+
+@pytest.mark.parametrize("reply", [NOTHING, {**NOTHING, "relation": "answers"}], ids=["none", "answers_no_item"])
+@pytest.mark.parametrize("count", [5, 6, 9])
+def test_an_untagged_result_for_a_request_past_the_four_offered_is_held_for_reconciliation(
+        tmp_path, count, reply) -> None:
+    with make_world(tmp_path) as world:
+        room = conversation(world)
+        judge = Judge(world, tmp_path, {"reply": reply})  # its verdict names none of the items it is offered
+        _catch_up(world)
+        asks = _requests_to_worker(world, room, count)
+        result = say(world, room, "worker", "Check 0 passed")  # for the oldest request, with no reply_to
+        decided = _decide(world, trigger=f"message:{result['seqs']['planner']}")
+        [request] = judge.requests
+        assert [item["title"] for item in request["items"]] == [f"Please run check {index}"
+                                                                for index in range(count - 4, count)]
+        # The judge never saw the oldest request, so a verdict naming none of the offered items can't rule that one
+        # out: the word lists decide, and they hold the result for reconciliation as they would without a judge.
+        item = _item(decided, result)
+        assert (item["decision"], item["rule"], item["reason"]) == (
+            "hold", "hold:reconcile", "multiple open expectations match this message")
+        assert (decided["decision"], decided["rule"], decided["judge"]) == (
+            "hold", "hold:reconcile", {"calls": 1, "fallbacks": 1})
+        assert _asked_of(world, asks[0]) == [{"direction": "awaited", "state": "open"}]
+        assert _state(world, "SELECT kind FROM expectation_evidence WHERE source_key=?",
+                      f"message:{result['message_id']}") == [{"kind": "uncertain"}] * count
+        # The next hourly digest cites the result as uncertain, beside the open requests' count.
+        digest = _decide(world, **_after(decided, hourly=True))
+        cited = [line for line in digest["brief"].split("\n") if result["message_id"] in line]
+        assert len(cited) == 1 and cited[0].startswith(f"- hold, uncertain, evidence message:{result['message_id']}")
+        assert item["judge"] == "judge_fallback:unoffered"
+
+
+def test_past_four_a_result_the_judge_ties_to_an_offered_item_still_closes_it(tmp_path) -> None:
+    with make_world(tmp_path) as world:
+        room = conversation(world)
+        Judge(world, tmp_path, {"when": "Check 5", "reply": {**NOTHING, "relation": "answers", "item": 3}})
+        _catch_up(world)
+        asks = _requests_to_worker(world, room, 6)
+        result = say(world, room, "worker", "Check 5 passed")  # for the newest request, with no reply_to
+        decided = _decide(world, trigger=f"message:{result['seqs']['planner']}")
+        assert _item(decided, result)["judge"] == "judged"
+        assert (decided["decision"], decided["rule"], decided["evidence"]) == (
+            "wake", "wake:brief", f"message:{result['message_id']}")
+        assert [_asked_of(world, ask)[0]["state"] for ask in asks] == ["open"] * 5 + ["satisfied"]
+
+
+@pytest.mark.parametrize("count", [5, 6])
+def test_an_explicit_reply_to_the_oldest_of_many_requests_is_judged_against_that_request(tmp_path, count) -> None:
+    with make_world(tmp_path) as world:
+        room = conversation(world)
+        judge = Judge(world, tmp_path, {"when": "Check 0", "reply": {**NOTHING, "relation": "answers", "item": 0}})
+        _catch_up(world)
+        asks = _requests_to_worker(world, room, count)
+        reply = say(world, room, "worker", "Check 0 passed", reply_to=asks[0]["message_id"])
+        decided = _decide(world, trigger=f"message:{reply['seqs']['planner']}")
+        # The reply names its request, so that request is the only candidate, and the judge is offered it.
+        assert [item["title"] for item in judge.requests[0]["items"]] == ["Please run check 0"]
+        assert (_item(decided, reply)["judge"], decided["decision"]) == ("judged", "wake")
+        assert [_asked_of(world, ask)[0]["state"] for ask in asks] == ["satisfied"] + ["open"] * (count - 1)
+
+
+def test_with_every_candidate_offered_the_judges_none_stands(tmp_path) -> None:
+    with make_world(tmp_path) as world:
+        room = conversation(world)
+        judge = Judge(world, tmp_path)
+        _catch_up(world)
+        _requests_to_worker(world, room, 4)
+        note = say(world, room, "worker", "Still working through the list")
+        decided = _decide(world, trigger=f"message:{note['seqs']['planner']}")
+        assert len(judge.requests[0]["items"]) == 4
+        item = _item(decided, note)
+        assert (item["judge"], item["decision"], item["rule"]) == ("judged", "keep", "keep:retain")
+        assert item["rules"] == {"decision": "hold", "rule": "hold:reconcile"}
 
 
 def test_both_verdicts_are_kept_for_every_judged_event_without_text(tmp_path) -> None:
