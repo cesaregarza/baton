@@ -190,7 +190,7 @@ configuration problem exits with status 2.
 | `baton events status\|unbind` | Inspect event subscriptions and receipts, or unbind a guest grant's event target. |
 | `baton seat logout-all` | End all browser-seat sessions. |
 | `baton secretary --state FILE --policy FILE scan\|replay\|show\|cancel\|decide` | Build and inspect local attention records from retained Baton events. |
-| `baton secretary --policy FILE read --after POS\|--ids IDS` | Read the messages the principal can see, text included, for a secretary thread. |
+| `baton secretary --policy FILE read --after POS\|--ids IDS` | Read what the principal was delivered, of any kind, text included, for a secretary thread. |
 
 `--as` defaults to `BATON_ROLE` in local mode and cannot select a human role. `--config` defaults to
 `BATON_CONFIG`, then `~/.config/baton/baton.toml`. `--host` defaults to `BATON_HOST`: it uses the remote
@@ -216,15 +216,22 @@ and a failed, late or malformed answer leaves a message to the deterministic rul
 to none of the items offered when it had a candidate the judge was not offered; the catch-up scan and the
 hourly digest never use it. Each result counts the decisions a judge made (`judged_counts`) and names the
 wake's own item (`trigger_item`) while it is in the window, so a caller can tell a trigger the judge
-decided from one it did not. The
+decided from one it did not. Its `new` items are what this call scanned; its `window` lists everything
+outstanding since `--since`, however little of it this call scanned, as `deliveries` and `context` in stream
+order, each with its first 100 items listed and the rest counted (`more_deliveries`, `more_context`). A caller
+that offers the deliveries to another reader covers no further than the last one it offered. The
 policy and state formats are versioned. This interface does not deliver, approve, or modify Baton work.
-`read` is the one secretary action that returns message text, for a host-local secretary thread: after an event
-position (`--after`), the principal's messages in the stream the scan reads, each listed once; or the given message
-ids (`--ids`), listing any the principal can't read as missing. Each message carries its id, position,
-conversation or direct recipient, sender, time, `reply_to`, text and relayed entries. A page holds at most
-`--limit` messages (default 20, at most 100) and `--max-bytes` (default 256 KiB), always at least one, and
-`through_pos` is where the next page starts. It opens the database read-only, needs no `--state`, and writes
-nothing; `python -m baton.secretary_read` takes the same options.
+`read` is the one secretary action that returns message text, for a host-local secretary thread. After an event
+position (`--after`), it returns every event the scan reads for the principal, whatever its kind, in two lists:
+`deliveries`, the events addressed to the principal, and `context`, its own sends and later events on jobs it moved,
+which are never deliveries. Each event carries its position, kind, time, actor, audience, job and sequence, summary
+and data, and a message event also carries its message, listed once. A new kind of event addressed to the principal
+is read as a delivery with no change to the secretary. With `--ids`, it reads the given messages, listing any the
+principal can't read as missing. Each message carries its id, position, conversation or direct recipient, sender,
+time, `reply_to`, text and relayed entries. A page holds at most `--limit` events or messages (default 20, at most
+100) and `--max-bytes` (default 256 KiB), always at least one, and `through_pos` is where the next page starts. Each
+of `decide`'s items says whether it was `delivered` to the principal in the same way. `read` opens the database
+read-only, needs no `--state`, and writes nothing; `python -m baton.secretary_read` takes the same options.
 The projection reads events addressed to or authored by the principal, plus later events for jobs whose
 earlier create or move event the principal authored. It derives job facts from those event rows and
 rechecks message visibility before retaining a cited message. Envelope version 1 refuses unknown stored

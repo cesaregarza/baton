@@ -1,4 +1,5 @@
-"""The secretary thread's read path: the messages one principal can see, text included, after a position or by id.
+"""The secretary thread's read path: everything delivered to one principal, whatever its kind, and the context
+beside it, after a position; or the messages it can see by id. Message text is included.
 
 It reads through the kernel's read-only opener with the kernel's own visibility rule, and writes nothing. Every
 read here goes through `baton secretary read` or `python -m baton.secretary_read`, as the thread runs it.
@@ -16,11 +17,12 @@ import pytest
 from secretary_support import ALIAS_ID, conversation, make_world, say, table_hashes
 
 import baton
-from baton import cli, conversations, messages, secretary, secretary_store, store
+from baton import cli, conversations, events, jobs, messages, secretary, secretary_store, store
 from baton.store import transaction
 
 SECRET = "the private phrase"
 RELAYED = [{"source": "upstream", "at": "2026-11-02T00:00:00Z", "text": "Relayed words"}]
+NEW_KIND = "synthetic.notice"  # a kind of delivery no secretary code names
 
 
 def _read(world, capsys, *args: str) -> tuple[int, dict]:
@@ -34,8 +36,37 @@ def _read(world, capsys, *args: str) -> tuple[int, dict]:
     return code, json.loads(out) if out.strip() else {}
 
 
+def _entries(page: dict) -> list[dict]:
+    """An after-position page's deliveries and context together, in stream order."""
+    return sorted(page.get("deliveries", []) + page.get("context", []), key=lambda entry: entry["pos"])
+
+
+def _messages(page: dict) -> list[dict]:
+    """The messages a page lists: by id, or carried by the events of an after-position page."""
+    if "missing" in page:
+        return page.get("messages", [])
+    return [entry["message"] for entry in _entries(page) if entry.get("message")]
+
+
 def _ids(page: dict) -> list[str]:
-    return [message["id"] for message in page.get("messages", [])]
+    return [message["id"] for message in _messages(page)]
+
+
+def _kinds(page: dict, part: str) -> list[tuple[str, int]]:
+    return [(entry["kind"], entry["pos"]) for entry in page.get(part, [])]
+
+
+def _append(world, kind: str, *, actor: str = "worker", audience: str | None = "planner", job_id: str | None = None,
+            data: dict | None = None) -> int:
+    """An event of any kind, appended as a future producer would: nothing in the secretary is told about it."""
+    with transaction(world.baton):
+        events.append(world.baton, job_id=job_id, seq=0 if job_id is None else None, actor=actor, audience=audience,
+                      kind=kind, summary=f"{kind} for {audience}", data=data or {})
+    return world.baton.execute("SELECT MAX(pos) FROM events").fetchone()[0]
+
+
+def _last_pos(world) -> int:
+    return world.baton.execute("SELECT MAX(pos) FROM events").fetchone()[0]
 
 
 def _stream_end(world, principal: str = "planner") -> int:
@@ -66,7 +97,7 @@ def test_after_a_position_lists_each_message_the_principal_sees_once_with_its_te
         code, page = _read(world, capsys, "--after", "0")
         assert code == 0 and page["principal"] == "planner" and page["after"] == 0
         assert _ids(page) == [direct["message_id"], asked["message_id"], reply["message_id"], guest["message_id"]]
-        first, own, answered, guested = page["messages"]
+        first, own, answered, guested = _messages(page)
         assert (first["sender"], first["to"], first["conversation_id"], first["text"], first["relayed"],
                 first["reply_to"]) == ("worker", "planner", None, "Direct words", [], None)
         assert (own["sender"], own["to"], own["conversation_id"], own["attention"]) == ("planner", None, room,
@@ -74,8 +105,9 @@ def test_after_a_position_lists_each_message_the_principal_sees_once_with_its_te
         assert (answered["reply_to"], answered["text"], answered["relayed"]) == (asked["message_id"], "Reply words",
                                                                                  RELAYED)
         assert guested["sender"] == f"guest:{ALIAS_ID}" and guested["alias"] == {"name": "lane-a", "code": "ab12"}
-        assert all(message["at"] and type(message["pos"]) is int for message in page["messages"])
-        assert [message["pos"] for message in page["messages"]] == sorted(m["pos"] for m in page["messages"])
+        assert all(message["at"] and type(message["pos"]) is int for message in _messages(page))
+        assert [message["pos"] for message in _messages(page)] == sorted(m["pos"] for m in _messages(page))
+        assert [entry["message"]["id"] for entry in page.get("context", [])] == [asked["message_id"]]  # its own post
         assert (page["through_pos"], page["more"]) == (_stream_end(world), False)
         assert _stream_end(world) < world.baton.execute("SELECT MAX(pos) FROM events").fetchone()[0]  # guest copies
 
@@ -129,17 +161,17 @@ def test_a_page_is_bounded_by_count_and_bytes_and_the_next_one_starts_where_it_s
         pages, after = [], 0
         while True:
             code, page = _read(world, capsys, "--after", str(after), "--limit", "2", "--max-bytes", "4000")
-            assert code == 0 and len(page["messages"]) <= 2 and page["through_pos"] >= after
+            assert code == 0 and len(_entries(page)) <= 2 and page["through_pos"] >= after
             pages.append(page)
             after = page["through_pos"]
             if not page["more"]:
                 break
         assert [message for page in pages for message in _ids(page)] == order  # nothing repeated, nothing skipped
-        assert [len(page["messages"]) for page in pages] == [2, 1, 1, 1]  # the count bound, then the byte bound
+        assert [len(_entries(page)) for page in pages] == [2, 1, 1, 1]  # the count bound, then the byte bound
         assert pages[0]["through_pos"] == max(event["pos"] for event in world.baton.execute(
             "SELECT pos, data FROM events WHERE kind='message'") if json.loads(event["data"])["message_id"] == order[1])
         code, alone = _read(world, capsys, "--after", str(pages[1]["through_pos"]), "--max-bytes", "1024")
-        assert code == 0 and len(alone["messages"]) == 1 and alone["more"] is True  # one message larger than the bound
+        assert code == 0 and len(_entries(alone)) == 1 and alone["more"] is True  # one message larger than the bound
         code, by_id = _read(world, capsys, "--ids", ",".join(order[2:]), "--max-bytes", "4000")
         assert code == 0 and _ids(by_id) == order[2:3] and by_id["not_read"] == order[3:]
 
@@ -201,9 +233,86 @@ def test_a_read_outside_its_bounds_is_refused_before_anything_is_read(tmp_path, 
 def test_the_other_secretary_actions_still_require_their_state(tmp_path, capsys) -> None:
     with make_world(tmp_path) as world:
         code, page = _read(world, capsys, "--after", "0")
-        assert (code, page.get("messages")) == (0, [])
+        assert (code, page.get("deliveries"), page.get("context")) == (0, [], [])
         for action in (["scan"], ["replay"], ["show"], ["decide", "--budget-seconds", "5"]):
             with pytest.raises(SystemExit) as absent:
                 cli.main(["--config", str(world.config_path), "secretary", "--policy", str(world.policy_path),
                           *action])
             assert absent.value.code == 2
+
+
+def test_every_kind_delivered_to_the_principal_is_read_as_a_delivery_with_or_without_its_ids(tmp_path,
+                                                                                           capsys) -> None:
+    with make_world(tmp_path) as world:
+        made = jobs.create(world.baton, world.config.jobs, request_id="job-kinds", actor="worker", title="Task")
+        loose = _append(world, NEW_KIND, data={"note": "metadata only"})  # neither a message nor a job id
+        on_job = _append(world, "job.synthetic", job_id=made["job_id"])  # a job id, no message id
+        sent = messages.send(world.baton, sender="worker", recipient="planner", text="Direct words")
+        code, page = _read(world, capsys, "--after", "0")
+        assert code == 0 and page.get("context") == []
+        assert _kinds(page, "deliveries") == [("job.created", loose - 1), (NEW_KIND, loose), ("job.synthetic", on_job),
+                                              ("message", _last_pos(world))]
+        created, notice, synthetic, message = page["deliveries"]
+        assert (notice["actor"], notice["audience"], notice["job_id"], notice["message"], notice["data"]) == (
+            "worker", "planner", None, None, {"note": "metadata only"})
+        assert (synthetic["job_id"], synthetic["message"], created["job_id"]) == (made["job_id"], None, made["job_id"])
+        assert notice["summary"] == f"{NEW_KIND} for planner" and notice["at"]
+        assert message["message"]["id"] == sent["message_id"] and message["message"]["text"] == "Direct words"
+        assert (page["through_pos"], page["more"]) == (_last_pos(world), False)
+
+
+def test_own_sends_and_job_context_come_out_as_context_and_never_as_deliveries(tmp_path, capsys) -> None:
+    with make_world(tmp_path) as world:
+        made = jobs.create(world.baton, world.config.jobs, request_id="job-context", actor="worker", title="Task")
+        jobs.move(world.baton, world.config.jobs, made["job_id"], "working", actor="planner")  # its own move
+        jobs.move(world.baton, world.config.jobs, made["job_id"], "handoff", actor="worker")  # to someone else
+        own = messages.send(world.baton, sender="planner", recipient="worker", text="Own words")
+        own_kind = _append(world, NEW_KIND, actor="planner", audience="worker")
+        delivered = _append(world, NEW_KIND)
+        code, page = _read(world, capsys, "--after", "0")
+        assert code == 0
+        assert _kinds(page, "deliveries") == [("job.created", 1), (NEW_KIND, delivered)]
+        assert [kind for kind, _ in _kinds(page, "context")] == ["job.moved", "job.moved", "message", NEW_KIND]
+        assert page["context"][2]["message"]["id"] == own["message_id"] and page["context"][3]["pos"] == own_kind
+        assert all(entry["audience"] != "planner" for entry in page["context"])
+
+
+def test_pages_over_mixed_kinds_keep_their_position_and_replay_the_same(tmp_path, capsys) -> None:
+    with make_world(tmp_path) as world:
+        room = conversation(world)
+        for number in range(3):
+            messages.send(world.baton, sender="worker", recipient="planner", text=f"Direct {number}")
+            _append(world, NEW_KIND, data={"number": number})
+            say(world, room, "planner", f"Own post {number}")  # two copies, listed once, as context
+            _append(world, NEW_KIND, actor="planner", audience="reviewer", data={"number": number})
+        whole = _read(world, capsys, "--after", "0", "--limit", "100")[1]
+        assert [kind for kind, _ in _kinds(whole, "deliveries")] == ["message", NEW_KIND] * 3
+        assert [kind for kind, _ in _kinds(whole, "context")] == ["message", NEW_KIND] * 3
+        pages, after = [], 0
+        while True:
+            code, page = _read(world, capsys, "--after", str(after), "--limit", "3")
+            assert code == 0 and len(_entries(page)) <= 3 and page["through_pos"] > after
+            assert _read(world, capsys, "--after", str(after), "--limit", "3")[1] == page  # a replay reads the same
+            pages.append(page)
+            after = page["through_pos"]
+            if not page["more"]:
+                break
+        assert [len(_entries(page)) for page in pages] == [3, 3, 3, 3]
+        assert [entry for page in pages for entry in page["deliveries"]] == whole["deliveries"]
+        assert [entry for page in pages for entry in page["context"]] == whole["context"]
+        assert pages[-1]["through_pos"] == whole["through_pos"] == _last_pos(world) and whole["more"] is False
+
+
+def test_a_delivery_of_any_kind_stays_within_the_principals_visibility(tmp_path, capsys) -> None:
+    with make_world(tmp_path) as world:
+        left = conversation(world)
+        conversations.remove(world.baton, world.config, left, "planner", actor="planner")
+        theirs = _append(world, NEW_KIND, audience="reviewer", data={"note": SECRET})
+        limited = _append(world, "conversation.rate_limited", data={"conversation_id": left, "note": SECRET})
+        hidden = say(world, left, "reviewer", f"After it left: {SECRET}")
+        delivered = _append(world, NEW_KIND, data={"note": "for the principal"})
+        code, page = _read(world, capsys, "--after", "0")
+        assert code == 0 and _kinds(page, "deliveries") == [(NEW_KIND, delivered)]
+        positions = [entry["pos"] for entry in _entries(page)]
+        assert theirs not in positions and limited not in positions and hidden["message_id"] not in _ids(page)
+        assert SECRET not in json.dumps(page)

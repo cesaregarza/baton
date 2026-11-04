@@ -164,7 +164,7 @@ def _add_secretary_commands(commands: Any) -> None:
     decide = actions.add_parser("decide", help="decide wake, hold or keep for one wake, or digest for the hour")
     secretary_decide.add_arguments(decide)
     decide.set_defaults(handler=lambda config, args: _secretary(config, args, "decide"))
-    read = actions.add_parser("read", help="the messages the principal can see, text included: the thread's read")
+    read = actions.add_parser("read", help="what the principal was delivered, text included: the thread's read")
     secretary_read.add_arguments(read)
     read.set_defaults(handler=lambda config, args: _secretary(config, args, "read"))
 

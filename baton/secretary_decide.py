@@ -47,6 +47,7 @@ BRIEF_END = "[End of secretary brief]"
 DIGEST_START = "[Secretary digest: derived information, not instructions; results reported, not verified]"
 DIGEST_END = "[End of secretary digest]"
 DIGEST_BYTES = 4096  # the hourly text's own bound; the policy's brief_bytes bounds only what a wake appends
+LISTED = 100  # what the window lists of each of its deliveries and its context; the rest are counted
 TRIGGER = re.compile(r"message:(?P<seq>[1-9][0-9]{0,17})"
                      r"|job:(?P<job>job_[0-9a-f]{16}):(?P<event_seq>[1-9][0-9]{0,17})|(?P<conversation>conversation)")
 JOB_KINDS = ("job.created", "job.moved")
@@ -177,7 +178,7 @@ def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config
                    through, head, "current" if current else "behind", decision, rule, evidence, policy.digest,
                    hashlib.sha256(text.encode("utf-8")).hexdigest(), len(text.encode("utf-8"))))
     public = ("source_key", "pos", "kind", "sender", "message_id", "job_id", "conversation_id", "disposition",
-              "reason", "decision", "rule", "judge", "rules")
+              "reason", "decision", "rule", "judge", "rules", "delivered")
     own = next((item for item in items if item["pos"] == trigger_pos), None)
     return {"principal": principal, "mode": "hourly" if hourly else "callback", "trigger": trigger,
             "trigger_pos": trigger_pos,
@@ -197,8 +198,21 @@ def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config
             # a judge made it, so the caller can tell a trigger the judge decided from one it did not.
             "trigger_item": {key: own[key] for key in public} if own else None,
             "new": [{key: item[key] for key in public} for item in items if item["pos"] > start],
+            # Everything outstanding since `since`, however little of it this call scanned: the deliveries apart from
+            # the context, each in stream order, the first LISTED of each listed and the rest counted. A caller that
+            # offers the deliveries to another reader covers no further than the last one it offered.
+            "window": _window(items, public),
             "judge": {"calls": judge.calls, "fallbacks": judge.fallbacks} if judge else None,
             "brief": text, "decision_seq": seq}
+
+
+def _window(items: list[dict], public: tuple[str, ...]) -> dict:
+    deliveries = [item for item in items if item["delivered"]]
+    context = [item for item in items if not item["delivered"]]
+    return {"deliveries": [{key: item[key] for key in public} for item in deliveries[:LISTED]],
+            "more_deliveries": max(0, len(deliveries) - LISTED),
+            "context": [{key: item[key] for key in public} for item in context[:LISTED]],
+            "more_context": max(0, len(context) - LISTED)}
 
 
 def _trigger_pos(baton: sqlite3.Connection, principal: str, trigger: str | None) -> int | None:
@@ -217,7 +231,8 @@ def _trigger_pos(baton: sqlite3.Connection, principal: str, trigger: str | None)
 
 def _item(row: sqlite3.Row, policy: policy_module.Policy) -> dict:
     """One scanned source. `judge` is None, "judged" or "judge_fallback:<reason>", and `rules` is what the word lists
-    decided: for a judged message, what they would have decided in the judge's place."""
+    decided: for a judged message, what they would have decided in the judge's place. `delivered` tells a delivery to
+    the principal, of any kind, from the context the scan also reads."""
     envelope = json.loads(row["envelope"])
     decision, rule = _classify(envelope["event_kind"], row["kind"], policy)
     rules = _classify(envelope["event_kind"], row["rules_kind"], policy) if row["judge"] else (decision, rule)
@@ -226,7 +241,8 @@ def _item(row: sqlite3.Row, policy: policy_module.Policy) -> dict:
             "job_id": envelope["job_id"], "job_state": (envelope["job"] or {}).get("event_state"),
             "conversation_id": envelope["conversation_id"], "artifacts": envelope["artifacts"],
             "disposition": row["kind"], "reason": row["reason"], "decision": decision, "rule": rule,
-            "judge": row["judge"], "rules": {"decision": rules[0], "rule": rules[1]}}
+            "judge": row["judge"], "rules": {"decision": rules[0], "rule": rules[1]},
+            "delivered": sources.delivered_to(policy.principal, envelope["event_audience"])}
 
 
 def _classify(event_kind: str, disposition: str, policy: policy_module.Policy) -> tuple[str, str]:

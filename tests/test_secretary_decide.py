@@ -8,11 +8,13 @@ import json
 import pytest
 from secretary_support import conversation, make_world, policy, say, table_hashes
 
-from baton import cli, conversations, jobs, messages, secretary, secretary_decide, secretary_store
+from baton import cli, conversations, events, jobs, messages, secretary, secretary_decide, secretary_store
 from baton.config import ConfigError
 from baton.errors import InvalidRequest
+from baton.store import transaction
 
 SECRET = "the secret phrase"
+NEW_KIND = "synthetic.notice"  # a kind of delivery no secretary code names
 
 
 def _catch_up(world) -> None:
@@ -41,6 +43,18 @@ def _direct(world, text: str) -> tuple[dict, str]:
 
 def _lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.startswith("- ")]
+
+
+def _last_pos(world) -> int:
+    return world.baton.execute("SELECT MAX(pos) FROM events").fetchone()[0]
+
+
+def _append(world, kind: str, *, job_id: str | None = None) -> int:
+    """An event of a new kind delivered to the principal, appended as a future producer would."""
+    with transaction(world.baton):
+        events.append(world.baton, job_id=job_id, seq=0 if job_id is None else None, actor="worker",
+                      audience="planner", kind=kind, summary=f"{kind} for planner", data={})
+    return _last_pos(world)
 
 
 def test_decide_refuses_a_state_without_the_catch_up_scan(tmp_path) -> None:
@@ -153,6 +167,55 @@ def test_job_events_never_wake_unless_the_policy_key_allows(tmp_path) -> None:
         woken = _decide(world, **_after(held, trigger=trigger))
         assert (woken["decision"], woken["rule"]) == ("wake", "wake:job-brief")
         assert made["job_id"] in woken["brief"]
+
+
+def test_a_new_kind_reaches_the_decision_as_a_delivery_and_never_wakes_by_its_kind(tmp_path) -> None:
+    with make_world(tmp_path) as world:
+        _catch_up(world)
+        made = jobs.create(world.baton, world.config.jobs, request_id="job-kind", actor="worker", title="Task")
+        created = _last_pos(world)
+        loose = _append(world, NEW_KIND)  # neither a message nor a job id
+        on_job = _append(world, "job.synthetic", job_id=made["job_id"])  # the job's second event
+        jobs.move(world.baton, world.config.jobs, made["job_id"], "working", actor="planner")
+        moved = _last_pos(world)
+        messages.send(world.baton, sender="planner", recipient="worker", text="Own words")
+        own = _last_pos(world)
+        _, trigger = _direct(world, "Please decide")
+        result = _decide(world, trigger=trigger)
+        new = {item["pos"]: item for item in result["new"]}
+        assert {pos: item.get("delivered") for pos, item in new.items()} == {
+            created: True, loose: True, on_job: True, moved: False, own: False, _last_pos(world): True}
+        assert [new[loose][key] for key in ("kind", "message_id", "job_id", "decision")] == [NEW_KIND, None, None,
+                                                                                               "keep"]
+        assert [new[on_job][key] for key in ("kind", "job_id", "decision")] == ["job.synthetic", made["job_id"], "keep"]
+        assert result["decision"] == "wake" and result["trigger_item"].get("delivered") is True
+        own_wake = _decide(world, **_after(result, trigger=f"job:{made['job_id']}:2"))  # the new kind's own wake
+        assert own_wake["trigger_item"]["source_key"] == f"event:{on_job}"
+        assert own_wake["trigger_item"].get("delivered") is True and own_wake["decision"] == "hold"
+
+
+def test_the_window_lists_what_is_outstanding_since_the_last_brief_however_little_this_call_scanned(
+        tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        _catch_up(world)
+        first = _decide(world)
+        own = messages.send(world.baton, sender="planner", recipient="worker", text="Own words")
+        sent = [_direct(world, "Please decide")[0] for _ in range(3)]
+        trigger = f"message:{sent[0]['seq']}"
+        _decide(world, **_after(first, trigger=trigger))
+        retry = _decide(world, **_after(first, trigger=trigger))  # nothing left to scan, nothing delivered yet
+        assert retry["new"] == []
+        window = retry.get("window") or {}
+        assert [item["source_key"] for item in window.get("deliveries", [])] == [
+            f"message:{message['message_id']}" for message in sent]
+        assert [item["source_key"] for item in window.get("context", [])] == [f"message:{own['message_id']}"]
+        assert [item["delivered"] for item in window["deliveries"] + window["context"]] == [True, True, True, False]
+        assert (window["more_deliveries"], window["more_context"]) == (0, 0)
+        monkeypatch.setattr(secretary_decide, "LISTED", 2)
+        bounded = _decide(world, **_after(first, trigger=trigger))["window"]
+        assert [item["source_key"] for item in bounded["deliveries"]] == [
+            item["source_key"] for item in window["deliveries"][:2]]
+        assert (bounded["more_deliveries"], len(bounded["context"]), bounded["more_context"]) == (1, 1, 0)
 
 
 def test_a_job_wake_never_wakes_for_a_message_on_its_own(tmp_path) -> None:
