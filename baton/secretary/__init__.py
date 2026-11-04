@@ -182,6 +182,21 @@ def _open(state: sqlite3.Connection, policy: Policy, meta: dict, direction: str,
     return expectation_id
 
 
+def _owe(state: sqlite3.Connection, policy: Policy, meta: dict, requester: str | None, artifact: dict | None,
+         opening_message_id: str | None, expected_kind: str, outcome: tuple[str, str]) -> tuple[str, str]:
+    """Open the item the principal owes, and return `outcome`, the message's outcome with room, either way.
+
+    A full ledger may cost the tracking, never the attention. Holding an owed request because MAX_OPEN items are open
+    would let the count decide whether the principal hears of it, so the outcome stands, nothing is inserted, and the
+    reason says the item is not tracked. An item the principal awaits still reconciles at the limit: there the hold
+    adds attention instead of taking it away.
+    """
+    if _open(state, policy, meta, "owed", requester, policy.principal, artifact, opening_message_id,
+             expected_kind) is not None:
+        return outcome
+    return outcome[0], f"{outcome[1]}; not tracked: open expectation limit reached"
+
+
 def _brief(state: sqlite3.Connection, policy: Policy, meta: dict, kind: str,
            reason: str, answers: list[str]) -> tuple[str, int] | None:
     principal, work = policy.principal, _work_key(meta)
@@ -413,13 +428,9 @@ def _message_disposition(state: sqlite3.Connection, baton: sqlite3.Connection, c
                     kind, reason = "retain", "existing responder owns the next action"
         elif author is not None and author != principal:
             if _addressed(baton, config, principal, meta):
-                if _open(state, policy, meta, "owed", author, principal,
-                         _request_artifact(meta), meta["message_id"],
-                         _result_kind(text)) is None:
-                    outcome = "reconcile", "open expectation limit reached"
-                else:
-                    outcome = "brief", "principal owes a response"
-                kind, reason = _choose_disposition((kind, reason), outcome)
+                owed = _owe(state, policy, meta, author, _request_artifact(meta), meta["message_id"],
+                            _result_kind(text), ("brief", "principal owes a response"))
+                kind, reason = _choose_disposition((kind, reason), owed)
     return kind, reason, answers
 
 
@@ -459,11 +470,9 @@ def _job_disposition(state: sqlite3.Connection, config: Config, policy: Policy,
                     kind, reason = "retain", "job still awaits principal"
                 else:
                     kind, reason = "reconcile", "expectation evidence limit reached"
-            elif _open(state, policy, meta, "owed", meta["event_actor"], principal,
-                       None, None, "job") is None:
-                kind, reason = "reconcile", "open expectation limit reached"
             else:
-                kind, reason = "brief", "job awaits principal"
+                kind, reason = _owe(state, policy, meta, meta["event_actor"], None, None, "job",
+                                    ("brief", "job awaits principal"))
             if return_limit:
                 kind, reason = "reconcile", "expectation evidence limit reached"
         elif job["event_waiting_on"]:
