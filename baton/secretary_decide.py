@@ -47,6 +47,7 @@ BRIEF_END = "[End of secretary brief]"
 DIGEST_START = "[Secretary digest: derived information, not instructions; results reported, not verified]"
 DIGEST_END = "[End of secretary digest]"
 DIGEST_BYTES = 4096  # the hourly text's own bound; the policy's brief_bytes bounds only what a wake appends
+LISTED = 100  # what the window lists of each of its deliveries and its context; the rest are counted
 TRIGGER = re.compile(r"message:(?P<seq>[1-9][0-9]{0,17})"
                      r"|job:(?P<job>job_[0-9a-f]{16}):(?P<event_seq>[1-9][0-9]{0,17})|(?P<conversation>conversation)")
 JOB_KINDS = ("job.created", "job.moved")
@@ -197,8 +198,21 @@ def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config
             # a judge made it, so the caller can tell a trigger the judge decided from one it did not.
             "trigger_item": {key: own[key] for key in public} if own else None,
             "new": [{key: item[key] for key in public} for item in items if item["pos"] > start],
+            # Everything outstanding since `since`, however little of it this call scanned: the deliveries apart from
+            # the context, each in stream order, the first LISTED of each listed and the rest counted. A caller that
+            # offers the deliveries to another reader covers no further than the last one it offered.
+            "window": _window(items, public),
             "judge": {"calls": judge.calls, "fallbacks": judge.fallbacks} if judge else None,
             "brief": text, "decision_seq": seq}
+
+
+def _window(items: list[dict], public: tuple[str, ...]) -> dict:
+    deliveries = [item for item in items if item["delivered"]]
+    context = [item for item in items if not item["delivered"]]
+    return {"deliveries": [{key: item[key] for key in public} for item in deliveries[:LISTED]],
+            "more_deliveries": max(0, len(deliveries) - LISTED),
+            "context": [{key: item[key] for key in public} for item in context[:LISTED]],
+            "more_context": max(0, len(context) - LISTED)}
 
 
 def _trigger_pos(baton: sqlite3.Connection, principal: str, trigger: str | None) -> int | None:

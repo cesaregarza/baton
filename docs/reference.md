@@ -216,7 +216,10 @@ and a failed, late or malformed answer leaves a message to the deterministic rul
 to none of the items offered when it had a candidate the judge was not offered; the catch-up scan and the
 hourly digest never use it. Each result counts the decisions a judge made (`judged_counts`) and names the
 wake's own item (`trigger_item`) while it is in the window, so a caller can tell a trigger the judge
-decided from one it did not. The
+decided from one it did not. Its `new` items are what this call scanned; its `window` lists everything
+outstanding since `--since`, however little of it this call scanned, as `deliveries` and `context` in stream
+order, each with its first 100 items listed and the rest counted (`more_deliveries`, `more_context`). A caller
+that offers the deliveries to another reader covers no further than the last one it offered. The
 policy and state formats are versioned. This interface does not deliver, approve, or modify Baton work.
 `read` is the one secretary action that returns message text, for a host-local secretary thread. After an event
 position (`--after`), it returns every event the scan reads for the principal, whatever its kind, in two lists:
