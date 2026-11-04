@@ -600,7 +600,9 @@ def test_limit_outcome_is_recorded_and_the_request_is_not_dropped(tmp_path, monk
         shown = secretary.show(world.config, world.state_path, world.policy_path)
         assert len(shown["items"]) == 2
         assert len(shown["expectations"]) == 1
-        assert any(row["kind"] == "reconcile" and "limit" in row["reason"] for row in shown["dispositions"])
+        assert sorted((row["kind"], row["reason"]) for row in shown["dispositions"]) == [
+            ("brief", "principal owes a response"),
+            ("brief", "principal owes a response; not tracked: open expectation limit reached")]
 
 
 def test_sixty_five_artifact_tokens_record_a_bounded_reconcile(tmp_path) -> None:
