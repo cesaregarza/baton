@@ -12,11 +12,14 @@ from secretary_support import conversation, make_world, policy, say
 
 from baton import conversations, jobs, messages, secretary, secretary_decide, secretary_store
 from baton.config import ConfigError
+from baton.store import transaction
 
 FAKE = Path(__file__).parent / "fixtures" / "secretary_fake_judge.py"
 QUESTIONS = "0" * 64
 SECRET = "the secret phrase"
 NOTHING = {"relation": "none", "item": None, "opens_owed": 0.0, "needs_now": 0.0}
+REV1, REV2 = "abcdef0111111111", "abcdef0222222222"
+UNTRACKED = "; not tracked: open expectation limit reached"
 
 
 class Judge:
@@ -487,3 +490,111 @@ def test_policy_judge_block_is_checked_and_frozen_in_the_digest(tmp_path) -> Non
             policy(world, judge={**block, **bad})
             with pytest.raises(ConfigError):
                 secretary.load_policy(world.config, world.baton, world.policy_path)
+
+
+def _fill_ledger(world, size: int) -> None:
+    """Bring the principal's open items up to `size`, counting any the test opened, with synthetic items it owes a role
+    that sends nothing here, so none is ever a candidate. Sizes are literal: the cap, MAX_OPEN, stays 500."""
+    state = secretary_store.open_state(world.state_path, world.config.data_dir)
+    try:
+        with transaction(state):
+            have = state.execute("SELECT COUNT(*) FROM expectations WHERE state='open'").fetchone()[0]
+            state.executemany("INSERT INTO expectations (principal, id, direction, requester, responder, expected_kind,"
+                              " opening_source, state) VALUES ('planner', ?, 'owed', 'outsider', 'planner', 'general',"
+                              " ?, 'open')", [(f"{index:024x}", f"filler:{index}") for index in range(have, size)])
+    finally:
+        state.close()
+
+
+def _open_count(world) -> int:
+    return _state(world, "SELECT COUNT(*) AS items FROM expectations WHERE state='open'")[0]["items"]
+
+
+@pytest.mark.parametrize("size", [499, 500])
+@pytest.mark.parametrize(("needs_now", "decision", "disposition", "reason"), [
+    (1.0, "wake", "brief", "principal owes a response"),
+    (0.5, "wake", "brief", "principal owes a response"),
+    (0.2, "hold", "digest", "principal owes a response that can wait")],
+    ids=["needs_now_1.0", "needs_now_0.5", "needs_now_0.2"])
+def test_a_full_ledger_loses_a_judged_requests_tracking_never_its_outcome(tmp_path, size, needs_now, decision,
+                                                                          disposition, reason) -> None:
+    with make_world(tmp_path) as world:
+        Judge(world, tmp_path, {"reply": {**NOTHING, "opens_owed": 0.9, "needs_now": needs_now}})
+        _catch_up(world)
+        _fill_ledger(world, size)
+        sent, trigger = _direct(world, "Please approve the deploy")
+        item = _item(_decide(world, trigger=trigger), sent)
+        tracked = size < 500
+        assert (item["judge"], item["decision"], item["disposition"], item["reason"]) == (
+            "judged", decision, disposition, reason if tracked else reason + UNTRACKED)
+        assert item["rules"] == {"decision": "wake", "rule": "wake:brief"}  # the word lists' own reading
+        assert _asked_of(world, sent) == ([{"direction": "owed", "state": "open"}] if tracked else [])
+        assert _open_count(world) == 500
+
+
+@pytest.mark.parametrize("size", [499, 500])
+def test_without_a_verdict_a_full_ledger_loses_an_addressed_requests_tracking_never_its_wake(tmp_path, size) -> None:
+    with make_world(tmp_path) as world:
+        Judge(world, tmp_path, {"reply": {"declined": "operator_relay"}})  # so the word lists decide
+        _catch_up(world)
+        _fill_ledger(world, size)
+        sent, trigger = _direct(world, "Please approve the deploy")
+        item = _item(_decide(world, trigger=trigger), sent)
+        tracked = size < 500
+        reason = "principal owes a response"
+        assert (item["judge"], item["decision"], item["disposition"], item["reason"]) == (
+            "judge_fallback:declined", "wake", "brief", reason if tracked else reason + UNTRACKED)
+        assert _asked_of(world, sent) == ([{"direction": "owed", "state": "open"}] if tracked else [])
+        assert _open_count(world) == 500
+
+
+@pytest.mark.parametrize("size", [499, 500])
+def test_a_full_ledger_loses_a_waiting_jobs_tracking_never_its_brief(tmp_path, size) -> None:
+    with make_world(tmp_path) as world:
+        Judge(world, tmp_path)
+        _catch_up(world)
+        _fill_ledger(world, size)
+        made = jobs.create(world.baton, world.config.jobs, request_id="job-full", actor="worker", title="Task")
+        [item] = _decide(world, trigger=f"job:{made['job_id']}:1")["new"]  # created waiting on the principal
+        tracked = size < 500
+        reason = "job awaits principal"
+        assert (item["kind"], item["disposition"], item["reason"]) == (
+            "job.created", "brief", reason if tracked else reason + UNTRACKED)
+        assert _state(world, "SELECT direction FROM expectations WHERE task_ref=?", f"job:{made['job_id']}") == (
+            [{"direction": "owed"}] if tracked else [])
+        assert _open_count(world) == 500
+
+
+@pytest.mark.parametrize("size", [499, 500])
+def test_a_full_ledger_still_reconciles_the_principals_own_direct_message(tmp_path, size) -> None:
+    with make_world(tmp_path) as world:
+        Judge(world, tmp_path)
+        _catch_up(world)
+        _fill_ledger(world, size)
+        request = messages.send(world.baton, sender="planner", recipient="worker", text="Please run the release check")
+        item = _item(_decide(world), request)
+        tracked = size < 500
+        # It opens an item the principal awaits; at the cap it is still held for reconciliation, as before.
+        assert (item["decision"], item["disposition"], item["reason"]) == (
+            ("keep", "retain", "no new principal action") if tracked else
+            ("hold", "reconcile", "open expectation limit reached"))
+        assert _asked_of(world, request) == ([{"direction": "awaited", "state": "open"}] if tracked else [])
+        assert _open_count(world) == 500
+
+
+@pytest.mark.parametrize("size", [499, 500])
+def test_an_uncertain_result_still_reconciles_however_full_the_ledger(tmp_path, size) -> None:
+    with make_world(tmp_path) as world:
+        room = conversation(world)
+        Judge(world, tmp_path, {"reply": {"relation": "answers", "item": 0, "opens_owed": 0.9, "needs_now": 1.0}})
+        ask = say(world, room, "planner", f"Please review repo#7@{REV1}", attention=["worker"])
+        _catch_up(world)
+        _fill_ledger(world, size)  # the request's awaited item counts toward it
+        reply = say(world, room, "worker", f"Reviewed repo#7@{REV1} and repo#7@{REV2}", reply_to=ask["message_id"])
+        item = _item(_decide(world, trigger=f"message:{reply['seqs']['planner']}"), reply)
+        # Two revisions of the awaited artifact leave the answer uncertain, and that outranks what the reply asks.
+        assert (item["judge"], item["decision"], item["disposition"], item["reason"]) == (
+            "judged", "hold", "reconcile", "result is uncertain")
+        assert _asked_of(world, ask) == [{"direction": "awaited", "state": "open"}]
+        assert _asked_of(world, reply) == ([{"direction": "owed", "state": "open"}] if size < 500 else [])
+        assert _open_count(world) == 500

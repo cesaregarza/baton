@@ -9,6 +9,7 @@ retry, and what the byte bound left out of a delivered brief comes in the next b
 Over the items scanned after `since`:
 * wake: a new owed item, or an awaited one now answered (the action-brief disposition), from a message;
 * hold: an acknowledgment only (digest), or anything uncertain or over a bound (reconcile), for the hourly turn;
+  at the open expectation limit, what the principal owes keeps the outcome it would have with room, untracked;
 * keep: routed and retained records, which the hourly digest only counts.
 Nothing at or before the activation floor wakes: the first decision records the catch-up scan's position as the
 floor before it scans, and takes it as both.

@@ -186,13 +186,11 @@ def _judged(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config
     if secretary._addressed(baton, config, principal, meta):
         if verdict.opens_owed < ASKS:
             owed = "digest", "addressed to the principal; asks nothing of it"
-        elif secretary._open(state, policy, meta, "owed", author, principal, sources._request_artifact(meta),
-                             meta["message_id"], secretary._result_kind(text)) is None:
-            owed = "reconcile", "open expectation limit reached"
-        elif verdict.needs_now < block["owed_digest_below"]:
-            owed = "digest", "principal owes a response that can wait"
         else:
-            owed = "brief", "principal owes a response"
+            room = (("digest", "principal owes a response that can wait")
+                    if verdict.needs_now < block["owed_digest_below"] else ("brief", "principal owes a response"))
+            owed = secretary._owe(state, policy, meta, author, sources._request_artifact(meta), meta["message_id"],
+                                  secretary._result_kind(text), room)
         outcome = secretary._choose_disposition(outcome, owed)
     if verdict.needs_now >= block["wake_at"] and outcome[0] in ("retain", "digest"):
         outcome = "brief", "needs the principal now"
