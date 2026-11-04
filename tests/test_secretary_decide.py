@@ -194,6 +194,30 @@ def test_a_new_kind_reaches_the_decision_as_a_delivery_and_never_wakes_by_its_ki
         assert own_wake["trigger_item"].get("delivered") is True and own_wake["decision"] == "hold"
 
 
+def test_the_window_lists_what_is_outstanding_since_the_last_brief_however_little_this_call_scanned(
+        tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        _catch_up(world)
+        first = _decide(world)
+        own = messages.send(world.baton, sender="planner", recipient="worker", text="Own words")
+        sent = [_direct(world, "Please decide")[0] for _ in range(3)]
+        trigger = f"message:{sent[0]['seq']}"
+        _decide(world, **_after(first, trigger=trigger))
+        retry = _decide(world, **_after(first, trigger=trigger))  # nothing left to scan, nothing delivered yet
+        assert retry["new"] == []
+        window = retry.get("window") or {}
+        assert [item["source_key"] for item in window.get("deliveries", [])] == [
+            f"message:{message['message_id']}" for message in sent]
+        assert [item["source_key"] for item in window.get("context", [])] == [f"message:{own['message_id']}"]
+        assert [item["delivered"] for item in window["deliveries"] + window["context"]] == [True, True, True, False]
+        assert (window["more_deliveries"], window["more_context"]) == (0, 0)
+        monkeypatch.setattr(secretary_decide, "LISTED", 2)
+        bounded = _decide(world, **_after(first, trigger=trigger))["window"]
+        assert [item["source_key"] for item in bounded["deliveries"]] == [
+            item["source_key"] for item in window["deliveries"][:2]]
+        assert (bounded["more_deliveries"], len(bounded["context"]), bounded["more_context"]) == (1, 1, 0)
+
+
 def test_a_job_wake_never_wakes_for_a_message_on_its_own(tmp_path) -> None:
     with make_world(tmp_path) as world:
         _catch_up(world)
