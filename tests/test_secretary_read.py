@@ -26,6 +26,25 @@ RELAYED = [{"source": "upstream", "at": "2026-11-02T00:00:00Z", "text": "Relayed
 NEW_KIND = "synthetic.notice"  # a kind of delivery no secretary code names
 
 
+@pytest.mark.parametrize("action", [["read", "--after", "0"], ["show"], ["decide", "--budget-seconds", "1"]])
+def test_secretary_commands_refuse_remote_host_before_access(tmp_path, capsys, action) -> None:
+    code = cli.main(
+        [
+            "--host",
+            "http://invalid.example",
+            "secretary",
+            "--policy",
+            str(tmp_path / "missing.json"),
+            "--state",
+            str(tmp_path / "private.sqlite"),
+            *action,
+        ]
+    )
+    assert code == 2
+    assert "host-local" in json.loads(capsys.readouterr().out)["detail"]
+    assert not (tmp_path / "private.sqlite").exists()
+
+
 def _read(world, capsys, *args: str) -> tuple[int, dict]:
     """`baton secretary --policy FILE read ...` with no --state: its exit code and the JSON it printed."""
     try:

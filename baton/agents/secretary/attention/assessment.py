@@ -15,7 +15,9 @@ class Assessment:
     sources: list[str]
 
     @classmethod
-    def parse(cls, value: object, *, offered: set[str], summary_bytes: int, digest: bool) -> Assessment:
+    def parse(
+        cls, value: object, *, offered: set[str], required: set[str], summary_bytes: int, digest: bool
+    ) -> Assessment:
         fields = {"decision", "reason", "summary", "sources"}
         if not isinstance(value, dict) or value.keys() != fields:
             raise ModelUnavailable("model returned an invalid assessment shape")
@@ -36,6 +38,8 @@ class Assessment:
         needs_summary = value["decision"] == "wake" or digest
         if needs_summary and (not summary.strip() or not refs):
             raise ModelUnavailable("model omitted the summary or its source references")
-        if not needs_summary and summary:
-            raise ModelUnavailable("a held or kept alert must not include a delivery summary")
+        if needs_summary and not required.issubset(refs):
+            raise ModelUnavailable("model summary must account for every event in the page")
+        if not needs_summary and (summary or refs):
+            raise ModelUnavailable("a held or kept alert must not include a delivery summary or sources")
         return cls(**value)

@@ -23,5 +23,5 @@ The guidance and its effects should be observable, correctable, and reversible. 
 against example alert windows and resulting wake decisions and summaries before relying on it. Choosing a model
 alone does not guarantee resistance to gaming or manipulative feedback.
 
-Policy `instructions` already provides static operator preferences. This roadmap item concerns a future
-principal feedback loop; it does not change current policy, API, or configuration behavior.
+Policy `instructions` provides static operator preferences. This roadmap item concerns a future principal
+feedback loop; it is not supported by the current policy or API. The current secretary policy format is version 2.

@@ -126,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     os.umask(0o077)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     try:
         if args.action == "install":
             result = install(

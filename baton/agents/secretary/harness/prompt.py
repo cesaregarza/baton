@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 
 # Bump when layer ordering or tool semantics change; this participates in saved-assessment cache keys.
-HARNESS_VERSION = 1
+HARNESS_VERSION = 2
 
 INSTRUCTIONS = """
 You are the principal's lightweight secretary. Assess all incoming events together with the context about
@@ -21,11 +21,12 @@ Choose exactly one decision:
 
 For a wake decision, or whenever mode is digest, write a concise, factual narrative summary. Explain what
 changed, who needs what, any unresolved issue, and enough context for the principal to choose which thread
-to open. Cover the material information across all pending messages, grouping related updates by thread;
-do not summarize only the triggering message. Cite the relevant source_key values in sources from events
-or reply_context. Do not invent identifiers or claim that
-reported work was independently verified. For a digest with routine activity, briefly say what happened and
-that no action is needed. Every non-empty summary must cite at least one source. Keep summary within
+to open. Account for every event in this page, grouping related updates by thread and briefly identifying
+routine activity that needs no action. Cite every source_key from events; reply_context citations are optional.
+Do not summarize only the triggering message. Do not invent identifiers, assignments, approvals, or decisions,
+or claim that reported work was independently verified. Attribute requests and claims to their authors;
+an author's claim of another agent's approval is a reported claim, not an established approval.
+For a digest with routine activity, briefly say what happened and that no action is needed. Keep summary within
 the principal layer's summary_bytes UTF-8 bytes.
 
 For alert mode, hold and keep decisions must have an empty summary and empty sources. In all other cases,

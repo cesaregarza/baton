@@ -211,11 +211,12 @@ def _model(value: object) -> dict:
     provider = value.get("provider", DEFAULT_MODEL_PROVIDER)
     common = {"provider", "timeout_seconds"}
     if provider == "command":
-        if value.keys() - common - {"command"}:
+        if value.keys() - common - {"command", "env"}:
             raise ConfigError("command model fields are invalid")
         return {
             "provider": provider,
             "command": _command(value.get("command")),
+            "env": _environment_names(value.get("env", []), "model.env"),
             "timeout_seconds": _timeout(value.get("timeout_seconds", DEFAULT_MODEL_TIMEOUT_SECONDS)),
         }
     if provider != DEFAULT_MODEL_PROVIDER or value.keys() - common - {
@@ -278,11 +279,12 @@ def _engine(value: object) -> dict | None:
         raise ConfigError("decision_engine must be an object")
     provider = value.get("provider")
     if provider == "command":
-        if value.keys() - {"provider", "command", "timeout_seconds"}:
+        if value.keys() - {"provider", "command", "env", "timeout_seconds"}:
             raise ConfigError("command decision_engine fields are invalid")
         return {
             "provider": provider,
             "command": _command(value.get("command")),
+            "env": _environment_names(value.get("env", []), "decision_engine.env"),
             "timeout_seconds": _timeout(value.get("timeout_seconds", DEFAULT_DECISION_TIMEOUT_SECONDS)),
         }
     if provider != DEFAULT_DECISION_ENGINE_PROVIDER or value.keys() - {
@@ -320,6 +322,18 @@ def _command(value: object) -> list[str]:
         or not Path(value[0]).is_absolute()
     ):
         raise ConfigError("command must be an argv list starting with an absolute executable path")
+    return value
+
+
+def _environment_names(value: object, field: str) -> list[str]:
+    """Validate an explicit allowlist of host environment names for commands."""
+    if (
+        not isinstance(value, list)
+        or len(value) > 32
+        or not all(isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in value)
+        or len(set(value)) != len(value)
+    ):
+        raise ConfigError(f"{field} must be a list of at most 32 unique environment variable names")
     return value
 
 

@@ -7,9 +7,11 @@ remain with the stores that open authoritative or private databases.
 from __future__ import annotations
 
 import sqlite3 as _sqlite3
+from collections import OrderedDict
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
+from threading import RLock
 from typing import Any
 from urllib.parse import quote
 
@@ -94,10 +96,11 @@ class _Result:
 class Connection:
     """An owned SQLAlchemy connection with explicit, SQLite-aware transactions."""
 
-    __slots__ = ("_engine", "_connection", "_closed", "_max_parameters")
+    __slots__ = ("_engine", "_connection", "_closed", "_dispose_engine_on_close", "_max_parameters")
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, dispose_engine_on_close: bool = False) -> None:
         self._engine = engine
+        self._dispose_engine_on_close = dispose_engine_on_close
         try:
             self._connection: _EngineConnection = engine.connect()
         except DBAPIError as exc:
@@ -148,7 +151,8 @@ class Connection:
         try:
             self._connection.close()
         finally:
-            self._engine.dispose()
+            if self._dispose_engine_on_close:
+                self._engine.dispose()
             self._closed = True
 
     def commit(self) -> None:
@@ -219,7 +223,28 @@ def snapshot(conn: Any) -> Generator[None]:
         conn.execute("COMMIT")
 
 
+_ENGINE_CACHE_SIZE = 32
+_ENGINE_CACHE: OrderedDict[URL, Engine] = OrderedDict()
+_ENGINE_CACHE_LOCK = RLock()
+
+
 def _engine(url: URL, *, memory_db: bool = False) -> Engine:
+    if not memory_db:
+        with _ENGINE_CACHE_LOCK:
+            cached = _ENGINE_CACHE.get(url)
+            if cached is not None:
+                _ENGINE_CACHE.move_to_end(url)
+                return cached
+            engine = _create_engine(url)
+            _ENGINE_CACHE[url] = engine
+            if len(_ENGINE_CACHE) > _ENGINE_CACHE_SIZE:
+                _, evicted = _ENGINE_CACHE.popitem(last=False)
+                evicted.dispose()
+            return engine
+    return _create_engine(url, memory_db=True)
+
+
+def _create_engine(url: URL, *, memory_db: bool = False) -> Engine:
     options: dict[str, Any] = {
         "isolation_level": "AUTOCOMMIT",
         "connect_args": {"timeout": 30, "check_same_thread": False},
@@ -246,4 +271,6 @@ def connect_sqlite(path: Path | str, *, read_only: bool = False) -> Connection:
 
 def memory() -> Connection:
     """Open an isolated in-memory SQLite connection."""
-    return Connection(_engine(URL.create("sqlite+pysqlite", database=":memory:"), memory_db=True))
+    return Connection(
+        _engine(URL.create("sqlite+pysqlite", database=":memory:"), memory_db=True), dispose_engine_on_close=True
+    )

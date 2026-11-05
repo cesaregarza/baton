@@ -17,6 +17,10 @@ from . import read, sources
 class InboxTooLarge(BatonError):
     code = "secretary_context_limit"
 
+    def __init__(self, detail: str, through_pos: int | None = None) -> None:
+        super().__init__(detail)
+        self.extra = {} if through_pos is None else {"through_pos": through_pos}
+
 
 @dataclass(frozen=True)
 class InboxWindow:
@@ -45,71 +49,102 @@ class InboxWindow:
         return {event["source_key"] for event in [*self.events, *self.reply_context]}
 
     @classmethod
+    def head(cls, config: Config) -> tuple[str, int]:
+        """Return the log epoch and event head from one read-only database snapshot."""
+        with connect_read_only(config.db_path) as baton, baton.snapshot():
+            return sources._epoch(baton), baton.execute("SELECT COALESCE(MAX(pos),0) FROM events").one()[0]
+
+    @classmethod
     def read(cls, config: Config, policy: Policy, since: int, *, through: int | None = None) -> InboxWindow:
+        """Read a complete bounded prefix, or the exact requested range when revalidating."""
         with connect_read_only(config.db_path) as baton, baton.snapshot():
             epoch = sources._epoch(baton)
             head = baton.execute("SELECT COALESCE(MAX(pos),0) FROM events").one()[0]
             end = head if through is None else through
             if not 0 <= since <= end <= head:
                 raise InvalidRequest("secretary positions must belong to the retained event stream")
-            events, listed, size = _pending_events(baton, config, policy, since, end)
-            parents = _reply_context(baton, config, policy, events, listed, size)
-            return cls(policy.principal, epoch, since, end, events, parents)
+            events, parents, scanned = _pending_events(baton, config, policy, since, end, paginate=through is None)
+            return cls(policy.principal, epoch, since, scanned, events, parents)
 
 
 def _pending_events(
-    baton: Connection, config: Config, policy: Policy, since: int, end: int
-) -> tuple[list[dict], set[str], int]:
-    """Read and deduplicate the bounded pending event window inside the caller's snapshot."""
-    events, listed = [], set()
-    cursor, size = since, 0
-    while cursor < end:
-        rows = sources._source_rows(baton, policy.principal, cursor, 500)
+    baton: Connection, config: Config, policy: Policy, since: int, end: int, *, paginate: bool
+) -> tuple[list[dict], list[dict], int]:
+    """Add whole events and their required visible reply parents while they fit the policy."""
+    events: list[dict] = []
+    parents: list[dict] = []
+    listed: set[str] = set()
+    size = 0
+    scanned = since
+    while scanned < end:
+        rows = sources._source_rows(baton, policy.principal, scanned, 500)
         if not rows:
-            break
+            return events, parents, end
+        stopped = False
         for row in rows:
-            cursor = row["pos"]
-            if cursor > end:
-                break
+            if row["pos"] > end:
+                return events, parents, end
             entry = read._entry(baton, config, policy.principal, row, listed)
             if entry is None:
+                scanned = row["pos"]
                 continue
-            message = entry["message"]
-            entry["source_key"] = f"message:{message['id']}" if message else f"event:{entry['pos']}"
-            if message:
-                listed.add(message["id"])
-            size += len(json.dumps(entry, ensure_ascii=False).encode())
-            if len(events) >= policy.max_events or size > policy.context_bytes:
-                raise InboxTooLarge(
-                    "pending inbox exceeds max_events/context_bytes; increase the model "
-                    "context allowance or handle the backlog before retrying; "
-                    "nothing was consumed"
-                )
-            events.append(entry)
-    return events, listed, size
+            candidate_listed = listed.copy()
+            candidate_parents = parents.copy()
+            entry["source_key"] = _event_source_key(entry)
+            parent = _reply_parent(baton, config, policy, entry, candidate_listed)
+            if parent is not None:
+                candidate_parents.append(parent)
+            candidate_events = [*events, entry]
+            candidate_size = size + _size(entry) + (_size(parent) if parent is not None else 0)
+            exceeds_events = len(candidate_events) + len(candidate_parents) > policy.max_events
+            exceeds_bytes = candidate_size > policy.context_bytes
+            if exceeds_events or exceeds_bytes:
+                if not paginate:
+                    raise InboxTooLarge("pending inbox and reply context exceed the configured input bounds")
+                if not events:
+                    raise InboxTooLarge(
+                        "pending inbox and reply context exceed the configured input bounds", through_pos=row["pos"]
+                    )
+                stopped = True
+                break
+            events = candidate_events
+            parents = candidate_parents
+            listed = candidate_listed
+            size = candidate_size
+            scanned = row["pos"]
+        if stopped:
+            return events, parents, scanned
+        if len(rows) < 500:
+            return events, parents, end
+    return events, parents, scanned
 
 
-def _reply_context(
-    baton: Connection, config: Config, policy: Policy, events: list[dict], listed: set[str], size: int
-) -> list[dict]:
-    """Fill in visible reply parents using the remaining event and byte allowance."""
-    parents = []
-    for entry in events:
-        parent_id = entry["message"]["reply_to"] if entry["message"] else None
-        if not parent_id or parent_id in listed:
-            continue
-        listed.add(parent_id)
-        row = sources._visible_message(baton, config, policy.principal, parent_id)
-        if row is None:
-            continue
-        parent = {
-            "source_key": f"message:{parent_id}",
-            "pos": None,
-            "job_id": row["job_id"],
-            "message": read._shape(row, None),
-        }
-        size += len(json.dumps(parent, ensure_ascii=False).encode())
-        if len(events) + len(parents) >= policy.max_events or size > policy.context_bytes:
-            raise InboxTooLarge("pending inbox and reply context exceed the configured input bounds")
-        parents.append(parent)
-    return parents
+def _event_source_key(entry: dict) -> str:
+    message = entry["message"]
+    return f"message:{message['id']}" if message else f"event:{entry['pos']}"
+
+
+def _reply_parent(baton: Connection, config: Config, policy: Policy, entry: dict, listed: set[str]) -> dict | None:
+    """Resolve one visible reply parent unless its immutable message ID is already present."""
+    message = entry["message"]
+    parent_id = message["reply_to"] if message else None
+    if not parent_id or parent_id in listed:
+        if message:
+            listed.add(message["id"])
+        return None
+    listed.add(parent_id)
+    if message:
+        listed.add(message["id"])
+    row = sources._visible_message(baton, config, policy.principal, parent_id)
+    if row is None:
+        return None
+    return {
+        "source_key": f"message:{parent_id}",
+        "pos": None,
+        "job_id": row["job_id"],
+        "message": read._shape(row, None),
+    }
+
+
+def _size(value: dict) -> int:
+    return len(json.dumps(value, ensure_ascii=False).encode())

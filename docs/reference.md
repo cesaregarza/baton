@@ -201,23 +201,36 @@ host and the role of `BATON_TOKEN` or `BATON_TOKEN_COMMAND` for `message`, `read
 and can otherwise use defaults: `{"version":2,"principal":"planner"}` selects `gpt-6-luna` through the OpenAI
 Responses API using `OPENAI_API_KEY`. The optional `model` block configures the provider, model, timeout, and
 output settings; `instructions`, `max_events`, `context_bytes`, and `summary_bytes` tune the model context and
-summary. A `model` provider of `command` invokes a host executable with the version 2 request envelope and
-expects a JSON assessment. An optional `decision_engine.command` receives a separate `advise_secretary` request;
-its JSON object is advisory context to the model, and a failed advisory call does not prevent model assessment.
+summary. Policy version 1 deterministic rules are no longer supported; use a version 2 model policy and a new
+private state file. A `model` provider of `command` invokes a host executable using protocol version 3 and
+expects a structured assessment or a supported tool-call response. An optional decision engine is called by the
+model when useful and can use the JEV provider or a command adapter; its typed result is advisory context, and
+an unavailable engine does not prevent the model from completing its own assessment. The Baton host TOML
+format is unchanged.
 
-`decide --budget-seconds N` reads the pending visible window and asks the model once for wake, hold, or keep and
-a semantic summary. `--hourly` uses the same model to generate a digest. It accepts an optional `--trigger` and
-paired `--since`/`--floor` positions. The first call without positions uses the saved activation floor and
-delivery position. After the host successfully delivers a non-empty summary,
-`acknowledge DECISION_ID` records coverage, or the host may pass the result's `covered_through` as the next
-`--since` with the same `--floor`. Hold, keep, empty inbox and failed calls do not advance coverage. Identical
-policy and input reuse the recorded assessment. Each callback budget is at most 60 seconds; oversized windows
-fail instead of being silently truncated. Model failures return retryable `secretary_unavailable` errors.
+`decide --budget-seconds N` reads bounded, complete pages of the principal's visible events, including visible
+reply parents, and asks the model for wake, hold, or keep. `--hourly` can retry retained hold, keep, and failed
+pages as a digest while scanning proceeds through later pages. Installation binds the activation floor to the
+current database head; a standalone first `decide` without explicit positions does the same. Passing both
+`--since` and `--floor` explicitly requests a replay. Scan position is durable and separate from the delivered
+contiguous watermark. An oversized first event is retained as a failed page, and the worker scans past it; pages
+are never silently truncated.
+
+Every summary, including a digest, must account for and cite all events in its page; citing visible reply parents is optional. Source
+checks validate references against supplied context, not the truth of summary claims, and the prompt forbids invented
+assignments or approvals. Pending wake IDs remain queued until individually acknowledged; later hold/keep
+decisions do not clear them. `acknowledge DECISION_ID` is idempotent for a validated summary. Delivered ranges
+merge only when contiguous, so acknowledging a later wake cannot skip a held gap. Identical policy and page
+input can reuse an assessment. Callback budgets are at most 60 seconds; model failures return retryable
+`secretary_unavailable` errors.
 
 `show` inspects saved assessments. Policy version 2 is the only supported format; older policies are unsupported
-and require a current policy and a new `--state` file. `--state` is a private SQLite sidecar for generated
-assessments and positions; message bodies are not archived there. The secretary reads Baton records read-only
-and does not deliver or modify Baton work.
+and require a current policy. Private model attention state version 1 migrates additively to version 2; retired
+deterministic state is incompatible and requires a new `--state` file. Harness version 2 invalidates older
+unchecked assessment cache entries. `--state` is a private SQLite sidecar for generated
+assessments and positions. It stores the full model reason and brief, source references, and bounded result metadata,
+but does not archive source message bodies. The secretary reads Baton records read-only and does not deliver or
+modify Baton work. The sidecar is retained until the operator removes it; there is no automatic assessment cleanup.
 
 `read` returns currently visible source text for the principal. After an event position (`--after`), it pages
 events addressed to or authored by the principal and relevant job events in `deliveries` and `context`; with
@@ -226,13 +239,15 @@ IDs and conversation IDs for opening the cited thread. A page holds at most `--l
 20, maximum 100) and aims for `--max-bytes` (default 256 KiB); one oversized entry may be returned alone.
 Position-based reads return `through_pos` for the next page; ID-based reads report any `not_read` IDs. `read` opens
 the database read-only, needs no `--state`, and writes nothing; the canonical module command is
-`python -m baton.agents.secretary.inbox.read`. The existing executable alias `python -m baton.secretary_read`
-(also available as `baton.secretary_read`) takes the same options. `python -m baton.agents.secretary.attention.decide`
-is the canonical module command for the decision entrypoint; `python -m baton.secretary_decide` remains available.
+`python -m baton.agents.secretary.inbox.read`. The compatibility CLI wrapper `python -m baton.secretary_read`
+(also available as the `baton.secretary_read` executable) takes the same options. It is a CLI entrypoint, not
+an alias for the full Python API. `python -m baton.agents.secretary.attention.decide` is the canonical module
+command for the decision entrypoint; `python -m baton.secretary_decide` remains available as a CLI wrapper.
 
-Secretary policy and installed-instance configuration code lives in `baton.config.secretary`. Deployment TOML,
-secretary policy JSON, and installed integration JSON formats are unchanged; centralizing their code requires no
-file migration.
+Secretary policy and installed-instance configuration code lives in `baton.config.secretary`. The Baton host
+TOML format is unchanged. Secretary policy version 2 is required; deterministic version 1 policies are
+unsupported, and the retired state format requires a new state file. The installed integration JSON is a
+separate version 1 worker configuration.
 
 ## Local indexing interface
 

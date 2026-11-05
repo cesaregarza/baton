@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import httpx
 
@@ -48,8 +49,10 @@ async def command_json(
     if not isinstance(argv, list) or not argv or not all(isinstance(part, str) for part in argv):
         raise ModelUnavailable("model command is unavailable")
     payload = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
+    names = settings.get("env", [])
+    allowed_environment = {name: os.environ[name] for name in names if name in os.environ}
     try:
-        code, output = await Command(argv, max_output=max_bytes).run(payload, timeout)
+        code, output = await Command(argv, max_output=max_bytes, env=allowed_environment).run(payload, timeout)
     except asyncio.CancelledError:
         raise
     except Exception:

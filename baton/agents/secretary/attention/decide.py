@@ -46,6 +46,7 @@ class DecisionRun:
     trigger: str | None = None
     hourly: bool = False
     clock: Callable[[], float] = time.monotonic
+    through: int | None = None
 
     async def run(self) -> dict:
         self._check()
@@ -64,8 +65,9 @@ class DecisionRun:
         config = self.secretary.config
         log = AttentionLog(self.secretary.state_path, config.data_dir, policy.principal)
         if self.since is None:
-            self.since, self.floor = await database.call(log.positions)
-        window = await database.call(InboxWindow.read, config, policy, self.since)
+            epoch, head = await database.call(InboxWindow.head, config)
+            self.since, self.floor = await database.call(log.activate, epoch, head)
+        window = await database.call(InboxWindow.read, config, policy, self.since, through=self.through)
         await database.call(log.bind, window.epoch, self.floor)
         context = {
             "principal": policy.principal,
@@ -100,7 +102,11 @@ class DecisionRun:
         else:
             answer = await harness.assess(context, self._remaining())
             assessment = Assessment.parse(
-                answer, offered=window.source_keys, summary_bytes=policy.summary_bytes, digest=self.hourly
+                answer,
+                offered=window.source_keys,
+                required={event["source_key"] for event in window.events},
+                summary_bytes=policy.summary_bytes,
+                digest=self.hourly,
             )
         # Recheck the same sources after inference: permission changes or edits invalidate the generated summary.
         current = await database.call(InboxWindow.read, config, policy, self.since, through=window.through)
@@ -116,6 +122,7 @@ class DecisionRun:
             "floor": self.floor,
             "through_pos": window.through,
             "covered_through": window.through if assessment.summary else self.since,
+            "coverage": "complete" if assessment.summary else "none",
             "decision": assessment.decision,
             "reason": assessment.reason,
             "brief": assessment.summary,
@@ -156,6 +163,10 @@ class DecisionRun:
                 raise InvalidRequest("since and floor go together, as integers with 0 <= floor <= since")
         if self.hourly and self.trigger is not None:
             raise InvalidRequest("the hourly digest has no triggering wake")
+        if self.through is not None and (
+            type(self.through) is not int or self.since is None or self.through < self.since
+        ):
+            raise InvalidRequest("through requires explicit positions and must be at least since")
         if self.trigger is not None and TRIGGER.fullmatch(self.trigger) is None:
             raise InvalidRequest("the trigger must be message:SEQ, job:JOB_ID:SEQ or conversation")
 

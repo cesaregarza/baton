@@ -9,18 +9,25 @@ These project skills explain how a local secretary instance can deliver decision
 
 - Install and run on the same host and as the same user as the local Baton data and model authentication. Remote mode is unsupported.
 - The runner uses POSIX file locks (Linux/macOS). The supplied systemd unit is for Linux; use another supervisor on macOS.
-- Use a secretary v2 policy and Baton configuration. The default model uses OpenAI `gpt-6-luna` and `OPENAI_API_KEY`; the model may instead use a host command. An optional decision engine is separately configured as JEV or a command. This integration does not provide a CLI model adapter.
+- Use a secretary v2 policy and Baton configuration. The default model uses OpenAI `gpt-6-luna` and `OPENAI_API_KEY`; policy can select another model ID or the host-command transport. An optional decision engine is separately configured as JEV or a command. This integration does not provide a CLI model adapter.
 - Set `summary_bytes` explicitly to 4000 (maximum 6000) for hook output limits.
-- The worker polls the read-only visible-event feed every two seconds, performs inference at startup or when visible events arrive, and does not infer on empty timer polls.
+- Installation binds the activation floor to the current database head. The worker scans bounded, complete pages of visible events, including visible reply parents, and never truncates a page. An oversized first event is retained as a failed page while scanning continues past it.
+- The worker keeps its durable scan position separate from the contiguous delivered watermark. Hold, keep, and failed pages remain eligible for hourly digest retries while later pages continue to be scanned.
 - Run only one worker per instance. The generated user unit uses `Restart=on-failure`; standalone `run` may be managed by another supervisor.
 - systemd user-service enablement alone does not promise operation after logout or reboot. That depends on user-manager linger and host configuration.
 
-The worker waits with asyncio between local event checks. A new visible event is its alert: it asks the
-secretary model to choose wake, hold, or keep across the pending window. A wake stores a summary pointer.
-Codex receives a queued request to retrieve that summary; Claude Code watches the pointer file and its
-`asyncRewake` hook presents the summary. These are notifications to the principal, not another secretary model
-loop. Hold/keep leave the underlying messages pending without waking the principal. Model errors back off
-from five seconds to five minutes; no deterministic decision replaces a failed inference.
+The worker waits with asyncio between local event checks and asks the model to classify each page. Every summary,
+including a digest, must account for and cite every event in its page; it may cite visible parents as well. Source validation checks references,
+not the truth of summary claims, and the prompt forbids invented assignments or approvals. Hold, keep, and model
+error pages stay available for hourly digest retries while the worker continues to later pages. Model errors back
+off from five seconds to five minutes; no deterministic decision replaces failed inference. An operational alert
+for a prolonged model outage remains an open product question; inspect worker status and logs for health.
+
+Pending wake IDs remain queued until individually acknowledged. Codex receives a queued request to retrieve a
+summary; Claude Code's hook presents the summary to the bound session. Queueing or hook completion does not
+acknowledge it. A principal acknowledges only after seeing the summary and its exact decision ID. Pending wakes
+survive worker restarts, and later hold/keep results never clear them. Acknowledgement is idempotent by summary ID,
+and ranges merge only when contiguous, so acknowledging a later wake cannot skip an earlier held gap.
 
 ## Create an instance
 
@@ -85,13 +92,16 @@ python -m baton.integrations.secretary --instance /absolute/private/secretary-in
 python -m baton.integrations.secretary --instance /absolute/private/secretary-instance/integration.json bind SESSION_ID
 ```
 
-SessionStart binds the first matching project session. Other sessions are refused unless explicitly rebound. A hook or `receive` rechecks source visibility before showing a brief. Pending briefs survive worker restarts, and `receive` recovers a brief if the hook was missed. A principal acknowledges only after seeing the brief and its exact decision ID. Queueing or hook completion never counts as acknowledgement.
+SessionStart binds the first matching project session. Other sessions are refused unless explicitly rebound. A hook or `receive` rechecks source visibility before showing a brief. `receive` can recover pending briefs if a hook was missed. The same unacknowledged summary may be offered again after a session resumes or compacts; offers are not limited to once per session.
+
+Hooks escape the model's summary so its text cannot close the reported-content delimiter. If escaping makes the
+output too large, the hook gives a `receive` command instead. Read that complete summary before acknowledging it.
 
 If several sessions share the project, use `bind SESSION_ID` to choose the principal explicitly before
 starting the worker. A stopped or closed principal cannot receive a hook: Codex's resume is best-effort, and
 Claude's file watcher exists only while its session is running. Pending summaries remain available for the
-next session resume or an explicit `receive`. Hooks offer each decision once per session; missing an offer
-does not acknowledge it. A resumed/compacted session receives its pending summary again.
+next session resume or an explicit `receive`. Missing an offer does not acknowledge it; a resumed or compacted
+session can receive the same pending summary again until its ID is acknowledged.
 
 For install verification, first use synthetic config and decision data. Run a live model/session check only within the owner’s authorization for inference and notifications. Before relying on hooks, check the installed product's official CLI/version documentation and verify hook registration in its own UI.
 
@@ -115,7 +125,8 @@ and `hooks.py` delivers checked summaries to the bound session. `__main__.py` ex
 Assessment prompting, the bounded model/tool harness, optional typed decision engine, and model transports live in
 [`baton/agents/secretary`](../../baton/agents/secretary/README.md). Both Codex and Claude Code integrations use
 that same assessment path, split across `attention`, `inbox`, `harness`, and `connections` packages. Policy and
-installed-instance configuration code is centralized in `baton/config/secretary.py`; deployment TOML, policy
-JSON, and installed `integration.json` formats remain unchanged, so installed files require no migration. This
-runner is started separately; it is not enabled with a
+installed-instance configuration code is centralized in `baton/config/secretary.py`. The Baton host TOML
+format is unchanged. Secretary policy version 2 is required; deterministic version 1 policies are unsupported,
+and the retired state format is incompatible, so use a version 2 policy and a new state file. The installed
+`integration.json` is a separate version 1 worker configuration. This runner is started separately; it is not enabled with a
 `[integrations.secretary]` Baton server table.

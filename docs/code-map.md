@@ -33,8 +33,11 @@ baton/
   errors.py            Domain errors and their public codes
 ```
 
-The top-level `secretary_decide.py` and `secretary_read.py` files remain executable aliases. The canonical
-entrypoints are `agents/secretary/attention/decide.py` and `agents/secretary/inbox/read.py`.
+The top-level `secretary_decide.py` and `secretary_read.py` modules remain executable compatibility wrappers
+for `python -m baton.secretary_decide` and `python -m baton.secretary_read`. They delegate to the canonical
+CLI entrypoints `agents/secretary/attention/decide.py` and `agents/secretary/inbox/read.py`; callers should
+import from those canonical modules. The separate Python API exports `Secretary`, `show`, `Policy`, and
+`load_policy` from `baton.agents.secretary`.
 
 ## Where to make a change
 
@@ -56,22 +59,23 @@ entrypoints are `agents/secretary/attention/decide.py` and `agents/secretary/inb
 | Change job transitions | `jobs.py` | `Job.move()` owns revision checks, retries and atomic event recording |
 | Change connection mechanics | `database/driver.py` | `files.py` checks private database files |
 | Change the authoritative schema | `database/schema.py`, `database/migrations.py` | `database/store.py` opens and initializes the database |
-| Change secretary policy validation or installed-instance configuration | `config/secretary.py` | Owns `Policy`, `load_policy`, `fingerprint`, and `IntegrationConfig`; policy and integration JSON formats are unchanged |
+| Change secretary policy validation or installed-instance configuration | `config/secretary.py` | Owns `Policy`, `load_policy`, `fingerprint`, and `IntegrationConfig`; the Baton host TOML format is unchanged |
 | Change the model's inbox context or size limits | `agents/secretary/inbox/window.py` | `inbox/read.py` and `inbox/sources.py` load visible records and source context; oversized full windows fail |
 | Change wake/hold/keep assessment and callback lifecycle | `agents/secretary/attention/decide.py` | Coordinates the window, model call, cache and visibility recheck |
 | Change model or optional decision-engine transport | `agents/secretary/connections/` | `connections/model.py` selects model transport; `connections/decisions.py` owns typed engine adapters; `connections/transport.py` bounds I/O |
 | Change instructions or structured response shape | `agents/secretary/harness/prompt.py`, `attention/assessment.py` | Assessment validation checks decisions, summary bounds and cited source keys |
 | Change bounded model/tool turns | `agents/secretary/harness/run.py`, `harness/tools.py` | `harness/prompt.py` builds ordered prompt layers; tool verdict reuse remains per assessment |
-| Change private assessment cache or delivery acknowledgment | `agents/secretary/attention/state.py`, `service.py` | Coverage advances only after host delivery |
+| Change private assessment cache or delivery acknowledgment | `agents/secretary/attention/state.py`, `service.py` | Acknowledged ranges merge into delivered coverage only when contiguous |
 | Change secretary source visibility or read output | `agents/secretary/inbox/read.py`, `inbox/sources.py` | Reads current authoritative data without advancing Baton inbox cursors |
 
 Secretary packages are organized around assessment lifecycle (`attention`), authorized inbox context (`inbox`),
 model prompting and bounded turns (`harness`), and model/decision-engine I/O (`connections`). Their package
 `__init__.py` files contain docstrings only; import implementation from its canonical module, for example
 `from baton.agents.secretary.harness.run import SecretaryHarness`. The root package keeps the public
-`Secretary`, `show`, `Policy`, and `load_policy` API. Configuration code is centralized in `config/secretary.py`;
-deployment TOML, secretary policy JSON, and installed integration JSON retain their existing formats, so no
-file migration is required.
+`Secretary`, `show`, `Policy`, and `load_policy` API. Configuration code is centralized in `config/secretary.py`.
+The Baton host TOML format is unchanged. Secretary policy version 2 is required: deterministic version 1
+policies are unsupported, and the retired state format is incompatible, so upgrade the policy and use a new
+state file. The installed integration JSON is a separate version 1 worker configuration.
 
 ## Follow one message
 
@@ -155,16 +159,26 @@ read, or borrows an existing transaction.
 The [secretary developer guide](../baton/agents/secretary/README.md) documents model setup, host delivery,
 and source references. The planned principal feedback loop is described in the [roadmap](roadmap.md).
 
-For a version 2 policy, `Secretary.decide()` asks `InboxWindow` for the complete pending visible context, then
-`SecretaryModel` returns one semantic wake/hold/keep decision with a summary when needed. The optional
-`DecisionEngine` supplies advisory context to that model. `Assessment` checks its output against the offered
-source keys. The service rechecks source visibility after inference and caches a completed assessment for an
-identical policy and input. The host delivers the returned `brief`, then acknowledges its `decision_id` or
-supplies `covered_through` as the next `since`; a hold, keep or failed call does not advance coverage.
+Installation binds the activation floor to the current database head. A standalone first `decide` without an
+explicit `since` and `floor` does the same; passing both positions explicitly requests an intentional replay.
+`Secretary.decide()` reads bounded, complete pages of visible events, including visible reply parents, without
+truncating them. An oversized first event remains a failed page while the worker advances its scan position
+past it. Durable scan progress is separate from the contiguous delivered watermark.
 
-The secretary accepts policy version 2 and uses the configured model to interpret the pending window. Older
-policy versions are unsupported; operators must provide a current policy and a new state file. The
-`baton.secretary_decide` and `baton.secretary_read` modules are aliases to the current implementation.
+The model returns one wake/hold/keep decision for a page. Every summary, including a digest, must account for and
+cite every event in its page; it may also cite visible parents. Validation checks cited source references against the page, not whether
+the summary's claims are true. The prompt forbids inventing assignments or approvals. Hold, keep, and failed
+pages remain eligible for hourly digest retries while scanning continues to later pages. Pending wake IDs stay
+queued until individually acknowledged; a later hold or keep does not clear them. Acknowledgement is idempotent
+for a validated summary ID, and delivered ranges merge only when contiguous, so acknowledging a later wake
+cannot skip an earlier held gap. The optional `DecisionEngine` supplies advisory context to the model.
+
+The secretary accepts policy version 2 and uses the configured model to interpret each page. Older policy
+versions are unsupported. Private model attention state version 1 migrates additively to version 2, while the
+retired deterministic state format requires a new state file. Harness version 2 invalidates older unchecked
+assessment cache entries. The top-level
+`baton.secretary_decide` and `baton.secretary_read` modules are executable CLI wrappers only. The public Python
+API exports `Secretary`, `show`, `Policy`, and `load_policy`; import implementation from canonical modules.
 
 ## Organization rules
 

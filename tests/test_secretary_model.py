@@ -86,6 +86,9 @@ class Model:
 
 
 def _decide(world, **options) -> dict:
+    # These scenarios intentionally replay their fixture history. Normal activation starts at the head.
+    if not world.state_path.exists() and "since" not in options:
+        options.update(since=0, floor=0)
     return asyncio.run(
         Secretary(world.config, world.state_path, world.policy_path).decide(
             budget_seconds=options.pop("budget_seconds", 5), **options
@@ -314,7 +317,7 @@ def test_revoking_visibility_during_inference_discards_the_summary(tmp_path) -> 
 
         async def run():
             task = asyncio.create_task(
-                Secretary(world.config, world.state_path, world.policy_path).decide(budget_seconds=5)
+                Secretary(world.config, world.state_path, world.policy_path).decide(budget_seconds=5, since=0, floor=0)
             )
             async with asyncio.timeout(3):
                 await model.wait_for_request()
@@ -334,7 +337,7 @@ def test_cancelling_model_reaps_child_and_retry_keeps_the_same_pending_window(tm
 
         async def run():
             secretary = Secretary(world.config, world.state_path, world.policy_path)
-            task = asyncio.create_task(secretary.decide(budget_seconds=5))
+            task = asyncio.create_task(secretary.decide(budget_seconds=5, since=0, floor=0))
             async with asyncio.timeout(3):
                 request = await model.wait_for_request()
             task.cancel()
@@ -374,21 +377,48 @@ def test_hourly_digest_uses_the_model_and_inspection_does_not_infer_again(tmp_pa
         assert _positions(world)[0] == digest["through_pos"]
 
 
-def test_context_overflow_is_explicit_and_does_not_infer_from_a_truncated_window(tmp_path) -> None:
-    from baton.agents.secretary.inbox.window import InboxTooLarge
-
+def test_bounded_pages_deliver_each_complete_message_once(tmp_path) -> None:
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path)
         for index in range(2):
             messages.send(world.baton, sender="worker", recipient="planner", text=f"Report {index}")
         policy = json.loads(world.policy_path.read_text())
         world.policy_path.write_text(json.dumps({**policy, "max_events": 1}))
-        with pytest.raises(InboxTooLarge):
+        first = _decide(world)
+        assert len(first["sources"]) == 1 and _positions(world) == (0, 0)
+        asyncio.run(Secretary(world.config, world.state_path, world.policy_path).acknowledge(first["decision_id"]))
+        second = _decide(world)
+        assert len(second["sources"]) == 1 and set(first["sources"]).isdisjoint(second["sources"])
+        assert [request["context"]["events"][0]["message"]["text"] for request in model.requests] == [
+            "Report 0",
+            "Report 1",
+        ]
+
+
+def test_partial_summary_cannot_acknowledge_uncited_messages(tmp_path) -> None:
+    with make_world(tmp_path) as world:
+        Model(world, tmp_path, plan={"sources": "first"})
+        for text in ("First request", "Second request"):
+            messages.send(world.baton, sender="worker", recipient="planner", text=text)
+        with pytest.raises(SecretaryUnavailable, match="every event in the page"):
             _decide(world)
-        assert model.requests == [] and _positions(world) == (0, 0)
-        world.policy_path.write_text(json.dumps({**policy, "max_events": 2}))
-        result = _decide(world)
-        assert len(result["sources"]) == 2
+        assert _positions(world) == (0, 0)
+        assert show(world.config, world.state_path, world.policy_path)["assessments"] == []
+
+
+def test_first_activation_starts_at_head_and_retains_floor_after_restart(tmp_path) -> None:
+    with make_world(tmp_path) as world:
+        model = Model(world, tmp_path)
+        messages.send(world.baton, sender="worker", recipient="planner", text="Before activation")
+        secretary = Secretary(world.config, world.state_path, world.policy_path)
+        initial = asyncio.run(secretary.decide(budget_seconds=5))
+        assert initial["since"] == initial["through_pos"] > 0
+        assert model.requests == []
+        sent = messages.send(world.baton, sender="worker", recipient="planner", text="After activation")
+        restarted = Secretary(world.config, world.state_path, world.policy_path)
+        result = asyncio.run(restarted.decide(budget_seconds=5))
+        assert result["floor"] == initial["floor"] == initial["since"]
+        assert result["sources"] == [f"message:{sent['message_id']}"]
 
 
 def test_old_policy_is_rejected_before_model_or_state_access(tmp_path) -> None:

@@ -165,8 +165,9 @@ def test_generated_service_accepts_project_paths_with_spaces_and_specifier_chara
         assert parsed.stderr == "", parsed.stderr  # Invalid EnvironmentFile directives only emit warnings.
 
 
-def _positions(world) -> tuple[int, int]:
-    return AttentionLog(world.state_path, world.config.data_dir, "planner").positions()
+def _positions(world, instance: Path) -> tuple[int, int]:
+    state_path = Path(json.loads(instance.read_text())["state"])
+    return AttentionLog(state_path, world.config.data_dir, "planner").positions()
 
 
 @pytest.mark.parametrize("product", ["codex", "claude-code"])
@@ -174,6 +175,8 @@ def test_install_generated_hook_worker_receive_and_explicit_ack_lifecycle(tmp_pa
     with make_world(tmp_path) as world:
         room = conversation(world)
         project, instance, codex_log, hooks_path, original, result = _install(world, tmp_path, product)
+        initial_positions = _positions(world, instance)
+        assert initial_positions[0] == initial_positions[1]
         assert result["hook_events"] == (
             ["SessionStart", "Stop"] if product == "codex" else ["SessionStart", "Stop", "FileChanged"]
         )
@@ -202,7 +205,7 @@ def test_install_generated_hook_worker_receive_and_explicit_ack_lifecycle(tmp_pa
             received = _cli(instance, "receive")
             summary = json.loads(received.stdout)
             assert received.returncode == 0 and f"message:{sent['message_id']}" in summary["sources"]
-            assert _positions(world) == (0, 0)
+            assert _positions(world, instance) == initial_positions
             if product == "codex":
                 stop_event = {"hook_event_name": "Stop", "session_id": SESSION, "cwd": str(project)}
                 stop, stop_output = _hook(project, instance, stop_event)
@@ -266,10 +269,11 @@ def test_pending_result_survives_worker_kill_restart_and_duplicate_lock(tmp_path
                 _stop_worker(second)
 
 
-def test_hold_delivers_nothing_then_new_message_wakes_with_held_context(tmp_path) -> None:
+def test_hold_remains_unacknowledged_while_a_new_page_wakes(tmp_path) -> None:
     with make_world(tmp_path) as world:
         room = conversation(world)
         project, instance, codex_log, *_ = _install(world, tmp_path, "codex")
+        initial_positions = _positions(world, instance)
         _hook(project, instance, {"hook_event_name": "SessionStart", "session_id": SESSION, "cwd": str(project)})
         first = say(world, room, "worker", "Earlier held context")
         model = _model(world, tmp_path, plan={"steps": [{"decision": "hold", "summary": "", "sources": []}, {}]})
@@ -282,8 +286,16 @@ def test_hold_delivers_nothing_then_new_message_wakes_with_held_context(tmp_path
             before = table_hashes(world.baton)
             _wait(lambda: len(model.requests) >= 2 and bool(_status(instance)["pending"]))
             result = json.loads(_cli(instance, "receive").stdout)
-            assert f"message:{first['message_id']}" in result["sources"]
+            assert f"message:{first['message_id']}" not in result["sources"]
             assert f"message:{second['message_id']}" in result["sources"]
+            assert _cli(instance, "acknowledge", result["decision_id"]).returncode == 0
+            assert _positions(world, instance) == initial_positions
+            # The earlier page remains on disk for the scheduled digest, even after the later wake is read.
+            from baton.agents.secretary.attention.backlog import Backlog
+
+            state_path = Path(json.loads(instance.read_text())["state"])
+            backlog = Backlog(AttentionLog(state_path, world.config.data_dir, "planner"))
+            assert backlog.due(time.time() + 3601)[0] == initial_positions[0]
             assert table_hashes(world.baton) == before
         finally:
             _stop_worker(worker)

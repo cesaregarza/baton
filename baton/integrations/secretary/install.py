@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from baton import datadir
+from baton.agents.secretary.service import Secretary, activate
 from baton.config import load
 from baton.config.secretary import IntegrationConfig, load_policy, require_hook_summary
 
@@ -32,7 +33,8 @@ def install(
     project = _existing(project, "project", directory=True)
     config = _existing(config, "config", directory=False)
     policy = _existing(policy, "policy", directory=False)
-    policy_config = load_policy(load(config), policy)
+    baton_config = load(config)
+    policy_config = load_policy(baton_config, policy)
     require_hook_summary(policy_config)
     python = _executable(python, "python")
     codex_path = (_executable(codex, "codex") if codex is not None else _find_codex()) if product == "codex" else None
@@ -77,6 +79,7 @@ def install(
         state=destination / "attention.sqlite",
         codex=str(codex_path) if codex_path is not None else None,
     ).as_dict()
+    activate(Secretary(baton_config, destination / "attention.sqlite", policy))
     _write_private(instance_path, json.dumps(instance, indent=2, sort_keys=True) + "\n")
     _write_private(destination / "hooks.json", json.dumps(hooks, indent=2, sort_keys=True) + "\n")
     if product == "claude-code":

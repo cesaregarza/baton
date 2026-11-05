@@ -64,6 +64,8 @@ def connect(path: Path) -> Connection:
         conn.execute("PRAGMA foreign_keys = ON")
         if version != SCHEMA_VERSION:
             _ensure_schema(conn)
+        else:
+            _ensure_optional_search_indexes(conn)
     except BaseException:
         conn.close()
         raise
@@ -113,6 +115,19 @@ def _ensure_schema(conn: Connection) -> None:
         _ensure_search_index(conn)
         _ensure_artifact_index(conn)
         _update_schema_version(conn, version)
+
+
+def _ensure_optional_search_indexes(conn: Connection) -> None:
+    """Add optional indexes to a current database if SQLite now supports FTS5."""
+    existing = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE name IN ('messages_fts', 'artifacts_fts')")
+    }
+    if existing == {"messages_fts", "artifacts_fts"} or not fts5_available(conn):
+        return
+    with transaction(conn):
+        _ensure_search_index(conn)
+        _ensure_artifact_index(conn)
 
 
 def _create_or_upgrade_tables(conn: Connection) -> int | None:

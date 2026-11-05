@@ -13,9 +13,10 @@ in a public issue.
 
 A Baton host serves one operator's agents. Roles limit what clients can do, but they are not independent
 tenants. For example, any role can read jobs. Someone with shell access as the host's user can use the local
-CLI as an agent role and can access the database directly. In particular, the CLI does not enforce the MCP
-guard's `job_authority` restriction. A malicious operator, a compromised host, and denial of service beyond
-Baton's built-in limits are outside this model.
+CLI as an agent role and can access the database directly. The local CLI deliberately refuses guest direct
+messages through the same agent permission check used for message authorization; this does not change the
+MCP guest-message policy. The CLI does not enforce the MCP guard's `job_authority` restriction. A malicious
+operator, a compromised host, and denial of service beyond Baton's built-in limits are outside this model.
 
 Use TLS whenever traffic leaves the machine. The MCP server listens on loopback by default and checks
 `Host` and browser `Origin` headers. [Connecting from another machine](docs/exposing.md) explains how to
@@ -236,13 +237,13 @@ The data directory contains the following. Protect backups as carefully as the l
 - `audit.jsonl`: call time, credential and effective roles, credential identifier, tool, relevant IDs,
   outcome, and any alias ID and code. It excludes message text, job bodies, passphrases, and credentials.
   Malformed secret-bearing calls are refused before validation can echo their input.
-- An optional `0600` secretary state file holds source references, digests, bounded metadata, expectations,
-  dispositions, append-only brief versions, `decide` records with only a digest of each brief, and each judge
-  verdict beside the deterministic rules' verdict. It stores no message text. With a policy `judge` block,
-  `decide` writes a new message's authored text and its candidate items' first words to that host command's
-  stdin only. `show` reads excerpts from
-  `baton.db` at inspection time and rechecks the principal's visibility. This local projection cannot grant
-  authority, approve work, advance a delivery cursor, or send a wake.
+- An optional secretary state file stores model assessments, including their full reason and brief plus
+  source references and bounded result metadata. It does not archive the source message bodies, but message
+  context is sent to the configured model provider or host command for assessment; an optional decision
+  engine also receives authorized context when the model calls it. The state file is subject to the private
+  file checks described above. It is retained until the operator removes it; Baton does not automatically
+  delete old assessments. Host commands run as the Baton host user. Their filtered environment limits
+  inherited environment variables, but does not sandbox their access to files available to that user.
 
 The host's stderr logs record events such as registration, consent outcomes, and wake failures without
 message text or secrets. Operator-configured webhook signing secrets are read from named environment

@@ -14,10 +14,14 @@ _CHUNK_SIZE = 64 * 1024
 
 @dataclass(frozen=True)
 class Command:
-    """An argv command with a strict bound on captured stdout."""
+    """Run argv with bounded stdout and a reduced environment, not a sandbox.
+
+    The child retains the caller's filesystem and operating-system authority.
+    """
 
     argv: list[str]
     max_output: int = MAX_COMMAND_RESPONSE_BYTES
+    env: dict[str, str] | None = None
 
     async def run(self, payload: bytes, timeout: float) -> tuple[int, bytes]:
         """Run argv without a shell, concurrently streaming stdin and bounded stdout."""
@@ -25,7 +29,7 @@ class Command:
         tasks: list[asyncio.Task[object]] = []
         try:
             async with asyncio.timeout(timeout):
-                process = await _spawn(self.argv)
+                process = await _spawn(self.argv, _command_environment(self.env or {}))
                 assert process.stdin is not None and process.stdout is not None
                 input_task = asyncio.create_task(_write_input(process.stdin, payload))
                 output_task = asyncio.create_task(_read_output(process.stdout, self.max_output))
@@ -39,7 +43,17 @@ class Command:
             raise
 
 
-async def _spawn(argv: list[str]) -> asyncio.subprocess.Process:
+def _command_environment(allowed: dict[str, str]) -> dict[str, str]:
+    """Build a small child environment without inheriting host credentials."""
+    environment = {"PATH": os.environ.get("PATH", os.defpath)}
+    for name in ("HOME", "LANG", "LC_ALL", "LC_CTYPE"):
+        if name in os.environ:
+            environment[name] = os.environ[name]
+    environment.update(allowed)
+    return environment
+
+
+async def _spawn(argv: list[str], environment: dict[str, str]) -> asyncio.subprocess.Process:
     """Shield creation so cancellation cannot orphan a child before it is returned."""
     spawn = asyncio.create_task(
         asyncio.create_subprocess_exec(
@@ -48,6 +62,7 @@ async def _spawn(argv: list[str]) -> asyncio.subprocess.Process:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=(os.name == "posix"),
+            env=environment,
         )
     )
     try:
