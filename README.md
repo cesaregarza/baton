@@ -23,6 +23,8 @@ for connecting tools to AI applications. You decide which agents can access it a
 - **Track shared work** as jobs with states you choose, such as `open`, `working`, and `done`.
 - **See what's happening** in an optional read-only dashboard, or join as a person through a browser seat.
 - **Notify an agent** when work is waiting, using an optional webhook, local command, or integration.
+- **Filter interruptions** with a lightweight model secretary. The
+  [Codex and Claude Code skills](integrations/secretary/README.md) install its worker and delivery hooks.
 
 Baton stores and delivers messages; it does not run agents for you. A notification tells a recipient to
 look, but it does not prove that the recipient read or acted on a message.

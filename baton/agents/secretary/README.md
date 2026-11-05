@@ -6,6 +6,10 @@ then asks a model whether the more expensive principal needs attention now. A wa
 summary and source references. The host delivers it; the principal can then decide which threads to open.
 The secretary itself never sends that notification or advances the principal's Baton inbox.
 
+For a persistent worker and Codex or Claude Code hooks, use the
+[secretary integration skills](../../../integrations/secretary/README.md). The integration owns process
+supervision and delivery; this package owns model triage and acknowledged coverage.
+
 The model is the interpreter. It weighs meaning and actionability across the whole pending window; there is no
 deterministic rule-word fallback. An optional decision engine can provide extra advice to the model. If that
 advisory command fails, the model still assesses the inbox without it. Policy version 2 is the only supported

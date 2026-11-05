@@ -31,6 +31,26 @@ class Secretary:
         async with DatabaseWorker() as database:
             return await database.call(_acknowledge, self, decision_id)
 
+    async def pending(self, decision_id: str) -> dict | None:
+        """Return an undelivered summary only while its policy and source window remain current."""
+        async with DatabaseWorker() as database:
+            return await database.call(_pending, self, decision_id)
+
+
+def _pending(secretary: Secretary, decision_id: str) -> dict | None:
+    from .inbox import InboxWindow
+    from .state import AttentionLog
+    policy = load_policy(secretary.config, secretary.policy_path)
+    log = AttentionLog(secretary.state_path, secretary.config.data_dir, policy.principal)
+    result = log.get(decision_id)
+    delivered, _ = log.positions()
+    if (result is None or not result["brief"] or result["covered_through"] <= delivered
+            or result["policy_digest"] != policy.digest):
+        return None
+    current = InboxWindow.read(secretary.config, policy, result["since"], through=result["through_pos"])
+    log.bind(current.epoch, result["floor"])
+    return result if current.digest == result["window_digest"] else None
+
 
 def _acknowledge(secretary: Secretary, decision_id: str) -> int:
     from .inbox import InboxWindow
@@ -42,6 +62,8 @@ def _acknowledge(secretary: Secretary, decision_id: str) -> int:
         raise InvalidRequest("unknown secretary decision")
     current = InboxWindow.read(secretary.config, policy, result["since"], through=result["through_pos"])
     log.bind(current.epoch, result["floor"])
+    if current.digest != result["window_digest"] or policy.digest != result["policy_digest"]:
+        raise InvalidRequest("secretary summary is stale; receive a current assessment before acknowledging")
     return log.acknowledge(decision_id)
 
 
