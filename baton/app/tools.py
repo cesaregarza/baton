@@ -13,10 +13,11 @@ from pydantic import Field
 from baton import aliases, conversations, jobs, messages, topics
 from baton import search as search_module
 from baton.config import Config
+from baton.conversation import Conversation
 from baton.database import Connection
-from baton.errors import InvalidRequest, UnknownRole
-from baton.inbox import Inbox
-from baton.messages import DirectMessage
+from baton.errors import InvalidRequest
+from baton.jobs import Job
+from baton.participants import Participant
 from baton.reference_tools import ReferenceTools
 from baton.store import connection
 from baton.topic_tools import TopicTools
@@ -117,19 +118,11 @@ class Tools(TopicTools, ReferenceTools):
         A conversation message may answer another (`reply_to`) and may ask particular participants to look
         (`attention`, `needs_decision`); a direct message is already addressed to its recipient.
         """
-        if (to is None) == (conversation_id is None):
-            raise InvalidRequest("send_message takes exactly one of to and conversation_id")
         with self._conn() as conn:
-            if conversation_id is not None:
-                return conversations.send(conn, self._config, sender=role, conversation_id=conversation_id,
-                                          text=text, relayed=relayed, request_id=request_id, job_id=job_id,
-                                          reply_to=reply_to, attention=attention, needs_decision=needs_decision,
-                                          identity=identity)
-            if to not in self._config.roles:
-                raise UnknownRole(f"no role {to!r}; call whoami for the list")
-            messages.only_in_a_conversation(reply_to=reply_to, attention=attention, needs_decision=needs_decision)
-            return DirectMessage(sender=role, recipient=to, text=text, request_id=request_id, job_id=job_id,
-                                 relayed=relayed, author_kind=self._config.author_kind(role)).send(conn)
+            return Participant(conn, self._config, role).send(
+                text, to=to, conversation_id=conversation_id, job_id=job_id, relayed=relayed,
+                reply_to=reply_to, attention=attention, identity=identity, needs_decision=needs_decision,
+                request_id=request_id)
 
     def read_messages(
         self, role: str, after_seq: Annotated[int | None, Field(ge=0)] = None,
@@ -137,7 +130,7 @@ class Tools(TopicTools, ReferenceTools):
     ) -> dict[str, Any]:
         """Messages to you after `after_seq` (default: the ones not yet delivered), oldest first, with next_seq."""
         with self._conn() as conn:
-            return Inbox(conn, role, self._config).read(after_seq, limit)
+            return Participant(conn, self._config, role).inbox.read(after_seq, limit)
 
     def create_conversation(
         self, role: str, title: str,
@@ -154,9 +147,9 @@ class Tools(TopicTools, ReferenceTools):
     ) -> dict[str, Any]:
         """Start a thread. Name `participants`, or as a guest give a `topic` and its members receive it."""
         with self._conn() as conn:
-            return conversations.create(conn, self._config, actor=role, title=title, participants=participants,
-                                        topic=topic, request_id=request_id, identity=identity,
-                                        seen=topics.seen_by(call))
+            return Conversation.create(conn, self._config, actor=role, title=title, participants=participants,
+                                       topic=topic, request_id=request_id, identity=identity,
+                                       seen=topics.seen_by(call))
 
     def list_conversations(
         self, role: str,
@@ -200,8 +193,8 @@ class Tools(TopicTools, ReferenceTools):
         """
         conversations.require_enabled(self._config)
         with self._conn() as conn:
-            return conversations.history(conn, role, conversation_id, after_seq, limit, before_seq=before_seq,
-                                         config=self._config)
+            return Conversation(conn, conversation_id).history(role, after_seq, limit, before_seq=before_seq,
+                                                              config=self._config)
 
     def search(
         self, role: str,
@@ -255,23 +248,23 @@ class Tools(TopicTools, ReferenceTools):
     def add_participant(self, role: str, conversation_id: str, participant: str) -> dict[str, Any]:
         """Add a role to a conversation; every participant gets a host notice. Adding one already in changes nothing."""
         with self._conn() as conn:
-            return conversations.add(conn, self._config, conversation_id, participant, actor=role)
+            return Conversation(conn, conversation_id).add(self._config, participant, actor=role)
 
     def remove_participant(self, role: str, conversation_id: str, participant: str) -> dict[str, Any]:
         """Remove a role from a conversation; it receives nothing more, and the others get a host notice."""
         with self._conn() as conn:
-            return conversations.remove(conn, self._config, conversation_id, participant, actor=role)
+            return Conversation(conn, conversation_id).remove(self._config, participant, actor=role)
 
     def wait(self, role: str, timeout_seconds: Annotated[float, Field(ge=0, le=MAX_WAIT_SECONDS)] = 20) -> dict:
         """Block until messages or job changes are addressed to you, then return each exactly once."""
         with self._conn() as conn:
-            return Inbox(conn, role, self._config).wait(timeout_seconds=timeout_seconds)
+            return Participant(conn, self._config, role).inbox.wait(timeout_seconds=timeout_seconds)
 
     def create_job(self, role: str, title: str, body: str = "", request_id: str | None = None) -> dict[str, Any]:
         """Open a job in the initial state. Pass a request_id to make a retry safe."""
         with self._conn() as conn:
-            return jobs.create(conn, self._config.jobs, request_id=request_id or messages.new_request_id(),
-                               actor=role, title=title, body=body)
+            return Job.create(conn, self._config.jobs, request_id=request_id or messages.new_request_id(),
+                              actor=role, title=title, body=body)
 
     def move_job(
         self, role: str, job_id: str, to_state: str, note: str = "",
@@ -284,13 +277,13 @@ class Tools(TopicTools, ReferenceTools):
     ) -> dict[str, Any]:
         """Move a job to one of its current state's next states, with an optional short note."""
         with self._conn() as conn:
-            return jobs.move(conn, self._config.jobs, job_id, to_state, actor=role, note=note,
-                             request_id=request_id, expected_revision=expected_revision)
+            return Job(conn, job_id).move(self._config.jobs, to_state, actor=role, note=note,
+                                         request_id=request_id, expected_revision=expected_revision)
 
     def get_job(self, role: str, job_id: str) -> dict[str, Any]:
         """A job's title, body, state and who it waits on."""
         with self._conn() as conn:
-            return jobs.get(conn, job_id)
+            return Job(conn, job_id).read()
 
     def list_jobs(self, role: str, state: str | None = None, waiting_on: str | None = None) -> list[dict[str, Any]]:
         """Recent jobs, newest first, optionally filtered by state or by the role they wait on."""
@@ -301,7 +294,7 @@ class Tools(TopicTools, ReferenceTools):
                         limit: Annotated[int, Field(ge=1, le=jobs.MAX_PAGE_EVENTS)] = 50) -> dict[str, Any]:
         """A job's history after `after_seq`, oldest first, with next_seq to continue from."""
         with self._conn() as conn:
-            return jobs.read_events(conn, job_id, after_seq, limit)
+            return Job(conn, job_id).read_events(after_seq, limit)
 
     def _conn(self) -> AbstractContextManager[Connection]:
         return connection(self._config.db_path)

@@ -26,9 +26,10 @@ from baton import config as config_module
 from baton import conversations, datadir, jobs, messages, remote, wakes
 from baton.commands.index import add_commands as _add_index_commands
 from baton.config import Config, ConfigError
+from baton.conversation import Conversation
 from baton.errors import BatonError, InvalidRequest
-from baton.inbox import Inbox
-from baton.messages import DirectMessage
+from baton.jobs import Job
+from baton.participants import Participant
 from baton.store import connection
 
 
@@ -104,13 +105,13 @@ def _parser() -> argparse.ArgumentParser:
     read = _with_role(commands.add_parser("read", help="read messages sent to your role"))
     read.add_argument("--after-seq", type=int, help="default: only messages not yet delivered")
     read.add_argument("--limit", type=int, default=50)
-    read.set_defaults(handler=lambda config, args: _db(config, lambda conn: Inbox(conn, args.role, config).read(
-        args.after_seq, args.limit)))
+    read.set_defaults(handler=lambda config, args: _db(config, lambda conn:
+        Participant(conn, config, args.role).inbox.read(args.after_seq, args.limit)))
 
     wait = _with_role(commands.add_parser("wait", help="block until messages or job changes reach your role"))
     wait.add_argument("--timeout", type=float, help="seconds; default: wait indefinitely")
-    wait.set_defaults(handler=lambda config, args: _db(config, lambda conn: Inbox(conn, args.role, config).wait(
-        timeout_seconds=args.timeout)))
+    wait.set_defaults(handler=lambda config, args: _db(config, lambda conn:
+        Participant(conn, config, args.role).inbox.wait(timeout_seconds=args.timeout)))
 
     _add_job_commands(commands)
     _add_conversation_commands(commands)
@@ -251,13 +252,13 @@ def _add_job_commands(commands: Any) -> None:
     create.add_argument("--title", required=True)
     create.add_argument("--body", default="")
     create.add_argument("--request-id")
-    create.set_defaults(handler=lambda config, args: _db(config, lambda conn: jobs.create(
+    create.set_defaults(handler=lambda config, args: _db(config, lambda conn: Job.create(
         conn, config.jobs, request_id=args.request_id or messages.new_request_id(), actor=args.role,
         title=args.title, body=args.body)))
 
     show = job.add_parser("show")
     show.add_argument("job_id")
-    show.set_defaults(handler=lambda config, args: _db(config, lambda conn: jobs.get(conn, args.job_id)))
+    show.set_defaults(handler=lambda config, args: _db(config, lambda conn: Job(conn, args.job_id).read()))
 
     listing = job.add_parser("list")
     listing.add_argument("--state")
@@ -271,15 +272,15 @@ def _add_job_commands(commands: Any) -> None:
     move.add_argument("--note", default="")
     move.add_argument("--request-id", help="reuse a printed request_id to retry safely")
     move.add_argument("--expected-revision", type=int, help="refuse if the job changed since this revision")
-    move.set_defaults(handler=lambda config, args: _db(config, lambda conn: jobs.move(
-        conn, config.jobs, args.job_id, args.to_state, actor=args.role, note=args.note,
+    move.set_defaults(handler=lambda config, args: _db(config, lambda conn: Job(conn, args.job_id).move(
+        config.jobs, args.to_state, actor=args.role, note=args.note,
         request_id=args.request_id, expected_revision=args.expected_revision)))
 
     history = job.add_parser("events")
     history.add_argument("job_id")
     history.add_argument("--after-seq", type=int, default=0)
-    history.set_defaults(handler=lambda config, args: _db(config, lambda conn: jobs.read_events(
-        conn, args.job_id, args.after_seq)))
+    history.set_defaults(handler=lambda config, args: _db(config, lambda conn: Job(conn, args.job_id).read_events(
+        args.after_seq)))
 
 
 def _add_conversation_commands(commands: Any) -> None:
@@ -290,7 +291,7 @@ def _add_conversation_commands(commands: Any) -> None:
     new.add_argument("--with", dest="participants", required=True, help="comma-separated roles, yourself included")
     new.add_argument("--topic", help="an optional readable path, such as project or project/subtopic")
     new.add_argument("--request-id")
-    new.set_defaults(handler=lambda config, args: _db(config, lambda conn: conversations.create(
+    new.set_defaults(handler=lambda config, args: _db(config, lambda conn: Conversation.create(
         conn, config, actor=args.role, title=args.title, participants=args.participants.split(","),
         topic=args.topic, request_id=args.request_id)))
 
@@ -303,8 +304,9 @@ def _add_conversation_commands(commands: Any) -> None:
     change = topic.add_mutually_exclusive_group(required=True)
     change.add_argument("--set", dest="topic", help="the new topic, 1-2 lowercase slug segments")
     change.add_argument("--clear", action="store_true", help="remove the topic")
-    topic.set_defaults(handler=lambda config, args: _db(config, lambda conn: conversations.set_topic(
-        conn, config, args.conversation_id, None if args.clear else args.topic, actor=args.role)))
+    topic.set_defaults(handler=lambda config, args: _db(config, lambda conn:
+        Conversation(conn, args.conversation_id).set_topic(
+            config, None if args.clear else args.topic, actor=args.role)))
 
     history = _with_role(conversation.add_parser("history", help="a conversation as you saw it; marks nothing read"))
     history.add_argument("conversation_id")
@@ -312,12 +314,12 @@ def _add_conversation_commands(commands: Any) -> None:
     history.add_argument("--limit", type=int, default=50)
     history.set_defaults(handler=_history)
 
-    for name, operation in (("add", conversations.add), ("remove", conversations.remove)):
+    for name, operation in (("add", Conversation.add), ("remove", Conversation.remove)):
         change = _with_role(conversation.add_parser(name, help=f"{name} a participant"))
         change.add_argument("conversation_id")
         change.add_argument("participant")
         change.set_defaults(handler=lambda config, args, operation=operation: _db(config, lambda conn: operation(
-            conn, config, args.conversation_id, args.participant, actor=args.role)))
+            Conversation(conn, args.conversation_id), config, args.participant, actor=args.role)))
 
 
 def _with_role(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -413,14 +415,8 @@ def _message(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     if args.to is not None:
         config.require_role(args.to)
     message_args = _message_arguments(args)
-    if args.conversation_id is not None:
-        return _db(config, lambda conn: conversations.send(
-            conn, config, sender=args.role, conversation_id=args.conversation_id, **message_args))
-    messages.only_in_a_conversation(reply_to=message_args.pop("reply_to"), attention=message_args.pop("attention"),
-                                   needs_decision=message_args.pop("needs_decision"))
-    message = DirectMessage(sender=args.role, recipient=args.to, **message_args,
-                            author_kind=config.author_kind(args.role))
-    return _db(config, message.send)
+    return _db(config, lambda conn: Participant(conn, config, args.role).send(
+        to=args.to, conversation_id=args.conversation_id, **message_args))
 
 
 def _list_conversations(config: Config, args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -430,8 +426,8 @@ def _list_conversations(config: Config, args: argparse.Namespace) -> list[dict[s
 
 def _history(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     conversations.require_enabled(config)
-    return _db(config, lambda conn: conversations.history(conn, args.role, args.conversation_id, args.after_seq,
-                                                          args.limit, config=config))
+    return _db(config, lambda conn: Conversation(conn, args.conversation_id).history(
+        args.role, args.after_seq, args.limit, config=config))
 
 
 def _new_token(config: Config, args: argparse.Namespace) -> dict[str, Any]:
