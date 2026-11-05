@@ -142,13 +142,13 @@ def test_a_first_decision_killed_mid_scan_leaves_its_retry_the_same_activation_f
     with make_world(tmp_path) as world:
         activation = secretary.scan(world.config, world.state_path, world.policy_path, limit=1000)["through_pos"]
         sent, trigger = _direct(world, "Please decide")
-        scan = secretary.scan
+        scan = secretary.scan_async
 
-        def scan_then_killed(*args, **kwargs) -> None:
-            scan(*args, **kwargs)  # the batch commits with its position
+        async def scan_then_killed(*args, **kwargs) -> None:
+            await scan(*args, **kwargs)  # the batch commits with its position
             raise TimeoutError("killed by the host's timeout")
 
-        monkeypatch.setattr(secretary, "scan", scan_then_killed)
+        monkeypatch.setattr(secretary, "scan_async", scan_then_killed)
         with pytest.raises(TimeoutError):
             _decide(world, trigger=trigger)
         monkeypatch.undo()

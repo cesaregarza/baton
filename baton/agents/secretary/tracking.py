@@ -8,7 +8,10 @@ transaction, cursor and replay lifecycle.
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable
+from contextlib import ExitStack
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Protocol
@@ -25,6 +28,7 @@ from . import store as secretary_store
 from .expectations import Expectations
 from .policy import POLICY_VERSION, Policy, load_policy
 from .rules import MessageRules, job_disposition
+from .runtime import DatabaseWorker
 
 RULES_VERSION = 7
 MAX_BATCH = 1000
@@ -32,7 +36,7 @@ MAX_BRIEF_BYTES = 16 * 1024
 
 
 class Judge(Protocol):
-    """What `scan` asks of a judge: judge.Session during decisions, judge.Stored during replay."""
+    """Synchronous interpretation used by offline scan and RecordedJudgments during replay."""
 
     def wants(self, policy: Policy, meta: dict) -> bool:
         """Whether this source goes to the judge rather than to the word lists."""
@@ -88,90 +92,203 @@ def _over_limit(meta: dict, text: str) -> bool:
     return meta["artifact_over_limit"] or len(text.encode("utf-8")) > messages.MAX_MESSAGE_BYTES
 
 
-def _process(state: Connection, baton: Connection, config: Config, policy: Policy,
-             meta: dict, text: str, judge: Judge | None = None) -> bool:
-    """Apply one source inside the caller's sidecar transaction. Returns whether it was new.
+@dataclass
+class Projection:
+    """Interpret and record sources inside the caller's sidecar transaction."""
 
-    A judge reads only a message inside every bound: the bounds, like the activation floor, the job-event policy and
-    visibility, are decided before any judge is asked, and nothing it answers changes them.
+    state: Connection
+    baton: Connection
+    config: Config
+    policy: Policy
+
+    def start(self, meta: dict) -> bool:
+        if meta["version"] != sources.ENVELOPE_VERSION:
+            raise ConfigError("unsupported secretary envelope version")
+        return secretary_store.put_item(self.state, self.policy.principal, meta)
+
+    def interpret(self, meta: dict, text: str, judge: Judge | None = None) -> tuple[str, str, list[str]]:
+        state, baton, config, policy = self.state, self.baton, self.config, self.policy
+        principal = policy.principal
+        ledger = Expectations(state, principal)
+        kind, reason, answers = "retain", "no new principal action", []
+        if meta.get("operator_cancel"):
+            expected = state.execute("SELECT * FROM expectations WHERE principal=? AND id=?",
+                                     (principal, meta["expectation_id"])).fetchone()
+            if expected is None:
+                raise InvalidRequest("expectation to cancel does not exist")
+            if expected["state"] == "open":
+                if not ledger.close(expected, meta, "cancelled", "operator-cancel"):
+                    raise InvalidRequest("cancellation evidence limit reached")
+                kind, reason = "retain", "operator cancelled expectation"
+            else:
+                kind, reason = "retain", "expectation already closed or evidence limit reached"
+        elif _over_limit(meta, text):
+            kind, reason = "reconcile", "source exceeds a bounded input limit"
+        elif meta["event_kind"] == "message" and judge is not None and judge.wants(policy, meta):
+            kind, reason, answers = judge.outcome(state, baton, config, policy, meta, text)
+        elif meta["event_kind"] == "message":
+            rules = MessageRules(ledger, baton, config, policy)
+            kind, reason, answers = rules.interpret(meta, text)
+            if sources._actor(meta) == policy.principal:
+                kind, reason = rules.await_recipient(meta, text, (kind, reason))
+        elif meta["event_kind"] in {"job.created", "job.moved"}:
+            kind, reason = job_disposition(ledger, config, policy, meta)
+        return kind, reason, answers
+
+    def record(self, meta: dict, outcome: tuple[str, str, list[str]]) -> None:
+        state, policy = self.state, self.policy
+        principal = policy.principal
+        kind, reason, answers = outcome
+        brief = _brief(state, policy, meta, kind, reason, answers)
+        if brief is None:
+            kind, reason = "reconcile", "brief bound reached; inspect source and reconsider"
+        state.execute("INSERT INTO dispositions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      (principal, meta["source_key"], policy.digest, kind, reason, RULES_VERSION,
+                       sources.ENVELOPE_VERSION, brief[0] if brief else None, brief[1] if brief else None))
+
+    def process(self, meta: dict, text: str, judge: Judge | None = None) -> bool:
+        if not self.start(meta):
+            return False
+        self.record(meta, self.interpret(meta, text, judge))
+        return True
+
+
+class ScanBatch:
+    """A bounded page, its consistent source snapshot and atomic sidecar progress.
+
+    All methods run on one database thread. A live judgment may await a command
+    between prepare and finish; cancellation exits the batch with a rollback.
     """
-    principal = policy.principal
-    ledger = Expectations(state, principal)
-    if meta["version"] != sources.ENVELOPE_VERSION:
-        raise ConfigError("unsupported secretary envelope version")
-    if not secretary_store.put_item(state, principal, meta):
-        return False
-    kind, reason, answers = "retain", "no new principal action", []
-    if meta.get("operator_cancel"):
-        expected = state.execute("SELECT * FROM expectations WHERE principal=? AND id=?",
-                                 (principal, meta["expectation_id"])).fetchone()
-        if expected is None:
-            raise InvalidRequest("expectation to cancel does not exist")
-        if expected["state"] == "open":
-            if not ledger.close(expected, meta, "cancelled", "operator-cancel"):
-                raise InvalidRequest("cancellation evidence limit reached")
-            kind, reason = "retain", "operator cancelled expectation"
+
+    def __init__(self, config: Config, state_path: Path, policy_path: Path, limit: int,
+                 inject: Callable[[str], None] | None = None) -> None:
+        if type(limit) is not int or not 1 <= limit <= MAX_BATCH:
+            raise InvalidRequest(f"scan limit must be 1-{MAX_BATCH}")
+        self.config, self.state_path, self.policy_path = config, state_path, policy_path
+        self.limit, self.inject = limit, inject
+        self.stack = ExitStack()
+        self.added = self.invisible = 0
+        self.seen: list[int] = []
+        self.stopped = False
+
+    def __enter__(self) -> ScanBatch:
+        try:
+            self.baton = self.stack.enter_context(connect_read_only(self.config.db_path))
+            self.stack.enter_context(self.baton.snapshot())
+            self.policy = load_policy(self.config, self.baton, self.policy_path)
+            epoch = sources._epoch(self.baton)
+            self.state = self.stack.enter_context(secretary_store.open_state(self.state_path, self.config.data_dir))
+            self.stack.enter_context(self.state.transaction())
+            self.through = secretary_store.source_position(self.state, self.policy.principal, epoch)
+            _check_stored_envelope_version(self.state, self.policy.principal)
+            self.rows = sources._source_rows(self.baton, self.policy.principal, self.through, self.limit)
+            self.projection = Projection(self.state, self.baton, self.config, self.policy)
+            return self
+        except BaseException:
+            self.stack.__exit__(*sys.exc_info())
+            raise
+
+    def __exit__(self, *error: object) -> None:
+        self.stack.__exit__(*error)
+
+    def _read(self, event: dict, judge: Judge | secretary_judge.JudgeSession | None) -> tuple[dict, str] | None:
+        mapped = sources._envelope(self.baton, self.config, self.policy.principal, event)
+        if mapped is None:
+            self.invisible += 1
+            self._accept(event)
+            return None
+        meta, text = mapped
+        if judge is not None and _waits_for_judge(self.state, self.policy, meta, text, judge):
+            self.stopped = True
+            return None
+        return meta, text
+
+    def _accept(self, event: dict) -> None:
+        self.seen.append(event["pos"])
+        if self.inject:
+            self.inject("mid_batch")
+
+    def step(self, event: dict, judge: Judge | None = None) -> None:
+        mapped = self._read(event, judge)
+        if mapped is not None:
+            self.added += self.projection.process(*mapped, judge)
+            self._accept(event)
+
+    def prepare(self, event: dict, judge: secretary_judge.JudgeSession | None) -> secretary_judge.Judgment | None:
+        """Apply deterministic sources, or return the one question that needs an external answer."""
+        mapped = self._read(event, judge)
+        if mapped is None:
+            return None
+        meta, text = mapped
+        if judge is not None and judge.wants(self.policy, meta) and not _over_limit(meta, text):
+            if self.projection.start(meta):
+                return secretary_judge.Judgment(self.state, self.baton, self.config, self.policy, meta, text)
         else:
-            kind, reason = "retain", "expectation already closed or evidence limit reached"
-    elif _over_limit(meta, text):
-        kind, reason = "reconcile", "source exceeds a bounded input limit"
-    elif meta["event_kind"] == "message" and judge is not None and judge.wants(policy, meta):
-        kind, reason, answers = judge.outcome(state, baton, config, policy, meta, text)
-    elif meta["event_kind"] == "message":
-        rules = MessageRules(ledger, baton, config, policy)
-        kind, reason, answers = rules.interpret(meta, text)
-        if sources._actor(meta) == policy.principal:
-            kind, reason = rules.await_recipient(meta, text, (kind, reason))
-    elif meta["event_kind"] in {"job.created", "job.moved"}:
-        kind, reason = job_disposition(ledger, config, policy, meta)
-    brief = _brief(state, policy, meta, kind, reason, answers)
-    if brief is None:
-        kind, reason = "reconcile", "brief bound reached; inspect source and reconsider"
-    state.execute("INSERT INTO dispositions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                  (principal, meta["source_key"], policy.digest, kind, reason, RULES_VERSION,
-                   sources.ENVELOPE_VERSION, brief[0] if brief else None, brief[1] if brief else None))
-    return True
+            self.added += self.projection.process(meta, text)
+        self._accept(event)
+        return None
+
+    def finish(self, event: dict, judgment: secretary_judge.Judgment,
+               verdict: secretary_judge.Verdict | None, status: str) -> None:
+        self.projection.record(judgment.meta, judgment.apply(verdict, status))
+        self.added += 1
+        self._accept(event)
+
+    def result(self, include_export: bool) -> dict:
+        if self.seen:
+            secretary_store.set_position(self.state, self.policy.principal, self.seen[-1])
+        if self.inject:
+            self.inject("before_commit")
+        result = {"principal": self.policy.principal, "policy_digest": self.policy.digest,
+                  "events_seen": len(self.seen), "items_added": self.added, "invisible": self.invisible,
+                  "through_pos": self.seen[-1] if self.seen else self.through}
+        if include_export:
+            result["export_sha256"] = secretary_store.export_digest(self.state, self.policy.principal)
+        return result
+
+    async def run(self, database: DatabaseWorker, judge: secretary_judge.JudgeSession | None,
+                  include_export: bool) -> dict:
+        """Await judgments while all database operations stay on the same owner thread."""
+        try:
+            await database.call(self.__enter__)
+            for event in self.rows:
+                judgment = await database.call(self.prepare, event, judge)
+                if self.stopped:
+                    break
+                if judgment is not None:
+                    request = await database.call(judgment.request)
+                    verdict, status = await judge.ask(self.policy, request, len(judgment.candidates))
+                    await database.call(self.finish, event, judgment, verdict, status)
+            result = await database.call(self.result, include_export)
+        except BaseException:
+            await database.call(self.__exit__, *sys.exc_info())
+            raise
+        else:
+            await database.call(self.__exit__, None, None, None)
+            return result
 
 
 def scan(config: Config, state_path: Path, policy_path: Path, *, limit: int = sources.DEFAULT_BATCH,
          inject: Callable[[str], None] | None = None, judge: Judge | None = None,
          include_export: bool = True) -> dict:
-    """Interpret the next page of the principal's events. Only `decide` passes a judge: the catch-up scan, like
-    every scan before activation, reads with the word lists alone. The public scan includes a full state
-    digest for inspection; the decision loop requests only progress, without exporting historical state."""
-    if type(limit) is not int or not 1 <= limit <= MAX_BATCH:
-        raise InvalidRequest(f"scan limit must be 1-{MAX_BATCH}")
-    with connect_read_only(config.db_path) as baton, baton.snapshot():
-        policy = load_policy(config, baton, policy_path)  # before the sidecar is opened
-        epoch = sources._epoch(baton)
-        with secretary_store.open_state(state_path, config.data_dir) as state:
-            with state.transaction():
-                through = secretary_store.source_position(state, policy.principal, epoch)
-                _check_stored_envelope_version(state, policy.principal)
-                rows = sources._source_rows(baton, policy.principal, through, limit)
-                added = invisible = 0
-                seen = []
-                for event in rows:
-                    mapped = sources._envelope(baton, config, policy.principal, event)
-                    if mapped is None:
-                        invisible += 1
-                    else:
-                        meta, text = mapped
-                        if judge is not None and _waits_for_judge(state, policy, meta, text, judge):
-                            break  # the next decision's scan starts at this message, with a fresh budget
-                        added += _process(state, baton, config, policy, meta, text, judge)
-                    seen.append(event["pos"])
-                    if inject:
-                        inject("mid_batch")
-                if seen:
-                    secretary_store.set_position(state, policy.principal, seen[-1])
-                if inject:
-                    inject("before_commit")
-            return {"principal": policy.principal, "policy_digest": policy.digest, "events_seen": len(seen),
-                    "items_added": added, "invisible": invisible,
-                    "through_pos": seen[-1] if seen else through,
-                    **({"export_sha256": secretary_store.export_digest(state, policy.principal)}
-                       if include_export else {})}
+    """Synchronous offline scan. Live decisions use scan_async to await the judge."""
+    with ScanBatch(config, state_path, policy_path, limit, inject) as batch:
+        for event in batch.rows:
+            batch.step(event, judge)
+            if batch.stopped:
+                break
+        return batch.result(include_export)
+
+
+async def scan_async(config: Config, state_path: Path, policy_path: Path, *, limit: int = sources.DEFAULT_BATCH,
+                     inject: Callable[[str], None] | None = None, judge: secretary_judge.JudgeSession | None = None,
+                     include_export: bool = True, database: DatabaseWorker | None = None) -> dict:
+    """Scan one page, borrowing a decision's database worker or owning one for a standalone scan."""
+    batch = ScanBatch(config, state_path, policy_path, limit, inject)
+    if database is not None:
+        return await batch.run(database, judge, include_export)
+    async with DatabaseWorker() as database:
+        return await batch.run(database, judge, include_export)
 
 
 def _waits_for_judge(state: Connection, policy: Policy, meta: dict, text: str, judge: Judge) -> bool:
@@ -230,7 +347,7 @@ def replay(config: Config, state_path: Path, policy_path: Path) -> dict:
                 "SELECT source_key, kind, reason, policy_digest FROM dispositions WHERE principal=?",
                 (policy.principal,))}
             # Each judged message reads as it was first judged: replay never runs the judge.
-            judged = secretary_judge.Stored({row["source_key"]: row for row in state.execute(
+            judged = secretary_judge.RecordedJudgments({row["source_key"]: row for row in state.execute(
                 "SELECT * FROM judgments WHERE principal=?", (policy.principal,))})
             inputs = []
             unavailable = []
@@ -252,7 +369,7 @@ def replay(config: Config, state_path: Path, policy_path: Path) -> dict:
                 with trial.transaction():
                     secretary_store.source_position(trial, policy.principal, epoch)
                     for meta, source_text in inputs:
-                        _process(trial, baton, config, policy, meta, source_text, judged)
+                        Projection(trial, baton, config, policy).process(meta, source_text, judged)
                     secretary_store.set_position(trial, policy.principal, through)
                 now = {row["source_key"]: dict(row) for row in trial.execute(
                     "SELECT source_key, kind, reason, policy_digest FROM dispositions WHERE principal=?",
@@ -381,7 +498,7 @@ def cancel(config: Config, state_path: Path, policy_path: Path, expectation_id: 
                         "attention": None, "needs_decision": False, "text_sha256": None,
                         "relayed_sha256": None, "notice_sha256": None, "relayed_count": 0, "has_notice": False,
                         "operator_cancel": True, "expectation_id": expectation_id, "reason": reason}
-                created = _process(state, baton, config, policy, meta, "")
+                created = Projection(state, baton, config, policy).process(meta, "")
             return {"principal": policy.principal, "expectation_id": expectation_id,
                     "source_key": source_key, "created": created,
                     "export_sha256": secretary_store.export_digest(state, policy.principal)}

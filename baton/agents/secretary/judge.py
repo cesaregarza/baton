@@ -44,11 +44,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
-import selectors
-import signal
-import subprocess
-import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -61,6 +56,7 @@ from baton.database import Connection, Row
 from . import policy as policy_module
 from . import sources
 from . import store as secretary_store
+from .command import JudgeCommand
 from .expectations import EVIDENCE_LIMIT, Expectations, artifact_match
 from .rules import NO_ACTION, MessageRules, addressed, choose_disposition, result_kind, signals
 
@@ -87,9 +83,30 @@ class Verdict(NamedTuple):
     def relates_to_item(self) -> bool:
         return self.relation != "none" and self.item is not None
 
+    @classmethod
+    def parse(cls, output: bytes, offered: list[str]) -> tuple[Verdict | None, str]:
+        try:
+            value = json.loads(output)
+        except ValueError:  # undecodable bytes too
+            return None, FALLBACK + "invalid_json"
+        invalid = None, FALLBACK + "wrong_shape"
+        if not isinstance(value, dict):
+            return invalid
+        if set(value) == {"declined"} and isinstance(value["declined"], str):
+            return None, FALLBACK + "declined"
+        if set(value) != set(CALLS):
+            return invalid
+        if value["relation"] not in RELATIONS:
+            return invalid
+        if value["item"] is not None and value["item"] not in offered:
+            return invalid
+        if not _probability(value["opens_owed"]) or not _probability(value["needs_now"]):
+            return invalid
+        return cls(value["relation"], value["item"], float(value["opens_owed"]), float(value["needs_now"])), JUDGED
+
 
 @dataclass
-class Session:
+class JudgeSession:
     """One decision's judge: at most `calls_left` messages within the decision's budget, from the wake's own message.
 
     A message before that one had its own wake decided when it came, so the word lists read it, as they read the
@@ -116,28 +133,33 @@ class Session:
     def _spent(self) -> bool:
         return self.calls_left <= 0 or self.deadline - self.clock() < MIN_CALL_SECONDS
 
-    def outcome(self, state: Connection, baton: Connection, config: Config,
-                policy: policy_module.Policy, meta: dict, text: str) -> tuple[str, str, list[str]]:
-        candidates = Expectations(state, policy.principal).candidates(meta)
+    async def ask(self, policy: policy_module.Policy, request: dict,
+                  candidate_count: int) -> tuple[Verdict | None, str]:
+        """Spend this callback's budget on one question, falling back when it cannot be judged."""
         if self._spent():
             self.fallbacks += 1
-            return _apply(state, baton, config, policy, meta, text, candidates, None, FALLBACK + "budget")
+            return None, FALLBACK + "budget"
         timeout = min(policy.judge["timeout_seconds"], self.deadline - self.clock())
-        request = _request(state, baton, config, policy, meta, text, candidates)
-        self.calls_left, self.calls = self.calls_left - 1, self.calls + 1
+        self.calls_left -= 1
+        self.calls += 1
         offered = [item["id"] for item in request["items"]]
-        verdict, status = ask(policy.judge["command"], {**request, "timeout_seconds": round(timeout, 3)}, timeout,
-                              offered)
-        has_unoffered_candidates = len(offered) < len(candidates)
-        if verdict is not None and has_unoffered_candidates and not verdict.relates_to_item:
-            # The judge saw only some of the open items this message could answer. Its "none" can't rule out one it
-            # never saw, so the word lists decide, as on any fallback.
+        command = JudgeCommand(policy.judge["command"], max_output=MAX_OUTPUT)
+        payload = json.dumps({**request, "timeout_seconds": round(timeout, 3)}).encode("utf-8")
+        try:
+            code, output = await command.run(payload, timeout)
+            verdict, status = Verdict.parse(output, offered) if code == 0 else (None, FALLBACK + "error")
+        except TimeoutError:
+            verdict, status = None, FALLBACK + "timeout"
+        except (OSError, ValueError):
+            verdict, status = None, FALLBACK + "error"
+        if verdict is not None and len(offered) < candidate_count and not verdict.relates_to_item:
+            # Seeing only some candidates cannot rule out the ones the command was not offered.
             verdict, status = None, FALLBACK + "unoffered"
         self.fallbacks += verdict is None
-        return _apply(state, baton, config, policy, meta, text, candidates, verdict, status)
+        return verdict, status
 
 
-class Stored:
+class RecordedJudgments:
     """Replay's judge: the verdict recorded when each message was first judged. It never runs the command."""
 
     def __init__(self, rows: dict[str, Row]) -> None:
@@ -154,8 +176,7 @@ class Stored:
         row = self.rows[meta["source_key"]]
         verdict = (Verdict(row["relation"], row["item"], row["opens_owed"], row["needs_now"])
                    if row["status"] == JUDGED else None)
-        return _apply(state, baton, config, policy, meta, text, Expectations(state, policy.principal).candidates(meta),
-                      verdict, row["status"])
+        return Judgment(state, baton, config, policy, meta, text).apply(verdict, row["status"])
 
 
 def _judged_kind(policy: policy_module.Policy, meta: dict) -> bool:
@@ -166,69 +187,134 @@ def _judged_kind(policy: policy_module.Policy, meta: dict) -> bool:
             and author != policy.principal)
 
 
-def _apply(state: Connection, baton: Connection, config: Config, policy: policy_module.Policy,
-           meta: dict, text: str, candidates: list[Row], verdict: Verdict | None,
-           status: str) -> tuple[str, str, list[str]]:
-    """Decide one message from its verdict, or by the word lists without one, and record both verdicts."""
-    message_rules = MessageRules(Expectations(state, policy.principal), baton, config, policy)
-    if verdict is None:
-        kind, reason, answers = message_rules.interpret(meta, text)
-        rules = kind, reason
-    else:
-        with _rolled_back(state):  # what the word lists would have decided, kept for review and then undone
-            rules = message_rules.interpret(meta, text)[:2]
-        kind, reason = _judged(state, baton, config, policy, meta, text, candidates, verdict)
-        answers = signals(text, policy).answers  # a brief's blockers stay word-based
-    secretary_store.put_judgment(state, policy.principal, meta["source_key"], status,
-                                 tuple(verdict) if verdict else (None, None, None, None), rules)
-    return kind, reason, answers
+@dataclass
+class Judgment:
+    """One visible message: its candidate requests, question and persisted interpretation.
 
+    Methods use the scan's database thread. Only JudgeSession sends the prepared
+    question to the asynchronous command, then asks this object to apply it.
+    """
 
-def _judged(state: Connection, baton: Connection, config: Config, policy: policy_module.Policy,
-            meta: dict, text: str, candidates: list[Row], verdict: Verdict) -> tuple[str, str]:
-    """The mapping in the module docstring, applied in its order."""
-    principal = policy.principal
-    ledger = Expectations(state, principal)
-    outcome = NO_ACTION
-    chosen = next((row for row in candidates if row["id"] == verdict.item), None)
-    if chosen is not None and verdict.relates_to_item:
-        outcome = choose_disposition(outcome, _relation(ledger, meta, chosen, verdict.relation))
-    if addressed(baton, config, principal, meta):
-        request = _owed_request(ledger, policy, meta, text, verdict)
-        outcome = choose_disposition(outcome, request)
-    # Urgency can promote quiet outcomes; it cannot override uncertain or bounded evidence.
-    if verdict.needs_now >= policy.judge["wake_at"] and outcome[0] in ("retain", "digest"):
-        return "brief", "needs the principal now"
-    return outcome
+    state: Connection
+    baton: Connection
+    config: Config
+    policy: policy_module.Policy
+    meta: dict
+    text: str
 
+    def __post_init__(self) -> None:
+        self.candidates = Expectations(self.state, self.policy.principal).candidates(self.meta)
 
-def _owed_request(ledger: Expectations, policy: policy_module.Policy, meta: dict, text: str,
-                  verdict: Verdict) -> tuple[str, str]:
-    if verdict.opens_owed < ASKS:
-        return "digest", "addressed to the principal; asks nothing of it"
-    attention = "brief", "principal owes a response"
-    if verdict.needs_now < policy.judge["owed_digest_below"]:
-        attention = "digest", "principal owes a response that can wait"
-    return ledger.owe(meta, requester=sources._actor(meta), artifact=sources._request_artifact(meta),
-                      opening_message_id=meta["message_id"], expected_kind=result_kind(text), outcome=attention)
+    def apply(self, verdict: Verdict | None, status: str) -> tuple[str, str, list[str]]:
+        """Decide one message from its verdict, or by the word lists without one, and record both verdicts."""
+        state, baton, config, policy = self.state, self.baton, self.config, self.policy
+        meta, text = self.meta, self.text
+        message_rules = MessageRules(Expectations(state, policy.principal), baton, config, policy)
+        if verdict is None:
+            kind, reason, answers = message_rules.interpret(meta, text)
+            rules = kind, reason
+        else:
+            with _rolled_back(state):  # what the word lists would have decided, kept for review and then undone
+                rules = message_rules.interpret(meta, text)[:2]
+            kind, reason = self._interpret(verdict)
+            answers = signals(text, policy).answers  # a brief's blockers stay word-based
+        secretary_store.put_judgment(state, policy.principal, meta["source_key"], status,
+                                     tuple(verdict) if verdict else (None, None, None, None), rules)
+        return kind, reason, answers
 
+    def _interpret(self, verdict: Verdict) -> tuple[str, str]:
+        """The mapping in the module docstring, applied in its order."""
+        state, baton, config, policy = self.state, self.baton, self.config, self.policy
+        meta, candidates = self.meta, self.candidates
+        principal = policy.principal
+        ledger = Expectations(state, principal)
+        outcome = NO_ACTION
+        chosen = next((row for row in candidates if row["id"] == verdict.item), None)
+        if chosen is not None and verdict.relates_to_item:
+            outcome = choose_disposition(outcome, self._relation(ledger, chosen, verdict.relation))
+        if addressed(baton, config, principal, meta):
+            request = self._owed_request(ledger, verdict)
+            outcome = choose_disposition(outcome, request)
+        # Urgency can promote quiet outcomes; it cannot override uncertain or bounded evidence.
+        if verdict.needs_now >= policy.judge["wake_at"] and outcome[0] in ("retain", "digest"):
+            return "brief", "needs the principal now"
+        return outcome
 
-def _relation(ledger: Expectations, meta: dict, chosen: Row, relation: str) -> tuple[str, str]:
-    artifact = artifact_match(chosen, meta["artifacts"])
-    if artifact == "stale":
-        return ledger.record(chosen, meta, "stale", "artifact-revision", ("retain", "stale artifact revision retained"))
-    if artifact == "uncertain":
-        return ledger.record(chosen, meta, "uncertain", "conflicting-result", ("reconcile", "result is uncertain"))
-    if relation == "answers":
-        if ledger.close(chosen, meta, "satisfied", "judge:answers"):
-            return "brief", "expected result reported"
-        return EVIDENCE_LIMIT
-    if relation == "acknowledges":
-        return ledger.record(chosen, meta, "ack", "judge:acknowledges",
-                             ("digest", "acknowledgment; result still outstanding"))
-    # A change or cancellation is evidence only: one reading must never close what the principal still awaits.
-    return ledger.record(chosen, meta, "changed", "judge:changes-or-cancels",
-                         ("digest", "open item changed or cancelled"))
+    def _owed_request(self, ledger: Expectations, verdict: Verdict) -> tuple[str, str]:
+        policy, meta, text = self.policy, self.meta, self.text
+        if verdict.opens_owed < ASKS:
+            return "digest", "addressed to the principal; asks nothing of it"
+        attention = "brief", "principal owes a response"
+        if verdict.needs_now < policy.judge["owed_digest_below"]:
+            attention = "digest", "principal owes a response that can wait"
+        return ledger.owe(meta, requester=sources._actor(meta), artifact=sources._request_artifact(meta),
+                          opening_message_id=meta["message_id"], expected_kind=result_kind(text), outcome=attention)
+
+    def _relation(self, ledger: Expectations, chosen: Row, relation: str) -> tuple[str, str]:
+        meta = self.meta
+        artifact = artifact_match(chosen, meta["artifacts"])
+        if artifact == "stale":
+            return ledger.record(chosen, meta, "stale", "artifact-revision",
+                                 ("retain", "stale artifact revision retained"))
+        if artifact == "uncertain":
+            return ledger.record(chosen, meta, "uncertain", "conflicting-result", ("reconcile", "result is uncertain"))
+        if relation == "answers":
+            if ledger.close(chosen, meta, "satisfied", "judge:answers"):
+                return "brief", "expected result reported"
+            return EVIDENCE_LIMIT
+        if relation == "acknowledges":
+            return ledger.record(chosen, meta, "ack", "judge:acknowledges",
+                                 ("digest", "acknowledgment; result still outstanding"))
+        # A change or cancellation is evidence only: one reading must never close what the principal still awaits.
+        return ledger.record(chosen, meta, "changed", "judge:changes-or-cancels",
+                             ("digest", "open item changed or cancelled"))
+
+    def request(self) -> dict:
+        baton, config, policy, meta, text = self.baton, self.config, self.policy, self.meta, self.text
+        principal = policy.principal
+        parent = sources._visible_message(baton, config, principal, meta["reply_to"]) if meta["reply_to"] else None
+        message = {"id": meta["message_id"], "from": sources._actor(meta), "from_kind": meta["identity"]["author_kind"],
+                   "at": meta["at"], "channel": "direct" if meta["conversation_id"] is None else "conversation",
+                   "conversation_id": meta["conversation_id"], "job_id": meta["job_id"],
+                   "attention": meta["attention"] or [], "reply_to": meta["reply_to"],
+                   "replies_to_principal": parent is not None and parent["sender"] == principal,
+                   "artifacts": [f"{artifact['key']}@{artifact['rev']}" for artifact in meta["artifacts"]],
+                   "relayed": meta["relayed_count"] > 0, "notice": meta["has_notice"], "text": text}
+        return {"version": REQUEST_VERSION, "principal": principal,
+                "questions_sha256": policy.judge["questions_sha256"], "message": message,
+                "items": self._items()}
+
+    def _items(self) -> list[dict]:
+        """The most recently opened candidates, oldest first. Visibility is checked again here: an item whose opening
+        message the principal can no longer read is omitted along with its title."""
+        state, baton, config, principal = self.state, self.baton, self.config, self.policy.principal
+        candidates = self.candidates
+        def opened_at(row: Row) -> int:
+            found = state.execute("SELECT event_pos FROM items WHERE principal=? AND source_key=?",
+                                  (principal, row["opening_source"])).fetchone()
+            if found is None:
+                return 0
+            return found["event_pos"] or 0
+
+        offered = []
+        for row in sorted(candidates, key=opened_at, reverse=True):
+            opening = (sources._visible_message(baton, config, principal, row["opening_message_id"])
+                       if row["opening_message_id"] else None)
+            if row["opening_message_id"] and opening is None:
+                continue
+            shaped = messages.as_dict(opening) if opening is not None else None
+            acknowledged = state.execute("SELECT 1 FROM expectation_evidence WHERE principal=? AND expectation_id=?"
+                                         " AND kind='ack'", (principal, row["id"])).fetchone()
+            offered.append({"id": row["id"], "direction": row["direction"],
+                            "counterpart": row["responder"] if row["direction"] == "awaited" else row["requester"],
+                            "job_id": row["task_ref"][4:] if (row["task_ref"] or "").startswith("job:") else None,
+                            "artifact": f"{row['artifact_key']}@{row['artifact_rev']}" if row["artifact_key"] else None,
+                            "state": "acknowledged" if acknowledged else "open",
+                            "title": " ".join(shaped["text"].split()[:TITLE_WORDS]) if shaped else None,
+                            "relayed": bool(shaped and shaped["relayed"])})
+            if len(offered) == OFFERED:
+                break
+        return offered[::-1]
 
 
 @contextmanager
@@ -241,130 +327,5 @@ def _rolled_back(state: Connection) -> Iterator[None]:
         state.execute("RELEASE judge_word_lists")
 
 
-def _request(state: Connection, baton: Connection, config: Config, policy: policy_module.Policy,
-             meta: dict, text: str, candidates: list[Row]) -> dict:
-    principal = policy.principal
-    parent = sources._visible_message(baton, config, principal, meta["reply_to"]) if meta["reply_to"] else None
-    message = {"id": meta["message_id"], "from": sources._actor(meta), "from_kind": meta["identity"]["author_kind"],
-               "at": meta["at"], "channel": "direct" if meta["conversation_id"] is None else "conversation",
-               "conversation_id": meta["conversation_id"], "job_id": meta["job_id"],
-               "attention": meta["attention"] or [], "reply_to": meta["reply_to"],
-               "replies_to_principal": parent is not None and parent["sender"] == principal,
-               "artifacts": [f"{artifact['key']}@{artifact['rev']}" for artifact in meta["artifacts"]],
-               "relayed": meta["relayed_count"] > 0, "notice": meta["has_notice"], "text": text}
-    return {"version": REQUEST_VERSION, "principal": principal,
-            "questions_sha256": policy.judge["questions_sha256"], "message": message,
-            "items": _items(state, baton, config, principal, candidates)}
-
-
-def _items(state: Connection, baton: Connection, config: Config, principal: str,
-           candidates: list[Row]) -> list[dict]:
-    """The most recently opened candidates, oldest first. Visibility is checked again here: an item whose opening
-    message the principal can no longer read is not offered at all, so neither it nor its title reaches the judge."""
-    def opened_at(row: Row) -> int:
-        found = state.execute("SELECT event_pos FROM items WHERE principal=? AND source_key=?",
-                              (principal, row["opening_source"])).fetchone()
-        if found is None:
-            return 0
-        return found["event_pos"] or 0
-
-    offered = []
-    for row in sorted(candidates, key=opened_at, reverse=True):
-        opening = (sources._visible_message(baton, config, principal, row["opening_message_id"])
-                   if row["opening_message_id"] else None)
-        if row["opening_message_id"] and opening is None:
-            continue
-        shaped = messages.as_dict(opening) if opening is not None else None
-        acknowledged = state.execute("SELECT 1 FROM expectation_evidence WHERE principal=? AND expectation_id=?"
-                                     " AND kind='ack'", (principal, row["id"])).fetchone()
-        offered.append({"id": row["id"], "direction": row["direction"],
-                        "counterpart": row["responder"] if row["direction"] == "awaited" else row["requester"],
-                        "job_id": row["task_ref"][4:] if (row["task_ref"] or "").startswith("job:") else None,
-                        "artifact": f"{row['artifact_key']}@{row['artifact_rev']}" if row["artifact_key"] else None,
-                        "state": "acknowledged" if acknowledged else "open",
-                        "title": " ".join(shaped["text"].split()[:TITLE_WORDS]) if shaped else None,
-                        "relayed": bool(shaped and shaped["relayed"])})
-        if len(offered) == OFFERED:
-            break
-    return offered[::-1]
-
-
-def ask(command: list[str], request: dict, timeout: float, offered: list[str]) -> tuple[Verdict | None, str]:
-    """Run the judge once. Returns its verdict and "judged", or None and the reason it fell back."""
-    try:
-        code, output = _run(command, json.dumps(request).encode("utf-8"), timeout)
-    except subprocess.TimeoutExpired:
-        return None, FALLBACK + "timeout"
-    except (OSError, ValueError):
-        return None, FALLBACK + "error"
-    if code != 0:
-        return None, FALLBACK + "error"
-    return parse(output, offered)
-
-
-def parse(output: bytes, offered: list[str]) -> tuple[Verdict | None, str]:
-    try:
-        value = json.loads(output)
-    except ValueError:  # undecodable bytes too
-        return None, FALLBACK + "invalid_json"
-    invalid = None, FALLBACK + "wrong_shape"
-    if not isinstance(value, dict):
-        return invalid
-    if set(value) == {"declined"} and isinstance(value["declined"], str):
-        return None, FALLBACK + "declined"
-    if set(value) != set(CALLS):
-        return invalid
-    if value["relation"] not in RELATIONS:
-        return invalid
-    if value["item"] is not None and value["item"] not in offered:
-        return invalid
-    if not _probability(value["opens_owed"]) or not _probability(value["needs_now"]):
-        return invalid
-    return Verdict(value["relation"], value["item"], float(value["opens_owed"]), float(value["needs_now"])), JUDGED
-
-
 def _probability(value: object) -> bool:
     return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1
-
-
-def _run(command: list[str], payload: bytes, timeout: float) -> tuple[int, bytes]:
-    """Run the command in its own process group: write the request, read at most MAX_OUTPUT bytes, and kill the
-    whole group if it outlives the timeout. Its stderr is discarded, so nothing it prints is kept."""
-    deadline = time.monotonic() + timeout
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               start_new_session=True)
-    output, pending = bytearray(), memoryview(payload)
-    try:
-        with selectors.DefaultSelector() as selector:
-            os.set_blocking(process.stdin.fileno(), False)
-            selector.register(process.stdin, selectors.EVENT_WRITE)
-            selector.register(process.stdout, selectors.EVENT_READ)
-            while selector.get_map():
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    raise subprocess.TimeoutExpired(command, timeout)
-                for key, _ in selector.select(left):
-                    if key.fileobj is process.stdin:
-                        try:
-                            pending = pending[os.write(key.fd, pending[:65536]):]
-                        except BrokenPipeError:  # it stopped reading; its exit code says why
-                            pending = pending[len(pending):]
-                        if not pending:
-                            selector.unregister(process.stdin)
-                            process.stdin.close()
-                        continue
-                    chunk = os.read(key.fd, 65536)
-                    if not chunk:
-                        selector.unregister(process.stdout)
-                    elif len(output) + len(chunk) > MAX_OUTPUT:
-                        raise ValueError("judge output exceeds its bound")
-                    else:
-                        output.extend(chunk)
-        return process.wait(max(0.0, deadline - time.monotonic())), bytes(output)
-    finally:
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-        for pipe in (process.stdin, process.stdout):
-            if not pipe.closed:
-                pipe.close()

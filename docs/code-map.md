@@ -59,7 +59,9 @@ entrypoints. Their implementations live in `agents/secretary/decide.py` and `age
 | Change secretary message matching or job handoffs | `agents/secretary/rules.py` | `MessageRules` interprets messages; `job_disposition` follows job actors |
 | Change expectation lifecycle or evidence limits | `agents/secretary/expectations.py` | `Expectations` opens, records and closes requests for one principal |
 | Change secretary scan or replay | `agents/secretary/tracking.py` | `sources.py` reads visible records; `store.py` owns the private schema |
-| Change wake/hold decisions | `agents/secretary/decide.py` | `policy.py` validates configuration; `judge.py` handles optional external judgments |
+| Change wake/hold decisions | `agents/secretary/decide.py` | `DecisionRun` owns a callback; `AttentionWindow` selects and presents outstanding items |
+| Integrate asynchronous secretary calls | `agents/secretary/service.py` | `Secretary.scan/decide` await database work and external judgments |
+| Change judge interpretation or command execution | `agents/secretary/judge.py`, `command.py` | `Judgment` owns meaning; `JudgeSession` owns budget; `JudgeCommand` owns process I/O |
 | Change brief or digest text | `agents/secretary/digest.py` | Rendering checks visibility and returns the position covered by the byte bound |
 | Change secretary read output | `agents/secretary/read.py` | It reads authoritative data without advancing delivery cursors |
 
@@ -145,18 +147,19 @@ read, or borrows an existing transaction.
 The [secretary developer guide](../baton/agents/secretary/README.md) explains owed and awaited requests,
 rule order, judge behavior, and the scan/decision/delivery lifecycle with examples.
 
-`tracking.scan()` reads a page of visible events and commits its effects together with the scan position.
+`Secretary.scan()` awaits a `ScanBatch` that reads visible events and commits their effects with the scan position.
 `MessageRules.interpret()` matches a message to outstanding requests, records its result, then opens any new
 request addressed to the principal. Job events use `job_disposition()` instead. Both use an `Expectations`
 ledger bound to the principal and the scan's connection; the ledger owns opening, evidence and closure limits.
 
-When a judge is configured, `judge.Session` interprets eligible messages through the same ledger. It also
+When a judge is configured, `JudgeSession` asks an asynchronous `JudgeCommand` to interpret a message's
+prepared question. `Judgment` applies the answer through the same ledger. It also
 records what the word rules would have decided, rolling back that trial before applying the judgment.
 `tracking.replay()` uses recorded verdicts and an in-memory ledger, so it neither calls the judge again nor
 rewrites stored state.
 
-`decide.decide()` scans within its budget, chooses wake/hold/keep, and calls `digest.render()` when text is
-needed. Rendering returns both the text and the position it actually covered. The caller supplies that
+`Secretary.decide()` creates a `DecisionRun` that scans within its budget. Its `AttentionWindow` chooses
+wake/hold/keep and renders text when needed. Rendering returns both the text and the position it actually covered. The caller supplies that
 position on the next call only after delivering the text; an undelivered brief is therefore retried.
 
 ## Organization rules
