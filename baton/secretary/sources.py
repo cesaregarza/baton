@@ -9,10 +9,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import sqlite3
 
 from baton import board_read, messages, secretary_store
 from baton.config import Config, ConfigError
+from baton.database import Connection, Row
 from baton.errors import InvalidRequest
 
 ENVELOPE_VERSION = 1
@@ -24,7 +24,7 @@ SUPERSEDES = re.compile(r"\bsupersedes\s+(?P<key>[\w./-]+#\d+)@(?P<rev>[0-9a-fA-
                         r"(?![0-9a-fA-F])", re.IGNORECASE)
 
 
-def _epoch(baton: sqlite3.Connection) -> str:
+def _epoch(baton: Connection) -> str:
     row = baton.execute("SELECT value FROM log_meta WHERE key='log_epoch'").fetchone()
     if row is None:
         raise ConfigError("Baton log_epoch is missing")
@@ -58,23 +58,23 @@ def _request_artifact(meta: dict) -> dict | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _visible_message(baton: sqlite3.Connection, config: Config, principal: str,
-                     message_id: str) -> sqlite3.Row | None:
+def _visible_message(baton: Connection, config: Config, principal: str,
+                     message_id: str) -> Row | None:
     condition, params = board_read.message_condition(config, principal)
     return baton.execute(f"SELECT m.* FROM messages m WHERE m.id=:message_id AND {condition}"
                          " ORDER BY (m.recipient = :reader) DESC, m.seq LIMIT 1",
                          {**params, "message_id": message_id}).fetchone()
 
 
-def _event_message(baton: sqlite3.Connection, config: Config, principal: str,
-                   message_id: str, seq: int, recipient: str) -> sqlite3.Row | None:
+def _event_message(baton: Connection, config: Config, principal: str,
+                   message_id: str, seq: int, recipient: str) -> Row | None:
     condition, params = board_read.message_condition(config, principal)
     return baton.execute(f"SELECT m.* FROM messages m WHERE m.id=:message_id AND m.seq=:seq"
                          f" AND m.recipient=:recipient AND {condition}",
                          {**params, "message_id": message_id, "seq": seq, "recipient": recipient}).fetchone()
 
 
-def _job(config: Config, job_id: str | None, event: sqlite3.Row, data: dict) -> dict | None:
+def _job(config: Config, job_id: str | None, event: Row, data: dict) -> dict | None:
     if job_id is None:
         return None
     event_state = (data.get("state") if event["kind"] == "job.created" else data.get("to")
@@ -85,7 +85,7 @@ def _job(config: Config, job_id: str | None, event: sqlite3.Row, data: dict) -> 
             "event_waiting_on": event["audience"] if entered is not None and not entered.terminal else None}
 
 
-def _conversation(baton: sqlite3.Connection, conversation_id: str | None, message_id: str | None) -> dict | None:
+def _conversation(baton: Connection, conversation_id: str | None, message_id: str | None) -> dict | None:
     if conversation_id is None:
         return None
     change = baton.execute("SELECT revision FROM change_log WHERE conversation_id=? AND message_id=?"
@@ -93,8 +93,8 @@ def _conversation(baton: sqlite3.Connection, conversation_id: str | None, messag
     return {"id": conversation_id, "message_revision": change["revision"] if change else None}
 
 
-def _envelope(baton: sqlite3.Connection, config: Config, principal: str,
-              event: sqlite3.Row) -> tuple[dict, str] | None:
+def _envelope(baton: Connection, config: Config, principal: str,
+              event: Row) -> tuple[dict, str] | None:
     """Map one real Baton event to metadata plus transient authored text. Never persist the latter."""
     data = json.loads(event["data"])
     message = None
@@ -148,7 +148,7 @@ def _envelope(baton: sqlite3.Connection, config: Config, principal: str,
     return meta, text
 
 
-def _source_rows(baton: sqlite3.Connection, principal: str, after: int, limit: int) -> list[sqlite3.Row]:
+def _source_rows(baton: Connection, principal: str, after: int, limit: int) -> list[Row]:
     # An earlier job event authored by P is in P's stream and seeds job tracking. The correlated
     # source-event predicate rebuilds that set across batch boundaries without mutable job state.
     return baton.execute("SELECT e.* FROM events e WHERE e.pos>? AND (e.audience=? OR e.actor=? OR"

@@ -13,21 +13,20 @@ reader never sees a state without its event, or the reverse.
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from typing import Any
 
 from baton import events, messages
 from baton.config import Jobs
+from baton.database import Connection, Row
 from baton.errors import IllegalTransition, InvalidRequest, StaleRevision, UnknownJob
-from baton.store import transaction
 
 MAX_TITLE = 200
 MAX_BODY_BYTES = 64 * 1024
 MAX_PAGE_EVENTS = 100
 
 
-def create(conn: sqlite3.Connection, graph: Jobs, *, request_id: str, actor: str, title: str,
+def create(conn: Connection, graph: Jobs, *, request_id: str, actor: str, title: str,
            body: str = "") -> dict[str, Any]:
     """Open a job in the initial state. Retrying with the same request_id and body returns the same job."""
     if not 1 <= len(request_id) <= 200:
@@ -36,7 +35,7 @@ def create(conn: sqlite3.Connection, graph: Jobs, *, request_id: str, actor: str
         raise InvalidRequest(f"title is 1-{MAX_TITLE} characters and body at most {MAX_BODY_BYTES} bytes")
     digest = events.request_digest("create_job", {"actor": actor, "title": title, "body": body})
     initial = graph.states[graph.initial]
-    with transaction(conn):
+    with conn.transaction():
         existing = events.replayed(conn, "jobs", request_id, digest)
         if existing is not None:
             return {"job_id": existing["id"], "state": existing["state"], "revision": existing["revision"],
@@ -51,7 +50,7 @@ def create(conn: sqlite3.Connection, graph: Jobs, *, request_id: str, actor: str
     return {"job_id": job_id, "state": initial.name, "revision": 1, "created": True}
 
 
-def move(conn: sqlite3.Connection, graph: Jobs, job_id: str, to_state: str, *, actor: str, note: str = "",
+def move(conn: Connection, graph: Jobs, job_id: str, to_state: str, *, actor: str, note: str = "",
          request_id: str | None = None, expected_revision: int | None = None) -> dict[str, Any]:
     """Move a job along one edge of the graph, with an optional short note for whoever acts next.
 
@@ -67,7 +66,7 @@ def move(conn: sqlite3.Connection, graph: Jobs, job_id: str, to_state: str, *, a
     created_at = messages.request_time(request_id)
     digest = events.request_digest("move_job", {"job_id": job_id, "to_state": to_state, "actor": actor,
                                                 "note": note, "expected_revision": expected_revision})
-    with transaction(conn):
+    with conn.transaction():
         replay = events.replayed(conn, "job_moves", request_id, digest)
         if replay is not None:
             return {**json.loads(replay["outcome"]), "request_id": request_id, "created": False}
@@ -93,11 +92,11 @@ def move(conn: sqlite3.Connection, graph: Jobs, job_id: str, to_state: str, *, a
     return {**outcome, "request_id": request_id, "created": True}
 
 
-def get(conn: sqlite3.Connection, job_id: str) -> dict[str, Any]:
+def get(conn: Connection, job_id: str) -> dict[str, Any]:
     return _as_dict(_load(conn, job_id))
 
 
-def list_jobs(conn: sqlite3.Connection, *, state: str | None = None, waiting_on: str | None = None,
+def list_jobs(conn: Connection, *, state: str | None = None, waiting_on: str | None = None,
               limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
     """Recent jobs, newest first, without their bodies."""
     where, params = _filters(state, waiting_on)
@@ -107,7 +106,7 @@ def list_jobs(conn: sqlite3.Connection, *, state: str | None = None, waiting_on:
     return [dict(row) for row in rows]
 
 
-def count_jobs(conn: sqlite3.Connection, *, state: str | None = None, waiting_on: str | None = None) -> int:
+def count_jobs(conn: Connection, *, state: str | None = None, waiting_on: str | None = None) -> int:
     """How many jobs `list_jobs` would match with no limit."""
     where, params = _filters(state, waiting_on)
     return conn.execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", params).fetchone()[0]
@@ -123,7 +122,7 @@ def _filters(state: str | None, waiting_on: str | None) -> tuple[str, list[str]]
     return where, params
 
 
-def read_events(conn: sqlite3.Connection, job_id: str, after_seq: int = 0, limit: int = 50) -> dict[str, Any]:
+def read_events(conn: Connection, job_id: str, after_seq: int = 0, limit: int = 50) -> dict[str, Any]:
     """A job's events after `after_seq`, oldest first, with `next_seq` to continue from."""
     _load(conn, job_id)
     rows = conn.execute("SELECT * FROM events WHERE job_id = ? AND seq > ? ORDER BY seq LIMIT ?",
@@ -132,17 +131,17 @@ def read_events(conn: sqlite3.Connection, job_id: str, after_seq: int = 0, limit
     return {"events": page, "next_seq": page[-1]["seq"] if page else after_seq}
 
 
-def require_exists(conn: sqlite3.Connection, job_id: str) -> None:
+def require_exists(conn: Connection, job_id: str) -> None:
     """Refuse an unknown job. A finished job still accepts messages about it."""
     _load(conn, job_id)
 
 
-def _load(conn: sqlite3.Connection, job_id: str) -> sqlite3.Row:
+def _load(conn: Connection, job_id: str) -> Row:
     row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if row is None:
         raise UnknownJob(job_id)
     return row
 
 
-def _as_dict(row: sqlite3.Row) -> dict[str, Any]:
+def _as_dict(row: Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys() if key not in ("request_digest", "request_id")}

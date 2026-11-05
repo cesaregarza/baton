@@ -6,17 +6,17 @@ revalidation share the same source-message lookup and range operations."""
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 from typing import Any
 
 from baton.config import Config
+from baton.database import Connection, Row
 from baton.errors import BatchSuperseded, ProvenanceLimitExceeded, UpToDate
 
 from . import storage
 from .constants import ITEM_REVISION, RECENT
 
 
-def _kind_plan(conn: sqlite3.Connection, producer: str, generation: str | None, conversation_id: str,
+def _kind_plan(conn: Connection, producer: str, generation: str | None, conversation_id: str,
                kind: str) -> dict[str, Any]:
     """What a kind builds on: its current valid version, or nothing (a first version, or a rebase over an
     invalid one, whose number the commit's compare-and-set still names). An invalid version is never a prior."""
@@ -32,7 +32,7 @@ def _kind_plan(conn: sqlite3.Connection, producer: str, generation: str | None, 
             "rebase": False, "reason": None}
 
 
-def _recent_plan(conn: sqlite3.Connection, config: Config, producer: str, generation: str | None,
+def _recent_plan(conn: Connection, config: Config, producer: str, generation: str | None,
                  conversation_id: str, last_seq: int) -> dict[str, Any]:
     """A recent window builds on nothing and always reaches the newest message.
 
@@ -58,7 +58,7 @@ def _recent_plan(conn: sqlite3.Connection, config: Config, producer: str, genera
             "prior_inputs": [], "rebase": False, "reason": None}
 
 
-def _window(conn: sqlite3.Connection, config: Config, conversation_id: str, plans: dict[str, dict[str, Any]],
+def _window(conn: Connection, config: Config, conversation_id: str, plans: dict[str, dict[str, Any]],
             last_seq: int) -> dict[str, Any]:
     """The seqs this batch covers, from the lowest checkpoint asked for, as far as the bounds allow.
 
@@ -115,7 +115,7 @@ def _window(conn: sqlite3.Connection, config: Config, conversation_id: str, plan
             "item_count": len(items)}
 
 
-def _present(conn: sqlite3.Connection, conversation_id: str, from_seq: int, to_seq: int,
+def _present(conn: Connection, conversation_id: str, from_seq: int, to_seq: int,
              limit: int) -> list[tuple[int, str]]:
     """The first `limit` seqs in range that still have a copy, in order, each with its message id."""
     return [(row[0], row[1]) for row in conn.execute(
@@ -124,7 +124,7 @@ def _present(conn: sqlite3.Connection, conversation_id: str, from_seq: int, to_s
         (conversation_id, from_seq, to_seq, limit))]
 
 
-def _revalidate(conn: sqlite3.Connection, manifest: dict[str, Any], kinds: list[str]) -> None:
+def _revalidate(conn: Connection, manifest: dict[str, Any], kinds: list[str]) -> None:
     """Everything the batch rests on still holds, or the batch is superseded, naming the first thing that failed."""
     for segment in manifest["segments"]:
         for item in segment["items"]:
@@ -151,8 +151,8 @@ def _check_containment(prior: list[list[int]], merged: list[list[int]]) -> None:
             raise BatchSuperseded(f"inputs {start}-{end} of the prior version would be lost from this one")
 
 
-def _cannot_advance(conn: sqlite3.Connection, config: Config, conversation_id: str,
-                    current: sqlite3.Row | None) -> bool:
+def _cannot_advance(conn: Connection, config: Config, conversation_id: str,
+                    current: Row | None) -> bool:
     """Whether the next item past a valid version's coverage can't be recorded within the provenance bound."""
     prior = storage._inputs(conn, current["id"]) if current is not None else []
     start = current["covered_through_seq"] + 1 if current is not None else 1

@@ -76,7 +76,7 @@ from mcp.shared.exceptions import MCPError
 
 from baton import aliases, auth, datadir
 from baton.config import Config, ConfigError
-from baton.store import connect, transaction
+from baton.store import connect
 
 log = logging.getLogger("baton.integrations.openai_mcp_events")
 
@@ -612,7 +612,7 @@ class McpEvents:
         """One transaction on the host database. Always taken inside the state lock, never around it."""
         conn = connect(self.config.db_path)
         try:
-            with transaction(conn):
+            with conn.transaction():
                 yield conn
         finally:
             conn.close()

@@ -136,6 +136,8 @@ for published versions.
 
 ## Contributing
 
+The [code map](docs/code-map.md) follows a message through the domain objects and database boundary.
+
 ```sh
 uv sync
 uv run ruff check .

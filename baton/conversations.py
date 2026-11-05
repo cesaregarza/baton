@@ -32,13 +32,13 @@ a job.
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from baton import board_read, changes, events, messages, topic_grants, topics
 from baton.config import Config, Conversations
+from baton.database import Connection, Row
 from baton.errors import (
     ConversationFull,
     ConversationRateLimited,
@@ -50,7 +50,6 @@ from baton.errors import (
     UnknownConversation,
     UnknownRole,
 )
-from baton.store import snapshot, transaction
 from baton.topic_paths import MAX_TOPIC_SEGMENT as MAX_TOPIC_SEGMENT
 from baton.topic_paths import MAX_TOPIC_SEGMENTS as MAX_TOPIC_SEGMENTS
 from baton.topic_paths import TOPIC_SEGMENT as TOPIC_SEGMENT
@@ -63,7 +62,7 @@ RATE_WINDOW = timedelta(hours=1)
 MAX_LISTED = 200
 
 
-def set_topic(conn: sqlite3.Connection, config: Config, conversation_id: str, topic: Any, *,
+def set_topic(conn: Connection, config: Config, conversation_id: str, topic: Any, *,
               actor: str, identity: dict[str, str] | None = None,
               seen: dict[str, Any] | None = None, grant_key: str | None = None) -> dict[str, Any]:
     """Set, rename or clear a conversation's topic. `None` clears it; the conversation's id never changes.
@@ -78,7 +77,7 @@ def set_topic(conn: sqlite3.Connection, config: Config, conversation_id: str, to
         raise Forbidden(f"{actor} may not change a conversation's topic "
                         f"(roles.{actor}.can_manage_participants)")
     topic = check_topic(topic)
-    with transaction(conn):
+    with conn.transaction():
         before = _load(conn, conversation_id)["topic"]
         grant = _authorize_move(conn, actor, conversation_id, before, topic, identity, grant_key)
         grant_id = None if grant is None else grant["id"]
@@ -96,8 +95,8 @@ def set_topic(conn: sqlite3.Connection, config: Config, conversation_id: str, to
     return {"conversation_id": conversation_id, "topic": topic, "changed": topic != before}
 
 
-def _authorize_move(conn: sqlite3.Connection, actor: str, conversation_id: str, before: str | None, after: str | None,
-                    identity: dict[str, str] | None, grant_key: str | None) -> sqlite3.Row | None:
+def _authorize_move(conn: Connection, actor: str, conversation_id: str, before: str | None, after: str | None,
+                    identity: dict[str, str] | None, grant_key: str | None) -> Row | None:
     """A core role must be in the thread. A guest needs the grant its key opens to cover both ends of the move.
 
     Both ends, because the source is as much a claim as the destination: a grant on the destination alone would let
@@ -115,7 +114,7 @@ def _authorize_move(conn: sqlite3.Connection, actor: str, conversation_id: str, 
     return grant
 
 
-def _tell_of_move(conn: sqlite3.Connection, conversation_id: str, grant: sqlite3.Row, identity: dict[str, str],
+def _tell_of_move(conn: Connection, conversation_id: str, grant: Row, identity: dict[str, str],
                   who: str, before: str | None, after: str | None) -> None:
     """A host notice to every participant that a grantee moved their thread, and under which grant."""
     notice = {"event": "topic_moved", "from": before, "to": after, "by": who, "alias": identity["alias"],
@@ -131,7 +130,7 @@ def require_enabled(config: Config) -> Conversations:
     return config.conversations
 
 
-def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str,
+def create(conn: Connection, config: Config, *, actor: str, title: str,
            participants: list[str] | None = None, topic: Any = None, request_id: str | None = None,
            identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """Open a conversation. A retry with the same request_id replays rather than opening a second one.
@@ -164,7 +163,7 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str,
         **({"alias_id": identity["alias_id"]} if guest else {"participants": sorted(_check_roles(
             config, participants))})})
     refusal = None
-    with transaction(conn):
+    with conn.transaction():
         existing = events.replayed(conn, "conversations", request_id, digest)
         if existing is not None:
             topics.note_replay(conn, seen, topic, existing["topic"])
@@ -201,7 +200,7 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, title: str,
     return {**summary, "request_id": request_id, "created": True}
 
 
-def _thread_cap_refusal(conn: sqlite3.Connection, config: Config,
+def _thread_cap_refusal(conn: Connection, config: Config,
                         identity: dict[str, str]) -> LimitExceeded | None:
     """Whether this guest thread is over either hourly cap, counted inside the caller's write lock.
 
@@ -230,7 +229,7 @@ def _thread_cap_refusal(conn: sqlite3.Connection, config: Config,
                          "threads_per_guest" if over_guests else "threads_per_alias")
 
 
-def _alert_guest_cap(conn: sqlite3.Connection, config: Config) -> None:
+def _alert_guest_cap(conn: Connection, config: Config) -> None:
     """Tell the alert role the guest-wide cap filled, at most once an hour.
 
     The timestamp is persisted in the same transaction as the refusal, so a restart cannot turn one
@@ -269,7 +268,7 @@ def _admit_guest_thread(config: Config, identity: dict[str, str] | None) -> None
                         "(roles.guest.can_view_all_conversations), so they cannot start a thread either")
 
 
-def list_for(conn: sqlite3.Connection, role: str, topic: Any = None, *, limit: int = MAX_LISTED,
+def list_for(conn: Connection, role: str, topic: Any = None, *, limit: int = MAX_LISTED,
              before: tuple[str, str] | None = None, changed_since: str | None = None,
              _lookahead: bool = False) -> list[dict[str, Any]]:
     """The conversations `role` takes part in, newest first, with their participants.
@@ -290,7 +289,7 @@ def list_for(conn: sqlite3.Connection, role: str, topic: Any = None, *, limit: i
     return [_summary(conn, row) for row in rows]
 
 
-def list_all(conn: sqlite3.Connection, topic: Any = None, *, limit: int = MAX_LISTED,
+def list_all(conn: Connection, topic: Any = None, *, limit: int = MAX_LISTED,
              before: tuple[str, str] | None = None, changed_since: str | None = None,
              _lookahead: bool = False) -> list[dict[str, Any]]:
     """Every conversation, newest first, paged like `list_for`: only for a viewer the config lets see them all."""
@@ -310,7 +309,7 @@ def page_cursor(summary: dict[str, Any]) -> tuple[str, str]:
     return summary["created_at"], summary["conversation_id"]
 
 
-def list_readable(conn: sqlite3.Connection, config: Config, role: str, topic: Any = None, *,
+def list_readable(conn: Connection, config: Config, role: str, topic: Any = None, *,
                   limit: int = MAX_LISTED, before: tuple[str, str] | None = None,
                   changed_since: str | None = None, _lookahead: bool = False,
                   seen: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -319,13 +318,92 @@ def list_readable(conn: sqlite3.Connection, config: Config, role: str, topic: An
     The topic's id and the listing are read in one snapshot, so a rename and reuse of the path in between
     cannot make the listing describe a different topic from the one the audit line names.
     """
-    with snapshot(conn):
+    with conn.snapshot():
         topics.note_path(conn, seen, check_topic(topic))
         if board_read.sees_all(config, role):
             return list_all(conn, topic, limit=limit, before=before, changed_since=changed_since,
                             _lookahead=_lookahead)
         return list_for(conn, role, topic, limit=limit, before=before, changed_since=changed_since,
                         _lookahead=_lookahead)
+
+
+def list_readable_page(conn: Connection, config: Config, role: str, topic: Any = None, *,
+                       limit: int = MAX_LISTED, offset: int = 0) -> tuple[int, list[dict[str, Any]]]:
+    """Return the authorized total and one numbered page in a single read snapshot.
+
+    This is for views whose page number is part of the link, rather than a cursor. The count and
+    rows use the same board-read rule and topic filter; the page query never materializes earlier
+    conversations just to skip them.
+    """
+    where, values = _under(topic)
+    limit = _limit(limit)
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise InvalidRequest("offset must be a non-negative integer")
+    with conn.snapshot():
+        if board_read.sees_all(config, role):
+            total = conn.execute(f"SELECT COUNT(*) FROM conversations WHERE 1 = 1{where}", values).fetchone()[0]
+            rows = conn.execute(f"SELECT * FROM conversations WHERE 1 = 1{where} "
+                                "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                                (*values, limit, offset)).fetchall()
+        else:
+            # participants has one row per (conversation, role), so this join keeps count and page at conversation
+            # grain while enforcing the same membership boundary as list_for.
+            total = conn.execute("SELECT COUNT(*) FROM conversations c JOIN participants p "
+                                 "ON p.conversation_id = c.id WHERE p.role = ?" + where,
+                                 (role, *values)).fetchone()[0]
+            rows = conn.execute("SELECT c.* FROM conversations c JOIN participants p "
+                                "ON p.conversation_id = c.id WHERE p.role = ?" + where +
+                                " ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?",
+                                (role, *values, limit, offset)).fetchall()
+        return total, [_summary(conn, row) for row in rows]
+
+
+def readable_summary(conn: Connection, config: Config, role: str,
+                     conversation_id: str) -> dict[str, Any] | None:
+    """Return one conversation's summary only if the same board-read rule permits it."""
+    with conn.snapshot():
+        if not board_read.may_read_conversation(conn, config, role, conversation_id):
+            return None
+        row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+        return None if row is None else _summary(conn, row)
+
+
+def attention_signals(conn: Connection, config: Config, viewer: str, subject: str,
+                      topic: Any = None, *, human_replies_only: bool = False
+                      ) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]],
+                                 list[tuple[dict[str, Any], dict[str, Any]]], set[str]]:
+    """Collect and classify retained attention/decision messages readable by `viewer`.
+
+    `subject` filters signals but never grants access. A projected role's replies can be limited to
+    person-authored messages; a human seat always requests that restriction for its own replies.
+    """
+    found: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    replied: set[str] = set()
+    before = None
+    while True:
+        listed = list_readable(conn, config, viewer, topic, before=before)
+        for conversation in listed:
+            after = 0
+            while True:
+                page = history(conn, viewer, conversation["conversation_id"], after,
+                               messages.MAX_PAGE_MESSAGES, config=config)
+                entries = page["messages"]
+                found.extend((conversation, item) for item in entries
+                             if item["from_role"] not in (None, viewer, subject)
+                             and (item.get("needs_decision") or subject in (item.get("attention") or [])))
+                replied.update(item["reply_to"]["message_id"] for item in entries
+                               if item["from_role"] == subject and item.get("reply_to")
+                               and (not human_replies_only or item.get("author_kind") == "human"))
+                if not entries:
+                    break
+                after = page["next_seq"]
+        if len(listed) < MAX_LISTED:
+            break
+        before = page_cursor(listed[-1])
+    found.sort(key=lambda pair: (pair[1]["at"], pair[1]["seq"]), reverse=True)
+    mine = [pair for pair in found if subject in (pair[1].get("attention") or [])]
+    others = [pair for pair in found if subject not in (pair[1].get("attention") or [])]
+    return mine, others, replied
 
 
 def _before(before: tuple[str, str] | None, alias: str) -> tuple[str, tuple[str, ...]]:
@@ -354,11 +432,11 @@ def _under(topic: Any) -> tuple[str, tuple[str, ...]]:
     return " AND (topic = ? OR topic LIKE ?)", (topic, f"{topic}/%")
 
 
-def add(conn: sqlite3.Connection, config: Config, conversation_id: str, participant: str, *,
+def add(conn: Connection, config: Config, conversation_id: str, participant: str, *,
         actor: str) -> dict[str, Any]:
     """Add a participant and tell every participant, the new one included. Adding a present one changes nothing."""
     settings = _may_manage(config, actor, participant)
-    with transaction(conn):
+    with conn.transaction():
         _load(conn, conversation_id)
         current = _participants(conn, conversation_id)
         if participant not in current:
@@ -374,11 +452,11 @@ def add(conn: sqlite3.Connection, config: Config, conversation_id: str, particip
     return {"conversation_id": conversation_id, "participants": participants, "changed": participant not in current}
 
 
-def remove(conn: sqlite3.Connection, config: Config, conversation_id: str, participant: str, *,
+def remove(conn: Connection, config: Config, conversation_id: str, participant: str, *,
            actor: str) -> dict[str, Any]:
     """Remove a participant and tell the ones who remain; it receives nothing from then on."""
     _may_manage(config, actor, participant, allow_guest=True)
-    with transaction(conn):
+    with conn.transaction():
         _load(conn, conversation_id)
         current = _participants(conn, conversation_id)
         if participant in current:
@@ -394,7 +472,7 @@ def remove(conn: sqlite3.Connection, config: Config, conversation_id: str, parti
     return {"conversation_id": conversation_id, "participants": participants, "changed": participant in current}
 
 
-def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_id: str, text: str,
+def send(conn: Connection, config: Config, *, sender: str, conversation_id: str, text: str,
          relayed: Any = None, request_id: str | None = None, job_id: str | None = None,
          reply_to: str | None = None, attention: Any = None, needs_decision: bool = False,
          identity: dict[str, str] | None = None) -> dict[str, Any]:
@@ -424,7 +502,7 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
                                             **({"reply_to": reply_to} if reply_to else {}),
                                             **({"attention": attention} if attention else {}),
                                             **({"needs_decision": True} if needs_decision else {})})
-    with transaction(conn):
+    with conn.transaction():
         # Current authorization first, so a retry never returns a cached result to a sender who lost it.
         conversation = _load(conn, conversation_id)
         participants = _participants(conn, conversation_id)
@@ -469,7 +547,7 @@ def send(conn: sqlite3.Connection, config: Config, *, sender: str, conversation_
             "created": True}
 
 
-def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq: int = 0,
+def history(conn: Connection, role: str, conversation_id: str, after_seq: int = 0,
             limit: int = 50, before_seq: int | None = None, config: Config | None = None) -> dict[str, Any]:
     """A readable conversation page, oldest first, with retained gaps reported explicitly.
 
@@ -480,7 +558,7 @@ def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq
     if not 1 <= limit <= messages.MAX_PAGE_MESSAGES or after_seq < 0 or (before_seq is not None and before_seq < 1):
         raise InvalidRequest(f"limit must be 1-{messages.MAX_PAGE_MESSAGES}, after_seq at least 0 and before_seq "
                              "at least 1")
-    with transaction(conn):
+    with conn.transaction():
         conversation = _load(conn, conversation_id)
         participant = conn.execute("SELECT added_at FROM participants WHERE conversation_id = ? AND role = ?",
                                     (conversation_id, role)).fetchone()
@@ -528,8 +606,8 @@ def history(conn: sqlite3.Connection, role: str, conversation_id: str, after_seq
             "retention_gaps": gaps}
 
 
-def _access_start_seq(conn: sqlite3.Connection, conversation_id: str, role: str,
-                      participant: sqlite3.Row | None, conversation: sqlite3.Row, view_all: bool) -> int | None:
+def _access_start_seq(conn: Connection, conversation_id: str, role: str,
+                      participant: Row | None, conversation: Row, view_all: bool) -> int | None:
     """Earliest sequence whose visibility is independently established, or None if unknown.
 
     A client cursor is not proof that a role could read earlier messages. For late joiners, the retained
@@ -549,7 +627,7 @@ def _access_start_seq(conn: sqlite3.Connection, conversation_id: str, role: str,
     return None
 
 
-def _has_readable_seq(conn: sqlite3.Connection, condition: str, values: dict[str, Any],
+def _has_readable_seq(conn: Connection, condition: str, values: dict[str, Any],
                       conversation_id: str, start: int, end: int) -> bool:
     if end < start:
         return False
@@ -593,7 +671,7 @@ def _retention_gaps(page: list[dict[str, Any]], lower_seq: int | None, upper_seq
     return gaps
 
 
-def _fan_out(conn: sqlite3.Connection, conversation_id: str, recipients: list[str], *, sender: str | None,
+def _fan_out(conn: Connection, conversation_id: str, recipients: list[str], *, sender: str | None,
              text: str, relayed: list[dict] | None = None, notice: dict[str, str] | None = None,
              job_id: str | None = None, message_id: str | None = None, author_kind: str | None = None,
              reply_to: str | None = None, attention: list[str] | None = None,
@@ -617,14 +695,14 @@ def _fan_out(conn: sqlite3.Connection, conversation_id: str, recipients: list[st
             for role in recipients}
 
 
-def _sent_within_window(conn: sqlite3.Connection, conversation_id: str) -> int:
+def _sent_within_window(conn: Connection, conversation_id: str) -> int:
     """Messages participants sent to the conversation in the last hour; host notices don't count."""
     since = (datetime.now(UTC) - RATE_WINDOW).isoformat()
     return conn.execute("SELECT COUNT(DISTINCT id) FROM messages WHERE conversation_id = ? AND sender IS NOT NULL"
                         " AND at > ?", (conversation_id, since)).fetchone()[0]
 
 
-def _escalate(conn: sqlite3.Connection, settings: Conversations, conversation: sqlite3.Row, sender: str) -> None:
+def _escalate(conn: Connection, settings: Conversations, conversation: Row, sender: str) -> None:
     """Address one content-free event to the escalation role, unless one already went out within the window."""
     since = (datetime.now(UTC) - RATE_WINDOW).isoformat()
     if settings.escalation_role is None or (conversation["escalated_at"] or "") > since:
@@ -671,7 +749,7 @@ def _check_attention(config: Config, attention: Any) -> list[str] | None:
     return roles
 
 
-def _check_reply_to(conn: sqlite3.Connection, config: Config, conversation_id: str, sender: str,
+def _check_reply_to(conn: Connection, config: Config, conversation_id: str, sender: str,
                     reply_to: Any) -> None:
     """A reply answers a message of this conversation that the sender can see, and nothing else.
 
@@ -690,24 +768,24 @@ def _check_reply_to(conn: sqlite3.Connection, config: Config, conversation_id: s
                              "see; this host has no such message for you")
 
 
-def _load(conn: sqlite3.Connection, conversation_id: str) -> sqlite3.Row:
+def _load(conn: Connection, conversation_id: str) -> Row:
     row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
     if row is None:
         raise UnknownConversation(conversation_id)
     return row
 
 
-def _participants(conn: sqlite3.Connection, conversation_id: str) -> list[str]:
+def _participants(conn: Connection, conversation_id: str) -> list[str]:
     rows = conn.execute("SELECT role FROM participants WHERE conversation_id = ? ORDER BY role", (conversation_id,))
     return [row["role"] for row in rows]
 
 
-def _history_entry(row: sqlite3.Row, reply_to: dict[str, Any] | None = None) -> dict[str, Any]:
+def _history_entry(row: Row, reply_to: dict[str, Any] | None = None) -> dict[str, Any]:
     """A message as history shows it: numbered in the conversation, not in any one mailbox."""
     return {**messages.as_dict(row, reply_to), "seq": row["conversation_seq"]}
 
 
-def _summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+def _summary(conn: Connection, row: Row) -> dict[str, Any]:
     # The alias pair appears only on a thread a guest started, the way a guest post's attribution does,
     # so a role's thread reads exactly as it did before.
     alias = ({"created_by_alias": row["created_by_alias"], "created_by_alias_code": row["created_by_alias_code"]}

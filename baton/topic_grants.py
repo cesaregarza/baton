@@ -18,13 +18,12 @@ import hashlib
 import hmac
 import json
 import secrets
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from baton.aliases import alias_code
+from baton.database import Connection, Row
 from baton.errors import Forbidden, IllegalTransition, InvalidRequest, UnknownTopic
-from baton.store import transaction
 
 CAPABILITIES = ("reference.edit", "thread.organise", "topic.create_sub")
 MAX_DAYS = 30
@@ -113,14 +112,14 @@ def _render(row: Any, now: datetime) -> dict[str, Any]:
             "state": _state(row, now)}
 
 
-def _row(conn: sqlite3.Connection, grant_id: str) -> sqlite3.Row:
+def _row(conn: Connection, grant_id: str) -> Row:
     row = conn.execute("SELECT * FROM topic_grants WHERE id = ?", (grant_id,)).fetchone()
     if row is None:
         raise InvalidRequest(f"no topic grant {grant_id!r}")
     return row
 
 
-def _event(conn: sqlite3.Connection, grant_id: str, event: str, now: datetime, actor: str = OWNER,
+def _event(conn: Connection, grant_id: str, event: str, now: datetime, actor: str = OWNER,
            detail: dict[str, str] | None = None) -> None:
     """One line in the grant's log. `detail` holds only ids, states, tool names and checked topic paths, never
     free-form text, so it cannot carry a key ("tgk_" plus urlsafe base64 is never a lowercase slug)."""
@@ -151,21 +150,21 @@ def _checked_reason(reason: Any) -> str:
     return text
 
 
-def _alias_named(conn: sqlite3.Connection, name: str) -> sqlite3.Row:
+def _alias_named(conn: Connection, name: str) -> Row:
     row = conn.execute("SELECT id, name FROM aliases WHERE name = ?", (name,)).fetchone()
     if row is None:
         raise Forbidden(f"no alias {name!r}")
     return row
 
 
-def _topic_at(conn: sqlite3.Connection, path: str) -> sqlite3.Row:
+def _topic_at(conn: Connection, path: str) -> Row:
     row = conn.execute("SELECT id, path FROM topics WHERE path = ?", (path,)).fetchone()
     if row is None:
         raise UnknownTopic(f"no topic {path!r}")
     return row
 
 
-def propose(conn: sqlite3.Connection, alias_name: Any, topic_path: Any, capabilities: Any, inherit: Any,
+def propose(conn: Connection, alias_name: Any, topic_path: Any, capabilities: Any, inherit: Any,
             days: Any) -> dict[str, Any]:
     """Write a proposal and return it for the owner to read. It grants nothing until it is authorized.
 
@@ -173,7 +172,7 @@ def propose(conn: sqlite3.Connection, alias_name: Any, topic_path: Any, capabili
     """
     names = _checked_capabilities(capabilities)
     _checked_days(days)
-    with transaction(conn):
+    with conn.transaction():
         alias = _alias_named(conn, alias_name)
         topic = _topic_at(conn, topic_path)
         now = _now()
@@ -195,13 +194,13 @@ def propose(conn: sqlite3.Connection, alias_name: Any, topic_path: Any, capabili
         return _render(_row(conn, fields["id"]), now)
 
 
-def authorize(conn: sqlite3.Connection, grant_id: str, digest: Any) -> dict[str, Any]:
+def authorize(conn: Connection, grant_id: str, digest: Any) -> dict[str, Any]:
     """Authorize a pending grant and mint its key: the only time the key exists in full.
 
     The digest must be the one the owner read, and the alias and topic must still be the ones it names. The key is
     returned here and nowhere else.
     """
-    with transaction(conn):
+    with conn.transaction():
         row = _row(conn, grant_id)
         now = _now()
         state = _state(row, now)
@@ -225,7 +224,7 @@ def _not_pending(grant_id: str, state: str) -> str:
     return f"topic grant {grant_id} is already authorized, so no key is minted again"
 
 
-def _require_names_unchanged(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
+def _require_names_unchanged(conn: Connection, row: Row) -> None:
     """The owner read the alias and topic by name. Matching is by id, so a moved name means a different proposal."""
     alias = conn.execute("SELECT name FROM aliases WHERE id = ?", (row["alias_id"],)).fetchone()
     topic = conn.execute("SELECT path FROM topics WHERE id = ?", (row["topic_id"],)).fetchone()
@@ -234,10 +233,10 @@ def _require_names_unchanged(conn: sqlite3.Connection, row: sqlite3.Row) -> None
         raise InvalidRequest("the alias or topic changed since this was proposed: propose again")
 
 
-def revoke(conn: sqlite3.Connection, grant_id: str, reason: Any) -> dict[str, Any]:
+def revoke(conn: Connection, grant_id: str, reason: Any) -> dict[str, Any]:
     """End a grant in any state, with a reason. The row stays, and only the revocation fields are filled."""
     text = _checked_reason(reason)
-    with transaction(conn):
+    with conn.transaction():
         row = _row(conn, grant_id)
         if row["revoked_at"] is not None:
             raise IllegalTransition(f"topic grant {grant_id} is already revoked; its first reason stands")
@@ -248,7 +247,7 @@ def revoke(conn: sqlite3.Connection, grant_id: str, reason: Any) -> dict[str, An
         return _render(_row(conn, grant_id), now)
 
 
-def list_grants(conn: sqlite3.Connection, include_all: bool = False) -> list[dict[str, Any]]:
+def list_grants(conn: Connection, include_all: bool = False) -> list[dict[str, Any]]:
     """The grants, oldest proposal first. By default only those still pending or active, which an owner may act on."""
     now = _now()
     rows = sorted(conn.execute("SELECT * FROM topic_grants").fetchall(), key=_proposal_order)
@@ -256,7 +255,7 @@ def list_grants(conn: sqlite3.Connection, include_all: bool = False) -> list[dic
     return listed if include_all else [one for one in listed if one["state"] in ("pending", "active")]
 
 
-def active_grant_ids(conn: sqlite3.Connection, alias_name: str) -> list[str]:
+def active_grant_ids(conn: Connection, alias_name: str) -> list[str]:
     """The ids of an alias's active grants, oldest first, for the owner's arm-rekey output."""
     alias = conn.execute("SELECT id FROM aliases WHERE name = ?", (alias_name,)).fetchone()
     if alias is None:
@@ -266,7 +265,7 @@ def active_grant_ids(conn: sqlite3.Connection, alias_name: str) -> list[str]:
     return [row["id"] for row in sorted(rows, key=_proposal_order) if _state(row, now) == "active"]
 
 
-def covering_grant(conn: sqlite3.Connection, alias_id: str, topic_path: str, capability: str) -> sqlite3.Row | None:
+def covering_grant(conn: Connection, alias_id: str, topic_path: str, capability: str) -> Row | None:
     """The earliest active grant that lets `alias_id` use `capability` on the topic at `topic_path`, or None.
 
     Read-only, on the caller's connection: the guard that calls this holds the write lock already, so it must neither
@@ -283,11 +282,11 @@ def covering_grant(conn: sqlite3.Connection, alias_id: str, topic_path: str, cap
     return min(covering, key=_proposal_order, default=None)
 
 
-def _lists(row: sqlite3.Row, capability: str) -> bool:
+def _lists(row: Row, capability: str) -> bool:
     return capability in json.loads(row["capabilities"])
 
 
-def _covers(row: sqlite3.Row, topic_id: str, topic_path: str, capability: str) -> bool:
+def _covers(row: Row, topic_id: str, topic_path: str, capability: str) -> bool:
     """Whether a grant names this capability and this topic: the topic itself, or, when it inherits, a direct child.
 
     A text prefix would let a grant on `job-hunt` reach `job-hunting`, so paths are compared segment by segment.
@@ -300,7 +299,7 @@ def _covers(row: sqlite3.Row, topic_id: str, topic_path: str, capability: str) -
         and topic_path.split("/")[:-1] == row["root_path"].split("/")
 
 
-def grant_for_use(conn: sqlite3.Connection, identity: dict[str, str] | None, key: str) -> sqlite3.Row:
+def grant_for_use(conn: Connection, identity: dict[str, str] | None, key: str) -> Row:
     """The grant `key` opens for the alias behind `identity`, or the refusal that says why it does not.
 
     Only the presented key's own grant counts: another grant the alias holds is never tried in its place, so a
@@ -324,13 +323,13 @@ def grant_for_use(conn: sqlite3.Connection, identity: dict[str, str] | None, key
     return row
 
 
-def _not_allowed(grant: sqlite3.Row, capability: str, shown: str) -> GrantRefused:
+def _not_allowed(grant: Row, capability: str, shown: str) -> GrantRefused:
     return GrantRefused(f"topic grant {grant['id']} does not allow {capability} on {shown}",
                         grant["id"], "not_covered")
 
 
-def require_covers(conn: sqlite3.Connection, grant: sqlite3.Row, capability: str, path: str | None,
-                   shown: str | None = None) -> sqlite3.Row:
+def require_covers(conn: Connection, grant: Row, capability: str, path: str | None,
+                   shown: str | None = None) -> Row:
     """The topic at `path`, unless the grant does not cover it for `capability`, which is refused.
 
     No topic at that path (none given, or a stale label with no row) is not covered either. A refusal names the
@@ -343,7 +342,7 @@ def require_covers(conn: sqlite3.Connection, grant: sqlite3.Row, capability: str
     return topic
 
 
-def require_names(conn: sqlite3.Connection, grant: sqlite3.Row, capability: str, new_path: str) -> sqlite3.Row:
+def require_names(conn: Connection, grant: Row, capability: str, new_path: str) -> Row:
     """The parent of the topic to be made at `new_path`, unless it is not the grant's own topic, which is refused.
 
     For making a subtopic, which is the named topic's business alone: `inherit` extends the reach of moving threads,
@@ -357,13 +356,13 @@ def require_names(conn: sqlite3.Connection, grant: sqlite3.Row, capability: str,
     return parent
 
 
-def record_refused_use(conn: sqlite3.Connection, refusal: GrantRefused, actor: str, tool: str) -> None:
+def record_refused_use(conn: Connection, refusal: GrantRefused, actor: str, tool: str) -> None:
     """Log a refusal that named a grant, in a transaction of its own.
 
     Called after the operation's transaction has rolled back, so the operation itself has written nothing and this
     line is all a refused call leaves. Refusals that name no grant leave none: there is no log to put them in.
     """
-    with transaction(conn):
+    with conn.transaction():
         _event(conn, refusal.grant_id, "refused_use", _now(), actor, {"tool": tool, "reason": refusal.reason})
 
 
@@ -371,7 +370,7 @@ def _parent_path(path: str) -> str | None:
     return path.rsplit("/", 1)[0] if "/" in path else None
 
 
-def affected_by_rename(conn: sqlite3.Connection, renamed: str, target: str, moving: dict[str, str]) -> list[str]:
+def affected_by_rename(conn: Connection, renamed: str, target: str, moving: dict[str, str]) -> list[str]:
     """The ids of the active grants whose reach a rename changes, oldest first.
 
     `moving` maps every topic the rename moves, the renamed one and its subtopics, to its new path. A grant is
@@ -391,7 +390,7 @@ def affected_by_rename(conn: sqlite3.Connection, renamed: str, target: str, movi
     return affected
 
 
-def record_rename(conn: sqlite3.Connection, grant_ids: list[str], actor: str, topic_id: str, old: str,
+def record_rename(conn: Connection, grant_ids: list[str], actor: str, topic_id: str, old: str,
                   new: str) -> None:
     """One `rename` event on each grant a rename affected, describing the rename: the topic named, and its two paths.
 

@@ -530,10 +530,11 @@ def test_listing_orders_by_proposal_time_then_id(build_world):
 def test_listing_writes_nothing(build_world):
     w = build_world()
     w.activate()
-    changes = w.db.total_changes
+    driver = w.db._driver_connection()
+    changes = driver.total_changes
     w.tg.list_grants(w.db)
     w.tg.list_grants(w.db, include_all=True)
-    assert w.db.total_changes == changes and len(w.events()) == 2
+    assert driver.total_changes == changes and len(w.events()) == 2
 
 
 # 7. The event log and atomicity ----------------------------------------------------------------------------

@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import json
 import math
-import sqlite3
 import struct
 from typing import Any
 
 from baton.config import Config
+from baton.database import Connection, Row
 from baton.errors import EmbeddingProfileConflict, InvalidRequest, LimitExceeded, VectorConflict, VectorsIncomplete
 
 from . import storage
@@ -23,7 +23,7 @@ def signature(embedding: dict[str, Any]) -> dict[str, Any]:
     return {key: embedding[key] for key in ("model", "dim", "normalization", "distance")}
 
 
-def _require_one_signature(conn: sqlite3.Connection, producer: str, target: sqlite3.Row) -> None:
+def _require_one_signature(conn: Connection, producer: str, target: Row) -> None:
     """One model name, one embedding signature across active generations. Every other producer's active one is
     compared; this producer's own, which the activation replaces, is not, so a producer may change its own."""
     embedding = json.loads(target["profile"]).get("embedding")
@@ -41,7 +41,7 @@ def _require_one_signature(conn: sqlite3.Connection, producer: str, target: sqli
                                       "signature": signature(theirs)})
 
 
-def _unvectored(conn: sqlite3.Connection, producer: str, generation: str, counted: list) -> list[dict]:
+def _unvectored(conn: Connection, producer: str, generation: str, counted: list) -> list[dict]:
     """Served versions and messages with a copy, in counted conversations, holding no vector or skip."""
     missing = []
     for conversation in counted:
@@ -120,12 +120,12 @@ def _item_name(item: dict[str, str]) -> str:
     return f"kind {value}" if field == "kind" else f"message {value}"
 
 
-def _embedding(conn: sqlite3.Connection, generation: str) -> dict[str, Any] | None:
+def _embedding(conn: Connection, generation: str) -> dict[str, Any] | None:
     profile = conn.execute("SELECT profile FROM generations WHERE id = ?", (generation,)).fetchone()[0]
     return json.loads(profile).get("embedding")
 
 
-def _check_vectors(conn: sqlite3.Connection, config: Config, manifest: dict[str, Any], artifacts: list[dict],
+def _check_vectors(conn: Connection, config: Config, manifest: dict[str, Any], artifacts: list[dict],
                    vectors: list[dict], skips: list[dict], embedding: dict | None) -> dict:
     """What this commit owes in vectors and skips, checked whole before anything is written.
 
@@ -198,7 +198,7 @@ def _check_fit(vector: list[float], embedding: dict[str, Any], name: str) -> Non
         raise InvalidRequest(f"the vector for {name} isn't unit length, as the profile requires")
 
 
-def _held(conn: sqlite3.Connection, generation: str, item_kind: str, item_id: str) -> tuple | None:
+def _held(conn: Connection, generation: str, item_kind: str, item_id: str) -> tuple | None:
     vector = conn.execute("SELECT data FROM vectors WHERE generation = ? AND item_kind = ? AND item_id = ?",
                           (generation, item_kind, item_id)).fetchone()
     if vector is not None:
@@ -214,7 +214,7 @@ def _stored_form(entry: dict[str, Any], embedding: dict[str, Any]) -> tuple:
     return ("skip", entry["reason"])
 
 
-def _write_vector(conn: sqlite3.Connection, generation: str, embedding: dict[str, Any], item_kind: str,
+def _write_vector(conn: Connection, generation: str, embedding: dict[str, Any], item_kind: str,
                   item_id: str, entry: dict[str, Any]) -> None:
     if "vector" in entry:
         conn.execute("INSERT INTO vectors (generation, item_kind, item_id, model, dim, data, created_at)"

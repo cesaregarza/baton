@@ -12,15 +12,15 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
 from baton import board_read, messages, secretary_store
 from baton.config import Config, ConfigError
+from baton.database import Connection, Row
 from baton.errors import InvalidRequest
-from baton.store import connect_read_only, snapshot, transaction
+from baton.store import connect_read_only
 
 from .policy import BRIEF_BYTES as BRIEF_BYTES
 from .policy import DEFAULT_ACKS as DEFAULT_ACKS
@@ -68,7 +68,7 @@ class Judge(Protocol):
     def stops_before(self, meta: dict) -> bool:
         """Whether its budget is gone and the scan should stop before this source rather than read it."""
 
-    def outcome(self, state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: Policy,
+    def outcome(self, state: Connection, baton: Connection, config: Config, policy: Policy,
                 meta: dict, text: str) -> tuple[str, str, list[str]]:
         """The source's disposition, reason and answer words, with both verdicts recorded."""
 
@@ -101,7 +101,7 @@ def _kind_matches(expected: str, observed: str) -> bool:
     return observed == expected or (expected in {"check", "general"} and observed == "general")
 
 
-def _artifact_match(expected: sqlite3.Row, observed: list[dict]) -> str:
+def _artifact_match(expected: Row, observed: list[dict]) -> str:
     key, rev = expected["artifact_key"], expected["artifact_rev"]
     if key is None:
         return "none"
@@ -133,7 +133,7 @@ def _task_ref(meta: dict) -> str | None:
             f"conversation:{meta['conversation_id']}" if meta["conversation_id"] else None)
 
 
-def _evidence(state: sqlite3.Connection, principal: str, expected: sqlite3.Row, meta: dict,
+def _evidence(state: Connection, principal: str, expected: Row, meta: dict,
               kind: str, rule: str, observed_kind: str | None = None) -> bool:
     count = state.execute("SELECT COUNT(*) FROM expectation_evidence WHERE principal=? AND expectation_id=?",
                           (principal, expected["id"])).fetchone()[0]
@@ -147,7 +147,7 @@ def _evidence(state: sqlite3.Connection, principal: str, expected: sqlite3.Row, 
     return True
 
 
-def _close(state: sqlite3.Connection, principal: str, expected: sqlite3.Row, meta: dict,
+def _close(state: Connection, principal: str, expected: Row, meta: dict,
            status: str, rule: str) -> bool:
     if not _evidence(state, principal, expected, meta, status, rule):
         return False
@@ -156,7 +156,7 @@ def _close(state: sqlite3.Connection, principal: str, expected: sqlite3.Row, met
     return True
 
 
-def _open(state: sqlite3.Connection, policy: Policy, meta: dict, direction: str, requester: str | None,
+def _open(state: Connection, policy: Policy, meta: dict, direction: str, requester: str | None,
           responder: str, artifact: dict | None, opening_message_id: str | None,
           expected_kind: str) -> str | None:
     principal = policy.principal
@@ -182,7 +182,7 @@ def _open(state: sqlite3.Connection, policy: Policy, meta: dict, direction: str,
     return expectation_id
 
 
-def _owe(state: sqlite3.Connection, policy: Policy, meta: dict, requester: str | None, artifact: dict | None,
+def _owe(state: Connection, policy: Policy, meta: dict, requester: str | None, artifact: dict | None,
          opening_message_id: str | None, expected_kind: str, outcome: tuple[str, str]) -> tuple[str, str]:
     """Open the item the principal owes, and return `outcome`, the message's outcome with room, either way.
 
@@ -197,7 +197,7 @@ def _owe(state: sqlite3.Connection, policy: Policy, meta: dict, requester: str |
     return outcome[0], f"{outcome[1]}; not tracked: open expectation limit reached"
 
 
-def _brief(state: sqlite3.Connection, policy: Policy, meta: dict, kind: str,
+def _brief(state: Connection, policy: Policy, meta: dict, kind: str,
            reason: str, answers: list[str]) -> tuple[str, int] | None:
     principal, work = policy.principal, _work_key(meta)
     last = state.execute("SELECT version FROM briefs WHERE principal=? AND work_key=?"
@@ -226,7 +226,7 @@ def _brief(state: sqlite3.Connection, policy: Policy, meta: dict, kind: str,
     return work, version
 
 
-def _job_event_origin(expected: sqlite3.Row) -> bool:
+def _job_event_origin(expected: Row) -> bool:
     return expected["opening_source"].startswith("event:")
 
 
@@ -237,7 +237,7 @@ def _job_next_actor_changed(config: Config, meta: dict, job: dict) -> bool:
     return previous is not None and previous.waiting_on != job["event_waiting_on"]
 
 
-def _await_job_actor(state: sqlite3.Connection, policy: Policy, meta: dict,
+def _await_job_actor(state: Connection, policy: Policy, meta: dict,
                      job_ref: str, responder: str, changed: bool) -> tuple[str, str]:
     """Follow an event's next actor, preserving evidence for each prior awaited actor."""
     principal = policy.principal
@@ -264,7 +264,7 @@ def _await_job_actor(state: sqlite3.Connection, policy: Policy, meta: dict,
     return "route", "job waits on its existing actor"
 
 
-def _close_returned_awaited(state: sqlite3.Connection, principal: str, meta: dict,
+def _close_returned_awaited(state: Connection, principal: str, meta: dict,
                             job_ref: str, changed: bool) -> bool:
     """Cite a job event when the next actor changes from a prior awaited actor."""
     limited = False
@@ -283,8 +283,8 @@ def _choose_disposition(current: tuple[str, str], proposed: tuple[str, str]) -> 
                         current == ("retain", "no new principal action")) else current
 
 
-def _uncertain_candidates(state: sqlite3.Connection, principal: str, meta: dict,
-                          candidates: list[sqlite3.Row]) -> tuple[str, str]:
+def _uncertain_candidates(state: Connection, principal: str, meta: dict,
+                          candidates: list[Row]) -> tuple[str, str]:
     limited = False
     for expected in candidates:
         if not _evidence(state, principal, expected, meta, "uncertain", "ambiguous-correlation"):
@@ -293,7 +293,7 @@ def _uncertain_candidates(state: sqlite3.Connection, principal: str, meta: dict,
             "multiple open expectations match this message")
 
 
-def _candidates(state: sqlite3.Connection, principal: str, meta: dict) -> list[sqlite3.Row]:
+def _candidates(state: Connection, principal: str, meta: dict) -> list[Row]:
     """The open items a message could answer on structure alone: what its author owes in the same job or
     conversation and, for a reply, the item its parent opened."""
     rows = state.execute("SELECT * FROM expectations WHERE principal=? AND state='open' AND responder=? ORDER BY id",
@@ -302,7 +302,7 @@ def _candidates(state: sqlite3.Connection, principal: str, meta: dict) -> list[s
             (not meta["reply_to"] or meta["reply_to"] == row["opening_message_id"])]
 
 
-def _direct_request(state: sqlite3.Connection, principal: str, expected: sqlite3.Row) -> bool:
+def _direct_request(state: Connection, principal: str, expected: Row) -> bool:
     """An item a principal's direct message opened (`_await_recipient`)."""
     if expected["direction"] != "awaited" or expected["opening_message_id"] is None:
         return False
@@ -311,14 +311,14 @@ def _direct_request(state: sqlite3.Connection, principal: str, expected: sqlite3
     return opening is not None and json.loads(opening["envelope"])["conversation_id"] is None
 
 
-def _addressed(baton: sqlite3.Connection, config: Config, principal: str, meta: dict) -> bool:
+def _addressed(baton: Connection, config: Config, principal: str, meta: dict) -> bool:
     """A direct message to the principal, a post naming it in `attention`, or a reply to its own message."""
     parent = _visible_message(baton, config, principal, meta["reply_to"]) if meta["reply_to"] else None
     return ((meta["conversation_id"] is None and meta["recipient"] == principal)
             or principal in (meta["attention"] or []) or (parent is not None and parent["sender"] == principal))
 
 
-def _await_recipient(state: sqlite3.Connection, policy: Policy, meta: dict, text: str,
+def _await_recipient(state: Connection, policy: Policy, meta: dict, text: str,
                      outcome: tuple[str, str]) -> tuple[str, str]:
     """With a judge, a principal's direct message awaits its recipient, as a post's `attention` does, unless it
     answered one of the recipient's own requests. A direct message carries neither `attention` nor `reply_to`, so
@@ -334,7 +334,7 @@ def _await_recipient(state: sqlite3.Connection, policy: Policy, meta: dict, text
     return outcome
 
 
-def _message_disposition(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config,
+def _message_disposition(state: Connection, baton: Connection, config: Config,
                          policy: Policy, meta: dict, text: str) -> tuple[str, str, list[str]]:
     """The word lists' reading of one message."""
     principal = policy.principal
@@ -434,7 +434,7 @@ def _message_disposition(state: sqlite3.Connection, baton: sqlite3.Connection, c
     return kind, reason, answers
 
 
-def _job_disposition(state: sqlite3.Connection, config: Config, policy: Policy,
+def _job_disposition(state: Connection, config: Config, policy: Policy,
                      meta: dict) -> tuple[str, str]:
     principal = policy.principal
     kind, reason = "retain", "no new principal action"
@@ -495,7 +495,7 @@ def _over_limit(meta: dict, text: str) -> bool:
     return meta["artifact_over_limit"] or len(text.encode("utf-8")) > messages.MAX_MESSAGE_BYTES
 
 
-def _process(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: Policy,
+def _process(state: Connection, baton: Connection, config: Config, policy: Policy,
              meta: dict, text: str, judge: Judge | None = None) -> bool:
     """Apply one source inside the caller's sidecar transaction. Returns whether it was new.
 
@@ -539,19 +539,21 @@ def _process(state: sqlite3.Connection, baton: sqlite3.Connection, config: Confi
 
 
 def scan(config: Config, state_path: Path, policy_path: Path, *, limit: int = DEFAULT_BATCH,
-         inject: Callable[[str], None] | None = None, judge: Judge | None = None) -> dict:
+         inject: Callable[[str], None] | None = None, judge: Judge | None = None,
+         include_export: bool = True) -> dict:
     """Interpret the next page of the principal's events. Only `decide` passes a judge: the catch-up scan, like
-    every scan before activation, reads with the word lists alone."""
+    every scan before activation, reads with the word lists alone. The public scan includes a full state
+    digest for inspection; the decision loop requests only progress, without exporting historical state."""
     if type(limit) is not int or not 1 <= limit <= MAX_BATCH:
         raise InvalidRequest(f"scan limit must be 1-{MAX_BATCH}")
     baton = connect_read_only(config.db_path)
     try:
-        with snapshot(baton):
+        with baton.snapshot():
             policy = load_policy(config, baton, policy_path)  # before the sidecar is opened
             epoch = _epoch(baton)
             state = secretary_store.open_state(state_path, config.data_dir)
             try:
-                with transaction(state):
+                with state.transaction():
                     through = secretary_store.source_position(state, policy.principal, epoch)
                     _check_stored_envelope_version(state, policy.principal)
                     rows = _source_rows(baton, policy.principal, through, limit)
@@ -576,14 +578,15 @@ def scan(config: Config, state_path: Path, policy_path: Path, *, limit: int = DE
                 return {"principal": policy.principal, "policy_digest": policy.digest, "events_seen": len(seen),
                         "items_added": added, "invisible": invisible,
                         "through_pos": seen[-1] if seen else through,
-                        "export_sha256": secretary_store.export_digest(state, policy.principal)}
+                        **({"export_sha256": secretary_store.export_digest(state, policy.principal)}
+                           if include_export else {})}
             finally:
                 state.close()
     finally:
         baton.close()
 
 
-def _waits_for_judge(state: sqlite3.Connection, policy: Policy, meta: dict, text: str, judge: Judge) -> bool:
+def _waits_for_judge(state: Connection, policy: Policy, meta: dict, text: str, judge: Judge) -> bool:
     """A new message the judge would read once its budget is gone, past the wake's own event: the scan stops before
     it and reports itself behind, rather than leave the message to the word lists for want of time."""
     return (judge.wants(policy, meta) and judge.stops_before(meta) and not _over_limit(meta, text)
@@ -591,14 +594,14 @@ def _waits_for_judge(state: sqlite3.Connection, policy: Policy, meta: dict, text
                               (policy.principal, meta["source_key"])).fetchone() is None)
 
 
-def _check_stored_envelope_version(state: sqlite3.Connection, principal: str) -> None:
+def _check_stored_envelope_version(state: Connection, principal: str) -> None:
     first = state.execute("SELECT envelope FROM items WHERE principal=? ORDER BY seq LIMIT 1",
                           (principal,)).fetchone()
     if first is not None and json.loads(first["envelope"])["version"] != ENVELOPE_VERSION:
         raise ConfigError("secretary state envelope version differs from this kernel; use a new state file")
 
 
-def _stored_epoch(state: sqlite3.Connection, principal: str, epoch: str) -> int:
+def _stored_epoch(state: Connection, principal: str, epoch: str) -> int:
     row = state.execute("SELECT log_epoch, through_pos FROM sources WHERE principal=?", (principal,)).fetchone()
     if row is None:
         raise InvalidRequest("principal has no secretary scan state")
@@ -608,13 +611,13 @@ def _stored_epoch(state: sqlite3.Connection, principal: str, epoch: str) -> int:
     return row["through_pos"]
 
 
-def _existing_state(config: Config, path: Path) -> sqlite3.Connection:
+def _existing_state(config: Config, path: Path) -> Connection:
     if not path.exists():
         raise InvalidRequest("secretary state file does not exist; run scan first")
     return secretary_store.open_state(path, config.data_dir)
 
 
-def _text_for_replay(baton: sqlite3.Connection, config: Config, principal: str, meta: dict) -> str | None:
+def _text_for_replay(baton: Connection, config: Config, principal: str, meta: dict) -> str | None:
     message_id = meta["message_id"]
     if message_id is None:
         return ""
@@ -630,7 +633,7 @@ def replay(config: Config, state_path: Path, policy_path: Path) -> dict:
     """Recompute from retained references in memory and compare; never rewrite stored records."""
     baton = connect_read_only(config.db_path)
     try:
-        with snapshot(baton):
+        with baton.snapshot():
             policy = load_policy(config, baton, policy_path)
             epoch = _epoch(baton)
             state = _existing_state(config, state_path)
@@ -664,7 +667,7 @@ def replay(config: Config, state_path: Path, policy_path: Path) -> dict:
                             "replayed_sha256": None}
                 trial = secretary_store.memory()
                 try:
-                    with transaction(trial):
+                    with trial.transaction():
                         secretary_store.source_position(trial, policy.principal, epoch)
                         for meta, source_text in inputs:
                             _process(trial, baton, config, policy, meta, source_text, judged)
@@ -687,7 +690,7 @@ def replay(config: Config, state_path: Path, policy_path: Path) -> dict:
         baton.close()
 
 
-def _excerpt(baton: sqlite3.Connection, config: Config, principal: str, meta: dict) -> dict:
+def _excerpt(baton: Connection, config: Config, principal: str, meta: dict) -> dict:
     if meta["message_id"] is None:
         return {"authored_excerpt": None, "relayed": [], "notice": None}
     row = _visible_message(baton, config, principal, meta["message_id"])
@@ -703,7 +706,7 @@ def _excerpt(baton: sqlite3.Connection, config: Config, principal: str, meta: di
 def show(config: Config, state_path: Path, policy_path: Path, *, source_key: str | None = None) -> dict:
     baton = connect_read_only(config.db_path)
     try:
-        with snapshot(baton):
+        with baton.snapshot():
             policy = load_policy(config, baton, policy_path)
             state = _existing_state(config, state_path)
             try:
@@ -790,12 +793,12 @@ def cancel(config: Config, state_path: Path, policy_path: Path, expectation_id: 
         raise InvalidRequest("cancellation reason must be 1-200 characters")
     baton = connect_read_only(config.db_path)
     try:
-        with snapshot(baton):
+        with baton.snapshot():
             policy = load_policy(config, baton, policy_path)
             epoch = _epoch(baton)
             state = _existing_state(config, state_path)
             try:
-                with transaction(state):
+                with state.transaction():
                     _stored_epoch(state, policy.principal, epoch)
                     expected = state.execute("SELECT * FROM expectations WHERE principal=? AND id=?",
                                              (policy.principal, expectation_id)).fetchone()

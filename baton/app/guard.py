@@ -19,17 +19,14 @@ from mcp.types import CallToolResult, TextContent
 from baton import aliases, auth, datadir, messages, topics
 from baton.config import Config
 from baton.errors import BatonError, Forbidden, InvalidRequest
-from baton.reference_tools import REFERENCE_GUEST_TOOLS, LiteralArguments
+from baton.reference_tools import LiteralArguments
 from baton.store import connect
+from baton.tool_policy import BY_NAME
 
 from .catalog import (
     AUDITED_IDS,
-    CALL_TOOLS,
     CORE_PROOF_NOTE,
-    GRANT_TOOLS,
-    GUEST_IDENTIFIED,
     GUEST_TOOLS,
-    IDENTIFIED_CHANGES,
     TOKEN_ARGUMENT,
 )
 
@@ -47,6 +44,8 @@ class Guard:
         self._lock = threading.Lock()
 
     def wrap(self, name: str, scope: str, body: Callable[..., Any]) -> Callable[..., Any]:
+        policy = BY_NAME[name]
+        passes_context = "call" in inspect.signature(body).parameters
         @functools.wraps(body)
         def guarded(**kwargs: Any) -> Any:
             proof = kwargs.pop("token", None)
@@ -60,7 +59,7 @@ class Guard:
                     if isinstance(secret, str) and secret:
                         detail = detail.replace(secret, "[redacted]")
                 refusal = {**self._refuse(name, call, kwargs, code, detail, proof), **(extra or {})}
-                if name in {"list_conversations", "list_jobs"}:
+                if policy.error_result:
                     return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))],
                                            is_error=True)
                 return refusal
@@ -73,18 +72,19 @@ class Guard:
                 refusal = self._capability(name, call, kwargs)
                 if refusal is not None:
                     return refuse("forbidden", refusal)
-                if call["identity"] is not None and name in IDENTIFIED_CHANGES:
+                if call["identity"] is not None and policy.identity == "bound":
                     kwargs["identity"] = call["identity"]
-                if call["role"] == "guest" and name in GUEST_IDENTIFIED:
+                if call["role"] == "guest" and policy.identity == "guest":
                     # Both carry the alias through to the body, which attributes the row to it. Only a
                     # post spends the hourly post quota; a thread has its own caps, counted where it is
                     # created so that a refusal and its alert commit together.
-                    if name == "send_message":
+                    if policy.post_quota:
                         self._admit_post(principal, call)
                     elif call["identity"] is None:
                         raise Forbidden("alias binding is missing, invalid or expired")
                     kwargs["identity"] = call["identity"]
-                if call["role"] == "guest" and name == "edit_reference" and call["identity"] is not None:
+                if (call["role"] == "guest" and policy.identity == "bound" and policy.post_quota
+                        and call["identity"] is not None):
                     # An edit spends the alias's hourly post quota, whether it is then refused or not. Without a
                     # binding it spends none: the grant check refuses it, in its own words.
                     self._admit_post(principal, call)
@@ -92,7 +92,7 @@ class Guard:
                 return refuse(error.code, str(error), error.extra)
             if not self._within_limit(call["role"], name, HOURLY_LIMITS[scope]):
                 return refuse("rate_limited", f"{name} is over its hourly limit")
-            if name in CALL_TOOLS | topics.AUDIT_TOOLS:
+            if passes_context:
                 kwargs["call"] = call
             try:
                 result = body(call["role"], **kwargs)
@@ -129,10 +129,11 @@ class Guard:
     def _capability(self, name: str, call: dict[str, Any], kwargs: dict[str, Any]) -> str | None:
         """Why the role this call runs as may not make it, or None."""
         role = call["role"]
+        policy = BY_NAME[name]
         if role == "guest":
-            if name not in GUEST_TOOLS and not (name in GRANT_TOOLS and call["grant_key"] is not None):
+            if policy.guest == "no" or (policy.guest == "grant" and call["grant_key"] is None):
                 return f"guest may not call {name}"
-            if name in REFERENCE_GUEST_TOOLS and call["identity"] is None:
+            if policy.guest == "binding" and call["identity"] is None:
                 return "alias binding is missing, invalid or expired"
             if name == "search" and (kwargs.get("producer") is not None or kwargs.get("query_vector") is not None
                                       or kwargs.get("model") is not None or
@@ -143,7 +144,7 @@ class Guard:
             if name == "send_message" and (kwargs.get("conversation_id") is None or kwargs.get("to") is not None
                                            or kwargs.get("job_id") is not None or kwargs.get("needs_decision")):
                 return "guest posts require a conversation, without jobs or decisions"
-        if name in {"create_job", "move_job"} and not self._config.roles[role].job_authority:
+        if policy.job_authority and not self._config.roles[role].job_authority:
             return f"role {role} may not mutate jobs"
         if name == "send_message" and role != "guest" and kwargs.get("to") == "guest":
             return "direct messages to guest are not allowed"

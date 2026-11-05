@@ -27,7 +27,7 @@ MINE = ["orchestrator", "reviewer", "operator"]
 def seeded(tmp_path: Path, *, view_all: bool = True) -> tuple[Config, sqlite3.Connection]:
     config = page_config(tmp_path, view_all=view_all, guest=True)
     conn = connect(config.db_path)
-    with conn:
+    with conn.transaction():
         conn.execute("INSERT INTO aliases (id, name, skeleton, verifier, created_at)"
                      " VALUES (?, 'lane-a', 'lane-a', 'synthetic', 0.0)", (ALIAS["alias_id"],))
     topics.create(conn, config, actor="orchestrator", path="baton", title="The board",
@@ -187,7 +187,7 @@ def test_the_directory_never_renders_an_unreadable_threads_activity(tmp_path):
                                     participants=MINE, topic="baton")
         theirs = conversations.create(conn, config, actor="orchestrator", title="Not mine",
                                       participants=["orchestrator", "assistant"], topic="baton")
-        with conn:
+        with conn.transaction():
             conn.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?",
                          ("2026-11-01T10:00:00+00:00", mine["conversation_id"]))
             conn.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?",

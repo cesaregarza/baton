@@ -9,12 +9,12 @@ import hashlib
 import json
 import math
 import secrets
-import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from baton.config import Config
+from baton.database import Connection, Row
 from baton.errors import (
     BatchClosed,
     BatchExpired,
@@ -31,14 +31,13 @@ from baton.errors import (
     UnknownConversation,
     VersionConflict,
 )
-from baton.store import transaction
 
 from . import generations, provenance, storage
 from . import vectors as vector_module
 from .constants import KINDS, MAX_REQUEST_ID, RECENT, SCOPE
 
 
-def begin_batch(conn: sqlite3.Connection, config: Config, producer: str, conversation_id: str,
+def begin_batch(conn: Connection, config: Config, producer: str, conversation_id: str,
                 kinds: list[str], generation: str | None = None) -> dict[str, Any]:
     """Issue a manifest naming exactly which messages the batch reads, and what each kind builds on."""
     generations._require_producer(config, producer)
@@ -50,7 +49,7 @@ def begin_batch(conn: sqlite3.Connection, config: Config, producer: str, convers
     elif not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds) or not set(kinds) <= set(KINDS):
         raise InvalidRequest(f"kinds is a non-empty list of distinct kinds from {', '.join(KINDS)}")
     limits = config.indexer
-    with transaction(conn):
+    with conn.transaction():
         generations._retire_generations(conn, config)
         if generation is not None:  # after retiring, so a generation it just retired fails closed
             generation = generations._owned_generation(conn, producer, generation)["id"]
@@ -95,10 +94,10 @@ def begin_batch(conn: sqlite3.Connection, config: Config, producer: str, convers
     return manifest
 
 
-def read_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_id: str, page: int) -> dict[str, Any]:
+def read_batch(conn: Connection, config: Config, producer: str, batch_id: str, page: int) -> dict[str, Any]:
     """One page of the batch's messages, recorded as delivered: a commit needs every page delivered first."""
     generations._require_producer(config, producer)
-    with transaction(conn):
+    with conn.transaction():
         batch = _open_batch(conn, producer, batch_id)
         manifest = json.loads(batch["manifest"])
         if isinstance(page, bool) or not isinstance(page, int) or not 1 <= page <= manifest["pages"]:
@@ -119,7 +118,7 @@ def read_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_id
     return {"batch_id": batch_id, "page": page, "pages": manifest["pages"], "items": served}
 
 
-def commit_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_id: str,
+def commit_batch(conn: Connection, config: Config, producer: str, batch_id: str,
                  payload: dict[str, Any]) -> dict[str, Any]:
     """Write a new version of each kind given, built only from what the batch delivered.
 
@@ -133,7 +132,7 @@ def commit_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_
         request |= {"vectors": vectors, "skips": skips}
     digest = _digest(request)
     limits = config.indexer
-    with transaction(conn):
+    with conn.transaction():
         # A request_id names one commit forever, so an aged-out receipt still refuses a different commit.
         receipt = conn.execute("SELECT * FROM commit_requests WHERE producer = ? AND request_id = ?",
                                (producer, request_id)).fetchone()
@@ -219,7 +218,7 @@ def commit_batch(conn: sqlite3.Connection, config: Config, producer: str, batch_
     return {"created": True, **_with_states(conn, stored)}
 
 
-def dirty(conn: sqlite3.Connection, config: Config, producer: str, generation: str | None = None) -> dict[str, Any]:
+def dirty(conn: Connection, config: Config, producer: str, generation: str | None = None) -> dict[str, Any]:
     """Each (conversation, kind) `producer` has no version of, or whose version is behind or invalid. Read-only.
 
     `producer` only chooses whose set to compute, and `generation` which of its generations (the active one by
@@ -247,7 +246,7 @@ def dirty(conn: sqlite3.Connection, config: Config, producer: str, generation: s
     return {"producer": producer, "pairs": pairs}
 
 
-def _has_copies(conn: sqlite3.Connection, conversation_id: str) -> bool:
+def _has_copies(conn: Connection, conversation_id: str) -> bool:
     return conn.execute("SELECT 1 FROM messages WHERE conversation_id = ? LIMIT 1", (conversation_id,)).fetchone() \
         is not None
 
@@ -285,17 +284,17 @@ def _commit_request(payload: Any) -> tuple[str, list[dict[str, Any]]]:
     return request_id, sorted(canonical, key=lambda artifact: artifact["kind"]), vectors, skips
 
 
-def _replay(conn: sqlite3.Connection, receipt: sqlite3.Row) -> dict[str, Any]:
+def _replay(conn: Connection, receipt: Row) -> dict[str, Any]:
     """The stored receipt with each version's state now: no batch, no revalidation, no write, no content."""
     return {"created": False, **_with_states(conn, json.loads(receipt["receipt"]))}
 
 
-def _with_states(conn: sqlite3.Connection, receipt: dict[str, Any]) -> dict[str, Any]:
+def _with_states(conn: Connection, receipt: dict[str, Any]) -> dict[str, Any]:
     return {**receipt, "versions": [{**version, "state": storage._state(conn, version["version_id"])}
                                     for version in receipt["versions"]]}
 
 
-def _open_batch(conn: sqlite3.Connection, producer: str, batch_id: str) -> sqlite3.Row:
+def _open_batch(conn: Connection, producer: str, batch_id: str) -> Row:
     batch = conn.execute("SELECT * FROM batches WHERE id = ?", (str(batch_id),)).fetchone()
     if batch is None:
         raise UnknownBatch(f"there is no batch {batch_id}")

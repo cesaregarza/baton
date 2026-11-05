@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import sqlite3
 from pathlib import Path
 from typing import Any
 
 from baton import datadir
 from baton.config import ConfigError
-from baton.store import transaction
+from baton.database import Connection
+from baton.database import memory as memory_connection
+from baton.database.files import open_private
 
 SCHEMA_VERSION = 2
 
@@ -68,8 +68,7 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
-def _init(conn: sqlite3.Connection) -> None:
-    conn.row_factory = sqlite3.Row
+def _init(conn: Connection) -> None:
     tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if tables:
         if "schema_version" not in tables or not {"sources", "items", "expectations", "expectation_evidence",
@@ -85,35 +84,25 @@ def _init(conn: sqlite3.Connection) -> None:
             raise ConfigError("secretary state schema is incomplete")
     conn.execute("PRAGMA foreign_keys=ON")
     if not tables:
-        with transaction(conn):
+        with conn.transaction():
             for statement in SCHEMA:
                 conn.execute(statement)
             conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
 
 
-def memory() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:", isolation_level=None)
+def memory() -> Connection:
+    conn = memory_connection()
     _init(conn)
     return conn
 
 
-def open_state(path: Path, data_dir: Path) -> sqlite3.Connection:
+def open_state(path: Path, data_dir: Path) -> Connection:
     """Open a 0600 sidecar like Baton opens its own file, without migrating anything."""
     path = datadir.canonical(path)
     data_dir = datadir.canonical(data_dir)
     if data_dir in path.parents and path.parent != data_dir:
         raise ConfigError("secretary state inside data_dir must be a direct child file")
-    with datadir.opened(path.parent) as dir_fd:
-        fd = datadir.open_file(dir_fd, path.name, os.O_RDWR | os.O_CREAT, directory=path.parent)
-        try:
-            file_info = os.fstat(fd)
-        finally:
-            os.close(fd)
-        dir_info = os.fstat(dir_fd)
-        conn = sqlite3.connect(path, isolation_level=None, timeout=30)
-        if not (datadir.same_file(path, file_info) and datadir.same_file(path.parent, dir_info)):
-            conn.close()
-            raise ConfigError("secretary state path changed while opening")
+    conn = open_private(path)
     try:
         _init(conn)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -123,7 +112,7 @@ def open_state(path: Path, data_dir: Path) -> sqlite3.Connection:
     return conn
 
 
-def source_position(conn: sqlite3.Connection, principal: str, epoch: str) -> int:
+def source_position(conn: Connection, principal: str, epoch: str) -> int:
     row = conn.execute("SELECT log_epoch, through_pos FROM sources WHERE principal=?", (principal,)).fetchone()
     if row is None:
         conn.execute("INSERT INTO sources VALUES (?, ?, 0)", (principal, epoch))
@@ -133,11 +122,11 @@ def source_position(conn: sqlite3.Connection, principal: str, epoch: str) -> int
     return row["through_pos"]
 
 
-def set_position(conn: sqlite3.Connection, principal: str, pos: int) -> None:
+def set_position(conn: Connection, principal: str, pos: int) -> None:
     conn.execute("UPDATE sources SET through_pos=? WHERE principal=? AND through_pos <= ?", (pos, principal, pos))
 
 
-def put_item(conn: sqlite3.Connection, principal: str, envelope: dict) -> bool:
+def put_item(conn: Connection, principal: str, envelope: dict) -> bool:
     key = envelope["source_key"]
     before = conn.execute("SELECT envelope_digest FROM items WHERE principal=? AND source_key=?",
                           (principal, key)).fetchone()
@@ -154,20 +143,20 @@ def put_item(conn: sqlite3.Connection, principal: str, envelope: dict) -> bool:
     return True
 
 
-def add_evidence(conn: sqlite3.Connection, principal: str, expectation_id: str, source_key: str,
+def add_evidence(conn: Connection, principal: str, expectation_id: str, source_key: str,
                  kind: str, rule_id: str, artifact: tuple[str | None, str | None],
                  observed_kind: str | None = None) -> None:
     conn.execute("INSERT OR IGNORE INTO expectation_evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                  (principal, expectation_id, source_key, kind, rule_id, *artifact, observed_kind))
 
 
-def put_judgment(conn: sqlite3.Connection, principal: str, source_key: str, status: str,
+def put_judgment(conn: Connection, principal: str, source_key: str, status: str,
                  answers: tuple[str | None, str | None, float | None, float | None], rules: tuple[str, str]) -> None:
     conn.execute("INSERT INTO judgments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  (principal, source_key, status, *answers, *rules))
 
 
-def export(conn: sqlite3.Connection, principal: str) -> dict:
+def export(conn: Connection, principal: str) -> dict:
     """A deterministic export for restart, replay, and isolation comparisons."""
     result = {}
     for table, order in (("sources", "principal"), ("items", "seq"), ("expectations", "id"),
@@ -179,5 +168,5 @@ def export(conn: sqlite3.Connection, principal: str) -> dict:
     return result
 
 
-def export_digest(conn: sqlite3.Connection, principal: str) -> str:
+def export_digest(conn: Connection, principal: str) -> str:
     return digest(export(conn, principal))

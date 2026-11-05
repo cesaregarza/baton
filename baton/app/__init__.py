@@ -31,7 +31,6 @@ from baton.wakes import Dispatcher
 
 from .catalog import ARTIFACT_TOOLS as ARTIFACT_TOOLS
 from .catalog import AUDITED_IDS as AUDITED_IDS
-from .catalog import CALL_TOOLS as CALL_TOOLS
 from .catalog import CONVERSATION_TOOLS as CONVERSATION_TOOLS
 from .catalog import CORE_PROOF_NOTE as CORE_PROOF_NOTE
 from .catalog import GRANT_TOOLS as GRANT_TOOLS

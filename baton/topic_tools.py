@@ -120,9 +120,8 @@ class TopicTools:
         A guest holding a topic grant with thread.organise may move a thread between topics the grant covers,
         with its binding `token` and `grant_token`; the thread's participants are told. It cannot clear a topic.
 
-        `topic` has no default on purpose. A tool that cleared the topic when an argument was left out
-        would make an omission destructive, and it would let any caller that drops nulls clear one by
-        accident -- the remote command does drop them, which is why it sends this argument explicitly.
+        `topic` has no default on purpose: clearing requires an explicit null, so omitting the
+        argument cannot accidentally clear a topic.
         """
         return self._under_grant("set_topic", role, identity, call, lambda conn, key: conversations.set_topic(
             conn, self._config, conversation_id, topic, actor=role, identity=identity, seen=topics.seen_by(call),

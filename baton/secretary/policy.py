@@ -8,13 +8,13 @@ from __future__ import annotations
 import json
 import math
 import re
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from baton import secretary_store
 from baton.config import Config, ConfigError
+from baton.database import Connection
 
 POLICY_VERSION = 1
 MAX_POLICY_BYTES = 16 * 1024
@@ -47,7 +47,7 @@ def _words(value: Any, field: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(words)
 
 
-def load_policy(config: Config, baton: sqlite3.Connection, path: Path) -> Policy:
+def load_policy(config: Config, baton: Connection, path: Path) -> Policy:
     try:
         data = path.read_bytes()
     except OSError as error:

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections.abc import Iterator
 
 import pytest
 
 from baton import changes, cli
+from baton.database import Connection, memory
 from baton.errors import CursorExpired, InvalidRequest
 
 INVALID_DETAIL = "a cursor is <log_epoch>:<change_seq>, as next_cursor gave it"
@@ -23,10 +23,9 @@ INVALID_NUMBERS = [
 
 
 @pytest.fixture
-def log() -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(":memory:", isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    conn.executescript("""
+def log() -> Iterator[Connection]:
+    conn = memory()
+    statements = """
         CREATE TABLE log_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         INSERT INTO log_meta VALUES ('log_epoch', 'current'), ('pruned_through', '0');
         CREATE TABLE change_log (
@@ -35,7 +34,10 @@ def log() -> Iterator[sqlite3.Connection]:
         );
         INSERT INTO change_log VALUES (5, 'conversation', 1, 'message_added', 'm1', NULL, '2026-01-01');
         INSERT INTO change_log VALUES (11, 'conversation', 2, 'message_added', 'm2', NULL, '2026-01-02');
-    """)
+    """
+    for statement in statements.split(";"):
+        if statement.strip():
+            conn.execute(statement)
     conn.execute("PRAGMA query_only = ON")
     yield conn
     conn.close()
@@ -46,14 +48,15 @@ def operation(request) -> str:
     return request.param
 
 
-def follow(conn: sqlite3.Connection, operation: str, cursor: str) -> dict:
-    before = conn.total_changes
+def follow(conn: Connection, operation: str, cursor: str) -> dict:
+    driver = conn._driver_connection()
+    before = driver.total_changes
     try:
         if operation == "read":
             return changes.read(conn, changes.Scope.ALL, cursor=cursor)
         return changes.wait(conn, changes.Scope.ALL, cursor=cursor, timeout_seconds=0)
     finally:
-        assert conn.total_changes == before
+        assert driver.total_changes == before
         assert not conn.in_transaction
 
 

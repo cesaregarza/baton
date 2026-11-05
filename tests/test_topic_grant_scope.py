@@ -274,10 +274,11 @@ def test_a_grant_that_cannot_cover_never_masks_a_later_one_that_can(build_world)
 def test_covering_grant_writes_nothing(build_world):
     w = build_world()
     w.activate(inherit=True)
-    changes, events = w.db.total_changes, len(w.events())
+    driver = w.db._driver_connection()
+    changes, events = driver.total_changes, len(w.events())
     for path in (ROOT, CHILD, "nowhere", LOOKALIKE):
         w.covering(path)
-    assert w.db.total_changes == changes and len(w.events()) == events
+    assert driver.total_changes == changes and len(w.events()) == events
 
 
 def test_covering_grant_runs_inside_the_callers_own_write_transaction(build_world):

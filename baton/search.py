@@ -18,14 +18,15 @@ from __future__ import annotations
 import json
 import math
 import re
-import sqlite3
 import struct
 from typing import Any
 
 from baton import board_read, derived, messages
 from baton.config import Config
 from baton.conversations import utc_iso
+from baton.database import Connection, Row
 from baton.errors import InvalidRequest, UnknownMessage, UnsupportedKind
+from baton.topic_paths import check_topic
 
 MAX_HITS = 50
 MAX_TERMS = 8
@@ -34,12 +35,10 @@ SNIPPET_CHARS = 160
 ARTIFACT_KINDS = (*derived.KINDS, derived.RECENT)
 # The first message a version was made from, which a recent window reports as where it starts.
 FIRST_INPUT = "(SELECT MIN(i.from_seq) FROM artifact_inputs i WHERE i.version_id = v.id) AS first_input"
-TOPIC = re.compile(r"[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)?")
 
 
-def keyword_mode(conn: sqlite3.Connection) -> str:
-    found = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'messages_fts'").fetchone()
-    return "fts5" if found else "like"
+def keyword_mode(conn: Connection) -> str:
+    return "fts5" if conn.table_exists("messages_fts") else "like"
 
 
 def readable(config: Config, role: str) -> tuple[str, dict[str, Any]]:
@@ -52,7 +51,7 @@ def readable(config: Config, role: str) -> tuple[str, dict[str, Any]]:
     return condition, values
 
 
-def get_message(conn: sqlite3.Connection, config: Config, role: str, message_id: str) -> dict[str, Any]:
+def get_message(conn: Connection, config: Config, role: str, message_id: str) -> dict[str, Any]:
     """One message the caller may read. Missing and not permitted give the same refusal."""
     condition, values = readable(config, role)
     row = conn.execute(f"SELECT m.* FROM messages m WHERE m.id = :message_id AND {condition}"
@@ -66,7 +65,7 @@ def get_message(conn: sqlite3.Connection, config: Config, role: str, message_id:
     return shown
 
 
-def search(conn: sqlite3.Connection, config: Config, role: str, query: str, *, conversation_id: str | None = None,
+def search(conn: Connection, config: Config, role: str, query: str, *, conversation_id: str | None = None,
            topic: str | None = None, kinds: list[str] | None = None, limit: int = 20,
            before: str | None = None, producer: str | None = None, query_vector: list[float] | None = None,
            model: str | None = None) -> dict[str, Any]:
@@ -120,7 +119,7 @@ def search(conn: sqlite3.Connection, config: Config, role: str, query: str, *, c
 POOL_FACTOR = 4
 
 
-def _query_profiles(conn: sqlite3.Connection, config: Config, query_vector: Any, model: Any) -> dict[str, dict]:
+def _query_profiles(conn: Connection, config: Config, query_vector: Any, model: Any) -> dict[str, dict]:
     """The active generations that embed with `model`, by id; or a refusal naming what doesn't fit."""
     if not config.search.embeddings:
         raise InvalidRequest("query vectors need [search] embeddings = true")
@@ -151,7 +150,7 @@ def _query_profiles(conn: sqlite3.Connection, config: Config, query_vector: Any,
     return profiles
 
 
-def _rerank(conn: sqlite3.Connection, hits: list[dict], query_vector: list[float], model: str,
+def _rerank(conn: Connection, hits: list[dict], query_vector: list[float], model: str,
             profiles: dict[str, dict]) -> list[dict]:
     """Keyword matches with a vector first, most similar first; then the rest, in keyword order."""
     candidates = [("artifact", hit["version_id"]) if hit["derived"] else ("message", hit["message_id"])
@@ -168,12 +167,12 @@ def _rerank(conn: sqlite3.Connection, hits: list[dict], query_vector: list[float
     return sorted(hits, key=sort_key)
 
 
-def _vector_scores(conn: sqlite3.Connection, candidates: list[tuple[str, str]], query_vector: list[float],
+def _vector_scores(conn: Connection, candidates: list[tuple[str, str]], query_vector: list[float],
                    model: str, profiles: dict[str, dict]) -> dict[tuple[str, str], float]:
     """Best similarity across allowed generations, reading only the authorized keyword candidates."""
     generation_marks = ", ".join("?" for _ in profiles)
     # Reserve bindings for the generations, item kind and model; each remaining binding holds one item id.
-    batch_size = max(1, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - len(profiles) - 2)
+    batch_size = max(1, conn.max_parameters - len(profiles) - 2)
     scores: dict[tuple[str, str], float] = {}
     for item_kind in ("message", "artifact"):
         item_ids = [item_id for kind, item_id in candidates if kind == item_kind]
@@ -202,7 +201,7 @@ def _similarity(a: list[float], b: list[float], embedding: dict) -> float:
     return product / norms if norms else 0.0
 
 
-def _message_hits(conn: sqlite3.Connection, config: Config, role: str, terms: list[str], mode: str, limit: int,
+def _message_hits(conn: Connection, config: Config, role: str, terms: list[str], mode: str, limit: int,
                   conversation_id: str | None, topic: str | None, before: str | None) -> list[tuple[Any, dict]]:
     condition, values = readable(config, role)
     filters, extra = _filters(conversation_id, topic, before)
@@ -236,7 +235,7 @@ def _message_hits(conn: sqlite3.Connection, config: Config, role: str, terms: li
     }) for row in rows]
 
 
-def _artifact_hits(conn: sqlite3.Connection, config: Config, role: str, terms: list[str], mode: str, limit: int,
+def _artifact_hits(conn: Connection, config: Config, role: str, terms: list[str], mode: str, limit: int,
                    kinds: list[str], conversation_id: str | None, topic: str | None, before: str | None,
                    producer: str | None) -> list[tuple[Any, dict]]:
     """Artifact versions served to `role`, filtered in SQL before they are ranked or limited."""
@@ -265,7 +264,7 @@ def _artifact_hits(conn: sqlite3.Connection, config: Config, role: str, terms: l
             for row in rows]
 
 
-def read_artifacts(conn: sqlite3.Connection, config: Config, role: str, conversation_id: str,
+def read_artifacts(conn: Connection, config: Config, role: str, conversation_id: str,
                    producer: str | None = None) -> dict[str, Any]:
     """A conversation's artifacts that `role` may read: each kind's latest valid version from each producer's
     active generation, if `role` can read every message it was made from. `producer` only filters."""
@@ -299,11 +298,11 @@ def served(config: Config, role: str) -> tuple[str, dict[str, Any]]:
             " < i.to_seq - i.from_seq + 1))", values)
 
 
-def _artifact(row: sqlite3.Row) -> dict[str, Any]:
+def _artifact(row: Row) -> dict[str, Any]:
     return {**_labels(row), "body": row["body"], "citations": json.loads(row["citations"])}
 
 
-def _labels(row: sqlite3.Row) -> dict[str, Any]:
+def _labels(row: Row) -> dict[str, Any]:
     """What every served artifact says about itself, in reads and in search alike."""
     labels = {
         "version_id": row["id"], "conversation_id": row["conversation_id"], "kind": row["kind"],
@@ -316,7 +315,7 @@ def _labels(row: sqlite3.Row) -> dict[str, Any]:
     return labels
 
 
-def _state(row: sqlite3.Row) -> str:
+def _state(row: Row) -> str:
     return "behind" if row["covered_through_seq"] < row["last_seq"] else "valid"
 
 
@@ -327,12 +326,9 @@ def _artifact_filters(kinds: list[str], conversation_id: str | None, topic: str 
     if conversation_id is not None:
         sql += " AND v.conversation_id = :conversation_id"
         values["conversation_id"] = str(conversation_id)
-    if topic is not None:
-        if not TOPIC.fullmatch(str(topic)):
-            raise InvalidRequest("topic is 1-2 lowercase slug segments, such as project or project/subtopic")
-        sql += (" AND v.conversation_id IN (SELECT id FROM conversations WHERE topic = :topic"
-                " OR topic LIKE :topic || '/%')")
-        values["topic"] = str(topic)
+    topic_sql, topic_values = _topic_filter("v", topic)
+    sql += topic_sql
+    values.update(topic_values)
     if before is not None:
         sql += " AND v.created_at < :before"
         values["before"] = utc_iso(before, "before")
@@ -359,16 +355,21 @@ def _filters(conversation_id: str | None, topic: str | None, before: str | None)
     if conversation_id is not None:
         sql += " AND m.conversation_id = :conversation_id"
         values["conversation_id"] = str(conversation_id)
-    if topic is not None:
-        if not TOPIC.fullmatch(str(topic)):
-            raise InvalidRequest("topic is 1-2 lowercase slug segments, such as project or project/subtopic")
-        sql += (" AND m.conversation_id IN (SELECT id FROM conversations WHERE topic = :topic"
-                " OR topic LIKE :topic || '/%')")
-        values["topic"] = str(topic)
+    topic_sql, topic_values = _topic_filter("m", topic)
+    sql += topic_sql
+    values.update(topic_values)
     if before is not None:
         sql += " AND m.at < :before"
         values["before"] = utc_iso(before, "before")
     return sql, values
+
+
+def _topic_filter(alias: str, topic: str | None) -> tuple[str, dict[str, Any]]:
+    if topic is None:
+        return "", {}
+    checked = check_topic(topic)
+    return (f" AND {alias}.conversation_id IN (SELECT id FROM conversations WHERE topic = :topic"
+            " OR topic LIKE :topic || '/%')", {"topic": checked})
 
 
 def _snippet(text: str, terms: list[str]) -> str:

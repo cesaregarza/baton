@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import json
 import secrets
-import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from baton.config import Config
+from baton.database import Connection, Row
 from baton.errors import (
     Forbidden,
     GenerationActive,
@@ -23,19 +23,18 @@ from baton.errors import (
     ReconcileRequired,
     UnknownGeneration,
 )
-from baton.store import transaction
 
 from . import storage, vectors
 from .constants import KINDS, SCOPE
 
 
-def generation_create(conn: sqlite3.Connection, config: Config, producer: str,
+def generation_create(conn: Connection, config: Config, producer: str,
                       profile: dict[str, Any] | None = None) -> dict[str, Any]:
     """A new, inactive generation for `producer` to fill, with an immutable profile and a watermark: the change
     log's position now, which activation checks every later change against."""
     _require_producer(config, producer)
     profile = vectors._profile(config, profile)
-    with transaction(conn):
+    with conn.transaction():
         _retire_generations(conn, config)
         _require_slot(conn, config, producer)
         epoch, seq = _log_position(conn)
@@ -47,7 +46,7 @@ def generation_create(conn: sqlite3.Connection, config: Config, producer: str,
     return {"generation": generation, "profile": profile, "active": False, "watermark": {"epoch": epoch, "seq": seq}}
 
 
-def generation_activate(conn: sqlite3.Connection, config: Config, producer: str, generation: str) -> dict[str, Any]:
+def generation_activate(conn: Connection, config: Config, producer: str, generation: str) -> dict[str, Any]:
     """Switch `producer`'s readers to `generation`, whole, only if every counted pair is current in it.
 
     A pair is counted for every kind of every conversation with a copy left, and current when its latest version
@@ -60,7 +59,7 @@ def generation_activate(conn: sqlite3.Connection, config: Config, producer: str,
     either path, it is `reconcile_required`.
     """
     _require_producer(config, producer)
-    with transaction(conn):
+    with conn.transaction():
         target = _owned_generation(conn, producer, generation)
         previous = _generation(conn, producer)
         if previous == target["id"]:
@@ -112,11 +111,11 @@ def generation_activate(conn: sqlite3.Connection, config: Config, producer: str,
     return {"generation": target["id"], "previous": previous, "mode": "reconcile" if reconcile else "watermark"}
 
 
-def generation_drop(conn: sqlite3.Connection, config: Config, producer: str, generation: str) -> dict[str, Any]:
+def generation_drop(conn: Connection, config: Config, producer: str, generation: str) -> dict[str, Any]:
     """Drop one of `producer`'s inactive generations: its slot frees at once, its open batches close, and its rows
     stay, invalid from now on. Receipts for commits into it stay, reporting those versions invalid."""
     _require_producer(config, producer)
-    with transaction(conn):
+    with conn.transaction():
         row = conn.execute("SELECT * FROM generations WHERE id = ?", (str(generation),)).fetchone()
         if row is None:
             raise UnknownGeneration(f"there is no generation {generation}")
@@ -132,7 +131,7 @@ def generation_drop(conn: sqlite3.Connection, config: Config, producer: str, gen
     return {"generation": row["id"], "dropped": True}
 
 
-def _owned_generation(conn: sqlite3.Connection, producer: str, generation: str) -> sqlite3.Row:
+def _owned_generation(conn: Connection, producer: str, generation: str) -> Row:
     row = conn.execute("SELECT * FROM generations WHERE id = ?", (str(generation),)).fetchone()
     if row is None:
         raise UnknownGeneration(f"there is no generation {generation}")
@@ -143,7 +142,7 @@ def _owned_generation(conn: sqlite3.Connection, producer: str, generation: str) 
     return row
 
 
-def _after_watermark(conn: sqlite3.Connection, watermark: int) -> tuple[dict[str, int], set[str]]:
+def _after_watermark(conn: Connection, watermark: int) -> tuple[dict[str, int], set[str]]:
     """Per conversation, how many messages were added after the watermark; and which lost a copy after it.
     Participant changes count for neither: at scope `all` they change no coverage and no validity."""
     # Logs written before copies stopped expiring still hold `message_expired` rows, and count the same.
@@ -156,7 +155,7 @@ def _after_watermark(conn: sqlite3.Connection, watermark: int) -> tuple[dict[str
     return added, expired
 
 
-def _owed_at_watermark(conn: sqlite3.Connection, conversation: sqlite3.Row, added_after: int,
+def _owed_at_watermark(conn: Connection, conversation: Row, added_after: int,
                        watermark: int) -> bool:
     """Whether the conversation owed a version at the watermark: it had messages then, and a copy of one.
 
@@ -177,7 +176,7 @@ def _owed_at_watermark(conn: sqlite3.Connection, conversation: sqlite3.Row, adde
         (watermark, conversation["id"], watermark, conversation["id"])).fetchone() is not None
 
 
-def _met_at_watermark(version: sqlite3.Row | None, conversation: sqlite3.Row, added_after: int,
+def _met_at_watermark(version: Row | None, conversation: Row, added_after: int,
                       expired_after: bool) -> bool:
     """Whether a pair met its watermark obligation: covering through the last seq the conversation had then,
     and valid, or made invalid only by an expiry after the watermark."""
@@ -186,7 +185,7 @@ def _met_at_watermark(version: sqlite3.Row | None, conversation: sqlite3.Row, ad
     return version["state"] == "valid" or expired_after
 
 
-def _require_slot(conn: sqlite3.Connection, config: Config, producer: str) -> None:
+def _require_slot(conn: Connection, config: Config, producer: str) -> None:
     held = conn.execute("SELECT COUNT(*) FROM generations WHERE producer = ? AND dropped_at IS NULL",
                         (producer,)).fetchone()[0]
     if held >= config.indexer.max_generations:
@@ -194,13 +193,13 @@ def _require_slot(conn: sqlite3.Connection, config: Config, producer: str) -> No
                             "max_generations")
 
 
-def _is_current(version: sqlite3.Row | None, conversation: sqlite3.Row) -> bool:
+def _is_current(version: Row | None, conversation: Row) -> bool:
     """Delta r4.1: valid, and covering through the conversation's last seq. The source revision is a label."""
     return version is not None and version["state"] == "valid" and \
         version["covered_through_seq"] >= conversation["last_seq"]
 
 
-def _log_position(conn: sqlite3.Connection) -> tuple[str, int]:
+def _log_position(conn: Connection) -> tuple[str, int]:
     """The change log's epoch and its newest position, retained or pruned."""
     epoch = conn.execute("SELECT value FROM log_meta WHERE key = 'log_epoch'").fetchone()[0]
     pruned = int(conn.execute("SELECT value FROM log_meta WHERE key = 'pruned_through'").fetchone()[0])
@@ -213,12 +212,12 @@ def _require_producer(config: Config, producer: str) -> None:
         raise Forbidden(f"{producer!r} is not listed in [indexer] producers")
 
 
-def _generation(conn: sqlite3.Connection, producer: str) -> str | None:
+def _generation(conn: Connection, producer: str) -> str | None:
     row = conn.execute("SELECT id FROM generations WHERE producer = ? AND active = 1", (producer,)).fetchone()
     return row["id"] if row else None
 
 
-def _retire_generations(conn: sqlite3.Connection, config: Config) -> None:
+def _retire_generations(conn: Connection, config: Config) -> None:
     """Retire a generation replaced longer ago than its retention: mark it dropped.
 
     Its rows stay, so anything naming it fails closed. The active generation never retires, and one with an open

@@ -503,7 +503,7 @@ def test_a_claim_is_refused_when_the_role_has_already_read_past_the_baseline(tmp
     """
     _, dispatcher, conn = woken_batch(tmp_path, recorder := Recorder())
     messages.read(conn, "worker")
-    with conn:                                   # put the row back as a crashed read would leave it
+    with conn.transaction():  # put the row back as a crashed read would leave it
         conn.execute("UPDATE wakes SET status = 'scheduled', finished_at = NULL"
                      " WHERE key = 'messages:1:r1'")
     assert rows(conn)["messages:1:r1"] == "scheduled"
@@ -532,7 +532,7 @@ def test_a_second_claim_keeps_the_first_claim_time_so_the_cap_is_charged_once(tm
     charged_at = conn.execute("SELECT claimed_at FROM wakes WHERE key = 'messages:1:r1'").fetchone()[0]
     assert charged_at is not None
 
-    with conn:                                   # a path that puts charged work back in the queue
+    with conn.transaction():  # a path that puts charged work back in the queue
         conn.execute("UPDATE wakes SET status = 'scheduled' WHERE key = 'messages:1:r1'")
     clock.advance(TWENTY_MINUTES)
     assert claim(dispatcher, conn, "worker", "messages:1:r1", 1, 0) is True

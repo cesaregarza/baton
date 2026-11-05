@@ -46,7 +46,6 @@ import os
 import re
 import secrets
 import socket
-import sqlite3
 import threading
 import time
 from collections import deque
@@ -58,6 +57,7 @@ from zoneinfo import ZoneInfo
 
 from baton import auth, board_read, conversations, datadir, jobs, messages
 from baton.config import Config, ConfigError
+from baton.database import Connection, Row
 from baton.errors import (
     BatonError,
     ConversationFull,
@@ -66,7 +66,7 @@ from baton.errors import (
     MailboxFull,
     NotAParticipant,
 )
-from baton.store import connect, transaction
+from baton.store import connect
 
 from .models import Response as Response
 from .models import _Refusal as _Refusal
@@ -151,7 +151,7 @@ def respond(config: Config, method: str, target: str, headers: list[tuple[str, s
 # Routing ---------------------------------------------------------------------------------------------------
 
 
-def _route(config: Config, conn: sqlite3.Connection, request: _Request) -> Response:
+def _route(config: Config, conn: Connection, request: _Request) -> Response:
     if request.path == "/seat/style.css" and request.method != "POST":
         return Response(200, STYLE.encode(), {**HEADERS, "Content-Type": "text/css; charset=utf-8"})
     if request.path == "/seat/login":
@@ -196,7 +196,7 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _login_form(conn: sqlite3.Connection, status: int = 200, notice: str = "", *, paused: bool = False) -> Response:
+def _login_form(conn: Connection, status: int = 200, notice: str = "", *, paused: bool = False) -> Response:
     """A fresh login form, or a refusal once MAX_PRE forms, used or not, were issued in the last PRE_TTL.
 
     Forms are kept once used or expired, so refusing is what bounds the table: no form is evicted to make room.
@@ -205,7 +205,7 @@ def _login_form(conn: sqlite3.Connection, status: int = 200, notice: str = "", *
     """
     pre = secrets.token_urlsafe(24)
     now = _now()
-    with transaction(conn):
+    with conn.transaction():
         issued = conn.execute("SELECT COUNT(*) FROM seat_prelogin WHERE expires_at > ?", (now,)).fetchone()[0]
         if issued < MAX_PRE:
             conn.execute("INSERT INTO seat_prelogin (digest, expires_at) VALUES (?, ?)", (_digest(pre), now + PRE_TTL))
@@ -224,10 +224,10 @@ def _login_form(conn: sqlite3.Connection, status: int = 200, notice: str = "", *
     return response
 
 
-def _login(config: Config, conn: sqlite3.Connection, request: _Request) -> Response:
+def _login(config: Config, conn: Connection, request: _Request) -> Response:
     pre = request.form["pre"]
     now = _now()
-    with transaction(conn):
+    with conn.transaction():
         fresh = conn.execute("UPDATE seat_prelogin SET ended_at = ?, end_reason = 'used' WHERE digest = ?"
                              " AND expires_at > ? AND ended_at IS NULL", (now, _digest(pre), now)).rowcount
     if not fresh or not _same(request.cookies.get(PRE_COOKIE, ""), pre):
@@ -249,7 +249,7 @@ def _login(config: Config, conn: sqlite3.Connection, request: _Request) -> Respo
                                       'whole seat token.</p>')
     authority = auth.credential_authority(access)
     raw = "seat_" + secrets.token_urlsafe(32)
-    with transaction(conn):
+    with conn.transaction():
         _end_lapsed(config, conn, now)
         for row in conn.execute("SELECT digest FROM seat_sessions WHERE role = ? AND ended_at IS NULL"
                                 " ORDER BY last_seen DESC LIMIT -1 OFFSET ?",
@@ -269,12 +269,12 @@ def _seat_role_ok(config: Config) -> bool:
     return config.seat.enabled and role is not None and role.human and not role.display_only
 
 
-def _session(config: Config, conn: sqlite3.Connection, raw: str | None) -> _Session | None:
+def _session(config: Config, conn: Connection, raw: str | None) -> _Session | None:
     """The live session `raw` names, or None; a session that no longer holds is ended on the spot."""
     if not raw:
         return None
     digest, now = _digest(raw), _now()
-    with transaction(conn):
+    with conn.transaction():
         row = conn.execute("SELECT * FROM seat_sessions WHERE digest = ?", (digest,)).fetchone()
         if row is None or row["ended_at"] is not None:
             return None
@@ -290,7 +290,7 @@ def _session(config: Config, conn: sqlite3.Connection, raw: str | None) -> _Sess
     return _Session(raw, digest, row["role"], ZoneInfo(config.seat.timezone))
 
 
-def _end(conn: sqlite3.Connection, digest: str, now: float, reason: str) -> None:
+def _end(conn: Connection, digest: str, now: float, reason: str) -> None:
     """End a session, and the receipts and form ids still live under it, by state; every row stays."""
     conn.execute("UPDATE seat_sessions SET ended_at = ?, end_reason = ? WHERE digest = ? AND ended_at IS NULL",
                  (now, reason, digest))
@@ -299,7 +299,7 @@ def _end(conn: sqlite3.Connection, digest: str, now: float, reason: str) -> None
                      (now, digest))
 
 
-def _end_lapsed(config: Config, conn: sqlite3.Connection, now: float) -> None:
+def _end_lapsed(config: Config, conn: Connection, now: float) -> None:
     """End idle or old sessions, and form ids older than REQUEST_TTL. An expired receipt needs nothing: its own
     `expires_at` refuses it."""
     for row in conn.execute("SELECT digest FROM seat_sessions WHERE ended_at IS NULL AND (last_seen < ? OR"
@@ -310,8 +310,8 @@ def _end_lapsed(config: Config, conn: sqlite3.Connection, now: float) -> None:
                  " AND created_at < ?", (now, now - REQUEST_TTL))
 
 
-def _logout(conn: sqlite3.Connection, session: _Session) -> Response:
-    with transaction(conn):
+def _logout(conn: Connection, session: _Session) -> Response:
+    with conn.transaction():
         _end(conn, session.digest, _now(), "logout")
     return _to_login()
 
@@ -320,7 +320,7 @@ def logout_all(config: Config) -> int:
     """End every seat session at once; `baton seat logout-all`."""
     conn = connect(config.db_path)
     try:
-        with transaction(conn):
+        with conn.transaction():
             live, now = conn.execute("SELECT digest FROM seat_sessions WHERE ended_at IS NULL").fetchall(), _now()
             for row in live:
                 _end(conn, row["digest"], now, "logout_all")
@@ -338,7 +338,7 @@ def _to_login() -> Response:
 # Pages -----------------------------------------------------------------------------------------------------
 
 
-def _home(config: Config, conn: sqlite3.Connection, session: _Session,
+def _home(config: Config, conn: Connection, session: _Session,
           before: tuple[str, str] | None = None) -> Response:
     """One page of the conversations the seat may read, newest first. "Older" carries the cursor of the last row
     shown, as the dashboard's list does, so a conversation added or left between pages never shifts another
@@ -367,34 +367,12 @@ NEEDS_SHOWN = 100  # the newest of each list on /seat/needs; the count says when
 NEEDS_JOBS = 50
 
 
-def _needs(config: Config, conn: sqlite3.Connection, session: _Session) -> Response:
+def _needs(config: Config, conn: Connection, session: _Session) -> Response:
     """What asks for the seat's own role, from what that role may read: the messages whose `attention` names it,
     then decisions asked of others or of nobody, collapsed, then the jobs waiting on it. Reading moves nothing:
     no cursor, no read state. "you replied" means only that you sent a reply; it approves or resolves nothing."""
     role = session.role
-    found, replied, before = [], set(), None
-    while True:  # every conversation the role may read, page by page, as its own list does
-        listed = conversations.list_readable(conn, config, role, before=before)
-        for conversation in listed:
-            after = 0
-            while True:
-                page = conversations.history(conn, role, conversation["conversation_id"], after,
-                                             messages.MAX_PAGE_MESSAGES, config=config)
-                if not page["messages"]:
-                    break
-                found += [(conversation, item) for item in page["messages"]
-                          if item["from_role"] not in (None, role)
-                          and (item.get("needs_decision") or role in (item.get("attention") or []))]
-                replied |= {item["reply_to"]["message_id"] for item in page["messages"]
-                            if item["from_role"] == role and item.get("author_kind") == "human"
-                            and item.get("reply_to")}
-                after = page["next_seq"]
-        if len(listed) < conversations.MAX_LISTED:
-            break
-        before = conversations.page_cursor(listed[-1])
-    found.sort(key=lambda pair: (pair[1]["at"], pair[1]["seq"]), reverse=True)
-    mine = [pair for pair in found if role in (pair[1].get("attention") or [])]
-    others = [pair for pair in found if role not in (pair[1].get("attention") or [])]
+    mine, others, replied = conversations.attention_signals(conn, config, role, role, human_replies_only=True)
 
     def item(conversation: dict[str, Any], entry: dict[str, Any]) -> str:
         attention = entry.get("attention") or []
@@ -436,9 +414,9 @@ def _needs(config: Config, conn: sqlite3.Connection, session: _Session) -> Respo
     return _page(200, "Needs you", body)
 
 
-def _inbox(config: Config, conn: sqlite3.Connection, session: _Session) -> Response:
+def _inbox(config: Config, conn: Connection, session: _Session) -> Response:
     """The mailbox from its cursor, without moving it, and a receipt for exactly the page shown."""
-    with transaction(conn):
+    with conn.transaction():
         start = messages.read_seq(conn, session.role)
         rows = conn.execute("SELECT * FROM messages WHERE recipient = ? AND seq > ? ORDER BY seq LIMIT ?",
                             (session.role, start, INBOX_PAGE)).fetchall()
@@ -470,15 +448,15 @@ def _inbox(config: Config, conn: sqlite3.Connection, session: _Session) -> Respo
     return _page(200, "Inbox", body)
 
 
-def _inbox_entry(row: sqlite3.Row, member: dict[str, str]) -> dict[str, Any]:
+def _inbox_entry(row: Row, member: dict[str, str]) -> dict[str, Any]:
     if row["conversation_id"] is not None and row["conversation_id"] not in member:
         return {"seq": row["seq"], "placeholder": True}
     return {**messages.as_dict(row), "conversation_seq": row["conversation_seq"],
             "title": member.get(row["conversation_id"] or "")}
 
 
-def _ack(config: Config, conn: sqlite3.Connection, session: _Session, receipt: str) -> Response:
-    with transaction(conn):
+def _ack(config: Config, conn: Connection, session: _Session, receipt: str) -> Response:
+    with conn.transaction():
         row = conn.execute("SELECT * FROM seat_receipts WHERE digest = ? AND session = ?",
                            (_digest(receipt), session.digest)).fetchone()
         # Single use, as before: any attempt spends it, whether or not it moves the cursor.
@@ -498,7 +476,7 @@ def _ack(config: Config, conn: sqlite3.Connection, session: _Session, receipt: s
     return _redirect("/seat/inbox")
 
 
-def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, conversation_id: str, after: int,
+def _conversation(config: Config, conn: Connection, session: _Session, conversation_id: str, after: int,
                   reply: str | None, *, status: int = 200, notice: str = "", text: str = "",
                   request_id: str | None = None) -> Response:
     try:
@@ -538,7 +516,7 @@ def _conversation(config: Config, conn: sqlite3.Connection, session: _Session, c
     return _page(status, title, body)
 
 
-def _send(config: Config, conn: sqlite3.Connection, session: _Session, conversation_id: str,
+def _send(config: Config, conn: Connection, session: _Session, conversation_id: str,
           form: dict[str, str]) -> Response:
     """Membership and the form's own binding first, so a retry never replays past either; then one send."""
     if session.role not in _participants(conn, conversation_id):
@@ -549,7 +527,7 @@ def _send(config: Config, conn: sqlite3.Connection, session: _Session, conversat
     # reservation are one transaction, every request for the id holds the place while it is in flight, and the
     # last one out gives it back only if nothing was stored under the id. So two overlapping sends can't both
     # take the last place, and a failed attempt can't free a place its own retry is about to use.
-    with transaction(conn):
+    with conn.transaction():
         bound = conn.execute("SELECT * FROM seat_requests WHERE request_id = ?", (request_id,)).fetchone()
         mine = (bound is not None and bound["ended_at"] is None and bound["session"] == session.digest
                 and bound["conversation_id"] == conversation_id)
@@ -569,13 +547,13 @@ def _send(config: Config, conn: sqlite3.Connection, session: _Session, conversat
     try:
         return _store(config, conn, session, conversation_id, form)
     finally:
-        with transaction(conn):
+        with conn.transaction():
             conn.execute("UPDATE seat_requests SET holders = holders - 1 WHERE request_id = ?", (request_id,))
             conn.execute("UPDATE seat_requests SET sent_at = NULL WHERE request_id = ? AND holders = 0 AND NOT"
                          " EXISTS (SELECT 1 FROM message_requests WHERE request_id = ?)", (request_id, request_id))
 
 
-def _store(config: Config, conn: sqlite3.Connection, session: _Session, conversation_id: str,
+def _store(config: Config, conn: Connection, session: _Session, conversation_id: str,
            form: dict[str, str]) -> Response:
     request_id, text, reply_to = form["request_id"], form["text"], form.get("reply_to") or None
     try:
@@ -603,7 +581,7 @@ def _store(config: Config, conn: sqlite3.Connection, session: _Session, conversa
     return _redirect(_link(conversation_id, seq))
 
 
-def _retry(config: Config, conn: sqlite3.Connection, session: _Session, conversation_id: str, form: dict[str, str],
+def _retry(config: Config, conn: Connection, session: _Session, conversation_id: str, form: dict[str, str],
            status: int, why: str) -> Response:
     """The same form again, with its text and its request id: whether or not the send happened, a repeat is safe."""
     return _conversation(config, conn, session, conversation_id, 0, form.get("reply_to") or None, status=status,
@@ -611,9 +589,9 @@ def _retry(config: Config, conn: sqlite3.Connection, session: _Session, conversa
                          request_id=form["request_id"])
 
 
-def _mint_request(conn: sqlite3.Connection, session: _Session, conversation_id: str) -> str:
+def _mint_request(conn: Connection, session: _Session, conversation_id: str) -> str:
     request_id = messages.new_request_id()
-    with transaction(conn):
+    with conn.transaction():
         conn.execute("INSERT INTO seat_requests (request_id, session, conversation_id, created_at) VALUES"
                      " (?, ?, ?, ?)", (request_id, session.digest, conversation_id, _now()))
         # At most MAX_REQUESTS live per session, sent or not: this hour's sends first (the quota counts them),
@@ -625,7 +603,7 @@ def _mint_request(conn: sqlite3.Connection, session: _Session, conversation_id: 
     return request_id
 
 
-def _participants(conn: sqlite3.Connection, conversation_id: str) -> set[str]:
+def _participants(conn: Connection, conversation_id: str) -> set[str]:
     return {row["role"] for row in conn.execute("SELECT role FROM participants WHERE conversation_id = ?",
                                                 (conversation_id,)).fetchall()}
 
@@ -745,7 +723,7 @@ def _free_cut_off_sends(config: Config) -> None:
     """
     conn = connect(config.db_path)
     try:
-        with transaction(conn):
+        with conn.transaction():
             conn.execute("UPDATE seat_requests SET holders = 0 WHERE holders != 0")
             conn.execute("UPDATE seat_requests SET sent_at = NULL WHERE sent_at IS NOT NULL AND NOT EXISTS"
                          " (SELECT 1 FROM message_requests WHERE request_id = seat_requests.request_id)")

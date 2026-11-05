@@ -32,12 +32,12 @@ import argparse
 import json
 import os
 import re
-import sqlite3
 from pathlib import Path
 
 from baton import config as config_module
 from baton import datadir, messages, store
 from baton.config import Config, ConfigError
+from baton.database import Connection, Row
 from baton.errors import BatonError, InvalidRequest
 from baton.secretary import policy as policy_module
 from baton.secretary import sources
@@ -81,7 +81,7 @@ def _check(after: int | None, ids: list[str] | None, limit: int, max_bytes: int)
         raise InvalidRequest(f"ids must be 1-{MAX_LIMIT} distinct message ids")
 
 
-def _after(baton: sqlite3.Connection, config: Config, principal: str, after: int, limit: int,
+def _after(baton: Connection, config: Config, principal: str, after: int, limit: int,
            max_bytes: int) -> dict:
     page: dict[str, list[dict]] = {"deliveries": [], "context": []}
     listed: set[str] = set()
@@ -105,7 +105,7 @@ def _after(baton: sqlite3.Connection, config: Config, principal: str, after: int
     return {"through_pos": through, "more": True, **page}
 
 
-def _entry(baton: sqlite3.Connection, config: Config, principal: str, event: sqlite3.Row,
+def _entry(baton: Connection, config: Config, principal: str, event: Row,
            listed: set[str]) -> dict | None:
     """One stream event as the thread reads it, whatever its kind; None where the principal can't see it, or for a
     later copy of a message already listed. Visibility is the kernel's own: the copy a message event names, and for
@@ -122,7 +122,7 @@ def _entry(baton: sqlite3.Connection, config: Config, principal: str, event: sql
             "summary": event["summary"], "data": json.loads(event["data"]), "message": message}
 
 
-def _message(baton: sqlite3.Connection, config: Config, principal: str, event: sqlite3.Row) -> dict | None:
+def _message(baton: Connection, config: Config, principal: str, event: Row) -> dict | None:
     """The message a stream event carries, when the principal can read the copy it names: the kernel's own rule."""
     data = json.loads(event["data"])
     message_id, seq = data.get("message_id"), data.get("seq")
@@ -132,7 +132,7 @@ def _message(baton: sqlite3.Connection, config: Config, principal: str, event: s
     return None if row is None else _shape(row, event["pos"])
 
 
-def _by_id(baton: sqlite3.Connection, config: Config, principal: str, ids: list[str], limit: int,
+def _by_id(baton: Connection, config: Config, principal: str, ids: list[str], limit: int,
            max_bytes: int) -> dict:
     page: list[dict] = []
     missing: list[str] = []
@@ -151,7 +151,7 @@ def _by_id(baton: sqlite3.Connection, config: Config, principal: str, ids: list[
     return {"messages": page, "missing": missing, "not_read": []}
 
 
-def _shape(row: sqlite3.Row, pos: int | None) -> dict:
+def _shape(row: Row, pos: int | None) -> dict:
     shaped = messages.as_dict(row)
     return {"id": row["id"], "pos": pos, "conversation_id": row["conversation_id"],
             "to": row["recipient"] if row["conversation_id"] is None else None,

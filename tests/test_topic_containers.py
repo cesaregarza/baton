@@ -67,7 +67,7 @@ def seed_aliases(conn: sqlite3.Connection, *identities: dict) -> None:
     a synthetic identity needs its row: the foreign key is the thing that stops attribution pointing
     at an alias nobody ever claimed.
     """
-    with conn:
+    with conn.transaction():
         conn.executemany("INSERT OR IGNORE INTO aliases (id, name, skeleton, verifier, created_at)"
                          " VALUES (?, ?, ?, 'synthetic-verifier', 0.0)",
                          [(one["alias_id"], one["alias"], one["alias"]) for one in identities])
@@ -475,7 +475,7 @@ def test_the_dedup_survives_a_restart(db, config):
 def test_a_full_alert_mailbox_stores_nothing_and_leaves_the_timestamp_unset(db, config):
     """Nothing is stored, and because the timestamp stays unset the next refusal tries again."""
     fill_guest_cap(db, config)
-    with db:
+    with db.transaction():
         db.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES ('orchestrator', ?, 0)"
                    " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq, read_seq = 0",
                    (messages.MAX_UNREAD,))
@@ -712,7 +712,7 @@ def test_the_topics_table_is_part_of_the_current_schema(db, config):
 def dated(db: sqlite3.Connection, conversation_id: str, when: str) -> None:
     """Set a thread's activity time directly. What is under test is which rows are aggregated, not how
     the column comes to be written, and a fixed value keeps the assertion off the clock."""
-    with db:
+    with db.transaction():
         db.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?", (when, conversation_id))
 
 
@@ -812,7 +812,7 @@ def test_the_subtree_activity_time_comes_from_the_same_threads(db, config):
     rows = db.execute("SELECT id, title FROM conversations ORDER BY title").fetchall()
     stamps = {"Child, hidden": "2026-11-03T10:00:00+00:00", "Child, readable": "2026-11-02T10:00:00+00:00",
               "Parent, hidden": "2026-11-01T10:00:00+00:00"}
-    with db:
+    with db.transaction():
         for row in rows:
             db.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?",
                        (stamps[row["title"]], row["id"]))

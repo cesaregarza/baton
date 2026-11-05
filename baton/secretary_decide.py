@@ -27,7 +27,6 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -36,10 +35,11 @@ from pathlib import Path
 from baton import board_read, datadir, secretary, secretary_judge, secretary_store
 from baton import config as config_module
 from baton.config import Config, ConfigError
+from baton.database import Connection, Row
 from baton.errors import BatonError, InvalidRequest
 from baton.secretary import policy as policy_module
 from baton.secretary import sources
-from baton.store import connect_read_only, snapshot, transaction
+from baton.store import connect_read_only
 
 BATCH = sources.DEFAULT_BATCH
 MAX_BUDGET_SECONDS = 60.0
@@ -70,16 +70,17 @@ def decide(config: Config, state_path: Path, policy_path: Path, *, budget_second
         since = floor = activation  # the first decision: everything up to the floor predates activation
     judge = None if hourly else _judge(config, policy_path, trigger, deadline, clock)
     # Each batch commits with its position, so running out of time loses nothing; the next call continues.
-    while (secretary.scan(config, state_path, policy_path, limit=BATCH, judge=judge)["events_seen"] == BATCH
+    while (secretary.scan(config, state_path, policy_path, limit=BATCH, judge=judge,
+                         include_export=False)["events_seen"] == BATCH
            and clock() < deadline):
         pass
     baton = connect_read_only(config.db_path)
     try:
-        with snapshot(baton):
+        with baton.snapshot():
             policy = policy_module.load_policy(config, baton, policy_path)
             state = secretary_store.open_state(state_path, config.data_dir)
             try:
-                with transaction(state):
+                with state.transaction():
                     return _decide(baton, state, config, policy, start=start, since=since, floor=floor,
                                    trigger=trigger, hourly=hourly, judge=judge)
             finally:
@@ -114,7 +115,7 @@ def _catch_up_position(config: Config, state_path: Path, policy_path: Path, *,
     """
     baton = connect_read_only(config.db_path)
     try:
-        with snapshot(baton):
+        with baton.snapshot():
             principal = policy_module.load_policy(config, baton, policy_path).principal
     finally:
         baton.close()
@@ -127,7 +128,7 @@ def _catch_up_position(config: Config, state_path: Path, policy_path: Path, *,
             raise ConfigError("the secretary state has no scan for this principal: run the offline catch-up scan first")
         if not first:
             return row["through_pos"], None
-        with transaction(state):
+        with state.transaction():
             state.execute("INSERT OR IGNORE INTO activation VALUES (?, ?, ?)", (principal, row["through_pos"], _now()))
         floor = state.execute("SELECT floor_pos FROM activation WHERE principal=?", (principal,)).fetchone()[0]
         return row["through_pos"], floor
@@ -142,7 +143,7 @@ def _judge(config: Config, policy_path: Path, trigger: str | None, deadline: flo
     wake names no message, so it judges from the scan's position."""
     baton = connect_read_only(config.db_path)
     try:
-        with snapshot(baton):
+        with baton.snapshot():
             policy = policy_module.load_policy(config, baton, policy_path)
             if policy.judge is None:
                 return None
@@ -153,7 +154,7 @@ def _judge(config: Config, policy_path: Path, trigger: str | None, deadline: flo
     return secretary_judge.Session(deadline=deadline, clock=clock, start_pos=start, trigger_pos=trigger_pos)
 
 
-def _decide(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config, policy: policy_module.Policy, *,
+def _decide(baton: Connection, state: Connection, config: Config, policy: policy_module.Policy, *,
             start: int, since: int, floor: int, trigger: str | None, hourly: bool,
             judge: secretary_judge.Session | None = None) -> dict:
     principal = policy.principal
@@ -216,7 +217,7 @@ def _window(items: list[dict], public: tuple[str, ...]) -> dict:
             "more_context": max(0, len(context) - LISTED)}
 
 
-def _trigger_pos(baton: sqlite3.Connection, principal: str, trigger: str | None) -> int | None:
+def _trigger_pos(baton: Connection, principal: str, trigger: str | None) -> int | None:
     """The event a wake was raised for. A rate-limited conversation's wake names none."""
     match = TRIGGER.fullmatch(trigger) if trigger else None
     if match is None or match["conversation"]:
@@ -230,7 +231,7 @@ def _trigger_pos(baton: sqlite3.Connection, principal: str, trigger: str | None)
     return row["pos"] if row else None
 
 
-def _item(row: sqlite3.Row, policy: policy_module.Policy) -> dict:
+def _item(row: Row, policy: policy_module.Policy) -> dict:
     """One scanned source. `judge` is None, "judged" or "judge_fallback:<reason>", and `rules` is what the word lists
     decided: for a judged message, what they would have decided in the judge's place. `delivered` tells a delivery to
     the principal, of any kind, from the context the scan also reads."""
@@ -272,7 +273,7 @@ def _decision(items: list[dict], trigger: str | None, policy: policy_module.Poli
     return first["decision"], first["rule"], first["source_key"]
 
 
-def _text(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config, policy: policy_module.Policy,
+def _text(baton: Connection, state: Connection, config: Config, policy: policy_module.Policy,
           items: list[dict], *, since: int, floor: int, through: int, scanned: str,
           hourly: bool) -> tuple[str, int]:
     """A wake's brief or the hourly digest, and the position through which it listed every item.
@@ -302,7 +303,7 @@ def _text(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config, 
     return text, (lines[shown][0] - 1 if shown < len(lines) else through)
 
 
-def _lines(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config, principal: str,
+def _lines(baton: Connection, state: Connection, config: Config, principal: str,
            items: list[dict]) -> tuple[list[tuple[int, tuple, str]], int]:
     """A line per wake or hold item the principal can still read, in stream order, as (position, place, text).
     Its place lists what needs the principal now first, and what it owes before what it awaits.
@@ -322,7 +323,7 @@ def _lines(baton: sqlite3.Connection, state: sqlite3.Connection, config: Config,
     return lines, hidden
 
 
-def _visible(baton: sqlite3.Connection, config: Config, principal: str, item: dict) -> bool:
+def _visible(baton: Connection, config: Config, principal: str, item: dict) -> bool:
     if item["message_id"]:
         return sources._visible_message(baton, config, principal, item["message_id"]) is not None
     if item["conversation_id"]:
@@ -330,7 +331,7 @@ def _visible(baton: sqlite3.Connection, config: Config, principal: str, item: di
     return True  # a job event is in the stream through its own actor or audience, which never change
 
 
-def _links(state: sqlite3.Connection, principal: str, source_key: str) -> tuple[str | None, list[str]]:
+def _links(state: Connection, principal: str, source_key: str) -> tuple[str | None, list[str]]:
     """The direction of the records a source opened or touched, and the rule words it matched."""
     directions = {row[0] for row in state.execute(
         "SELECT direction FROM expectations WHERE principal=? AND opening_source=?"

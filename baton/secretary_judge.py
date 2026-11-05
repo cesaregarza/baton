@@ -47,7 +47,6 @@ import math
 import os
 import selectors
 import signal
-import sqlite3
 import subprocess
 import time
 from collections.abc import Callable, Iterator
@@ -57,6 +56,7 @@ from typing import NamedTuple
 
 from baton import messages, secretary, secretary_store
 from baton.config import Config
+from baton.database import Connection, Row
 from baton.secretary import policy as policy_module
 from baton.secretary import sources
 
@@ -108,7 +108,7 @@ class Session:
     def _spent(self) -> bool:
         return self.calls_left <= 0 or self.deadline - self.clock() < MIN_CALL_SECONDS
 
-    def outcome(self, state: sqlite3.Connection, baton: sqlite3.Connection, config: Config,
+    def outcome(self, state: Connection, baton: Connection, config: Config,
                 policy: policy_module.Policy, meta: dict, text: str) -> tuple[str, str, list[str]]:
         candidates = secretary._candidates(state, policy.principal, meta)
         if self._spent():
@@ -132,7 +132,7 @@ class Session:
 class Stored:
     """Replay's judge: the verdict recorded when each message was first judged. It never runs the command."""
 
-    def __init__(self, rows: dict[str, sqlite3.Row]) -> None:
+    def __init__(self, rows: dict[str, Row]) -> None:
         self.rows = rows
 
     def wants(self, policy: policy_module.Policy, meta: dict) -> bool:
@@ -141,7 +141,7 @@ class Stored:
     def stops_before(self, meta: dict) -> bool:
         return False
 
-    def outcome(self, state: sqlite3.Connection, baton: sqlite3.Connection, config: Config,
+    def outcome(self, state: Connection, baton: Connection, config: Config,
                 policy: policy_module.Policy, meta: dict, text: str) -> tuple[str, str, list[str]]:
         row = self.rows[meta["source_key"]]
         verdict = (Verdict(row["relation"], row["item"], row["opens_owed"], row["needs_now"])
@@ -158,8 +158,8 @@ def _judged_kind(policy: policy_module.Policy, meta: dict) -> bool:
             and author != policy.principal)
 
 
-def _apply(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: policy_module.Policy,
-           meta: dict, text: str, candidates: list[sqlite3.Row], verdict: Verdict | None,
+def _apply(state: Connection, baton: Connection, config: Config, policy: policy_module.Policy,
+           meta: dict, text: str, candidates: list[Row], verdict: Verdict | None,
            status: str) -> tuple[str, str, list[str]]:
     """Decide one message from its verdict, or by the word lists without one, and record both verdicts."""
     if verdict is None:
@@ -175,8 +175,8 @@ def _apply(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config,
     return kind, reason, answers
 
 
-def _judged(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: policy_module.Policy,
-            meta: dict, text: str, candidates: list[sqlite3.Row], verdict: Verdict) -> tuple[str, str]:
+def _judged(state: Connection, baton: Connection, config: Config, policy: policy_module.Policy,
+            meta: dict, text: str, candidates: list[Row], verdict: Verdict) -> tuple[str, str]:
     """The mapping in the module docstring, applied in its order."""
     principal, author, block = policy.principal, sources._actor(meta), policy.judge
     outcome = "retain", "no new principal action"
@@ -197,7 +197,7 @@ def _judged(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config
     return outcome
 
 
-def _relation(state: sqlite3.Connection, principal: str, meta: dict, chosen: sqlite3.Row,
+def _relation(state: Connection, principal: str, meta: dict, chosen: Row,
               relation: str) -> tuple[str, str]:
     limit = "reconcile", "expectation evidence limit reached"
 
@@ -219,7 +219,7 @@ def _relation(state: sqlite3.Connection, principal: str, meta: dict, chosen: sql
 
 
 @contextmanager
-def _rolled_back(state: sqlite3.Connection) -> Iterator[None]:
+def _rolled_back(state: Connection) -> Iterator[None]:
     state.execute("SAVEPOINT judge_word_lists")
     try:
         yield
@@ -228,8 +228,8 @@ def _rolled_back(state: sqlite3.Connection) -> Iterator[None]:
         state.execute("RELEASE judge_word_lists")
 
 
-def _request(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, policy: policy_module.Policy,
-             meta: dict, text: str, candidates: list[sqlite3.Row]) -> dict:
+def _request(state: Connection, baton: Connection, config: Config, policy: policy_module.Policy,
+             meta: dict, text: str, candidates: list[Row]) -> dict:
     principal = policy.principal
     parent = sources._visible_message(baton, config, principal, meta["reply_to"]) if meta["reply_to"] else None
     message = {"id": meta["message_id"], "from": sources._actor(meta), "from_kind": meta["identity"]["author_kind"],
@@ -244,11 +244,11 @@ def _request(state: sqlite3.Connection, baton: sqlite3.Connection, config: Confi
             "items": _items(state, baton, config, principal, candidates)}
 
 
-def _items(state: sqlite3.Connection, baton: sqlite3.Connection, config: Config, principal: str,
-           candidates: list[sqlite3.Row]) -> list[dict]:
+def _items(state: Connection, baton: Connection, config: Config, principal: str,
+           candidates: list[Row]) -> list[dict]:
     """The most recently opened candidates, oldest first. Visibility is checked again here: an item whose opening
     message the principal can no longer read is not offered at all, so neither it nor its title reaches the judge."""
-    def opened_at(row: sqlite3.Row) -> int:
+    def opened_at(row: Row) -> int:
         found = state.execute("SELECT event_pos FROM items WHERE principal=? AND source_key=?",
                               (principal, row["opening_source"])).fetchone()
         return found["event_pos"] or 0 if found else 0

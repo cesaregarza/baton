@@ -17,13 +17,13 @@ hourly post caps are all unchanged and still belong to `baton.conversations`.
 from __future__ import annotations
 
 import json
-import sqlite3
 from typing import Any
 
 from baton import board_read, events, messages, topic_grants, topic_paths
 from baton.config import Config
+from baton.database import Connection, Row
 from baton.errors import Forbidden, InvalidRequest, UnknownRole, UnknownTopic
-from baton.store import new_topic_id, snapshot, transaction
+from baton.store import new_topic_id
 
 MAX_TITLE = 100
 MAX_DESCRIPTION = 1000
@@ -76,20 +76,20 @@ def _check_members(config: Config, members: Any) -> list[str]:
     return members
 
 
-def _row(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
+def _row(conn: Connection, path: str) -> Row | None:
     return conn.execute("SELECT * FROM topics WHERE path = ?", (path,)).fetchone()
 
 
-def _require_parent(conn: sqlite3.Connection, path: str) -> None:
+def _require_parent(conn: Connection, path: str) -> None:
     if "/" in path and _row(conn, path.split("/")[0]) is None:
         raise InvalidRequest(f"topic {path!r} needs its parent {path.split('/')[0]!r} to exist first")
 
 
-def exists(conn: sqlite3.Connection, path: str) -> bool:
+def exists(conn: Connection, path: str) -> bool:
     return _row(conn, path) is not None
 
 
-def require_exists(conn: sqlite3.Connection, path: str, field: str = "topic") -> sqlite3.Row:
+def require_exists(conn: Connection, path: str, field: str = "topic") -> Row:
     """The topic, or a refusal naming the path. Callers hold the write lock, so this cannot go stale."""
     row = _row(conn, path)
     if row is None:
@@ -97,7 +97,7 @@ def require_exists(conn: sqlite3.Connection, path: str, field: str = "topic") ->
     return row
 
 
-def require_topic(conn: sqlite3.Connection, path: str) -> sqlite3.Row:
+def require_topic(conn: Connection, path: str) -> Row:
     """The topic at `path`, or the `unknown_topic` refusal `get_topic` gives for a path no topic holds."""
     row = _row(conn, path)
     if row is None:
@@ -105,7 +105,7 @@ def require_topic(conn: sqlite3.Connection, path: str) -> sqlite3.Row:
     return row
 
 
-def members_for_thread(conn: sqlite3.Connection, config: Config, path: str) -> list[str]:
+def members_for_thread(conn: Connection, config: Config, path: str) -> list[str]:
     """The participants a guest's thread in `path` gets, or a refusal saying what is wrong with them.
 
     The config-dependent checks live here rather than in the schema upgrade, which sees no config: a
@@ -126,13 +126,13 @@ def members_for_thread(conn: sqlite3.Connection, config: Config, path: str) -> l
     return members
 
 
-def _summary(row: sqlite3.Row) -> dict[str, Any]:
+def _summary(row: Row) -> dict[str, Any]:
     return {"path": row["path"], "title": row["title"], "description": row["description"],
             "members": json.loads(row["members"]), "created_by": row["created_by"],
             "created_at": row["created_at"]}
 
 
-def _state(row: sqlite3.Row) -> dict[str, Any]:
+def _state(row: Row) -> dict[str, Any]:
     """What a topic change's history row records of a topic: its editable fields, never its id or path."""
     return {"title": row["title"], "description": row["description"], "members": json.loads(row["members"])}
 
@@ -146,7 +146,7 @@ def history_actor(actor: str, identity: dict[str, str] | None) -> str:
     return actor if identity is None else f"{actor} via alias {identity['alias_id']}"
 
 
-def record(conn: sqlite3.Connection, *, topic_id: str, operation: str, actor: str,
+def record(conn: Connection, *, topic_id: str, operation: str, actor: str,
            before: dict[str, Any] | None, after: dict[str, Any] | None, grant_id: str | None = None) -> None:
     """Append one change to the history. The caller holds the write lock and has made the change.
 
@@ -161,7 +161,7 @@ def _encoded(state: dict[str, Any] | None) -> str | None:
     return None if state is None else json.dumps(state)
 
 
-def id_of(conn: sqlite3.Connection, path: str) -> str | None:
+def id_of(conn: Connection, path: str) -> str | None:
     """The id of the topic at `path`, or None when there is none."""
     row = _row(conn, path)
     return None if row is None else row["id"]
@@ -175,7 +175,7 @@ REFERENCE_AUDIT = frozenset({"edit_reference", "read_reference", "reference_hist
 AUDIT_TOOLS = PATH_TOOLS | {"set_topic", "create_conversation", "list_conversations"} | REFERENCE_AUDIT
 
 
-def record_seen(seen: dict[str, Any] | None, path: str, row: sqlite3.Row | None = None,
+def record_seen(seen: dict[str, Any] | None, path: str, row: Row | None = None,
                 **more: str | int | None) -> None:
     """Note in `seen`, when the caller gave one, the topic this call resolved: `path` and the id of `row`, if any.
 
@@ -195,13 +195,13 @@ def seen_by(call: dict[str, Any] | None) -> dict[str, Any] | None:
     return None if call is None else call.setdefault("topic", {})
 
 
-def note_path(conn: sqlite3.Connection, seen: dict[str, Any] | None, path: str | None) -> None:
+def note_path(conn: Connection, seen: dict[str, Any] | None, path: str | None) -> None:
     """record_seen for the topic now at `path`, which may be none; a path with no topic records no id."""
     if path is not None and seen is not None:
         record_seen(seen, path, _row(conn, path))
 
 
-def note_replay(conn: sqlite3.Connection, seen: dict[str, Any] | None, path: str | None,
+def note_replay(conn: Connection, seen: dict[str, Any] | None, path: str | None,
                 filed_in: str | None) -> None:
     """record_seen for a replay: the path it named, and the id of the topic its returned thread is in now.
 
@@ -262,8 +262,8 @@ def _no_members(members: Any) -> list[str]:
     return []
 
 
-def _grant_and_parent(conn: sqlite3.Connection, identity: dict[str, str] | None, grant_key: str | None,
-                      path: str) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
+def _grant_and_parent(conn: Connection, identity: dict[str, str] | None, grant_key: str | None,
+                      path: str) -> tuple[Row | None, Row | None]:
     """The grant the key opens and the parent it names for a new topic at `path`; neither for a core role."""
     if grant_key is None:
         return None, None
@@ -271,7 +271,7 @@ def _grant_and_parent(conn: sqlite3.Connection, identity: dict[str, str] | None,
     return grant, topic_grants.require_names(conn, grant, "topic.create_sub", path)
 
 
-def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, title: Any = None,
+def create(conn: Connection, config: Config, *, actor: str, path: Any, title: Any = None,
            description: Any = None, members: Any = None, request_id: str | None = None,
            identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None,
            grant_key: str | None = None) -> dict[str, Any]:
@@ -293,7 +293,7 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
     whose = {} if grant_key is None else {"alias_id": (identity or {}).get("alias_id")}
     digest = events.request_digest("create_topic", {"actor": actor, "path": checked, "title": title,
                                                     "description": description, "members": chosen, **whose})
-    with transaction(conn):
+    with conn.transaction():
         grant, parent = _grant_and_parent(conn, identity, grant_key, checked)
         grant_id = None if grant is None else grant["id"]
         existing = events.replayed(conn, "topics", request_id, digest)
@@ -319,7 +319,7 @@ def create(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
     return {**made, "request_id": request_id, "created": True}
 
 
-def update(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, title: Any = None,
+def update(conn: Connection, config: Config, *, actor: str, path: Any, title: Any = None,
            description: Any = UNSET, members: Any = UNSET, identity: dict[str, str] | None = None,
            seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """Edit a topic's title, description or members. An omitted argument leaves that field as it is.
@@ -332,7 +332,7 @@ def update(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, t
     new_description = (UNSET if description is UNSET
                        else _check_text(description, "description", MAX_DESCRIPTION))
     new_members = UNSET if members is UNSET else _check_members(config, members)
-    with transaction(conn):
+    with conn.transaction():
         row = require_exists(conn, checked)
         record_seen(seen, checked, row)
         conn.execute("UPDATE topics SET title = ?, description = ?, members = ? WHERE path = ?",
@@ -361,7 +361,7 @@ def _require_acknowledged(path: str, affected: list[str], acknowledged: list[str
                          "repeat the call with acknowledge_topic_grants set to exactly those ids")
 
 
-def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, new_path: Any,
+def rename(conn: Connection, config: Config, *, actor: str, path: Any, new_path: Any,
            identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None,
            acknowledge_topic_grants: list[str] | None = None) -> dict[str, Any]:
     """Move a topic, its subtopics and every thread filed under them, in one transaction.
@@ -377,7 +377,7 @@ def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, n
     target = check_path(new_path, field="new_path")
     if target == checked or target.startswith(checked + "/"):
         raise InvalidRequest(f"new_path {target!r} is {path!r} itself or inside it")
-    with transaction(conn):
+    with conn.transaction():
         require_exists(conn, checked)
         _require_parent(conn, target)
         children = [row[0] for row in conn.execute(
@@ -406,7 +406,7 @@ def rename(conn: sqlite3.Connection, config: Config, *, actor: str, path: Any, n
         return {**_summary(renamed), "renamed_from": checked, "subtopics": len(children)}
 
 
-def record_move(conn: sqlite3.Connection, *, conversation_id: str, actor: str, before: str | None,
+def record_move(conn: Connection, *, conversation_id: str, actor: str, before: str | None,
                 after: str | None, grant_id: str | None = None) -> None:
     """Record a conversation's topic changing: a move, or a clear, which is filed under the topic it left.
 
@@ -419,7 +419,7 @@ def record_move(conn: sqlite3.Connection, *, conversation_id: str, actor: str, b
            after={"conversation_id": conversation_id, "topic": after, "topic_id": after_id}, grant_id=grant_id)
 
 
-def may_open(conn: sqlite3.Connection, config: Config, reader: str, path: str) -> bool:
+def may_open(conn: Connection, config: Config, reader: str, path: str) -> bool:
     """Whether this reader may be shown `path` at all: the board rule, or a readable thread in its subtree.
 
     The subtree, not the topic alone, because a parent whose only readable thread sits in a subtopic has
@@ -430,11 +430,11 @@ def may_open(conn: sqlite3.Connection, config: Config, reader: str, path: str) -
     return board_read.sees_all(config, reader) or _readable(conn, config, reader, path)[0] > 0
 
 
-def get(conn: sqlite3.Connection, config: Config, *, reader: str, path: Any,
+def get(conn: Connection, config: Config, *, reader: str, path: Any,
         seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """One topic, with the number of threads in it this reader may see and the subtopics it may open."""
     checked = check_path(path)
-    with snapshot(conn):  # one view, so a rename in between cannot mix two topics into one answer
+    with conn.snapshot():  # one view, so a rename in between cannot mix two topics into one answer
         row = require_topic(conn, checked)
         record_seen(seen, checked, row)
         threads, _ = _readable(conn, config, reader, checked)
@@ -446,7 +446,7 @@ def get(conn: sqlite3.Connection, config: Config, *, reader: str, path: Any,
                 "subtopics": [child for child in children if may_open(conn, config, reader, child)]}
 
 
-def listing(conn: sqlite3.Connection, config: Config, *, reader: str,
+def listing(conn: Connection, config: Config, *, reader: str,
             parent: Any = None) -> list[dict[str, Any]]:
     """Every topic, or only those directly under `parent`, each with this reader's own thread count."""
     if parent is None:
@@ -462,7 +462,7 @@ def listing(conn: sqlite3.Connection, config: Config, *, reader: str,
     return listed
 
 
-def _readable(conn: sqlite3.Connection, config: Config, reader: str,
+def _readable(conn: Connection, config: Config, reader: str,
               path: str) -> tuple[int, str | None]:
     """The threads in this topic's subtree the reader may see, and the newest activity among those same ones.
 

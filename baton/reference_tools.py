@@ -10,7 +10,6 @@ Every whole number is a `StrictInt`. The SDK reads a plain `int` leniently and h
 so `references` cannot tell what was sent. Strict, the schema refuses them as it refuses a number out of range.
 """
 
-import sqlite3
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Annotated, Any, Protocol
@@ -18,18 +17,12 @@ from typing import Annotated, Any, Protocol
 from mcp.server.mcpserver.utilities.func_metadata import FuncMetadata
 from pydantic import Field, StrictInt
 
-from baton import auth, references, topics
+from baton import references, topics
 from baton.config import Config
+from baton.database import Connection
+from baton.tool_policy import REFERENCE_GUEST_TOOLS as REFERENCE_GUEST_TOOLS
+from baton.tool_policy import REFERENCE_TOOLS as REFERENCE_TOOLS
 from baton.topic_tools import GRANT_TOKEN
-
-# (tool, scope, read-only). Present with the conversation tools, after them.
-REFERENCE_TOOLS = (
-    ("edit_reference", auth.SCOPE_WRITE, False),
-    ("read_reference", auth.SCOPE_READ, True),
-    ("reference_history", auth.SCOPE_READ, True),
-)
-# The two a guest with an alias binding may call. Reading needs no grant, so no key.
-REFERENCE_GUEST_TOOLS = frozenset({"read_reference", "reference_history"})
 
 
 class LiteralArguments(FuncMetadata):
@@ -50,7 +43,7 @@ class _Host(Protocol):
 
     _config: Config
 
-    def _conn(self) -> AbstractContextManager[sqlite3.Connection]: ...
+    def _conn(self) -> AbstractContextManager[Connection]: ...
 
     def _under_grant(self, tool: str, role: str, identity: dict[str, str] | None, call: dict[str, Any] | None,
                      operate: Callable[[Any, str | None], dict[str, Any]]) -> dict[str, Any]: ...

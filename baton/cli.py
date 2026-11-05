@@ -23,11 +23,13 @@ from pathlib import Path
 from typing import Any
 
 from baton import config as config_module
-from baton import conversations, datadir, inbox, jobs, messages, remote, wakes
+from baton import conversations, datadir, jobs, messages, remote, wakes
 from baton.commands.index import add_commands as _add_index_commands
 from baton.config import Config, ConfigError
 from baton.errors import BatonError, InvalidRequest
-from baton.store import connect
+from baton.inbox import Inbox
+from baton.messages import DirectMessage
+from baton.store import connection
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -102,13 +104,13 @@ def _parser() -> argparse.ArgumentParser:
     read = _with_role(commands.add_parser("read", help="read messages sent to your role"))
     read.add_argument("--after-seq", type=int, help="default: only messages not yet delivered")
     read.add_argument("--limit", type=int, default=50)
-    read.set_defaults(handler=lambda config, args: _db(config, lambda conn: messages.read(
-        conn, args.role, args.after_seq, args.limit, config=config)))
+    read.set_defaults(handler=lambda config, args: _db(config, lambda conn: Inbox(conn, args.role, config).read(
+        args.after_seq, args.limit)))
 
     wait = _with_role(commands.add_parser("wait", help="block until messages or job changes reach your role"))
     wait.add_argument("--timeout", type=float, help="seconds; default: wait indefinitely")
-    wait.set_defaults(handler=lambda config, args: _db(config, lambda conn: inbox.wait(
-        conn, args.role, timeout_seconds=args.timeout, config=config)))
+    wait.set_defaults(handler=lambda config, args: _db(config, lambda conn: Inbox(conn, args.role, config).wait(
+        timeout_seconds=args.timeout)))
 
     _add_job_commands(commands)
     _add_conversation_commands(commands)
@@ -324,11 +326,8 @@ def _with_role(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 
 def _db(config: Config, operation: Any) -> Any:
-    conn = connect(config.db_path)
-    try:
+    with connection(config.db_path) as conn:
         return operation(conn)
-    finally:
-        conn.close()
 
 
 def _aliases(config: Config, operation: Any) -> Any:
@@ -391,27 +390,37 @@ def _attention(args: argparse.Namespace) -> list[str] | None:
     return args.attention.split(",") if args.attention is not None else None
 
 
+def _message_arguments(args: argparse.Namespace) -> dict[str, Any]:
+    """Normalize message input once for local and remote sends."""
+    try:
+        relayed = json.loads(args.relayed_json) if args.relayed_json is not None else None
+    except json.JSONDecodeError:
+        raise InvalidRequest("--relayed-json must be JSON: a list of {source, at, text} entries") from None
+    return {
+        "text": args.text if args.text is not None else sys.stdin.read(),
+        "job_id": args.job_id,
+        "relayed": relayed,
+        "request_id": args.request_id,
+        "reply_to": args.reply_to,
+        "attention": _attention(args),
+        "needs_decision": args.needs_decision,
+    }
+
+
 def _message(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     if args.to is None and args.conversation_id is None:
         raise InvalidRequest("name a recipient with --to or a conversation with --conversation")
     if args.to is not None:
         config.require_role(args.to)
-    try:
-        relayed = json.loads(args.relayed_json) if args.relayed_json is not None else None
-    except json.JSONDecodeError:
-        raise InvalidRequest("--relayed-json must be JSON: a list of {source, at, text} entries") from None
-    text = args.text if args.text is not None else sys.stdin.read()
-    attention = _attention(args)
+    message_args = _message_arguments(args)
     if args.conversation_id is not None:
         return _db(config, lambda conn: conversations.send(
-            conn, config, sender=args.role, conversation_id=args.conversation_id, text=text, relayed=relayed,
-            request_id=args.request_id, job_id=args.job_id, reply_to=args.reply_to, attention=attention,
-            needs_decision=args.needs_decision))
-    return _db(config, lambda conn: messages.send(conn, sender=args.role, recipient=args.to, text=text,
-                                                  request_id=args.request_id, job_id=args.job_id, relayed=relayed,
-                                                  author_kind=config.author_kind(args.role),
-                                                  reply_to=args.reply_to, attention=attention,
-                                                  needs_decision=args.needs_decision))
+            conn, config, sender=args.role, conversation_id=args.conversation_id, **message_args))
+    messages.only_in_a_conversation(reply_to=message_args.pop("reply_to"), attention=message_args.pop("attention"),
+                                   needs_decision=message_args.pop("needs_decision"))
+    message = DirectMessage(sender=args.role, recipient=args.to, **message_args,
+                            author_kind=config.author_kind(args.role))
+    return _db(config, message.send)
 
 
 def _list_conversations(config: Config, args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -470,15 +479,7 @@ def _remote(args: argparse.Namespace) -> Any:
     if command == "message":
         if (args.to is None) == (args.conversation_id is None):
             raise InvalidRequest("name a recipient with --to or a conversation with --conversation")
-        try:
-            relayed = json.loads(args.relayed_json) if args.relayed_json is not None else None
-        except json.JSONDecodeError:
-            raise InvalidRequest("--relayed-json must be JSON: a list of {source, at, text} entries") from None
-        text = args.text if args.text is not None else sys.stdin.read()
-        # Every argument the local command takes, or the field is accepted here and never sent.
-        arguments = {"text": text, "to": args.to, "conversation_id": args.conversation_id, "job_id": args.job_id,
-                     "relayed": relayed, "request_id": args.request_id, "reply_to": args.reply_to,
-                     "attention": _attention(args), "needs_decision": True if args.needs_decision else None}
+        arguments = {**_message_arguments(args), "to": args.to, "conversation_id": args.conversation_id}
         return _call(args, "send_message", arguments)
     if command == "read":
         return _call(args, "read_messages", {"after_seq": args.after_seq, "limit": args.limit})
@@ -491,12 +492,11 @@ def _remote(args: argparse.Namespace) -> Any:
     if command == "conversation list":
         return _conversation_list_result(_call(args, "list_conversations", {"topic": args.topic}))
     if command == "conversation topic":
-        # `--clear` means null, which _call strips, and set_topic requires the argument: send it directly.
-        return remote.call(args.host, remote.token(), "set_topic",
-                           {"conversation_id": args.conversation_id,
-                            "topic": None if args.clear else args.topic})
+        return _call(args, "set_topic", {"conversation_id": args.conversation_id,
+                                          "topic": None if args.clear else args.topic})
     if command == "conversation history":
-        return _call(args, "read_history", {"conversation_id": args.conversation_id, "after_seq": args.after_seq,
+        return _call(args, "read_history", {"conversation_id": args.conversation_id,
+                                            "after_seq": args.after_seq,
                                             "limit": args.limit})
     raise ConfigError(f"`baton {command}` runs on the host only; with --host use message, read, wait, "
                       "conversation new, conversation list, conversation topic or conversation history")
@@ -515,8 +515,7 @@ def _remote_wait(args: argparse.Namespace) -> Any:
 
 
 def _call(args: argparse.Namespace, tool: str, arguments: dict[str, Any]) -> Any:
-    return remote.call(args.host, remote.token(), tool, {key: value for key, value in arguments.items()
-                                                         if value is not None})
+    return remote.call(args.host, remote.token(), tool, arguments)
 
 
 def _conversation_list_result(result: Any) -> Any:

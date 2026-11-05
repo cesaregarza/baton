@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Any
 
 from baton.config import Config
+from baton.database import Connection
 
 
 def sees_all(config: Config, role: str) -> bool:
@@ -29,7 +29,7 @@ def message_condition(config: Config, role: str, alias: str = "m") -> tuple[str,
             {"reader": role})
 
 
-def may_read_conversation(conn: sqlite3.Connection, config: Config, role: str, conversation_id: str) -> bool:
+def may_read_conversation(conn: Connection, config: Config, role: str, conversation_id: str) -> bool:
     """Apply the conversation-level part of the same rule before reading history."""
     if sees_all(config, role):
         return True

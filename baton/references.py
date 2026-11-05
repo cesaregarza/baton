@@ -18,13 +18,12 @@ references follow topic visibility and any identified caller may list the topics
 from __future__ import annotations
 
 import secrets
-import sqlite3
 from typing import Any
 
 from baton import events, messages, topic_grants, topic_paths, topics
 from baton.config import Config
+from baton.database import Connection, Row
 from baton.errors import Forbidden, InvalidRequest, LimitExceeded, StaleReference, UnknownReference
-from baton.store import snapshot, transaction
 
 CAPABILITY = "reference.edit"
 MAX_BODY_BYTES = 32768
@@ -98,8 +97,8 @@ def _may_edit(config: Config, actor: str) -> None:
         raise Forbidden(f"{actor} may not edit references (roles.{actor}.can_create_topics)")
 
 
-def _authorize(conn: sqlite3.Connection, identity: dict[str, str] | None, grant_key: str | None,
-               path: str) -> tuple[sqlite3.Row, sqlite3.Row | None]:
+def _authorize(conn: Connection, identity: dict[str, str] | None, grant_key: str | None,
+               path: str) -> tuple[Row, Row | None]:
     """The topic at `path` and the grant the caller acts under, or the refusal.
 
     A core role was settled by its flag. A guest is decided by its key's grant, which reads the topic itself and
@@ -122,7 +121,7 @@ def _digest(actor: str, identity: dict[str, str] | None, topic_id: str, name: st
         "body": body, "expected_revision": expected})
 
 
-def _locate(conn: sqlite3.Connection, topic_id: str, name: str) -> tuple[str | None, int]:
+def _locate(conn: Connection, topic_id: str, name: str) -> tuple[str | None, int]:
     """A document's id and its current revision, its highest. A document that does not exist is at revision 0."""
     row = conn.execute("SELECT d.id, r.revision FROM reference_docs d JOIN reference_revisions r ON r.doc_id = d.id"
                        " WHERE d.topic_id = ? AND d.name = ? ORDER BY r.revision DESC LIMIT 1",
@@ -130,7 +129,7 @@ def _locate(conn: sqlite3.Connection, topic_id: str, name: str) -> tuple[str | N
     return (None, 0) if row is None else (row["id"], row["revision"])
 
 
-def _document(conn: sqlite3.Connection, topic_id: str, path: str, name: str, expected: int) -> str:
+def _document(conn: Connection, topic_id: str, path: str, name: str, expected: int) -> str:
     """The id of the document an edit appends to, made if it is new, or the refusal of a stale edit or a full topic.
 
     The topic's limit counts its own documents only, never its subtopics', and only when one is made: a topic that
@@ -152,7 +151,7 @@ def _document(conn: sqlite3.Connection, topic_id: str, path: str, name: str, exp
     return doc_id
 
 
-def _append(conn: sqlite3.Connection, *, doc_id: str, number: int, body: str, actor: str,
+def _append(conn: Connection, *, doc_id: str, number: int, body: str, actor: str,
             identity: dict[str, str] | None, grant_id: str | None, request_id: str, digest: str) -> None:
     """Write revision `number`, based on the one before it, with who wrote it and under which grant.
 
@@ -167,7 +166,7 @@ def _append(conn: sqlite3.Connection, *, doc_id: str, number: int, body: str, ac
                   request_id, digest, number - 1, events.now()))
 
 
-def _revision(conn: sqlite3.Connection, doc_id: str, number: int) -> sqlite3.Row:
+def _revision(conn: Connection, doc_id: str, number: int) -> Row:
     """A revision with its text. Revisions are exactly 1 to the current one, so a caller within that has its row.
 
     Every answer about a revision is read back from here, so an edit, its retry and a later read cannot describe it
@@ -177,7 +176,7 @@ def _revision(conn: sqlite3.Connection, doc_id: str, number: int) -> sqlite3.Row
                         (doc_id, number)).fetchone()
 
 
-def _author(row: sqlite3.Row) -> dict[str, str]:
+def _author(row: Row) -> dict[str, str]:
     """Who wrote a revision: the role it ran as, and the alias as it was called then if an alias was behind it."""
     author = {"role": row["author_role"]}
     if row["author_alias_id"] is not None:
@@ -185,13 +184,13 @@ def _author(row: sqlite3.Row) -> dict[str, str]:
     return author
 
 
-def _summary(row: sqlite3.Row) -> dict[str, Any]:
+def _summary(row: Row) -> dict[str, Any]:
     """What an answer says of a revision besides its text."""
     return {"revision": row["revision"], "base_revision": row["base_revision"], "at": row["at"],
             "size": row["size"], "author": _author(row), "grant_id": row["grant_id"]}
 
 
-def edit(conn: sqlite3.Connection, config: Config, *, actor: str, topic: Any, name: Any, body: Any,
+def edit(conn: Connection, config: Config, *, actor: str, topic: Any, name: Any, body: Any,
          expected_revision: Any, request_id: Any = None, identity: dict[str, str] | None = None,
          grant_key: str | None = None, seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """Append a document's next revision, or answer the retry of one already appended.
@@ -208,7 +207,7 @@ def edit(conn: sqlite3.Connection, config: Config, *, actor: str, topic: Any, na
     _check_body(body)
     _check_expected(expected_revision)
     request_id = _request_id(request_id)
-    with transaction(conn):
+    with conn.transaction():
         topic_row, grant = _authorize(conn, identity, grant_key, path)
         grant_id = None if grant is None else grant["id"]
         digest = _digest(actor, identity, topic_row["id"], name, body, expected_revision)
@@ -225,7 +224,7 @@ def edit(conn: sqlite3.Connection, config: Config, *, actor: str, topic: Any, na
                 "request_id": request_id, "created": stored is None}
 
 
-def _existing(conn: sqlite3.Connection, topic_id: str, path: str, name: str) -> tuple[str, int]:
+def _existing(conn: Connection, topic_id: str, path: str, name: str) -> tuple[str, int]:
     """A document that must exist: its id and current revision, or the refusal naming what is missing."""
     doc_id, current = _locate(conn, topic_id, name)
     if doc_id is None:
@@ -233,7 +232,7 @@ def _existing(conn: sqlite3.Connection, topic_id: str, path: str, name: str) -> 
     return doc_id, current
 
 
-def _listing(conn: sqlite3.Connection, topic_id: str) -> list[dict[str, Any]]:
+def _listing(conn: Connection, topic_id: str) -> list[dict[str, Any]]:
     """The topic's own documents by name, each described by its current revision."""
     rows = conn.execute(f"SELECT d.name, {_DESCRIBED} FROM reference_docs d JOIN reference_revisions r"
                         " ON r.doc_id = d.id WHERE d.topic_id = ? AND r.revision ="
@@ -243,7 +242,7 @@ def _listing(conn: sqlite3.Connection, topic_id: str) -> list[dict[str, Any]]:
              "author": _author(row), "grant_id": row["grant_id"]} for row in rows]
 
 
-def read(conn: sqlite3.Connection, *, topic: Any, name: Any = None, revision: Any = None,
+def read(conn: Connection, *, topic: Any, name: Any = None, revision: Any = None,
          seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """A topic's references, or one reference's current text, or one old revision of it, as it was written.
 
@@ -257,7 +256,7 @@ def read(conn: sqlite3.Connection, *, topic: Any, name: Any = None, revision: An
         raise InvalidRequest("revision is a whole number from 1")
     if revision is not None and name is None:
         raise InvalidRequest("revision needs a name")
-    with snapshot(conn):  # one view, so a write in between cannot mix two revisions into one answer
+    with conn.snapshot():  # one view, so a write in between cannot mix two revisions into one answer
         topic_row = topics.require_topic(conn, path)
         topics.record_seen(seen, path, topic_row, reference=name)
         if name is None:
@@ -273,7 +272,7 @@ def read(conn: sqlite3.Connection, *, topic: Any, name: Any = None, revision: An
                 "body": found["body"], **_summary(found)}
 
 
-def history(conn: sqlite3.Connection, *, topic: Any, name: Any, after_revision: Any = 0, limit: Any = 50,
+def history(conn: Connection, *, topic: Any, name: Any, after_revision: Any = 0, limit: Any = 50,
             seen: dict[str, Any] | None = None) -> dict[str, Any]:
     """A reference's revisions after `after_revision`, oldest first and without their text.
 
@@ -284,7 +283,7 @@ def history(conn: sqlite3.Connection, *, topic: Any, name: Any, after_revision: 
     _check_name(name)
     if not (_is_count(after_revision, 0) and _is_count(limit, 1) and limit <= MAX_HISTORY_PAGE):
         raise InvalidRequest(f"limit is 1-{MAX_HISTORY_PAGE} and after_revision at least 0")
-    with snapshot(conn):
+    with conn.snapshot():
         topic_row = topics.require_topic(conn, path)
         topics.record_seen(seen, path, topic_row, reference=name)
         doc_id, current = _existing(conn, topic_row["id"], path, name)

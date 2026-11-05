@@ -4,20 +4,21 @@ Annotations stay eagerly evaluated: the MCP SDK inspects these methods through
 Guard wrappers defined in another module.
 """
 
-import sqlite3
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from typing import Annotated, Any
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from pydantic import Field
 
-from baton import aliases, conversations, inbox, jobs, messages, topics
+from baton import aliases, conversations, jobs, messages, topics
 from baton import search as search_module
 from baton.config import Config
+from baton.database import Connection
 from baton.errors import InvalidRequest, UnknownRole
+from baton.inbox import Inbox
+from baton.messages import DirectMessage
 from baton.reference_tools import ReferenceTools
-from baton.store import connect
+from baton.store import connection
 from baton.topic_tools import TopicTools
 
 MAX_WAIT_SECONDS = 30
@@ -126,9 +127,9 @@ class Tools(TopicTools, ReferenceTools):
                                           identity=identity)
             if to not in self._config.roles:
                 raise UnknownRole(f"no role {to!r}; call whoami for the list")
-            return messages.send(conn, sender=role, recipient=to, text=text, request_id=request_id, job_id=job_id,
-                                 relayed=relayed, author_kind=self._config.author_kind(role),
-                                 reply_to=reply_to, attention=attention, needs_decision=needs_decision)
+            messages.only_in_a_conversation(reply_to=reply_to, attention=attention, needs_decision=needs_decision)
+            return DirectMessage(sender=role, recipient=to, text=text, request_id=request_id, job_id=job_id,
+                                 relayed=relayed, author_kind=self._config.author_kind(role)).send(conn)
 
     def read_messages(
         self, role: str, after_seq: Annotated[int | None, Field(ge=0)] = None,
@@ -136,7 +137,7 @@ class Tools(TopicTools, ReferenceTools):
     ) -> dict[str, Any]:
         """Messages to you after `after_seq` (default: the ones not yet delivered), oldest first, with next_seq."""
         with self._conn() as conn:
-            return messages.read(conn, role, after_seq, limit, config=self._config)
+            return Inbox(conn, role, self._config).read(after_seq, limit)
 
     def create_conversation(
         self, role: str, title: str,
@@ -264,7 +265,7 @@ class Tools(TopicTools, ReferenceTools):
     def wait(self, role: str, timeout_seconds: Annotated[float, Field(ge=0, le=MAX_WAIT_SECONDS)] = 20) -> dict:
         """Block until messages or job changes are addressed to you, then return each exactly once."""
         with self._conn() as conn:
-            return inbox.wait(conn, role, timeout_seconds=timeout_seconds, config=self._config)
+            return Inbox(conn, role, self._config).wait(timeout_seconds=timeout_seconds)
 
     def create_job(self, role: str, title: str, body: str = "", request_id: str | None = None) -> dict[str, Any]:
         """Open a job in the initial state. Pass a request_id to make a retry safe."""
@@ -302,10 +303,5 @@ class Tools(TopicTools, ReferenceTools):
         with self._conn() as conn:
             return jobs.read_events(conn, job_id, after_seq, limit)
 
-    @contextmanager
-    def _conn(self) -> Iterator[sqlite3.Connection]:
-        conn = connect(self._config.db_path)
-        try:
-            yield conn
-        finally:
-            conn.close()
+    def _conn(self) -> AbstractContextManager[Connection]:
+        return connection(self._config.db_path)

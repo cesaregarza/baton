@@ -45,7 +45,6 @@ import hmac
 import json
 import logging
 import os
-import sqlite3
 import subprocess
 import threading
 import time
@@ -56,7 +55,8 @@ import httpx
 
 from baton import events, messages
 from baton.config import Config, Wake
-from baton.store import connect, transaction
+from baton.database import Connection, Row
+from baton.store import connect
 
 log = logging.getLogger("baton.wakes")
 
@@ -155,13 +155,13 @@ class Dispatcher:
                     claimed = self._claim(conn, event)
                     if claimed is not None:
                         tried += self._attempt(conn, *claimed)
-                    with transaction(conn):
+                    with conn.transaction():
                         events.set_cursor(conn, CURSOR, event["pos"])
             return tried
         finally:
             conn.close()
 
-    def _claim(self, conn: sqlite3.Connection, event: sqlite3.Row) -> tuple[str, str] | None:
+    def _claim(self, conn: Connection, event: Row) -> tuple[str, str] | None:
         """Record the wake an event calls for, if its audience has a hook; None if there is nothing new to send."""
         role = self._config.roles.get(event["audience"] or "")
         if role is None or not role.wake.enabled:
@@ -181,7 +181,7 @@ class Dispatcher:
             key, payload = (f"job:{event['job_id']}:{event['seq']}",
                             {"reason": event["kind"], "job_id": event["job_id"], "event_seq": event["seq"]})
         body = {"type": "baton.wake", "role": role.name, "host": self._config.public_url, **payload}
-        with transaction(conn):
+        with conn.transaction():
             inserted = conn.execute(
                 "INSERT INTO wakes (role, key, payload, status, lease_until, attempts, created_at)"
                 " VALUES (?, ?, ?, 'pending', 0, 0, ?) ON CONFLICT (role, key) DO NOTHING",
@@ -189,8 +189,8 @@ class Dispatcher:
             ).rowcount
         return (role.name, key) if inserted else None
 
-    def _attempt(self, conn: sqlite3.Connection, role: str, key: str) -> int:
-        with transaction(conn):
+    def _attempt(self, conn: Connection, role: str, key: str) -> int:
+        with conn.transaction():
             row = conn.execute("SELECT * FROM wakes WHERE role = ? AND key = ?", (role, key)).fetchone()
             if row is None or row["status"] != "pending":
                 return 0
@@ -226,7 +226,7 @@ class Dispatcher:
                     (_now() + LEASE_SECONDS, role, key, _now())).rowcount:
                 return 0
         delivered = self._send(role, wake_id(role, key), row["payload"].encode())
-        with transaction(conn):
+        with conn.transaction():
             if delivered:
                 # Only a wake that was still pending becomes delivered, and only that wake gets
                 # reminders. The callback is made outside the transaction, so the role can read
@@ -243,8 +243,8 @@ class Dispatcher:
                              (_now() + backoff, role, key))
         return 1
 
-    def _schedule_reminders(self, conn: sqlite3.Connection, role: str, key: str,
-                            row: sqlite3.Row) -> None:
+    def _schedule_reminders(self, conn: Connection, role: str, key: str,
+                            row: Row) -> None:
         """Set both reminders for a message batch whose original wake has just been delivered.
 
         Anchored here, at durable delivery, so a restart needs no reconstruction and a later message
@@ -263,7 +263,7 @@ class Dispatcher:
                 (role, f"{key}:r{ordinal}", row["payload"], events.now(),
                  delivered_at + offset, batch - 1, ordinal))
 
-    def _due_reminders(self, conn: sqlite3.Connection) -> int:
+    def _due_reminders(self, conn: Connection) -> int:
         """Claim and send every reminder that has come due; return how many were tried.
 
         Runs on the ordinary pass rather than a loop of its own, so the original wakes keep their
@@ -299,7 +299,7 @@ class Dispatcher:
                 tried += self._attempt(conn, row["role"], row["key"])
         return tried
 
-    def _reminder_is_spent(self, conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    def _reminder_is_spent(self, conn: Connection, row: Row) -> bool:
         """Whether a pending reminder has lost its turn, retiring it if so. Checked before each send.
 
         Retries run before the due scan in a pass, so without this an earlier ordinal could be sent
@@ -317,7 +317,7 @@ class Dispatcher:
                      " AND status = 'pending'", (events.now(), role, key))
         return True
 
-    def _claim_reminder(self, conn: sqlite3.Connection, role: str, key: str, ordinal: int,
+    def _claim_reminder(self, conn: Connection, role: str, key: str, ordinal: int,
                         baseline: int) -> bool:
         """Take an exclusive claim on one due reminder, charging its cap slot once. True if won.
 
@@ -327,7 +327,7 @@ class Dispatcher:
         finds it no longer `scheduled` and stands down.
         """
         batch = key.rsplit(":r", 1)[0]
-        with transaction(conn):
+        with conn.transaction():
             if ordinal == max(range(1, len(REMINDER_OFFSETS) + 1)):
                 # The last ordinal has come due, so anything earlier has had its turn. This is about
                 # the chain reaching its end, not about this reminder going out, so it happens before
@@ -393,7 +393,7 @@ def wake_id(role: str, key: str) -> str:
     return "wake_" + hashlib.sha256(f"{role}:{key}".encode()).hexdigest()[:24]
 
 
-def recent(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:
+def recent(conn: Connection, limit: int = 20) -> list[dict[str, Any]]:
     """The latest wakes and how they ended, for `baton wakes`."""
     rows = conn.execute("SELECT role, key, status, attempts, created_at, finished_at FROM wakes"
                         " ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()

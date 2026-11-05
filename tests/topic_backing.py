@@ -31,7 +31,7 @@ def back_topics(target: Any, *paths: str, members: tuple[str, ...] = ()) -> None
         conn = target
     try:
         wanted = sorted({part for path in paths for part in (path, path.split("/")[0])})
-        with conn:
+        with conn.transaction():
             conn.executemany(
                 "INSERT OR IGNORE INTO topics (path, title, members, created_by, created_at, id)"
                 " VALUES (?, ?, ?, 'fixture', '2026-01-01T00:00:00+00:00', ?)",

@@ -15,14 +15,13 @@ falls back to it implicitly.
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
+from baton.database import Connection
 from baton.errors import CursorExpired, InvalidRequest
-from baton.store import snapshot
 
 MAX_SCAN = 1000  # rows one read looks at, so a long stretch is paged and never loaded at once
 MAX_LIMIT = 1000
@@ -36,7 +35,7 @@ class Scope(Enum):
     ALL = "all"
 
 
-def record(conn: sqlite3.Connection, conversation_id: str, kind: str, *, message_id: str | None = None,
+def record(conn: Connection, conversation_id: str, kind: str, *, message_id: str | None = None,
            role: str | None = None) -> int:
     """Bump the conversation's revision and log the change; the caller holds the write lock. Returns the revision."""
     if kind not in KINDS:
@@ -49,11 +48,11 @@ def record(conn: sqlite3.Connection, conversation_id: str, kind: str, *, message
     return revision
 
 
-def epoch(conn: sqlite3.Connection) -> str:
+def epoch(conn: Connection) -> str:
     return conn.execute("SELECT value FROM log_meta WHERE key = 'log_epoch'").fetchone()[0]
 
 
-def read(conn: sqlite3.Connection, scope: Scope, *, cursor: str | None = None, limit: int = 100) -> dict[str, Any]:
+def read(conn: Connection, scope: Scope, *, cursor: str | None = None, limit: int = 100) -> dict[str, Any]:
     """The changes after `cursor`, oldest first, metadata only, and `next_cursor` to continue from.
 
     `next_cursor` is past every row looked at, so a page always advances. Without a cursor the read starts at
@@ -62,7 +61,7 @@ def read(conn: sqlite3.Connection, scope: Scope, *, cursor: str | None = None, l
     _require(scope)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_LIMIT:
         raise InvalidRequest(f"limit must be 1-{MAX_LIMIT}")
-    with snapshot(conn):  # a prune between checking the cursor and scanning would skip rows silently
+    with conn.snapshot():  # a prune between checking the cursor and scanning would skip rows silently
         after = _position(conn, cursor)
         rows = conn.execute(f"SELECT {', '.join(FIELDS)} FROM change_log WHERE change_seq > ? ORDER BY change_seq"
                             " LIMIT ?", (after, min(limit, MAX_SCAN))).fetchall()
@@ -71,13 +70,13 @@ def read(conn: sqlite3.Connection, scope: Scope, *, cursor: str | None = None, l
         return {"entries": entries, "next_cursor": f"{epoch(conn)}:{last}"}
 
 
-def wait(conn: sqlite3.Connection, scope: Scope, *, cursor: str, timeout_seconds: float,
+def wait(conn: Connection, scope: Scope, *, cursor: str, timeout_seconds: float,
          poll_seconds: float = 0.5) -> dict[str, Any]:
     """Block until a change after `cursor` is logged, then return only its `change_seq`; or time out. No content."""
     _require(scope)
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     while True:
-        with snapshot(conn):
+        with conn.snapshot():
             after = _position(conn, cursor)
             row = conn.execute("SELECT MIN(change_seq) FROM change_log WHERE change_seq > ?", (after,)).fetchone()
         if row[0] is not None:
@@ -92,7 +91,7 @@ def _require(scope: Scope) -> None:
         raise TypeError("every read of the change log names its scope")
 
 
-def _position(conn: sqlite3.Connection, cursor: str | None) -> int:
+def _position(conn: Connection, cursor: str | None) -> int:
     pruned = int(conn.execute("SELECT value FROM log_meta WHERE key = 'pruned_through'").fetchone()[0])
     current = epoch(conn)
     if cursor is None:

@@ -451,18 +451,6 @@ def _needs_topic(query: str) -> str | None | bool:
         return False
 
 
-def _visible(config: Config, conn: Any, topic: str | None = None) -> Iterator[dict[str, Any]]:
-    """Every readable conversation, newest first, fetching another page only when needed."""
-    viewer = config.dashboard.viewer_role
-    before = None
-    while True:
-        page = conversations.list_readable(conn, config, viewer, topic, before=before)
-        yield from page
-        if len(page) < conversations.MAX_LISTED:
-            return
-        before = conversations.page_cursor(page[-1])
-
-
 def _topic_header(config: Config, conn: Any, topic: str) -> str:
     """A topic's own details, above its threads: what it is, who opened it, and who a thread here reaches."""
     try:
@@ -521,7 +509,8 @@ def _directory(config: Config, conn: Any) -> str:
 
 def _index(config: Config, conn: Any, topic: str | None = None, page: int = 1) -> str:
     viewer = config.dashboard.viewer_role
-    listed = list(_visible(config, conn, topic))
+    total, shown = conversations.list_readable_page(conn, config, viewer, topic, limit=MAX_LISTED,
+                                                    offset=(page - 1) * MAX_LISTED)
     scope = "every conversation" if board_read.sees_all(config, viewer) else f"the conversations {viewer} is in"
     needs = f"Needs {_e(_attention_label(config))}"
     if topic is None:
@@ -532,13 +521,12 @@ def _index(config: Config, conn: Any, topic: str | None = None, page: int = 1) -
                    f'<h1>{_e(topic)}</h1><p class="muted">Read-only. Showing {_e(scope)} under this topic, as '
                    f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">{needs} here</a></p>'
                    + _topic_header(config, conn, topic))
-    if not listed:
+    if not total:
         return heading + f'<ul><li class=muted>{"None yet." if topic is None else "None under this topic."}</li></ul>'
-    shown = _slice(listed, page, MAX_LISTED)
-    span = _span(len(shown), len(listed), page, MAX_LISTED, " conversations")
+    span = _span(len(shown), total, page, MAX_LISTED, " conversations")
     more = f'<p class="muted">More than one page holds: {span}.</p>' if span else ""
     path = f"/t/{topic}" if topic else "/"
-    pager = _pager(path, {}, "page", page, MAX_LISTED, len(listed), "Older conversations")
+    pager = _pager(path, {}, "page", page, MAX_LISTED, total, "Older conversations")
     groups = "".join(f'<h2>{_topic_link(group)}</h2><ul>' + "".join(_listing(item) for item in items) + "</ul>"
                      for group, items in _by_topic(shown))
     if not shown:
@@ -563,9 +551,7 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
     subject = config.dashboard.attention_role or viewer
     projected = subject != viewer
     you = _attention_label(config)   # plain text: every use below escapes it
-    found, replied = _asking(config, conn, topic, subject)
-    mine = [pair for pair in found if subject in (pair[1].get("attention") or [])]
-    others = [pair for pair in found if subject not in (pair[1].get("attention") or [])]
+    mine, others, replied = _asking(config, conn, topic, subject)
     # Each list's links keep the topic and where the other lists are, so paging one leaves the others in place.
     params = {**({"topic": topic} if topic else {}),
               **{name: str(number) for name, number in pages.items() if number > 1}}
@@ -639,9 +625,9 @@ def _attention_label(config: Config) -> str:
 
 
 def _asking(config: Config, conn: Any, topic: str | None,
-            subject: str) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], set[str]]:
-    """Every message the viewer could read that names `subject` in `attention` or asks for a decision, newest
-    first, and the ids of the messages `subject` itself replied to.
+            subject: str) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]],
+                                   list[tuple[dict[str, Any], dict[str, Any]]], set[str]]:
+    """Messages addressed to `subject`, other decision signals, and replies, all from the viewer's readable set.
 
     It reads each visible conversation through the same `history` path as its page, under the viewer's
     shared board-read predicate, over the copies still stored: `subject` only filters, it never reads. Each message
@@ -650,16 +636,8 @@ def _asking(config: Config, conn: Any, topic: str | None,
     a person's, so an agent relaying or quoting the person never counts.
     """
     viewer = config.dashboard.viewer_role
-    found, replied = [], set()
-    for conversation in _visible(config, conn, topic):
-        for page in _history_pages(config, conn, conversation["conversation_id"], MAX_NEEDS):
-            found += [(conversation, item) for item in page["messages"]
-                      if item["from_role"] not in (None, viewer, subject)
-                      and (item.get("needs_decision") or subject in (item.get("attention") or []))]
-            replied |= {item["reply_to"]["message_id"] for item in page["messages"]
-                        if item["from_role"] == subject and item.get("reply_to")
-                        and (subject == viewer or item.get("author_kind") == "human")}
-    return sorted(found, key=lambda pair: (pair[1]["at"], pair[1]["seq"]), reverse=True), replied
+    return conversations.attention_signals(conn, config, viewer, subject, topic,
+                                           human_replies_only=subject != viewer)
 
 
 def _signal(subject: str, you: str, conversation: dict[str, Any], item: dict[str, Any], replied: set[str]) -> str:
@@ -738,10 +716,8 @@ def _history_pages(config: Config, conn: Any, conversation_id: str, limit: int) 
 
 def _title(config: Config, conn: Any, conversation_id: str) -> str:
     """A thread's title as the viewer's list gives it, or its id when that list does not hold it."""
-    for item in _visible(config, conn):
-        if item["conversation_id"] == conversation_id:
-            return item["title"]
-    return conversation_id
+    summary = conversations.readable_summary(conn, config, config.dashboard.viewer_role, conversation_id)
+    return summary["title"] if summary is not None else conversation_id
 
 
 def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -> Response:

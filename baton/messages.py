@@ -11,19 +11,31 @@ message in its conversation, and single out the roles it asks to look at it.
 from __future__ import annotations
 
 import json
-import re
-import sqlite3
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
 from typing import Any
 
 from baton import board_read, events
-from baton.errors import InvalidRequest, MailboxFull, RequestTooOld
-from baton.store import transaction
+from baton import message_content as _content
+from baton.database import Connection, Row
+from baton.errors import InvalidRequest, MailboxFull
+from baton.posts import Post
 
-# Text is measured as it travels: JSON with every non-ASCII character escaped.
-MAX_MESSAGE_BYTES = 64 * 1024
+# Keep the established public validation names available through baton.messages.
+AUTHOR_FIELDS = _content.AUTHOR_FIELDS
+MAX_MESSAGE_BYTES = _content.MAX_MESSAGE_BYTES
+MAX_SOURCE = _content.MAX_SOURCE
+RELAYED_FIELDS = _content.RELAYED_FIELDS
+REQUEST_ID = _content.REQUEST_ID
+REQUEST_MAX_AGE = _content.REQUEST_MAX_AGE
+REQUEST_MAX_SKEW = _content.REQUEST_MAX_SKEW
+check = _content.check
+check_relayed = _content.check_relayed
+new_request_id = _content.new_request_id
+request_time = _content.request_time
+wire_bytes = _content.wire_bytes
+
 # A page's estimated wire size. A tool result carries its data twice (the
 # structured result and a text copy), so the estimate doubles the JSON size.
 MAX_PAGE_BYTES = 512 * 1024
@@ -31,30 +43,61 @@ MAX_PAGE_MESSAGES = 100
 # Past this many unread messages a sender is refused until the recipient reads.
 MAX_UNREAD = 500
 
-# A request_id starts with its UTC creation time, so the host refuses an old
-# one by its date alone and never needs to forget a retry identity.
-REQUEST_ID = re.compile(r"(\d{8}T\d{6}Z)-[A-Za-z0-9._:-]{1,100}")
-REQUEST_MAX_AGE = timedelta(days=30)
-REQUEST_MAX_SKEW = timedelta(minutes=5)
-
 # How a page turns one row into a message, given the reader's view of the parent it answers.
-type Shape = Callable[[sqlite3.Row, dict[str, Any] | None], dict[str, Any]]
+type Shape = Callable[[Row, dict[str, Any] | None], dict[str, Any]]
 
 # The actor a host notice's event names: not a valid role name, so no role can be mistaken for it.
 HOST_ACTOR = "@host"
-RELAYED_FIELDS = ("source", "at", "text")
-# Arguments that would claim who wrote a message. The author is always the credential's role, so a request
-# carrying any of these is refused outright (`forbidden_field`) rather than silently ignored.
-AUTHOR_FIELDS = ("from_role", "author_kind", "author", "sender", "from", "role", "on_behalf_of",
-                 "alias", "alias_id", "identity", "code")
-MAX_SOURCE = 200
 
 
-def new_request_id() -> str:
-    return f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:12]}"
+@dataclass(frozen=True)
+class DirectMessage:
+    """A direct message to persist for its recipient."""
+
+    sender: str
+    recipient: str
+    text: str
+    request_id: str | None = None
+    job_id: str | None = None
+    relayed: Any = None
+    author_kind: str = "agent"
+
+    def __post_init__(self) -> None:
+        # A message object represents one submission, including when its caller retries send().
+        if not self.request_id:
+            object.__setattr__(self, "request_id", new_request_id())
+
+    def send(self, conn: Connection) -> dict[str, Any]:
+        """Store this message as the recipient's next seq; retries are safe."""
+        request_id = self.request_id
+        created_at = request_time(request_id)
+        relayed = check(self.text, self.relayed)
+        # `relayed` joins the digest only when present, so older requests still replay.
+        digest = events.request_digest("send", {"sender": self.sender, "recipient": self.recipient,
+                                                  "text": self.text, "job_id": self.job_id,
+                                                  **({"relayed": relayed} if relayed else {})})
+        with conn.transaction():
+            existing = events.replayed(conn, "message_requests", request_id, digest)
+            if existing is not None:
+                return {"message_id": existing["message_id"], "seq": existing["seq"],
+                        "request_id": request_id, "created": False}
+            if self.job_id is not None:
+                from baton import jobs  # lazily: jobs imports this module
+
+                jobs.require_exists(conn, self.job_id)
+            if unread(conn, self.recipient) >= MAX_UNREAD:
+                raise MailboxFull(f"{self.recipient} has {MAX_UNREAD} unread messages; retry after it reads")
+            message_id = new_message_id()
+            seq = store_copy(conn, message_id=message_id, sender=self.sender, recipient=self.recipient,
+                             text=self.text, job_id=self.job_id, relayed=relayed,
+                             author_kind=self.author_kind)
+            conn.execute("INSERT INTO message_requests (request_id, request_digest, message_id, seq, created_at)"
+                         " VALUES (?, ?, ?, ?, ?)",
+                         (request_id, digest, message_id, seq, created_at.isoformat()))
+        return {"message_id": message_id, "seq": seq, "request_id": request_id, "created": True}
 
 
-def send(conn: sqlite3.Connection, *, sender: str, recipient: str, text: str, request_id: str | None = None,
+def send(conn: Connection, *, sender: str, recipient: str, text: str, request_id: str | None = None,
          job_id: str | None = None, relayed: Any = None, author_kind: str = "agent",
          reply_to: str | None = None, attention: Any = None,
          needs_decision: bool = False) -> dict[str, Any]:
@@ -67,32 +110,11 @@ def send(conn: sqlite3.Connection, *, sender: str, recipient: str, text: str, re
     no interface can pass them to a direct message and have them quietly dropped.
     """
     only_in_a_conversation(reply_to=reply_to, attention=attention, needs_decision=needs_decision)
-    request_id = request_id or new_request_id()
-    created_at = request_time(request_id)
-    relayed = check(text, relayed)
-    # `relayed` joins the digest only when present, so a request sent before it existed still replays.
-    digest = events.request_digest("send", {"sender": sender, "recipient": recipient, "text": text,
-                                            "job_id": job_id, **({"relayed": relayed} if relayed else {})})
-    with transaction(conn):
-        existing = events.replayed(conn, "message_requests", request_id, digest)
-        if existing is not None:
-            return {"message_id": existing["message_id"], "seq": existing["seq"], "request_id": request_id,
-                    "created": False}
-        if job_id is not None:
-            from baton import jobs  # lazily: jobs imports this module
-
-            jobs.require_exists(conn, job_id)
-        if unread(conn, recipient) >= MAX_UNREAD:
-            raise MailboxFull(f"{recipient} has {MAX_UNREAD} unread messages; retry after it reads")
-        message_id = new_message_id()
-        seq = store_copy(conn, message_id=message_id, sender=sender, recipient=recipient, text=text, job_id=job_id,
-                         relayed=relayed, author_kind=author_kind)
-        conn.execute("INSERT INTO message_requests (request_id, request_digest, message_id, seq, created_at)"
-                     " VALUES (?, ?, ?, ?, ?)", (request_id, digest, message_id, seq, created_at.isoformat()))
-    return {"message_id": message_id, "seq": seq, "request_id": request_id, "created": True}
+    return DirectMessage(sender=sender, recipient=recipient, text=text, request_id=request_id, job_id=job_id,
+                         relayed=relayed, author_kind=author_kind).send(conn)
 
 
-def store_copy(conn: sqlite3.Connection, *, message_id: str, sender: str | None, recipient: str, text: str,
+def store_copy(conn: Connection, *, message_id: str, sender: str | None, recipient: str, text: str,
                job_id: str | None = None, conversation_id: str | None = None, conversation_seq: int | None = None,
                relayed: list[dict] | None = None, notice: dict[str, str] | None = None,
                author_kind: str | None = None, reply_to: str | None = None,
@@ -123,7 +145,7 @@ def new_message_id() -> str:
     return f"msg_{uuid.uuid4().hex[:16]}"
 
 
-def unread(conn: sqlite3.Connection, recipient: str) -> int:
+def unread(conn: Connection, recipient: str) -> int:
     last_seq, read_seq = _mailbox(conn, recipient)
     return last_seq - read_seq
 
@@ -143,7 +165,7 @@ def only_in_a_conversation(**fields: Any) -> None:
                              "addressed to its recipient.")
 
 
-def addressed_to(conn: sqlite3.Connection, recipient: str, seq: int) -> bool:
+def addressed_to(conn: Connection, recipient: str, seq: int) -> bool:
     """Whether the recipient's message `seq` singles it out, rather than only reaching it.
 
     A direct message does, by definition. A conversation message does when it names the recipient for
@@ -159,7 +181,7 @@ def addressed_to(conn: sqlite3.Connection, recipient: str, seq: int) -> bool:
     return bool(row["needs_decision"]) or recipient in json.loads(row["attention"] or "[]")
 
 
-def reply_references(conn: sqlite3.Connection, reader: str, rows: list[sqlite3.Row], config: Any = None
+def reply_references(conn: Connection, reader: str, rows: list[Row], config: Any = None
                      ) -> dict[tuple[str | None, str], dict[str, Any]]:
     """What `reader` may be told about each parent the rows answer, keyed by (conversation, parent id).
 
@@ -186,86 +208,24 @@ def reply_references(conn: sqlite3.Connection, reader: str, rows: list[sqlite3.R
                   **(attribution(visible[key]) if key in visible else {})} for key in answered}
 
 
-def check(text: str, relayed: Any) -> list[dict[str, str]] | None:
-    """Refuse an oversized message or a malformed relayed entry; return the entries as stored."""
-    relayed = check_relayed(relayed)
-    if wire_bytes(text) + (len(json.dumps(relayed)) if relayed else 0) > MAX_MESSAGE_BYTES:
-        raise InvalidRequest(f"a message, with any relayed entries, is at most {MAX_MESSAGE_BYTES} bytes "
-                             "once JSON-escaped")
-    return relayed
-
-
-def check_relayed(relayed: Any) -> list[dict[str, str]] | None:
-    """Words the sender passes on from someone else: each entry's source, the time they said it, and the words.
-
-    They are stored apart from the sender's own text and are never anyone's
-    authenticated authorship: the message's author is still the sender. A
-    refusal names the field at fault.
-    """
-    if relayed is None:
-        return None
-    if not isinstance(relayed, list) or not relayed:
-        raise InvalidRequest("relayed must be a non-empty list of {source, at, text} entries, or left out")
-    for index, entry in enumerate(relayed):
-        where = f"relayed[{index}]"
-        if not isinstance(entry, dict):
-            raise InvalidRequest(f"{where} must be an object with source, at and text")
-        for key in entry:
-            if key not in RELAYED_FIELDS:
-                raise InvalidRequest(f"{where}.{key} is not a field; an entry has only source, at and text")
-        if not isinstance(entry.get("source"), str) or not 1 <= len(entry["source"]) <= MAX_SOURCE:
-            raise InvalidRequest(f"{where}.source must name who said it, in 1-{MAX_SOURCE} characters")
-        if not isinstance(entry.get("at"), str) or not _zoned_time(entry["at"]):
-            raise InvalidRequest(f"{where}.at must be an ISO 8601 time with its UTC offset, such as "
-                                 "2026-10-29T07:00:00Z")
-        if not isinstance(entry.get("text"), str) or not entry["text"]:
-            raise InvalidRequest(f"{where}.text must be the relayed words")
-    return [{key: entry[key] for key in RELAYED_FIELDS} for entry in relayed]
-
-
-def _zoned_time(value: str) -> bool:
-    try:
-        return datetime.fromisoformat(value).tzinfo is not None
-    except ValueError:
-        return False
-
-
-def read(conn: sqlite3.Connection, recipient: str, after_seq: int | None = None, limit: int = 50,
+def read(conn: Connection, recipient: str, after_seq: int | None = None, limit: int = 50,
          config: Any = None) -> dict[str, Any]:
-    """The recipient's messages after `after_seq` (default: after the last one delivered), oldest first.
+    """Compatibility entrypoint for the recipient's sequenced inbox page."""
+    from baton.inbox import Inbox
 
-    `next_seq` is where the next page starts, so a short page is not the end.
-    `truncated` is true when the mailbox no longer holds the message right after `after_seq`, because its oldest
-    message comes later. Baton deletes no messages now, and it used to remove only a mailbox's oldest read ones,
-    which this covers; a gap left between kept messages by a change outside Baton is not detected.
-    """
-    if not 1 <= limit <= MAX_PAGE_MESSAGES or (after_seq is not None and after_seq < 0):
-        raise InvalidRequest(f"limit must be 1-{MAX_PAGE_MESSAGES} and after_seq at least 0")
-    with transaction(conn):
-        last_seq, read_seq = _mailbox(conn, recipient)
-        start = read_seq if after_seq is None else after_seq
-        rows = conn.execute("SELECT * FROM messages WHERE recipient = ? AND seq > ? ORDER BY seq LIMIT ?",
-                            (recipient, start, limit)).fetchall()
-        oldest = conn.execute("SELECT MIN(seq) FROM messages WHERE recipient = ?", (recipient,)).fetchone()[0]
-        page = as_page_for(conn, recipient, rows, config=config)
-        if page:
-            mark_read(conn, recipient, page[-1]["seq"])
-        unread = last_seq - _mailbox(conn, recipient)[1]
-    truncated = start + 1 < (oldest if oldest is not None else last_seq + 1)
-    return {"messages": page, "next_seq": page[-1]["seq"] if page else start, "unread": unread,
-            "truncated": truncated}
+    return Inbox(connection=conn, role=recipient, config=config).read(after_seq=after_seq, limit=limit)
 
 
-def first_unread_seq(conn: sqlite3.Connection, recipient: str) -> int | None:
+def first_unread_seq(conn: Connection, recipient: str) -> int | None:
     last_seq, read_seq = _mailbox(conn, recipient)
     return read_seq + 1 if read_seq < last_seq else None
 
 
-def read_seq(conn: sqlite3.Connection, recipient: str) -> int:
+def read_seq(conn: Connection, recipient: str) -> int:
     return _mailbox(conn, recipient)[1]
 
 
-def mark_read(conn: sqlite3.Connection, recipient: str, seq: int) -> None:
+def mark_read(conn: Connection, recipient: str, seq: int) -> None:
     """Advance the delivered position, and retire every wake the read has answered.
 
     A wake for messages now read would only replay them, and that holds for a batch's reminders as
@@ -284,11 +244,7 @@ def mark_read(conn: sqlite3.Connection, recipient: str, seq: int) -> None:
                  (events.now(), recipient, seq, seq))
 
 
-def wire_bytes(text: str) -> int:
-    return len(json.dumps(text)) - 2
-
-
-def attribution(row: sqlite3.Row) -> dict[str, str]:
+def attribution(row: Row) -> dict[str, str]:
     """Persisted server-bound attribution, optional so legacy/fixed-role results keep their shape."""
     return ({"alias_id": row["alias_id"], "alias": row["alias"], "badge": "guest", "code": row["alias_code"]}
             if row["alias_id"] else {})
@@ -300,7 +256,7 @@ def author_label(item: dict[str, Any]) -> str:
     return item.get("from_role") or "the host"
 
 
-def as_dict(row: sqlite3.Row, reply_to: dict[str, Any] | None = None) -> dict[str, Any]:
+def as_dict(row: Row, reply_to: dict[str, Any] | None = None) -> dict[str, Any]:
     """A message as readers see it. `from_role` is the sender's credential role, or None for a host notice.
 
     `author_kind` is `human` or `agent`, recorded when the message was sent; None for a host notice.
@@ -308,25 +264,18 @@ def as_dict(row: sqlite3.Row, reply_to: dict[str, Any] | None = None) -> dict[st
     `reply_to` is the reader's view of the message this one answers, from `reply_references`; None means
     this message answers nothing, or that it is being shaped for no particular reader.
     """
-    return {**attribution(row), "seq": row["seq"], "message_id": row["id"], "sender": row["sender"],
-            "from_role": row["sender"],
-            "author_kind": row["author_kind"],
-            "conversation_id": row["conversation_id"], "job_id": row["job_id"], "text": row["text"],
-            "relayed": json.loads(row["relayed"]) if row["relayed"] else None,
-            "notice": json.loads(row["notice"]) if row["notice"] else None, "reply_to": reply_to,
-            "attention": json.loads(row["attention"]) if row["attention"] else None,
-            "needs_decision": bool(row["needs_decision"]), "at": row["at"]}
+    return Post.from_row(row).to_dict(reply_to)
 
 
-def as_page_for(conn: sqlite3.Connection, reader: str, rows: list[sqlite3.Row],
+def as_page_for(conn: Connection, reader: str, rows: list[Row],
                 shape: Shape = as_dict, config: Any = None) -> list[dict[str, Any]]:
     """A page of messages as `reader` sees them, with each reply's parent resolved in one query."""
     references = reply_references(conn, reader, rows, config)
     return as_page(rows, lambda row: shape(row, references.get((row["conversation_id"], row["reply_to"]))))
 
 
-def as_page(rows: list[sqlite3.Row],
-            shape: Callable[[sqlite3.Row], dict[str, Any]] = as_dict) -> list[dict[str, Any]]:
+def as_page(rows: list[Row],
+            shape: Callable[[Row], dict[str, Any]] = as_dict) -> list[dict[str, Any]]:
     page: list[dict[str, Any]] = []
     size = 0
     for row in rows:
@@ -339,24 +288,6 @@ def as_page(rows: list[sqlite3.Row],
     return page
 
 
-def _mailbox(conn: sqlite3.Connection, recipient: str) -> tuple[int, int]:
+def _mailbox(conn: Connection, recipient: str) -> tuple[int, int]:
     row = conn.execute("SELECT last_seq, read_seq FROM mailboxes WHERE recipient = ?", (recipient,)).fetchone()
     return (row["last_seq"], row["read_seq"]) if row else (0, 0)
-
-
-def request_time(request_id: str) -> datetime:
-    """The UTC creation time a request_id starts with; refuse a malformed, future or too-old one."""
-    match = REQUEST_ID.fullmatch(request_id)
-    if match is None:
-        raise InvalidRequest("a request_id is YYYYMMDDTHHMMSSZ-<suffix>: its UTC creation time, then up "
-                             "to 100 of [A-Za-z0-9._:-]")
-    try:
-        created_at = datetime.strptime(match[1], "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
-    except ValueError:
-        raise InvalidRequest(f"request_id {request_id} does not carry a real UTC time") from None
-    current = datetime.now(UTC)
-    if created_at < current - REQUEST_MAX_AGE:
-        raise RequestTooOld(f"request_id {request_id} is more than {REQUEST_MAX_AGE.days} days old")
-    if created_at > current + REQUEST_MAX_SKEW:
-        raise InvalidRequest(f"request_id {request_id} is dated in the future")
-    return created_at

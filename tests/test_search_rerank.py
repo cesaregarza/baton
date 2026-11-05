@@ -9,6 +9,7 @@ import struct
 import pytest
 
 from baton import search
+from baton.database import memory
 
 EMBEDDING = {"model": "toy", "dim": 3, "normalization": "none", "distance": "inner_product"}
 PROFILES = {"generation-a": EMBEDDING, "generation-b": EMBEDDING}
@@ -16,7 +17,7 @@ PROFILES = {"generation-a": EMBEDDING, "generation-b": EMBEDDING}
 
 @pytest.fixture
 def db():
-    conn = sqlite3.connect(":memory:")
+    conn = memory()
     conn.execute("CREATE TABLE vectors (generation TEXT, item_kind TEXT, item_id TEXT, model TEXT,"
                  " dim INTEGER, data BLOB, PRIMARY KEY (generation, item_kind, item_id))")
     yield conn
@@ -44,7 +45,7 @@ def test_a_full_mixed_candidate_pool_uses_bounded_vector_queries(db, variable_li
             expected.append((hit, score))
             vector(db, kind, str(number), score)
     if variable_limit is not None:
-        db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, variable_limit)
+        db._driver_connection().setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, variable_limit)
     statements = []
     db.set_trace_callback(statements.append)
     try:
@@ -54,7 +55,7 @@ def test_a_full_mixed_candidate_pool_uses_bounded_vector_queries(db, variable_li
     assert ranked == [hit for hit, _ in reversed(expected)]
     assert [hit["similarity"] for hit in ranked] == [score for _, score in reversed(expected)]
     vector_reads = [statement for statement in statements if "FROM vectors" in statement]
-    batch_size = db.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - len(PROFILES) - 2
+    batch_size = db.max_parameters - len(PROFILES) - 2
     assert len(vector_reads) <= 2 * math.ceil(200 / batch_size)
 
 

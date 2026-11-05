@@ -14,7 +14,6 @@ import hashlib
 import json
 import re
 import secrets
-import sqlite3
 import time
 import unicodedata
 
@@ -22,8 +21,8 @@ from mcp.server.auth.provider import AccessToken
 
 from baton import auth
 from baton.config import Aliases, Config
+from baton.database import Connection, Row
 from baton.errors import Forbidden, InvalidRequest, LimitExceeded
-from baton.store import transaction
 
 MAX_NAME = 64
 MAX_PASSPHRASE = 1024
@@ -68,13 +67,13 @@ def _credential(principal: AccessToken | None) -> str:
     return auth.token_digest(json.dumps(authority, sort_keys=True, separators=(",", ":")))
 
 
-def exists(conn: sqlite3.Connection, name: str) -> bool:
+def exists(conn: Connection, name: str) -> bool:
     """Read-only exact normalized-name occupancy, without ownership or code disclosure."""
     return conn.execute("SELECT 1 FROM aliases WHERE name = ?", (normalize(name),)).fetchone() is not None
 
 
-def _admit(conn: sqlite3.Connection, limits: Aliases, credential: str, name: str, now: float) -> None:
-    with transaction(conn):
+def _admit(conn: Connection, limits: Aliases, credential: str, name: str, now: float) -> None:
+    with conn.transaction():
         conn.execute("DELETE FROM alias_claims WHERE at <= ?", (now - CLAIM_WINDOW,))
         counts = conn.execute("SELECT COUNT(*), COALESCE(SUM(credential = ?), 0), COALESCE(SUM(name = ?), 0)"
                               " FROM alias_claims", (credential, skeleton(name))).fetchone()
@@ -90,14 +89,14 @@ def alias_code(alias_id: str) -> str:
     return hashlib.sha256(b"baton-alias-code-v1\x00" + alias_id.encode()).hexdigest()[:4]
 
 
-def _identity(row: sqlite3.Row, mapped_role: str | None) -> dict:
+def _identity(row: Row, mapped_role: str | None) -> dict:
     """An alias's identity; the caller reads `mapped_role` in the same query or transaction as `row`."""
     code = alias_code(row["id"])
     return {"alias_id": row["id"], "alias": row["name"], "badge": "guest", "code": code,
             "effective_role": mapped_role or "guest"}
 
 
-def claim(conn: sqlite3.Connection, config: Config, principal: AccessToken | None, name: str,
+def claim(conn: Connection, config: Config, principal: AccessToken | None, name: str,
           passphrase: str) -> dict:
     """Validate, then renew on the current passphrase, else reset on a live rekey arm, else refuse.
 
@@ -116,7 +115,7 @@ def claim(conn: sqlite3.Connection, config: Config, principal: AccessToken | Non
             return reset
         # The arm went before the reset could spend it: from here this is an ordinary claim, admitted like one.
     _admit(conn, config.aliases, credential, name, time.time())
-    with transaction(conn):
+    with conn.transaction():
         now = time.time()
         row = conn.execute("SELECT * FROM aliases WHERE name = ?", (name,)).fetchone()
         if row is None:
@@ -131,7 +130,7 @@ def claim(conn: sqlite3.Connection, config: Config, principal: AccessToken | Non
         return _bind(conn, config, row, now)
 
 
-def _replace_oldest_at_cap(conn: sqlite3.Connection, limits: Aliases, alias_id: str, now: float) -> None:
+def _replace_oldest_at_cap(conn: Connection, limits: Aliases, alias_id: str, now: float) -> None:
     """At the live-binding cap, end the alias's oldest live binding to make room for a proven renewal.
 
     Refusing instead would lock out a client that lost its token until the owner's rekey. Only a claim that
@@ -153,7 +152,7 @@ def _check_lifetimes(limits: Aliases) -> None:
             raise InvalidRequest(f"{label} must be a whole number from 1 to {high} seconds")
 
 
-def _reset_arm(conn: sqlite3.Connection, name: str, passphrase: str) -> str | None:
+def _reset_arm(conn: Connection, name: str, passphrase: str) -> str | None:
     """The live rekey arm this claim would spend as an armed reset: one exists and the passphrase isn't current.
 
     The scrypt check runs before admission only while an owner's arm is live.
@@ -163,12 +162,12 @@ def _reset_arm(conn: sqlite3.Connection, name: str, passphrase: str) -> str | No
     return row["id"] if row is not None and not auth.check_passphrase(passphrase, row["verifier"]) else None
 
 
-def _reset(conn: sqlite3.Connection, config: Config, name: str, passphrase: str, arm: str) -> dict | None:
+def _reset(conn: Connection, config: Config, name: str, passphrase: str, arm: str) -> dict | None:
     """Replace the verifier, end every proof and issue one, spending exactly the arm checked; None if it's gone.
 
     A replacement arm the owner wrote meanwhile has another id, so it is left for its own claim.
     """
-    with transaction(conn):
+    with conn.transaction():
         now = time.time()
         if conn.execute("DELETE FROM alias_arms WHERE id = ? AND expires_at > ?", (arm, now)).rowcount != 1:
             return None
@@ -179,7 +178,7 @@ def _reset(conn: sqlite3.Connection, config: Config, name: str, passphrase: str,
         return _bind(conn, config, row, now)
 
 
-def _bind(conn: sqlite3.Connection, config: Config, row: sqlite3.Row, now: float) -> dict:
+def _bind(conn: Connection, config: Config, row: Row, now: float) -> dict:
     """Issue a fresh proof; a mapped alias's lasts the mapped lifetime, a guest's the guest one."""
     mapped = conn.execute("SELECT role FROM alias_roles WHERE alias_id = ?", (row["id"],)).fetchone()
     identity = _identity(row, mapped["role"] if mapped else None)
@@ -194,8 +193,8 @@ def _bind(conn: sqlite3.Connection, config: Config, row: sqlite3.Row, now: float
     return {**identity, "binding_token": proof, "expires_at": now + lifetime}
 
 
-def _create(conn: sqlite3.Connection, config: Config, role: str, name: str, passphrase: str,
-            now: float) -> sqlite3.Row:
+def _create(conn: Connection, config: Config, role: str, name: str, passphrase: str,
+            now: float) -> Row:
     """A new guest alias, or a fixed role's one enrolment, which also maps the alias to the role."""
     if role == "guest":
         if _reserved(config, name):
@@ -213,36 +212,36 @@ def _create(conn: sqlite3.Connection, config: Config, role: str, name: str, pass
     return conn.execute("SELECT * FROM aliases WHERE id = ?", (alias_id,)).fetchone()
 
 
-def _take_arm(conn: sqlite3.Connection, kind: str, target: str, now: float) -> bool:
+def _take_arm(conn: Connection, kind: str, target: str, now: float) -> bool:
     """Spend a live arm. The caller's transaction rolls this back if the claim fails later."""
     conn.execute("DELETE FROM alias_arms WHERE expires_at <= ?", (now,))
     return conn.execute("DELETE FROM alias_arms WHERE kind = ? AND target = ?", (kind, target)).rowcount == 1
 
 
-def arm_enrol(conn: sqlite3.Connection, config: Config, role: str) -> dict:
+def arm_enrol(conn: Connection, config: Config, role: str) -> dict:
     """Owner: let `role`'s own credential enrol it, once, within ARM_SECONDS."""
     entry = config.roles.get(role)
     if entry is None or role == "guest" or entry.human or entry.display_only or role != normalize(role):
         raise Forbidden(f"{role!r} is not an agent role that can be mapped")
-    with transaction(conn):
+    with conn.transaction():
         if conn.execute("SELECT 1 FROM core_enrolment WHERE role = ?", (role,)).fetchone():
             raise Forbidden(f"{role} is already enrolled")
         return _arm(conn, "enrol", role)
 
 
-def arm_rekey(conn: sqlite3.Connection, name: str) -> dict:
+def arm_rekey(conn: Connection, name: str) -> dict:
     """Owner: let the next claim of alias `name` with a new passphrase replace its verifier, within ARM_SECONDS."""
     name = normalize(name)
-    with transaction(conn):
+    with conn.transaction():
         if not conn.execute("SELECT 1 FROM aliases WHERE name = ?", (name,)).fetchone():
             raise Forbidden(f"no alias {name!r}")
         return _arm(conn, "rekey", name)
 
 
-def map_alias(conn: sqlite3.Connection, name: str, role: str) -> dict:
+def map_alias(conn: Connection, name: str, role: str) -> dict:
     """Owner: make alias `name` act as enrolled `role`, replacing either side's earlier mapping."""
     name = normalize(name)
-    with transaction(conn):
+    with conn.transaction():
         row = conn.execute("SELECT id FROM aliases WHERE name = ?", (name,)).fetchone()
         if row is None:
             raise Forbidden(f"no alias {name!r}")
@@ -256,10 +255,10 @@ def map_alias(conn: sqlite3.Connection, name: str, role: str) -> dict:
     return {"alias": name, "role": role, "mapped": True}
 
 
-def unmap_alias(conn: sqlite3.Connection, name: str) -> dict:
+def unmap_alias(conn: Connection, name: str) -> dict:
     """Owner: end alias `name`'s mapping. It keeps renewing, as a guest alias."""
     name = normalize(name)
-    with transaction(conn):
+    with conn.transaction():
         row = conn.execute("SELECT r.role, r.alias_id FROM alias_roles r JOIN aliases a ON a.id = r.alias_id"
                            " WHERE a.name = ?", (name,)).fetchone()
         if row is None:
@@ -270,14 +269,14 @@ def unmap_alias(conn: sqlite3.Connection, name: str) -> dict:
     return {"alias": name, "role": row["role"], "mapped": False}
 
 
-def _end_proofs(conn: sqlite3.Connection, alias_ids: list[str]) -> None:
+def _end_proofs(conn: Connection, alias_ids: list[str]) -> None:
     """A mapping change ends the aliases' proofs and events targets, so nothing old is silently up- or downgraded."""
     for alias_id in alias_ids:
         conn.execute("DELETE FROM alias_bindings WHERE alias_id = ?", (alias_id,))
         conn.execute("DELETE FROM events_targets WHERE alias_id = ?", (alias_id,))
 
 
-def _arm(conn: sqlite3.Connection, kind: str, target: str) -> dict:
+def _arm(conn: Connection, kind: str, target: str) -> dict:
     """Write an arm, replacing any earlier one for the same target; the new id keeps the two apart."""
     expires_at = time.time() + ARM_SECONDS
     conn.execute("INSERT OR REPLACE INTO alias_arms VALUES (?, ?, ?, ?)",
@@ -290,7 +289,7 @@ def validate_proof(proof: object) -> None:
         raise Forbidden("alias binding is missing, invalid or expired")
 
 
-def resolve_binding(conn: sqlite3.Connection, proof: str | None) -> dict:
+def resolve_binding(conn: Connection, proof: str | None) -> dict:
     """The alias a live proof binds, with the role its calls run as (`guest` when unmapped).
 
     One query reads the proof, the alias and its mapping, so an owner's map or unmap can't land between them.
@@ -304,11 +303,11 @@ def resolve_binding(conn: sqlite3.Connection, proof: str | None) -> dict:
     return _identity(row, row["mapped_role"])
 
 
-def admit_post(conn: sqlite3.Connection, config: Config, principal: AccessToken, identity: dict) -> None:
+def admit_post(conn: Connection, config: Config, principal: AccessToken, identity: dict) -> None:
     """Count admitted calls, including retries/refusals, like Guard's existing tool quotas; prune old attempts."""
     credential = _credential(principal)
     now = time.time()
-    with transaction(conn):
+    with conn.transaction():
         conn.execute("DELETE FROM alias_posts WHERE at <= ?", (now - CLAIM_WINDOW,))
         counts = conn.execute("SELECT COALESCE(SUM(alias_id = ?), 0), COALESCE(SUM(credential = ?), 0)"
                               " FROM alias_posts", (identity["alias_id"], credential)).fetchone()
@@ -319,12 +318,12 @@ def admit_post(conn: sqlite3.Connection, config: Config, principal: AccessToken,
         conn.execute("INSERT INTO alias_posts VALUES (?, ?, ?)", (identity["alias_id"], credential, now))
 
 
-def bind_events(conn: sqlite3.Connection, authority: dict, identity: dict | None) -> dict:
+def bind_events(conn: Connection, authority: dict, identity: dict | None) -> dict:
     """Route this OAuth grant's event subscriptions to the role its alias is mapped to, checked on every wake."""
     grant = _grant(authority)
     if identity is None or identity["effective_role"] == "guest":
         raise Forbidden("bind_events needs the token of an alias mapped to a role")
-    with transaction(conn):
+    with conn.transaction():
         if not conn.execute("SELECT 1 FROM alias_roles WHERE alias_id = ? AND role = ?",
                             (identity["alias_id"], identity["effective_role"])).fetchone():
             raise Forbidden("this alias is no longer mapped to that role; claim it again")
@@ -337,12 +336,12 @@ def bind_events(conn: sqlite3.Connection, authority: dict, identity: dict | None
     return {"bound": True, "alias": identity["alias"], "code": identity["code"], "grant_id": grant}
 
 
-def unbind_events(conn: sqlite3.Connection, authority: dict, identity: dict | None) -> dict:
+def unbind_events(conn: Connection, authority: dict, identity: dict | None) -> dict:
     """Drop this grant's events target, with the token of the alias it is bound to. No target is a no-op."""
     grant = _grant(authority)
     if identity is None:
         raise Forbidden("unbind_events needs the token of the alias the grant is bound to")
-    with transaction(conn):
+    with conn.transaction():
         row = conn.execute("SELECT alias_id FROM events_targets WHERE grant_id = ?", (grant,)).fetchone()
         if row is not None and row["alias_id"] != identity["alias_id"]:
             raise Forbidden("this grant's events are bound to another alias")
@@ -350,24 +349,24 @@ def unbind_events(conn: sqlite3.Connection, authority: dict, identity: dict | No
     return {"unbound": row is not None, "grant_id": grant}
 
 
-def unbind_grant(conn: sqlite3.Connection, grant: str) -> dict:
+def unbind_grant(conn: Connection, grant: str) -> dict:
     """Owner: drop a grant's events target, for when its alias's token is lost."""
-    with transaction(conn):
+    with conn.transaction():
         dropped = conn.execute("DELETE FROM events_targets WHERE grant_id = ?", (grant,)).rowcount
     return {"unbound": dropped == 1, "grant_id": grant}
 
 
-def mapped_grants(conn: sqlite3.Connection, role: str) -> set[str]:
+def mapped_grants(conn: Connection, role: str) -> set[str]:
     """The grants whose events target is an alias currently mapped to `role`."""
     return {row[0] for row in conn.execute("SELECT t.grant_id FROM events_targets t JOIN alias_roles r"
                                            " ON r.alias_id = t.alias_id WHERE r.role = ?", (role,))}
 
 
-def sweep_events_targets(conn: sqlite3.Connection, config: Config) -> int:
+def sweep_events_targets(conn: Connection, config: Config) -> int:
     """Drop targets whose grant has ended. Cleanup only: delivery already checks each grant's liveness."""
     ended = [row["grant_id"] for row in conn.execute("SELECT grant_id, authority FROM events_targets")
              if not auth.authority_live(config, json.loads(row["authority"]))]
-    with transaction(conn):
+    with conn.transaction():
         for grant in ended:
             conn.execute("DELETE FROM events_targets WHERE grant_id = ?", (grant,))
     return len(ended)
