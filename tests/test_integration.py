@@ -27,6 +27,7 @@ TOOLS = {
     "get_job",
     "list_jobs",
     "read_job_events",
+    "read_secretary_summaries",
 }
 
 
