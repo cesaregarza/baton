@@ -50,6 +50,7 @@ def rename_events(scene):
 
 # 1. The worked cases ---------------------------------------------------------------------------------------------
 
+
 def test_renaming_a_subtopic_out_of_the_root_needs_the_acknowledgement_and_ends_the_grantees_reach(build_scene):
     """The case of a topic renamed out of the granted root: the grantee loses it from the next call. The rename is
     refused until the core role names the grant, then goes through and logs one event for it."""
@@ -68,14 +69,16 @@ def test_renaming_a_subtopic_out_of_the_root_needs_the_acknowledgement_and_ends_
 
         done = succeeded(await rename(client, scene, "job-hunt/leads", "leads", [held.grant_id]))
         assert (done["path"], done["renamed_from"]) == ("leads", "job-hunt/leads")
-        assert rename_events(scene) == [(held.grant_id, "planner",
-                                         {"topic_id": leads, "from": "job-hunt/leads", "to": "leads"})]
+        assert rename_events(scene) == [
+            (held.grant_id, "planner", {"topic_id": leads, "from": "job-hunt/leads", "to": "leads"})
+        ]
         assert scene.thread_topic(inside) == "leads"
 
         # Refusal 5 now: the topic left the root, so the grant no longer reaches it, in either direction.
         out = await held.call(client, "set_topic", conversation_id=inside, topic="job-hunt/boards")
         assert out.get("error") == "forbidden" and out["detail"].startswith(
-            f"topic grant {held.grant_id} does not allow thread.organise on "), out
+            f"topic grant {held.grant_id} does not allow thread.organise on "
+        ), out
         assert "leads" not in out["detail"], "the thread's current topic is not named in a refusal"
         elsewhere = await thread(client, scene.host, "job-hunt/boards")
         into = await held.call(client, "set_topic", conversation_id=elsewhere, topic="leads")
@@ -101,11 +104,19 @@ def test_renaming_the_granted_root_keeps_the_grant_on_the_same_topic_and_not_on_
         succeeded(await rename(client, scene, "job-hunt", "job-hunt-old", [held.grant_id]))
         assert scene.topic_id("job-hunt-old") == old_id
         succeeded(await held.call(client, "create_topic", path="job-hunt-old/referrals"))
-        assert only([row for row in scene.changes("create_topic") if row["grant_id"] == held.grant_id],
-                    "grantee's history row")["topic_id"] == scene.topic_id("job-hunt-old/referrals")
+        assert only(
+            [row for row in scene.changes("create_topic") if row["grant_id"] == held.grant_id], "grantee's history row"
+        )["topic_id"] == scene.topic_id("job-hunt-old/referrals")
 
-        succeeded(await tool(client, scene.host, "create_topic", {"path": "job-hunt", "members": ["planner", "worker"]},
-                             role="planner"))
+        succeeded(
+            await tool(
+                client,
+                scene.host,
+                "create_topic",
+                {"path": "job-hunt", "members": ["planner", "worker"]},
+                role="planner",
+            )
+        )
         assert scene.topic_id("job-hunt") != old_id
         stranger = await held.call(client, "create_topic", path="job-hunt/x")
         assert stranger.get("error") == "forbidden", stranger
@@ -116,6 +127,7 @@ def test_renaming_the_granted_root_keeps_the_grant_on_the_same_topic_and_not_on_
 
 
 # 2. Exactly the affected set -------------------------------------------------------------------------------------
+
 
 def test_a_rename_must_name_exactly_the_affected_grants(build_scene):
     """Renaming `job-hunt` changes what two active grants cover: the one on it, and one on its subtopic
@@ -135,8 +147,16 @@ def test_a_rename_must_name_exactly_the_affected_grants(build_scene):
         affected = [root.grant_id, child.grant_id]
         before = scene.topic_paths()
 
-        wrong = [None, [], [root.grant_id], [child.grant_id], [*affected, elsewhere["id"]], [*affected, ended["id"]],
-                 [*affected, "tgr_" + secrets.token_hex(8)], [elsewhere["id"]]]
+        wrong = [
+            None,
+            [],
+            [root.grant_id],
+            [child.grant_id],
+            [*affected, elsewhere["id"]],
+            [*affected, ended["id"]],
+            [*affected, "tgr_" + secrets.token_hex(8)],
+            [elsewhere["id"]],
+        ]
         for named in wrong:
             result = await rename(client, scene, "job-hunt", "job-hunt-old", named)
             must_name(result, "job-hunt", affected, unaffected=[elsewhere["id"], ended["id"]])
@@ -151,8 +171,11 @@ def test_a_rename_must_name_exactly_the_affected_grants(build_scene):
         for _, actor, detail in events:
             assert actor == "planner" and set(detail) == {"topic_id", "from", "to"}, detail
         by_grant = {grant_id: detail for grant_id, _, detail in events}
-        assert by_grant[root.grant_id] == {"topic_id": scene.topic_id("job-hunt-old"), "from": "job-hunt",
-                                           "to": "job-hunt-old"}
+        assert by_grant[root.grant_id] == {
+            "topic_id": scene.topic_id("job-hunt-old"),
+            "from": "job-hunt",
+            "to": "job-hunt-old",
+        }
 
     play(scene.host, scenario)
 
@@ -196,14 +219,16 @@ def test_a_rename_under_the_same_inheriting_root_is_affected_by_the_literal_rule
     async def scenario(client):
         await stage(client, scene.host, TOPICS)
         held = await scene.grantee(client, "lane-a", "job-hunt", ALL, inherit=True)
-        must_name(await rename(client, scene, "job-hunt/leads", "job-hunt/prospects"), "job-hunt/leads",
-                  [held.grant_id])
+        must_name(
+            await rename(client, scene, "job-hunt/leads", "job-hunt/prospects"), "job-hunt/leads", [held.grant_id]
+        )
         succeeded(await rename(client, scene, "job-hunt/leads", "job-hunt/prospects", [held.grant_id]))
 
     play(scene.host, scenario)
 
 
 # 3. When no grant is affected, a rename is exactly what it was ----------------------------------------------------
+
 
 def test_a_rename_no_grant_is_affected_by_needs_no_acknowledgement_and_naming_ids_is_refused(build_scene):
     """With grants around that this rename does not touch, it behaves as it always has: the same answer, no event.
@@ -221,8 +246,16 @@ def test_a_rename_no_grant_is_affected_by_needs_no_acknowledgement_and_naming_id
 
         plain = succeeded(await rename(client, scene, "reviews", "reviews-archive"))
         assert (plain["path"], plain["renamed_from"], plain["subtopics"]) == ("reviews-archive", "reviews", 0)
-        assert set(plain) == {"path", "title", "description", "members", "created_by", "created_at",
-                              "renamed_from", "subtopics"}
+        assert set(plain) == {
+            "path",
+            "title",
+            "description",
+            "members",
+            "created_by",
+            "created_at",
+            "renamed_from",
+            "subtopics",
+        }
         empty = succeeded(await rename(client, scene, "resume", "resume-archive", []))
         assert empty["path"] == "resume-archive"
         assert scene.events("rename") == []
@@ -282,6 +315,7 @@ def test_a_revoked_or_expired_grant_is_not_affected_by_a_rename(build_scene):
 
 # 4. History and atomicity ----------------------------------------------------------------------------------------
 
+
 def test_a_rename_writes_one_history_row_for_every_topic_whose_path_changed(build_scene):
     """History is by topic id, so each subtopic a rename moves gets its own row, with the same actor as the row for
     the topic named and, for a core role, no grant."""
@@ -293,8 +327,11 @@ def test_a_rename_writes_one_history_row_for_every_topic_whose_path_changed(buil
         rows = scene.changes("rename_topic")
         by_topic = {row["topic_id"]: row for row in rows}
         assert len(rows) == len(by_topic) == 3, [tuple(row) for row in rows]
-        for old, new in (("job-hunt", "job-hunt-old"), ("job-hunt/boards", "job-hunt-old/boards"),
-                         ("job-hunt/leads", "job-hunt-old/leads")):
+        for old, new in (
+            ("job-hunt", "job-hunt-old"),
+            ("job-hunt/boards", "job-hunt-old/boards"),
+            ("job-hunt/leads", "job-hunt-old/leads"),
+        ):
             row = by_topic[scene.topic_id(new)]
             assert (json.loads(row["before"]), json.loads(row["after"])) == ({"path": old}, {"path": new}), old
             assert (row["actor"], row["grant_id"]) == ("planner", None)

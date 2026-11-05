@@ -27,20 +27,32 @@ def dispatch(args: argparse.Namespace) -> Any:
     if command == "wait":
         return wait(args)
     if command == "conversation new":
-        return call(args, "create_conversation", {"title": args.title,
-                                                   "participants": args.participants.split(","),
-                                                   "topic": args.topic, "request_id": args.request_id})
+        return call(
+            args,
+            "create_conversation",
+            {
+                "title": args.title,
+                "participants": args.participants.split(","),
+                "topic": args.topic,
+                "request_id": args.request_id,
+            },
+        )
     if command == "conversation list":
         return conversation_list_result(call(args, "list_conversations", {"topic": args.topic}))
     if command == "conversation topic":
-        return call(args, "set_topic", {"conversation_id": args.conversation_id,
-                                         "topic": None if args.clear else args.topic})
+        return call(
+            args, "set_topic", {"conversation_id": args.conversation_id, "topic": None if args.clear else args.topic}
+        )
     if command == "conversation history":
-        return call(args, "read_history", {"conversation_id": args.conversation_id,
-                                            "after_seq": args.after_seq,
-                                            "limit": args.limit})
-    raise ConfigError(f"`baton {command}` runs on the host only; with --host use message, read, wait, "
-                      "conversation new, conversation list, conversation topic or conversation history")
+        return call(
+            args,
+            "read_history",
+            {"conversation_id": args.conversation_id, "after_seq": args.after_seq, "limit": args.limit},
+        )
+    raise ConfigError(
+        f"`baton {command}` runs on the host only; with --host use message, read, wait, "
+        "conversation new, conversation list, conversation topic or conversation history"
+    )
 
 
 def wait(args: argparse.Namespace) -> Any:

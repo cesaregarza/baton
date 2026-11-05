@@ -20,12 +20,16 @@ from baton.agents.secretary.harness.run import SecretaryHarness
 from baton.config.secretary import load_policy
 
 
-def _context(*, event: str = "one", knowledge: str = "shared knowledge",
-             instructions: str = "shared guidance") -> dict:
-    return {"principal": "planner", "instructions": instructions, "knowledge": knowledge,
-            "summary_bytes": 4000, "mode": "alert",
-            "events": [{"source_key": f"message:{event}", "text": "Synthetic incoming event"}],
-            "reply_context": []}
+def _context(*, event: str = "one", knowledge: str = "shared knowledge", instructions: str = "shared guidance") -> dict:
+    return {
+        "principal": "planner",
+        "instructions": instructions,
+        "knowledge": knowledge,
+        "summary_bytes": 4000,
+        "mode": "alert",
+        "events": [{"source_key": f"message:{event}", "text": "Synthetic incoming event"}],
+        "reply_context": [],
+    }
 
 
 def _harness(world) -> SecretaryHarness:
@@ -38,9 +42,12 @@ def _call(call_id: str = "call_1", name: str = "decide_attention", arguments: di
 
 def test_command_decision_adapter_roundtrips_typed_choice_and_reuses_verdict(tmp_path) -> None:
     with make_world(tmp_path) as world:
-        model = Model(world, tmp_path, engine=True,
-                      plan={"steps": [{"tool_calls": [_call()]}, {"decision": "wake"}],
-                            "engine_decision": "hold"})
+        model = Model(
+            world,
+            tmp_path,
+            engine=True,
+            plan={"steps": [{"tool_calls": [_call()]}, {"decision": "wake"}], "engine_decision": "hold"},
+        )
         harness = _harness(world)
         assessment = asyncio.run(harness.assess(_context(), 5))
         assert assessment["decision"] == "wake"
@@ -49,16 +56,22 @@ def test_command_decision_adapter_roundtrips_typed_choice_and_reuses_verdict(tmp
         assert harness.metrics["model_calls"] == 2 and len(harness.tools.calls) == 1
         [engine_request] = model.engine_requests
         assert engine_request == {
-            "version": 1, "task": "decide_attention", "context": _context(),
-            "choices": ["wake", "hold", "keep"], "_pid": engine_request["_pid"],
+            "version": 1,
+            "task": "decide_attention",
+            "context": _context(),
+            "choices": ["wake", "hold", "keep"],
+            "_pid": engine_request["_pid"],
         }
 
 
-@pytest.mark.parametrize("calls", [
-    [_call(name="unknown_tool")],
-    [_call(arguments={"explanation": "forbidden"})],
-    [_call(), _call()],
-])
+@pytest.mark.parametrize(
+    "calls",
+    [
+        [_call(name="unknown_tool")],
+        [_call(arguments={"explanation": "forbidden"})],
+        [_call(), _call()],
+    ],
+)
 def test_bad_tool_name_arguments_or_duplicate_batch_ids_fail_before_engine(tmp_path, calls) -> None:
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path, engine=True, plan={"steps": [{"tool_calls": calls}]})
@@ -70,10 +83,18 @@ def test_bad_tool_name_arguments_or_duplicate_batch_ids_fail_before_engine(tmp_p
 
 def test_repeated_calls_with_distinct_ids_stop_at_policy_limit(tmp_path) -> None:
     with make_world(tmp_path) as world:
-        model = Model(world, tmp_path, engine=True, plan={"steps": [
-            {"tool_calls": [_call("call_1")]}, {"tool_calls": [_call("call_2")]},
-            {"tool_calls": [_call("call_3")]},
-        ]})
+        model = Model(
+            world,
+            tmp_path,
+            engine=True,
+            plan={
+                "steps": [
+                    {"tool_calls": [_call("call_1")]},
+                    {"tool_calls": [_call("call_2")]},
+                    {"tool_calls": [_call("call_3")]},
+                ]
+            },
+        )
         messages.send(world.baton, sender="worker", recipient="planner", text="Call limit keeps this pending")
         with pytest.raises(SecretaryUnavailable, match="tool-call limit"):
             _decide(world)
@@ -85,9 +106,15 @@ def test_repeated_calls_with_distinct_ids_stop_at_policy_limit(tmp_path) -> None
 
 def test_model_call_after_tool_is_saved_and_replayed_without_writing_baton(tmp_path) -> None:
     with make_world(tmp_path) as world:
-        model = Model(world, tmp_path, engine=True, plan={"steps": [
-            {"tool_calls": [_call()]}, {"decision": "wake", "summary": "The event needs a look."}],
-            "engine_decision": "hold"})
+        model = Model(
+            world,
+            tmp_path,
+            engine=True,
+            plan={
+                "steps": [{"tool_calls": [_call()]}, {"decision": "wake", "summary": "The event needs a look."}],
+                "engine_decision": "hold",
+            },
+        )
         sent = messages.send(world.baton, sender="worker", recipient="planner", text="A synthetic incoming event")
         before = table_hashes(world.baton)
         result = _decide(world)
@@ -104,8 +131,7 @@ def test_model_call_after_tool_is_saved_and_replayed_without_writing_baton(tmp_p
 
 def test_cancellation_during_command_tool_reaps_child_without_assessment(tmp_path) -> None:
     with make_world(tmp_path) as world:
-        model = Model(world, tmp_path, engine=True,
-                      plan={"steps": [{"tool_calls": [_call()]}, {"decision": "wake"}]})
+        model = Model(world, tmp_path, engine=True, plan={"steps": [{"tool_calls": [_call()]}, {"decision": "wake"}]})
         # The engine fixture has an independent plan, so make its step sleep after configuring the command.
         engine_plan = tmp_path / "engine-plan.json"
         engine_plan.write_text(json.dumps({"steps": [{"sleep": 20}], "engine_decision": "hold"}))
@@ -129,35 +155,125 @@ def test_cancellation_during_command_tool_reaps_child_without_assessment(tmp_pat
         asyncio.run(run())
 
 
-@pytest.mark.parametrize("bad_response", [
-    pytest.param({"model": "", "answers": {"attention": {}}}, id="invalid-envelope"),
-    pytest.param({"model": "fake-jev", "answers": {"other": {}}}, id="wrong-answer-key"),
-    pytest.param({"model": "fake-jev", "answers": {"attention": {
-        "type": "text", "choice": "hold", "probabilities": {"wake": 0, "hold": 1, "keep": 0}, "confidence": 1,
-    }}}, id="wrong-answer-type"),
-    pytest.param({"model": "fake-jev", "answers": {"attention": {
-        "type": "choice", "choice": "hold", "probabilities": {"wake": 0, "hold": 1, "keep": 0},
-    }}}, id="missing-answer-field"),
-    pytest.param({"model": "fake-jev", "answers": {"attention": {
-        "type": "choice", "choice": "ignore", "probabilities": {"wake": 0, "hold": 1, "keep": 0}, "confidence": 1,
-    }}}, id="unknown-choice"),
-    pytest.param({"model": "fake-jev", "answers": {"attention": {
-        "type": "choice", "choice": "hold",
-        "probabilities": {"wake": float("nan"), "hold": 0, "keep": 0}, "confidence": 1,
-    }}}, id="non-finite-probability"),
-    pytest.param({"model": "fake-jev", "answers": {"attention": {
-        "type": "choice", "choice": "hold", "probabilities": {"wake": 0.2, "hold": 0.7, "keep": 0}, "confidence": 0.7,
-    }}}, id="probabilities-do-not-sum-to-one"),
-    pytest.param({"model": "fake-jev", "answers": {"attention": {
-        "type": "choice", "choice": "wake", "probabilities": {"wake": 0.2, "hold": 0.8, "keep": 0}, "confidence": 0.8,
-    }}}, id="choice-is-not-most-likely"),
-    pytest.param({"model": "fake-jev", "answers": {"attention": {
-        "type": "choice", "choice": "hold", "probabilities": {"wake": 0, "hold": 1, "keep": 0}, "confidence": 1.1,
-    }}}, id="invalid-confidence"),
-    pytest.param({"model": "fake-jev", "answers": {"attention": {
-        "type": "choice", "choice": "hold", "probabilities": {"wake": 0, "hold": 1, "keep": 0}, "confidence": 1,
-    }}, "usage": {"input_tokens": 1}}, id="invalid-optional-usage"),
-])
+@pytest.mark.parametrize(
+    "bad_response",
+    [
+        pytest.param({"model": "", "answers": {"attention": {}}}, id="invalid-envelope"),
+        pytest.param({"model": "fake-jev", "answers": {"other": {}}}, id="wrong-answer-key"),
+        pytest.param(
+            {
+                "model": "fake-jev",
+                "answers": {
+                    "attention": {
+                        "type": "text",
+                        "choice": "hold",
+                        "probabilities": {"wake": 0, "hold": 1, "keep": 0},
+                        "confidence": 1,
+                    }
+                },
+            },
+            id="wrong-answer-type",
+        ),
+        pytest.param(
+            {
+                "model": "fake-jev",
+                "answers": {
+                    "attention": {
+                        "type": "choice",
+                        "choice": "hold",
+                        "probabilities": {"wake": 0, "hold": 1, "keep": 0},
+                    }
+                },
+            },
+            id="missing-answer-field",
+        ),
+        pytest.param(
+            {
+                "model": "fake-jev",
+                "answers": {
+                    "attention": {
+                        "type": "choice",
+                        "choice": "ignore",
+                        "probabilities": {"wake": 0, "hold": 1, "keep": 0},
+                        "confidence": 1,
+                    }
+                },
+            },
+            id="unknown-choice",
+        ),
+        pytest.param(
+            {
+                "model": "fake-jev",
+                "answers": {
+                    "attention": {
+                        "type": "choice",
+                        "choice": "hold",
+                        "probabilities": {"wake": float("nan"), "hold": 0, "keep": 0},
+                        "confidence": 1,
+                    }
+                },
+            },
+            id="non-finite-probability",
+        ),
+        pytest.param(
+            {
+                "model": "fake-jev",
+                "answers": {
+                    "attention": {
+                        "type": "choice",
+                        "choice": "hold",
+                        "probabilities": {"wake": 0.2, "hold": 0.7, "keep": 0},
+                        "confidence": 0.7,
+                    }
+                },
+            },
+            id="probabilities-do-not-sum-to-one",
+        ),
+        pytest.param(
+            {
+                "model": "fake-jev",
+                "answers": {
+                    "attention": {
+                        "type": "choice",
+                        "choice": "wake",
+                        "probabilities": {"wake": 0.2, "hold": 0.8, "keep": 0},
+                        "confidence": 0.8,
+                    }
+                },
+            },
+            id="choice-is-not-most-likely",
+        ),
+        pytest.param(
+            {
+                "model": "fake-jev",
+                "answers": {
+                    "attention": {
+                        "type": "choice",
+                        "choice": "hold",
+                        "probabilities": {"wake": 0, "hold": 1, "keep": 0},
+                        "confidence": 1.1,
+                    }
+                },
+            },
+            id="invalid-confidence",
+        ),
+        pytest.param(
+            {
+                "model": "fake-jev",
+                "answers": {
+                    "attention": {
+                        "type": "choice",
+                        "choice": "hold",
+                        "probabilities": {"wake": 0, "hold": 1, "keep": 0},
+                        "confidence": 1,
+                    }
+                },
+                "usage": {"input_tokens": 1},
+            },
+            id="invalid-optional-usage",
+        ),
+    ],
+)
 def test_malformed_jev_result_is_unavailable_and_model_can_finish(tmp_path, monkeypatch, bad_response) -> None:
     requests: list[dict] = []
 
@@ -180,8 +296,12 @@ def test_malformed_jev_result_is_unavailable_and_model_can_finish(tmp_path, monk
         thread.start()
         monkeypatch.setenv("SECRETARY_JEV_TEST_KEY", "synthetic-only")
         value = json.loads(world.policy_path.read_text())
-        value["decision_engine"] = {"provider": "jev", "base_url": f"http://127.0.0.1:{server.server_port}",
-                                     "api_key_env": "SECRETARY_JEV_TEST_KEY", "timeout_seconds": 2}
+        value["decision_engine"] = {
+            "provider": "jev",
+            "base_url": f"http://127.0.0.1:{server.server_port}",
+            "api_key_env": "SECRETARY_JEV_TEST_KEY",
+            "timeout_seconds": 2,
+        }
         world.policy_path.write_text(json.dumps(value))
         try:
             harness = _harness(world)
@@ -212,29 +332,63 @@ def test_responses_keeps_append_only_prefix_reasoning_cache_usage_and_tool_schem
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(request)
             if self.path == "/jev/systemone":
-                response = {"model": "fake-jev", "answers": {"attention": {
-                    "type": "choice", "choice": "hold",
-                    "probabilities": {"wake": 0, "hold": 1, "keep": 0}, "confidence": 1,
-                }}, "usage": {"input_tokens": 4, "output_tokens": 2}}
+                response = {
+                    "model": "fake-jev",
+                    "answers": {
+                        "attention": {
+                            "type": "choice",
+                            "choice": "hold",
+                            "probabilities": {"wake": 0, "hold": 1, "keep": 0},
+                            "confidence": 1,
+                        }
+                    },
+                    "usage": {"input_tokens": 4, "output_tokens": 2},
+                }
             else:
                 model_request_count += 1
                 if model_request_count == 1:
-                    response = {"status": "completed", "usage": {"input_tokens": 10, "output_tokens": 3,
-                        "input_tokens_details": {"cached_tokens": 4}}, "output": [
-                        {"type": "reasoning", "id": "rs_opaque", "encrypted_content": "opaque-ciphertext"},
-                        {"type": "message", "role": "assistant", "content": [
-                            {"type": "output_text", "text": "I will consult the decision model."}]},
-                        {"type": "function_call", "id": "fc_opaque", "call_id": "call_1",
-                         "name": "decide_attention", "arguments": "{}"},
-                    ]}
+                    response = {
+                        "status": "completed",
+                        "usage": {"input_tokens": 10, "output_tokens": 3, "input_tokens_details": {"cached_tokens": 4}},
+                        "output": [
+                            {"type": "reasoning", "id": "rs_opaque", "encrypted_content": "opaque-ciphertext"},
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "I will consult the decision model."}],
+                            },
+                            {
+                                "type": "function_call",
+                                "id": "fc_opaque",
+                                "call_id": "call_1",
+                                "name": "decide_attention",
+                                "arguments": "{}",
+                            },
+                        ],
+                    }
                 else:
-                    response = {"status": "completed", "usage": {"input_tokens": 20, "output_tokens": 6,
-                        "input_tokens_details": {"cached_tokens": 9}}, "output": [
-                        {"type": "message", "content": [{"type": "output_text", "text": json.dumps({
-                            "decision": "wake", "reason": "Needs attention", "summary": "A new event arrived.",
-                            "sources": [event_key],
-                        })}]}
-                    ]}
+                    response = {
+                        "status": "completed",
+                        "usage": {"input_tokens": 20, "output_tokens": 6, "input_tokens_details": {"cached_tokens": 9}},
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": json.dumps(
+                                            {
+                                                "decision": "wake",
+                                                "reason": "Needs attention",
+                                                "summary": "A new event arrived.",
+                                                "sources": [event_key],
+                                            }
+                                        ),
+                                    }
+                                ],
+                            }
+                        ],
+                    }
             body = json.dumps(response).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
@@ -251,10 +405,16 @@ def test_responses_keeps_append_only_prefix_reasoning_cache_usage_and_tool_schem
         monkeypatch.setenv("SECRETARY_OPENAI_TEST_KEY", "synthetic-only")
         monkeypatch.setenv("SECRETARY_JEV_TEST_KEY", "synthetic-only")
         policy = json.loads(world.policy_path.read_text())
-        policy["model"] = {"provider": "openai", "base_url": f"http://127.0.0.1:{server.server_port}/v1",
-                           "api_key_env": "SECRETARY_OPENAI_TEST_KEY"}
-        policy["decision_engine"] = {"provider": "jev", "base_url": f"http://127.0.0.1:{server.server_port}/jev",
-                                     "api_key_env": "SECRETARY_JEV_TEST_KEY"}
+        policy["model"] = {
+            "provider": "openai",
+            "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+            "api_key_env": "SECRETARY_OPENAI_TEST_KEY",
+        }
+        policy["decision_engine"] = {
+            "provider": "jev",
+            "base_url": f"http://127.0.0.1:{server.server_port}/jev",
+            "api_key_env": "SECRETARY_JEV_TEST_KEY",
+        }
         world.policy_path.write_text(json.dumps(policy))
         try:
             harness = _harness(world)
@@ -263,8 +423,9 @@ def test_responses_keeps_append_only_prefix_reasoning_cache_usage_and_tool_schem
             changed_event = _harness(world)
             asyncio.run(changed_event.assess(_context(event="changed"), 5))
             changed_instructions = _harness(world)
-            asyncio.run(changed_instructions.assess(
-                _context(event="http_event", instructions="new principal instructions"), 5))
+            asyncio.run(
+                changed_instructions.assess(_context(event="http_event", instructions="new principal instructions"), 5)
+            )
             changed_knowledge = _harness(world)
             asyncio.run(changed_knowledge.assess(_context(event="http_event", knowledge="new knowledge"), 5))
         finally:
@@ -276,8 +437,7 @@ def test_responses_keeps_append_only_prefix_reasoning_cache_usage_and_tool_schem
         first_prefix = first["input"][:4]
         assert first["prompt_cache_options"] == {"mode": "implicit"}
         assert second["input"][:4] == first_prefix
-        assert second["input"][4] == {"type": "reasoning", "id": "rs_opaque",
-                                      "encrypted_content": "opaque-ciphertext"}
+        assert second["input"][4] == {"type": "reasoning", "id": "rs_opaque", "encrypted_content": "opaque-ciphertext"}
         assert second["input"][5]["content"][0]["text"] == "I will consult the decision model."
         assert second["input"][6]["type"] == "function_call"
         assert second["input"][6]["call_id"] == "call_1"

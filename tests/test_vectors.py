@@ -23,19 +23,27 @@ from baton.config import Config
 from baton.database.store import connect
 from baton.errors import BatonError
 
-ROLES = {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
-         "reviewer": {}, "assistant": {}, "outsider": {}, "viewer": {"can_view_all_conversations": True}}
+ROLES = {
+    "orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
+    "reviewer": {},
+    "assistant": {},
+    "outsider": {},
+    "viewer": {"can_view_all_conversations": True},
+}
 PROFILE = {"embedding": {"model": "toy-embed", "dim": 3, "normalization": "unit", "distance": "cosine"}}
 UNIT = {"x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0]}
 
 
 def vectors_config(tmp_path: Path, *, embeddings: bool = True, **indexer: Any) -> Config:
-    return config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": ROLES, "conversations": {"enabled": True},
-        "search": {"enabled": True, "embeddings": embeddings},
-        "indexer": {"producers": ["alpha", "beta"], **indexer},
-    })
+    return config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": ROLES,
+            "conversations": {"enabled": True},
+            "search": {"enabled": True, "embeddings": embeddings},
+            "indexer": {"producers": ["alpha", "beta"], **indexer},
+        }
+    )
 
 
 @pytest.fixture
@@ -65,18 +73,31 @@ def items(manifest: dict[str, Any]) -> list[str]:
     return [item["message_id"] for segment in manifest["segments"] for item in segment["items"]]
 
 
-def payload(manifest: dict[str, Any], *, request_id: str = "r-1", body: str = "a toy summary",
-            vectors: dict | None = None, skips: list | None = None, kinds=None) -> dict[str, Any]:
+def payload(
+    manifest: dict[str, Any],
+    *,
+    request_id: str = "r-1",
+    body: str = "a toy summary",
+    vectors: dict | None = None,
+    skips: list | None = None,
+    kinds=None,
+) -> dict[str, Any]:
     """Artifacts for the batch's kinds, and by default a vector for each kind and each message it served."""
     kinds = kinds or list(manifest["kinds"])
     if vectors is None:
-        vectors = {**{("kind", kind): UNIT["x"] for kind in kinds},
-                   **{("message_id", message_id): UNIT["y"] for message_id in items(manifest)}}
-    return {"request_id": request_id,
-            "artifacts": [{"kind": kind, "body": body, "citations": [],
-                           "expected_version": manifest["kinds"][kind]["prior_version"]} for kind in kinds],
-            "vectors": [{"item": {field: value}, "vector": vector} for (field, value), vector in vectors.items()],
-            "skips": skips or []}
+        vectors = {
+            **{("kind", kind): UNIT["x"] for kind in kinds},
+            **{("message_id", message_id): UNIT["y"] for message_id in items(manifest)},
+        }
+    return {
+        "request_id": request_id,
+        "artifacts": [
+            {"kind": kind, "body": body, "citations": [], "expected_version": manifest["kinds"][kind]["prior_version"]}
+            for kind in kinds
+        ],
+        "vectors": [{"item": {field: value}, "vector": vector} for (field, value), vector in vectors.items()],
+        "skips": skips or [],
+    }
 
 
 def begin(db, config, conversation_id: str, generation: str, kinds=("summary",), producer: str = "alpha"):
@@ -99,8 +120,15 @@ def skip_rows(db, generation: str) -> dict[tuple[str, str], str]:
     return {(row[0], row[1]): row[2] for row in rows}
 
 
-def fill(db, config, conversation_id: str, generation: str, kinds=derived.KINDS, producer: str = "alpha",
-         request_id: str | None = None) -> dict[str, Any]:
+def fill(
+    db,
+    config,
+    conversation_id: str,
+    generation: str,
+    kinds=derived.KINDS,
+    producer: str = "alpha",
+    request_id: str | None = None,
+) -> dict[str, Any]:
     manifest = begin(db, config, conversation_id, generation, kinds, producer)
     return commit(db, config, manifest, payload(manifest, request_id=request_id or manifest["batch_id"]), producer)
 
@@ -157,9 +185,15 @@ def test_a_message_that_already_holds_a_vector_needs_no_resend_and_may_not_chang
     assert vector_rows(db, generation)[("message", sent[0])] == UNIT["y"]
     say(db, config, conversation_id, "a third message")
     fourth = begin(db, config, conversation_id, generation, kinds=("summary",))
-    changed = payload(fourth, request_id="r-4", vectors={("kind", "summary"): UNIT["x"],
-                                                          ("message_id", sent[0]): UNIT["z"],
-                                                          ("message_id", items(fourth)[-1]): UNIT["y"]})
+    changed = payload(
+        fourth,
+        request_id="r-4",
+        vectors={
+            ("kind", "summary"): UNIT["x"],
+            ("message_id", sent[0]): UNIT["z"],
+            ("message_id", items(fourth)[-1]): UNIT["y"],
+        },
+    )
     refused("invalid_request", commit, db, config, fourth, changed)  # sent[0] wasn't served by this batch
     sixth_vectors = {("kind", "summary"): UNIT["x"], ("message_id", items(fourth)[-1]): UNIT["y"]}
     assert commit(db, config, fourth, payload(fourth, request_id="r-5", vectors=sixth_vectors))["created"] is True
@@ -192,8 +226,18 @@ def test_embedding_generations_need_embeddings_on(tmp_path: Path) -> None:
     db.close()
 
 
-@pytest.mark.parametrize("bad", [[1.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.5, 0.5, 0.5], [float("nan"), 1.0, 0.0],
-                                 [float("inf"), 0.0, 0.0], ["1", 0, 0], [True, 0, 0]])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        [1.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.5, 0.5, 0.5],
+        [float("nan"), 1.0, 0.0],
+        [float("inf"), 0.0, 0.0],
+        ["1", 0, 0],
+        [True, 0, 0],
+    ],
+)
 def test_a_vector_that_does_not_fit_the_profile_is_refused(db, config, bad) -> None:
     conversation_id, _ = converse(db, config, 1)
     generation = embedding_generation(db, config)
@@ -220,18 +264,32 @@ def test_skips_are_checked_and_recorded(db, config) -> None:
     conversation_id, sent = converse(db, config, 2)
     generation = embedding_generation(db, config)
     manifest = begin(db, config, conversation_id, generation)
-    lying = payload(manifest, vectors={("kind", "summary"): UNIT["x"], ("message_id", sent[1]): UNIT["y"]},
-                    skips=[{"item": {"message_id": sent[0]}, "reason": "empty_text"}])
+    lying = payload(
+        manifest,
+        vectors={("kind", "summary"): UNIT["x"], ("message_id", sent[1]): UNIT["y"]},
+        skips=[{"item": {"message_id": sent[0]}, "reason": "empty_text"}],
+    )
     refused("invalid_request", commit, db, config, manifest, lying)  # its text isn't empty
-    unknown = payload(manifest, vectors={("kind", "summary"): UNIT["x"], ("message_id", sent[1]): UNIT["y"]},
-                      skips=[{"item": {"message_id": sent[0]}, "reason": "felt_like_it"}])
+    unknown = payload(
+        manifest,
+        vectors={("kind", "summary"): UNIT["x"], ("message_id", sent[1]): UNIT["y"]},
+        skips=[{"item": {"message_id": sent[0]}, "reason": "felt_like_it"}],
+    )
     refused("invalid_request", commit, db, config, manifest, unknown)
-    honest = payload(manifest, body="", vectors={("message_id", sent[1]): UNIT["y"]},
-                     skips=[{"item": {"message_id": sent[0]}, "reason": "over_token_limit"},
-                            {"item": {"kind": "summary"}, "reason": "empty_text"}])  # the body really is empty
+    honest = payload(
+        manifest,
+        body="",
+        vectors={("message_id", sent[1]): UNIT["y"]},
+        skips=[
+            {"item": {"message_id": sent[0]}, "reason": "over_token_limit"},
+            {"item": {"kind": "summary"}, "reason": "empty_text"},
+        ],
+    )  # the body really is empty
     [version] = commit(db, config, manifest, honest)["versions"]
-    assert skip_rows(db, generation) == {("message", sent[0]): "over_token_limit",
-                                         ("artifact", version["version_id"]): "empty_text"}
+    assert skip_rows(db, generation) == {
+        ("message", sent[0]): "over_token_limit",
+        ("artifact", version["version_id"]): "empty_text",
+    }
 
 
 def test_a_vector_and_a_skip_for_one_item_is_refused(db, config) -> None:
@@ -301,17 +359,23 @@ def test_activation_refuses_an_embedding_generation_with_an_item_lacking_a_vecto
 def invariant_holds(db, generation: str) -> bool:
     """Every valid latest version, and every message any of them was made from, has a vector or a skip."""
     covered = set(vector_rows(db, generation)) | set(skip_rows(db, generation))
-    versions = db.execute("SELECT v.id, v.conversation_id FROM artifact_versions v WHERE v.generation = ? AND"
-                          " v.state = 'valid' AND v.version = (SELECT MAX(o.version) FROM artifact_versions o WHERE"
-                          " o.generation = v.generation AND o.conversation_id = v.conversation_id AND"
-                          " o.kind = v.kind)", (generation,)).fetchall()
+    versions = db.execute(
+        "SELECT v.id, v.conversation_id FROM artifact_versions v WHERE v.generation = ? AND"
+        " v.state = 'valid' AND v.version = (SELECT MAX(o.version) FROM artifact_versions o WHERE"
+        " o.generation = v.generation AND o.conversation_id = v.conversation_id AND"
+        " o.kind = v.kind)",
+        (generation,),
+    ).fetchall()
     for version_id, conversation_id in versions:
         if ("artifact", version_id) not in covered:
             return False
-        for (from_seq, to_seq) in db.execute("SELECT from_seq, to_seq FROM artifact_inputs WHERE version_id = ?",
-                                             (version_id,)):
-            for (message_id,) in db.execute("SELECT DISTINCT id FROM messages WHERE conversation_id = ? AND"
-                                            " conversation_seq BETWEEN ? AND ?", (conversation_id, from_seq, to_seq)):
+        for from_seq, to_seq in db.execute(
+            "SELECT from_seq, to_seq FROM artifact_inputs WHERE version_id = ?", (version_id,)
+        ):
+            for (message_id,) in db.execute(
+                "SELECT DISTINCT id FROM messages WHERE conversation_id = ? AND conversation_seq BETWEEN ? AND ?",
+                (conversation_id, from_seq, to_seq),
+            ):
                 if ("message", message_id) not in covered:
                     return False
     return True
@@ -349,8 +413,9 @@ def every_kind() -> dict:
 
 
 def hybrid(db, config, role: str, query: str, vector, **kwargs) -> list[str]:
-    hits = search.search(db, config, role, query, kinds=["message"], query_vector=vector, model="toy-embed",
-                         **kwargs)["hits"]
+    hits = search.search(db, config, role, query, kinds=["message"], query_vector=vector, model="toy-embed", **kwargs)[
+        "hits"
+    ]
     return [hit["message_id"] for hit in hits]
 
 
@@ -360,8 +425,12 @@ def test_hybrid_search_reranks_keyword_matches_by_their_vectors(db, config) -> N
     far = say(db, config, conversation_id, "kestrel in passing")
     generation = embedding_generation(db, config)
     manifest = begin(db, config, conversation_id, generation, kinds=derived.KINDS)
-    commit(db, config, manifest, payload(manifest, vectors={**every_kind(), ("message_id", near): UNIT["y"],
-                                                            ("message_id", far): UNIT["z"]}))
+    commit(
+        db,
+        config,
+        manifest,
+        payload(manifest, vectors={**every_kind(), ("message_id", near): UNIT["y"], ("message_id", far): UNIT["z"]}),
+    )
     derived.generation_activate(db, config, "alpha", generation)
     assert hybrid(db, config, "assistant", "kestrel", UNIT["z"])[0] == far  # the vector moves it up
     assert hybrid(db, config, "assistant", "kestrel", UNIT["z"], limit=1) == [far]  # re-ranked from a wider pool
@@ -378,8 +447,12 @@ def test_hybrid_search_never_lets_an_unreadable_perfect_match_in_or_ahead(db, co
     generation = embedding_generation(db, config)
     for conversation_id, message_id, vector in ((private, hidden, UNIT["x"]), (shared, seen, UNIT["y"])):
         manifest = begin(db, config, conversation_id, generation, kinds=derived.KINDS)
-        commit(db, config, manifest, payload(manifest, request_id=conversation_id,
-                                             vectors={**every_kind(), ("message_id", message_id): vector}))
+        commit(
+            db,
+            config,
+            manifest,
+            payload(manifest, request_id=conversation_id, vectors={**every_kind(), ("message_id", message_id): vector}),
+        )
     derived.generation_activate(db, config, "alpha", generation)
     assert hybrid(db, config, "assistant", "osprey", UNIT["x"], limit=1) == [seen]  # perfect vector, unreadable
     assert set(hybrid(db, config, "viewer", "osprey", UNIT["x"])) == {hidden, seen}
@@ -393,30 +466,33 @@ def test_an_invalid_version_s_vector_never_contributes(db, config) -> None:
     commit(db, config, manifest, payload(manifest, body="heron summary"))
     derived.generation_activate(db, config, "alpha", generation)
     db.execute("UPDATE artifact_versions SET state = 'invalid'")
-    hits = search.search(db, config, "viewer", "heron", kinds=["summary"], query_vector=UNIT["x"],
-                         model="toy-embed")["hits"]
+    hits = search.search(db, config, "viewer", "heron", kinds=["summary"], query_vector=UNIT["x"], model="toy-embed")[
+        "hits"
+    ]
     assert hits == []
 
 
 def test_a_query_vector_needs_embeddings_on_and_a_matching_profile(tmp_path: Path, db, config) -> None:
     conversation_id, _ = converse(db, config, 1)
-    refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=UNIT["x"],
-            model="no-such-model")
+    refused(
+        "invalid_request", search.search, db, config, "assistant", "note", query_vector=UNIT["x"], model="no-such-model"
+    )
     generation = embedding_generation(db, config)
     fill(db, config, conversation_id, generation)
     derived.generation_activate(db, config, "alpha", generation)
-    refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=[1.0, 0.0],
-            model="toy-embed")
+    refused(
+        "invalid_request", search.search, db, config, "assistant", "note", query_vector=[1.0, 0.0], model="toy-embed"
+    )
     refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=UNIT["x"])
     off = vectors_config(tmp_path, embeddings=False)
-    refused("invalid_request", search.search, db, off, "assistant", "note", query_vector=UNIT["x"],
-            model="toy-embed")
+    refused("invalid_request", search.search, db, off, "assistant", "note", query_vector=UNIT["x"], model="toy-embed")
 
 
 def test_the_search_tool_takes_a_query_vector_and_a_model() -> None:
     import inspect
 
     from baton import app
+
     parameters = inspect.signature(app.Tools.search).parameters
     assert {"query_vector", "model"} <= set(parameters)
 
@@ -431,8 +507,15 @@ def test_the_profile_distance_decides_the_order(db, config, distance: str, first
     profile = {"embedding": {"model": "toy-embed", "dim": 3, "normalization": "none", "distance": distance}}
     generation = derived.generation_create(db, config, "alpha", profile)["generation"]
     manifest = begin(db, config, conversation_id, generation, kinds=derived.KINDS)
-    commit(db, config, manifest, payload(manifest, vectors={**every_kind(), ("message_id", aligned): [0.1, 0.01, 0.0],
-                                                            ("message_id", long): [5.0, 5.0, 0.0]}))
+    commit(
+        db,
+        config,
+        manifest,
+        payload(
+            manifest,
+            vectors={**every_kind(), ("message_id", aligned): [0.1, 0.01, 0.0], ("message_id", long): [5.0, 5.0, 0.0]},
+        ),
+    )
     derived.generation_activate(db, config, "alpha", generation)
     hits = search.search(db, config, "assistant", "plover", query_vector=[1.0, 0.0, 0.0], model="toy-embed")["hits"]
     order = [hit["message_id"] for hit in hits if hit.get("message_id") in (aligned, long)]
@@ -440,8 +523,9 @@ def test_the_profile_distance_decides_the_order(db, config, distance: str, first
     similarity = {hit["message_id"]: hit["similarity"] for hit in hits if hit.get("message_id") in (aligned, long)}
     close = {"rel_tol": 1e-6}  # vectors are stored as float32
     if distance == "cosine":
-        assert math.isclose(similarity[aligned], 0.1 / math.hypot(0.1, 0.01), **close) and \
-            math.isclose(similarity[long], 1 / math.sqrt(2), **close)
+        assert math.isclose(similarity[aligned], 0.1 / math.hypot(0.1, 0.01), **close) and math.isclose(
+            similarity[long], 1 / math.sqrt(2), **close
+        )
     else:
         assert math.isclose(similarity[aligned], 0.1, **close) and math.isclose(similarity[long], 5.0, **close)
 
@@ -450,8 +534,17 @@ FLOAT32_MAX = 3.4028234663852886e38
 UNNORMALIZED = {"embedding": {"model": "toy-embed", "dim": 3, "normalization": "none", "distance": "inner_product"}}
 
 
-@pytest.mark.parametrize("bad", [[1e39, 0.0, 0.0], [0.0, -1e39, 0.0], [FLOAT32_MAX * 2, 0.0, 0.0],
-                                 [float("nan"), 0.0, 0.0], [float("inf"), 0.0, 0.0], [0.0, float("-inf"), 0.0]])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        [1e39, 0.0, 0.0],
+        [0.0, -1e39, 0.0],
+        [FLOAT32_MAX * 2, 0.0, 0.0],
+        [float("nan"), 0.0, 0.0],
+        [float("inf"), 0.0, 0.0],
+        [0.0, float("-inf"), 0.0],
+    ],
+)
 def test_a_vector_that_float32_cannot_hold_is_refused_whole_before_anything_is_stored(db, config, bad) -> None:
     """Vectors are stored as float32: a component it can't represent is a labelled refusal, never an overflow,
     and the same request id then commits once corrected."""
@@ -484,19 +577,29 @@ def test_a_query_vector_that_float32_cannot_hold_is_refused(db, config, bad) -> 
     refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=bad, model="toy-embed")
 
 
-
 # One model, one embedding signature across every active generation (Lane D's ruling on mixed profiles) --------
 
 
-def embedded(db, config, producer: str, conversation_id: str, *, model: str = "toy-embed", dim: int = 3,
-             normalization: str = "unit", distance: str = "cosine") -> str:
+def embedded(
+    db,
+    config,
+    producer: str,
+    conversation_id: str,
+    *,
+    model: str = "toy-embed",
+    dim: int = 3,
+    normalization: str = "unit",
+    distance: str = "cosine",
+) -> str:
     """A filled generation for `producer` that embeds with the given signature, ready to activate."""
     profile = {"embedding": {"model": model, "dim": dim, "normalization": normalization, "distance": distance}}
     generation = derived.generation_create(db, config, producer, profile)["generation"]
     manifest = begin(db, config, conversation_id, generation, kinds=derived.KINDS, producer=producer)
     axis = [[1.0 if i == n else 0.0 for i in range(dim)] for n in range(min(dim, 2))]
-    vectors = {**{("kind", kind): axis[0] for kind in manifest["kinds"]},
-               **{("message_id", message_id): axis[-1] for message_id in items(manifest)}}
+    vectors = {
+        **{("kind", kind): axis[0] for kind in manifest["kinds"]},
+        **{("message_id", message_id): axis[-1] for message_id in items(manifest)},
+    }
     commit(db, config, manifest, payload(manifest, request_id=generation, vectors=vectors), producer=producer)
     return generation
 
@@ -561,8 +664,16 @@ def test_a_scoped_query_on_the_one_active_signature_succeeds_after_a_conflict_wa
     derived.generation_activate(db, config, "alpha", alpha)
     beta = embedded(db, config, "beta", conversation_id, dim=2)
     refused("embedding_profile_conflict", derived.generation_activate, db, config, "beta", beta)
-    hits = search.search(db, config, "assistant", "summary", kinds=["summary"], producer="alpha",
-                         query_vector=UNIT["x"], model="toy-embed")["hits"]
+    hits = search.search(
+        db,
+        config,
+        "assistant",
+        "summary",
+        kinds=["summary"],
+        producer="alpha",
+        query_vector=UNIT["x"],
+        model="toy-embed",
+    )["hits"]
     assert hits and all(hit["producer"] == "alpha" for hit in hits)
 
 
@@ -574,8 +685,9 @@ def test_two_active_signatures_for_one_model_make_search_refuse_not_score(db, co
     beta = embedded(db, config, "beta", conversation_id, dim=2)
     db.execute("UPDATE generations SET active = 1 WHERE id = ?", (beta,))
     for query in (UNIT["x"], [1.0, 0.0]):
-        error = refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=query,
-                        model="toy-embed")
+        error = refused(
+            "invalid_request", search.search, db, config, "assistant", "note", query_vector=query, model="toy-embed"
+        )
         message = str(error)
         assert alpha in message and beta in message and "toy-embed" in message, message
 
@@ -600,5 +712,6 @@ def test_a_query_integer_too_large_for_any_float_is_refused_not_raised(db, confi
     generation = derived.generation_create(db, config, "alpha", UNNORMALIZED)["generation"]
     fill(db, config, conversation_id, generation)
     derived.generation_activate(db, config, "alpha", generation)
-    refused("invalid_request", search.search, db, config, "assistant", "note", query_vector=[huge, 0, 0],
-            model="toy-embed")
+    refused(
+        "invalid_request", search.search, db, config, "assistant", "note", query_vector=[huge, 0, 0], model="toy-embed"
+    )

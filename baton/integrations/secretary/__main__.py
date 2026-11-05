@@ -57,28 +57,9 @@ def apply_hooks(instance: Instance) -> dict:
 async def dispatch(instance: Instance, args) -> int:
     match args.action:
         case "run":
-            task = asyncio.current_task()
-            loop = asyncio.get_running_loop()
-            for signum in (signal.SIGTERM, signal.SIGINT):
-                loop.add_signal_handler(signum, task.cancel)
-            try:
-                await Worker(instance).run()
-            except asyncio.CancelledError:
-                pass
-            return 0
+            return await _run_worker(instance)
         case "hook":
-            raw = sys.stdin.buffer.read(65537)
-            if len(raw) > 65536:
-                raise ValueError("hook input exceeds 64 KiB")
-            event = json.loads(raw)
-            if not isinstance(event, dict):
-                raise ValueError("hook input must be a JSON object")
-            output, stderr, code = await handle(instance, event)
-            if stderr:
-                print(stderr, file=sys.stderr, flush=True)
-            if output:
-                print(json.dumps(output, ensure_ascii=False), flush=True)
-            return code
+            return await _handle_hook(instance)
         case "receive":
             result = await receive(instance)
         case "acknowledge":
@@ -92,9 +73,39 @@ async def dispatch(instance: Instance, args) -> int:
             result = {key: instance.receipts.get(key) for key in ("session", "pending", "queued", "health")}
             health = result["health"]
             result["heartbeat_stale"] = not health or time.time() - health["checked_at"] > max(
-                30, 2 * instance.budget_seconds + instance.poll_seconds)
+                30, 2 * instance.budget_seconds + instance.poll_seconds
+            )
     print(json.dumps(result, ensure_ascii=False), flush=True)
     return 0
+
+
+async def _run_worker(instance: Instance) -> int:
+    """Keep the worker alive until the supervisor asks it to stop."""
+    task = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(signum, task.cancel)
+    try:
+        await Worker(instance).run()
+    except asyncio.CancelledError:
+        pass
+    return 0
+
+
+async def _handle_hook(instance: Instance) -> int:
+    """Read one bounded host event and emit the hook's context and exit status."""
+    raw = sys.stdin.buffer.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("hook input exceeds 64 KiB")
+    event = json.loads(raw)
+    if not isinstance(event, dict):
+        raise ValueError("hook input must be a JSON object")
+    output, stderr, code = await handle(instance, event)
+    if stderr:
+        print(stderr, file=sys.stderr, flush=True)
+    if output:
+        print(json.dumps(output, ensure_ascii=False), flush=True)
+    return code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -116,8 +127,15 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     try:
         if args.action == "install":
-            result = install(destination=args.destination, project=args.project, config=args.config, policy=args.policy,
-                             product=args.product, python=Path(sys.executable), codex=args.codex)
+            result = install(
+                destination=args.destination,
+                project=args.project,
+                config=args.config,
+                policy=args.policy,
+                product=args.product,
+                python=Path(sys.executable),
+                codex=args.codex,
+            )
             instance = Instance.load(result["instance"])
             if args.apply_hooks:
                 result["applied"] = apply_hooks(instance)

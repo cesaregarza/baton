@@ -38,14 +38,20 @@ GROUP = ["orchestrator", "reviewer", "assistant"]
 
 def search_config(tmp_path: Path, *, enabled: bool = True) -> Config:
     """Five generic roles. `viewer` may see every conversation; `outsider` is never invited."""
-    return config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
-                  "reviewer": {}, "assistant": {}, "outsider": {},
-                  "viewer": {"can_view_all_conversations": True}},
-        "conversations": {"enabled": True},
-        "search": {"enabled": enabled},
-    })
+    return config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": {
+                "orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
+                "reviewer": {},
+                "assistant": {},
+                "outsider": {},
+                "viewer": {"can_view_all_conversations": True},
+            },
+            "conversations": {"enabled": True},
+            "search": {"enabled": enabled},
+        }
+    )
 
 
 @pytest.fixture
@@ -61,8 +67,9 @@ def db(config: Config):
 
 
 def start(db, config, participants=GROUP, title="Release plan") -> str:
-    return conversations.create(db, config, actor="orchestrator", title=title,
-                                participants=participants)["conversation_id"]
+    return conversations.create(db, config, actor="orchestrator", title=title, participants=participants)[
+        "conversation_id"
+    ]
 
 
 def say(db, config, sender: str, conversation_id: str, text: str) -> dict[str, Any]:
@@ -87,8 +94,10 @@ def log(db, conversation_id: str | None = None) -> list[dict[str, Any]]:
 
 def state(db) -> dict[str, Any]:
     """Everything delivery depends on, so a read can be shown to move none of it."""
-    return {table: [tuple(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY 1, 2")]
-            for table in ("mailboxes", "cursors", "wakes", "events", "change_log")}
+    return {
+        table: [tuple(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY 1, 2")]
+        for table in ("mailboxes", "cursors", "wakes", "events", "change_log")
+    }
 
 
 # Revisions and the change log ---------------------------------------------------------------------------
@@ -153,11 +162,14 @@ def test_the_cursor_always_advances_past_what_was_scanned(db, config, monkeypatc
     assert len(first["entries"]) == 2
     second = changes.read(db, changes.Scope.ALL, cursor=first["next_cursor"])
     assert [entry["change_seq"] for entry in second["entries"]] == [3, 4]
-    end = changes.read(db, changes.Scope.ALL, cursor=changes.read(db, changes.Scope.ALL,
-                                                                 cursor=second["next_cursor"])["next_cursor"])
+    end = changes.read(
+        db, changes.Scope.ALL, cursor=changes.read(db, changes.Scope.ALL, cursor=second["next_cursor"])["next_cursor"]
+    )
     assert end["entries"] == [] and end["next_cursor"].endswith(":5")
-    assert all(set(entry) == {"change_seq", "conversation_id", "revision", "kind", "message_id", "role", "at"}
-               for entry in first["entries"])  # metadata only, never text
+    assert all(
+        set(entry) == {"change_seq", "conversation_id", "revision", "kind", "message_id", "role", "at"}
+        for entry in first["entries"]
+    )  # metadata only, never text
 
 
 def test_a_cursor_from_another_epoch_or_before_an_earlier_prune_is_expired(db, config) -> None:
@@ -186,12 +198,28 @@ def test_no_read_has_an_implicit_scope(db) -> None:
 
 def config_file(config: Config, tmp_path: Path) -> Path:
     path = tmp_path / "baton.toml"
-    path.write_text("\n".join([
-        "[host]", 'public_url = "http://127.0.0.1:8765"', f'data_dir = "{config.data_dir}"',
-        "[roles.orchestrator]", "can_create_conversations = true", "can_manage_participants = true",
-        "[roles.reviewer]", "[roles.assistant]", "[roles.outsider]",
-        "[roles.viewer]", "can_view_all_conversations = true",
-        "[conversations]", "enabled = true", "[search]", "enabled = true", ""]))
+    path.write_text(
+        "\n".join(
+            [
+                "[host]",
+                'public_url = "http://127.0.0.1:8765"',
+                f'data_dir = "{config.data_dir}"',
+                "[roles.orchestrator]",
+                "can_create_conversations = true",
+                "can_manage_participants = true",
+                "[roles.reviewer]",
+                "[roles.assistant]",
+                "[roles.outsider]",
+                "[roles.viewer]",
+                "can_view_all_conversations = true",
+                "[conversations]",
+                "enabled = true",
+                "[search]",
+                "enabled = true",
+                "",
+            ]
+        )
+    )
     return path
 
 
@@ -202,8 +230,11 @@ def run(capsys, *argv: str) -> tuple[int, Any]:
 
 
 def files_digest(directory: Path) -> dict[str, str]:
-    return {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in sorted(directory.iterdir()) if path.name.startswith("baton.db")}
+    return {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(directory.iterdir())
+        if path.name.startswith("baton.db")
+    }
 
 
 def test_25_the_read_only_index_commands_write_nothing(db, config, tmp_path, capsys) -> None:
@@ -214,8 +245,9 @@ def test_25_the_read_only_index_commands_write_nothing(db, config, tmp_path, cap
     before = files_digest(config.data_dir)
     code, changed = run(capsys, "--config", str(path), "index", "changes")
     assert code == 0 and [entry["kind"] for entry in changed["entries"]] == ["message_added"]
-    code, woke = run(capsys, "--config", str(path), "index", "wait", "--after", changed["next_cursor"],
-                     "--timeout", "0")
+    code, woke = run(
+        capsys, "--config", str(path), "index", "wait", "--after", changed["next_cursor"], "--timeout", "0"
+    )
     assert code == 0 and woke == {"timed_out": True}
     assert files_digest(config.data_dir) == before  # not a byte written, the WAL included
 
@@ -239,8 +271,7 @@ def test_the_read_only_connection_is_opened_read_only_not_only_asked_to_be(confi
     conn.close()
 
 
-def test_the_index_commands_read_through_the_read_only_connection(db, config, tmp_path, capsys,
-                                                                  monkeypatch) -> None:
+def test_the_index_commands_read_through_the_read_only_connection(db, config, tmp_path, capsys, monkeypatch) -> None:
     path = config_file(config, tmp_path)
     seen = []
     original = changes.read
@@ -287,8 +318,13 @@ def test_27_wait_returns_only_a_change_seq_once_something_changes(db, config, tm
     assert result == {"change_seq": 1}  # no content
     after = state(db)  # the send moved mailboxes and events; the wait itself moved no cursor and no wake
     assert after["cursors"] == snapshot["cursors"] and after["wakes"] == snapshot["wakes"]
-    timed_out = changes.wait(store.connect_read_only(config.db_path), changes.Scope.ALL,
-                             cursor=f"{changes.epoch(db)}:1", timeout_seconds=0.1, poll_seconds=0.02)
+    timed_out = changes.wait(
+        store.connect_read_only(config.db_path),
+        changes.Scope.ALL,
+        cursor=f"{changes.epoch(db)}:1",
+        timeout_seconds=0.1,
+        poll_seconds=0.02,
+    )
     assert timed_out == {"timed_out": True}
 
 
@@ -332,8 +368,9 @@ def test_read_history_reads_backwards_with_before_seq(db, config) -> None:
 def test_shared_board_read_rule_covers_history_and_reply_parent(db, config) -> None:
     conversation_id = start(db, config)
     parent = say(db, config, "reviewer", conversation_id, "parent before viewer joined")
-    child = conversations.send(db, config, sender="assistant", conversation_id=conversation_id, text="answer",
-                              reply_to=parent["message_id"])
+    child = conversations.send(
+        db, config, sender="assistant", conversation_id=conversation_id, text="answer", reply_to=parent["message_id"]
+    )
 
     page = conversations.history(db, "viewer", conversation_id, config=config)
     assert [item["text"] for item in page["messages"]] == ["parent before viewer joined", "answer"]
@@ -379,15 +416,16 @@ def test_history_does_not_call_prejoin_messages_retention_gaps(db, config) -> No
     say(db, config, "reviewer", conversation_id, "before the viewer joined")
     conversations.add(db, config, conversation_id, "outsider", actor="orchestrator")
     say(db, config, "assistant", conversation_id, "after the viewer joined")
-    db.execute("DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider' "
-               "AND conversation_seq = 3", (conversation_id,))
+    db.execute(
+        "DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider' AND conversation_seq = 3",
+        (conversation_id,),
+    )
 
     history = conversations.history(db, "outsider", conversation_id, config=config)
     assert [item["seq"] for item in history["messages"]] == [2]
     assert history["retention_gaps"] == [{"from_seq": 3, "to_seq": 3}]
 
-    db.execute("DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider'",
-               (conversation_id,))
+    db.execute("DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider'", (conversation_id,))
     empty = conversations.history(db, "outsider", conversation_id, config=config)
     assert empty["messages"] == []
     assert empty["retention_gaps"] == []
@@ -397,8 +435,10 @@ def test_history_does_not_call_prejoin_messages_retention_gaps(db, config) -> No
 
     say(db, config, "reviewer", conversation_id, "after the deleted join marker")
     say(db, config, "assistant", conversation_id, "retained after the join")
-    db.execute("DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider' "
-               "AND conversation_seq = 4", (conversation_id,))
+    db.execute(
+        "DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider' AND conversation_seq = 4",
+        (conversation_id,),
+    )
     after_arbitrary_cursor = conversations.history(db, "outsider", conversation_id, after_seq=1, config=config)
     assert [item["seq"] for item in after_arbitrary_cursor["messages"]] == [5]
     assert after_arbitrary_cursor["retention_gaps"] == []
@@ -411,8 +451,10 @@ def test_history_does_not_infer_gap_boundaries_from_pre_rejoin_copies(db, config
     say(db, config, "reviewer", conversation_id, "while outsider was away")
     conversations.add(db, config, conversation_id, "outsider", actor="orchestrator")
     say(db, config, "reviewer", conversation_id, "after outsider returned")
-    db.execute("DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider' "
-               "AND conversation_seq = 4", (conversation_id,))
+    db.execute(
+        "DELETE FROM messages WHERE conversation_id = ? AND recipient = 'outsider' AND conversation_seq = 4",
+        (conversation_id,),
+    )
 
     history = conversations.history(db, "outsider", conversation_id, config=config)
     assert [item["seq"] for item in history["messages"]] == [1, 5]
@@ -440,8 +482,9 @@ def test_wait_reply_parent_uses_the_shared_board_predicate(db, config, monkeypat
     conversation_id = start(db, config)
     parent = say(db, config, "reviewer", conversation_id, "before viewer joined")
     conversations.add(db, config, conversation_id, "viewer", actor="orchestrator")
-    reply = conversations.send(db, config, sender="assistant", conversation_id=conversation_id, text="reply",
-                              reply_to=parent["message_id"])
+    reply = conversations.send(
+        db, config, sender="assistant", conversation_id=conversation_id, text="reply", reply_to=parent["message_id"]
+    )
     tools = Tools(config)
 
     @contextmanager
@@ -450,8 +493,11 @@ def test_wait_reply_parent_uses_the_shared_board_predicate(db, config, monkeypat
 
     monkeypatch.setattr(tools, "_conn", connection)
     waited = tools.wait("viewer", timeout_seconds=0)
-    shaped = next(event["message"] for event in waited["events"]
-                  if event.get("message", {}).get("message_id") == reply["message_id"])
+    shaped = next(
+        event["message"]
+        for event in waited["events"]
+        if event.get("message", {}).get("message_id") == reply["message_id"]
+    )
     assert shaped["reply_to"] == {"message_id": parent["message_id"], "seq": 1}
 
 
@@ -466,8 +512,14 @@ def test_mcp_board_listing_pages_every_conversation_and_filters_changed_since(db
 
     monkeypatch.setattr(tools, "_conn", connection)
     for index in range(205):
-        conversations.create(db, config, actor="orchestrator", title=f"conversation {index}",
-                             participants=GROUP, request_id=f"list-page-{index}")
+        conversations.create(
+            db,
+            config,
+            actor="orchestrator",
+            title=f"conversation {index}",
+            participants=GROUP,
+            request_id=f"list-page-{index}",
+        )
     first = tools.list_conversations("viewer", limit=200)
     assert len(first["conversations"]) == 200 and first["next_cursor"]
     second = tools.list_conversations("viewer", limit=200, cursor=first["next_cursor"])
@@ -485,8 +537,9 @@ def test_list_conversations_carries_revision_last_seq_and_activity(db, config) -
     later = (datetime.now(UTC) + timedelta(minutes=1)).isoformat()
     assert conversations.list_for(db, "assistant", changed_since=later) == []
     earlier = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
-    assert [c["conversation_id"] for c in conversations.list_for(db, "assistant", changed_since=earlier)] == \
-        [conversation_id]
+    assert [c["conversation_id"] for c in conversations.list_for(db, "assistant", changed_since=earlier)] == [
+        conversation_id
+    ]
 
 
 def ids(hits: dict[str, Any]) -> list[str]:
@@ -511,8 +564,10 @@ def test_search_returns_each_message_once_and_respects_join_point_and_removal(db
     after_join = say(db, config, "reviewer", conversation_id, "quokka after the join")
     assert ids(search.search(db, config, "orchestrator", "quokka")).count(before_join["message_id"]) == 1
     assert ids(search.search(db, config, "outsider", "quokka")) == [after_join["message_id"]]
-    assert set(ids(search.search(db, config, "reviewer", "quokka"))) == \
-        {before_join["message_id"], after_join["message_id"]}  # its own sent messages too
+    assert set(ids(search.search(db, config, "reviewer", "quokka"))) == {
+        before_join["message_id"],
+        after_join["message_id"],
+    }  # its own sent messages too
     conversations.remove(db, config, conversation_id, "outsider", actor="orchestrator")
     assert ids(search.search(db, config, "outsider", "quokka")) == []
 
@@ -546,8 +601,13 @@ def test_hits_carry_where_to_read_and_never_more_than_the_reader_may(db, config)
     conversation_id = start(db, config)
     sent = say(db, config, "reviewer", conversation_id, "the capybara plan is ready")
     [hit] = search.search(db, config, "assistant", "capybara")["hits"]
-    assert (hit["message_id"], hit["conversation_id"], hit["seq"], hit["from_role"], hit["derived"]) == \
-        (sent["message_id"], conversation_id, 1, "reviewer", False)
+    assert (hit["message_id"], hit["conversation_id"], hit["seq"], hit["from_role"], hit["derived"]) == (
+        sent["message_id"],
+        conversation_id,
+        1,
+        "reviewer",
+        False,
+    )
     assert "capybara" in hit["snippet"]
 
 
@@ -606,13 +666,19 @@ def test_a_version_6_database_gains_revisions_a_fresh_log_and_a_search_index(tmp
     raw.executescript((Path(__file__).parent / "fixtures" / "schema_v6.sql").read_text())
     stamp = datetime.now(UTC).isoformat()
     with raw:
-        raw.execute("INSERT INTO conversations (id, request_id, request_digest, title, created_by, created_at,"
-                    " last_seq) VALUES ('conv_old', 'r', 'd', 'Old', 'orchestrator', ?, 1)", (stamp,))
+        raw.execute(
+            "INSERT INTO conversations (id, request_id, request_digest, title, created_by, created_at,"
+            " last_seq) VALUES ('conv_old', 'r', 'd', 'Old', 'orchestrator', ?, 1)",
+            (stamp,),
+        )
         raw.executemany("INSERT INTO participants VALUES ('conv_old', ?, ?)", [(r, stamp) for r in GROUP])
         for recipient, seq in (("reviewer", 1), ("assistant", 1)):
-            raw.execute("INSERT INTO messages (id, conversation_id, conversation_seq, sender, author_kind,"
-                        " recipient, seq, text, at) VALUES ('msg_old', 'conv_old', 1, 'orchestrator', 'agent',"
-                        " ?, ?, 'an aardvark from before', ?)", (recipient, seq, stamp))
+            raw.execute(
+                "INSERT INTO messages (id, conversation_id, conversation_seq, sender, author_kind,"
+                " recipient, seq, text, at) VALUES ('msg_old', 'conv_old', 1, 'orchestrator', 'agent',"
+                " ?, ?, 'an aardvark from before', ?)",
+                (recipient, seq, stamp),
+            )
         raw.executemany("INSERT INTO mailboxes VALUES (?, 1, 0)", [("reviewer",), ("assistant",)])
     raw.close()
     os.chmod(config.db_path, 0o600)
@@ -653,8 +719,12 @@ def test_whoami_reports_the_keyword_mode(config) -> None:
 def test_the_index_commands_are_the_feed_and_the_producer_gated_writer() -> None:
     """Slice 1 had only the read-only feed; the writers came later, each needing a listed producer (see
     test_index_writer)."""
-    result = subprocess.run([sys.executable, "-m", "baton.cli", "index", "--help"], capture_output=True, text=True,
-                            cwd=Path(__file__).parent.parent)
+    result = subprocess.run(
+        [sys.executable, "-m", "baton.cli", "index", "--help"],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).parent.parent,
+    )
     for command in ("changes", "wait", "dirty", "begin-batch", "read-batch", "commit-batch"):
         assert command in result.stdout, command
 

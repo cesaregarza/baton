@@ -46,19 +46,44 @@ class Agent:
 
         return Thread(self, conversation_id)
 
-    def create_thread(self, title: str, *, participants: list[str] | None = None, topic: str | None = None,
-                      request_id: str | None = None, identity: dict[str, str] | None = None,
-                      seen: dict[str, Any] | None = None) -> dict[str, Any]:
+    def create_thread(
+        self,
+        title: str,
+        *,
+        participants: list[str] | None = None,
+        topic: str | None = None,
+        request_id: str | None = None,
+        identity: dict[str, str] | None = None,
+        seen: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         from baton.conversations import Conversation
 
-        return Conversation.create(self.connection, self.config, actor=self.role, title=title,
-                                   participants=participants, topic=topic, request_id=request_id,
-                                   identity=identity, seen=seen)
+        return Conversation.create(
+            self.connection,
+            self.config,
+            actor=self.role,
+            title=title,
+            participants=participants,
+            topic=topic,
+            request_id=request_id,
+            identity=identity,
+            seen=seen,
+        )
 
-    def send(self, text: str, *, to: str | None = None, conversation_id: str | None = None,
-             job_id: str | None = None, relayed: Any = None, reply_to: str | None = None,
-             attention: Any = None, needs_decision: bool = False, request_id: str | None = None,
-             identity: dict[str, str] | None = None) -> dict[str, Any]:
+    def send(
+        self,
+        text: str,
+        *,
+        to: str | None = None,
+        conversation_id: str | None = None,
+        job_id: str | None = None,
+        relayed: Any = None,
+        reply_to: str | None = None,
+        attention: Any = None,
+        needs_decision: bool = False,
+        request_id: str | None = None,
+        identity: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Send as this role, checking permission, destination and authorship."""
         from baton.messages.content import only_in_a_conversation
         from baton.messages.direct import DirectMessage
@@ -66,20 +91,36 @@ class Agent:
         if (to is None) == (conversation_id is None):
             raise InvalidRequest("send_message takes exactly one of to and conversation_id")
         permissions = self.permissions
-        refusal = permissions.message_refusal(to=to, conversation_id=conversation_id,
-                                              job_id=job_id, needs_decision=needs_decision)
+        refusal = permissions.message_refusal(
+            to=to, conversation_id=conversation_id, job_id=job_id, needs_decision=needs_decision
+        )
         if refusal is not None:
             raise Forbidden(refusal)
         if conversation_id is not None:
             from baton.conversations import Conversation
 
             return Conversation(self.connection, conversation_id).send(
-                self.config, sender=self.role, text=text, relayed=relayed, request_id=request_id,
-                job_id=job_id, reply_to=reply_to, attention=attention, needs_decision=needs_decision,
-                identity=identity)
+                self.config,
+                sender=self.role,
+                text=text,
+                relayed=relayed,
+                request_id=request_id,
+                job_id=job_id,
+                reply_to=reply_to,
+                attention=attention,
+                needs_decision=needs_decision,
+                identity=identity,
+            )
         if to not in self.config.roles:
             raise UnknownRole(f"no role {to!r}; call whoami for the list")
         only_in_a_conversation(reply_to=reply_to, attention=attention, needs_decision=needs_decision)
-        message = DirectMessage(sender=self.role, recipient=to, text=text, request_id=request_id, job_id=job_id,
-                                relayed=relayed, author_kind=permissions.author_kind)
+        message = DirectMessage(
+            sender=self.role,
+            recipient=to,
+            text=text,
+            request_id=request_id,
+            job_id=job_id,
+            relayed=relayed,
+            author_kind=permissions.author_kind,
+        )
         return message.send(self.connection)

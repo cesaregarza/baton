@@ -63,31 +63,48 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
     if integrations is None:
         integrations = load_enabled(config)
     tools, guard = Tools(config), Guard(config)
-    middleware = [guard.refuse_author_fields, guard.refuse_claim_validation, guard.refuse_token_validation,
-                  *(item for integration in integrations.values() for item in integration.middleware())]
+    middleware = [
+        guard.refuse_author_fields,
+        guard.refuse_claim_validation,
+        guard.refuse_token_validation,
+        *(item for integration in integrations.values() for item in integration.middleware()),
+    ]
     settings = auth.auth_settings(config)
-    common = {"name": "baton", "version": __version__, "instructions": INSTRUCTIONS, "auth": settings,
-              "middleware": middleware}
+    common = {
+        "name": "baton",
+        "version": __version__,
+        "instructions": INSTRUCTIONS,
+        "auth": settings,
+        "middleware": middleware,
+    }
     if config.oauth.enabled:
         provider = auth.PassphraseProvider(config)
         server = MCPServer(auth_server_provider=provider, **common)
         auth.register_login_routes(server, provider)
     else:
         server = MCPServer(token_verifier=auth.StaticTokenVerifier(config), **common)
-    for name, scope, read_only in (TOOLS + (CONVERSATION_TOOLS if config.conversations.enabled else ())
-                                   + (SEARCH_TOOLS + ARTIFACT_TOOLS if config.search.enabled else ())):
-        server.add_tool(guard.wrap(name, scope, getattr(tools, name)), name=name,
-                        annotations=ToolAnnotations(readOnlyHint=read_only, destructiveHint=False,
-                                                    openWorldHint=False))
+    for name, scope, read_only in (
+        TOOLS
+        + (CONVERSATION_TOOLS if config.conversations.enabled else ())
+        + (SEARCH_TOOLS + ARTIFACT_TOOLS if config.search.enabled else ())
+    ):
+        server.add_tool(
+            guard.wrap(name, scope, getattr(tools, name)),
+            name=name,
+            annotations=ToolAnnotations(readOnlyHint=read_only, destructiveHint=False, openWorldHint=False),
+        )
         if name in LITERAL_TOOLS:  # these take every argument as sent: a reference may be named "null"
             guard.take_literally(server._tool_manager.get_tool(name))
     for integration in integrations.values():
         integration.register(server)
     public = urlparse(config.public_url)
-    app = server.streamable_http_app(stateless_http=True, transport_security=TransportSecuritySettings(
-        allowed_hosts=[public.netloc, "127.0.0.1:*", "localhost:*"],
-        allowed_origins=[f"{public.scheme}://{public.netloc}", *config.allowed_origins],
-    ))
+    app = server.streamable_http_app(
+        stateless_http=True,
+        transport_security=TransportSecuritySettings(
+            allowed_hosts=[public.netloc, "127.0.0.1:*", "localhost:*"],
+            allowed_origins=[f"{public.scheme}://{public.netloc}", *config.allowed_origins],
+        ),
+    )
     if config.oauth.enabled:
         app.add_middleware(auth.EndpointGuard, provider=provider)
         app.add_middleware(auth.IssuerIdentification, provider=provider)
@@ -108,7 +125,7 @@ def _prepared(name: str, integration: Integration) -> bool:
     except IntegrationUnavailable as error:
         log.error("integration %s is off for this run: %s", name, error)
         return False
-    except Exception as error:  # noqa: BLE001 - an optional integration must never stop the host
+    except Exception as error:
         log.error("integration %s is off for this run: prepare failed (%s)", name, type(error).__name__)
         return False
     return True

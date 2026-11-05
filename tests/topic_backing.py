@@ -35,7 +35,8 @@ def back_topics(target: Any, *paths: str, members: tuple[str, ...] = ()) -> None
             conn.executemany(
                 "INSERT OR IGNORE INTO topics (path, title, members, created_by, created_at, id)"
                 " VALUES (?, ?, ?, 'fixture', '2026-01-01T00:00:00+00:00', ?)",
-                [(path, path.split("/")[-1], json.dumps(list(members)), new_topic_id()) for path in wanted])
+                [(path, path.split("/")[-1], json.dumps(list(members)), new_topic_id()) for path in wanted],
+            )
     finally:
         if opened is not None:
             opened.close()

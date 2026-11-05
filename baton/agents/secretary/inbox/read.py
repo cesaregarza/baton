@@ -25,12 +25,19 @@ DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
 DEFAULT_BYTES = 256 * 1024
 BYTES = (1024, 1024 * 1024)  # the least and most a page's max_bytes may be
-MAX_SCANNED = 5000           # events one page looks through, listed or not
+MAX_SCANNED = 5000  # events one page looks through, listed or not
 MESSAGE_ID = re.compile(r"msg_[0-9a-f]{8,32}")
 
 
-def read(config: Config, policy_path: Path, *, after: int | None = None, ids: list[str] | None = None,
-         limit: int = DEFAULT_LIMIT, max_bytes: int = DEFAULT_BYTES) -> dict:
+def read(
+    config: Config,
+    policy_path: Path,
+    *,
+    after: int | None = None,
+    ids: list[str] | None = None,
+    limit: int = DEFAULT_LIMIT,
+    max_bytes: int = DEFAULT_BYTES,
+) -> dict:
     """One page for the policy's principal: after an event position, or for the given message ids."""
     _check(after, ids, limit, max_bytes)
     baton = store.connect_read_only(config.db_path)
@@ -39,8 +46,7 @@ def read(config: Config, policy_path: Path, *, after: int | None = None, ids: li
             principal = policy_module.load_policy(config, policy_path).principal
             if ids is not None:
                 return {"principal": principal, **_by_id(baton, config, principal, ids, limit, max_bytes)}
-            return {"principal": principal, "after": after,
-                    **_after(baton, config, principal, after, limit, max_bytes)}
+            return {"principal": principal, "after": after, **_after(baton, config, principal, after, limit, max_bytes)}
     finally:
         baton.close()
 
@@ -55,13 +61,15 @@ def _check(after: int | None, ids: list[str] | None, limit: int, max_bytes: int)
         raise InvalidRequest(f"limit must be 1-{MAX_LIMIT}")
     if type(max_bytes) is not int or not BYTES[0] <= max_bytes <= BYTES[1]:
         raise InvalidRequest(f"max_bytes must be {BYTES[0]}-{BYTES[1]}")
-    if ids is not None and (not 1 <= len(ids) <= MAX_LIMIT or len(set(ids)) != len(ids) or not all(
-            isinstance(value, str) and MESSAGE_ID.fullmatch(value) for value in ids)):
+    if ids is not None and (
+        not 1 <= len(ids) <= MAX_LIMIT
+        or len(set(ids)) != len(ids)
+        or not all(isinstance(value, str) and MESSAGE_ID.fullmatch(value) for value in ids)
+    ):
         raise InvalidRequest(f"ids must be 1-{MAX_LIMIT} distinct message ids")
 
 
-def _after(baton: Connection, config: Config, principal: str, after: int, limit: int,
-           max_bytes: int) -> dict:
+def _after(baton: Connection, config: Config, principal: str, after: int, limit: int, max_bytes: int) -> dict:
     page: dict[str, list[dict]] = {"deliveries": [], "context": []}
     listed: set[str] = set()
     through, size, count, scanned = after, 0, 0, 0
@@ -84,8 +92,7 @@ def _after(baton: Connection, config: Config, principal: str, after: int, limit:
     return {"through_pos": through, "more": True, **page}
 
 
-def _entry(baton: Connection, config: Config, principal: str, event: Row,
-           listed: set[str]) -> dict | None:
+def _entry(baton: Connection, config: Config, principal: str, event: Row, listed: set[str]) -> dict | None:
     """One stream event as the thread reads it, whatever its kind; None where the principal can't see it, or for a
     later copy of a message already listed. Message copies and event context use the principal's current visibility."""
     message = None
@@ -95,9 +102,18 @@ def _entry(baton: Connection, config: Config, principal: str, event: Row,
             return None
     elif not sources.visible_event(baton, config, principal, event):
         return None
-    return {"pos": event["pos"], "kind": event["kind"], "at": event["at"], "actor": event["actor"],
-            "audience": event["audience"], "job_id": event["job_id"], "seq": event["seq"],
-            "summary": event["summary"], "data": json.loads(event["data"]), "message": message}
+    return {
+        "pos": event["pos"],
+        "kind": event["kind"],
+        "at": event["at"],
+        "actor": event["actor"],
+        "audience": event["audience"],
+        "job_id": event["job_id"],
+        "seq": event["seq"],
+        "summary": event["summary"],
+        "data": json.loads(event["data"]),
+        "message": message,
+    }
 
 
 def _message(baton: Connection, config: Config, principal: str, event: Row) -> dict | None:
@@ -110,8 +126,7 @@ def _message(baton: Connection, config: Config, principal: str, event: Row) -> d
     return None if row is None else _shape(row, event["pos"])
 
 
-def _by_id(baton: Connection, config: Config, principal: str, ids: list[str], limit: int,
-           max_bytes: int) -> dict:
+def _by_id(baton: Connection, config: Config, principal: str, ids: list[str], limit: int, max_bytes: int) -> dict:
     page: list[dict] = []
     missing: list[str] = []
     size = 0
@@ -131,14 +146,23 @@ def _by_id(baton: Connection, config: Config, principal: str, ids: list[str], li
 
 def _shape(row: Row, pos: int | None) -> dict:
     shaped = messages.as_dict(row)
-    return {"id": row["id"], "pos": pos, "conversation_id": row["conversation_id"],
-            "to": row["recipient"] if row["conversation_id"] is None else None,
-            "sender": f"guest:{row['alias_id']}" if row["alias_id"] else row["sender"],
-            "from_kind": row["author_kind"],
-            "alias": {"name": row["alias"], "code": row["alias_code"]} if row["alias_id"] else None,
-            "at": row["at"], "reply_to": row["reply_to"], "job_id": row["job_id"],
-            "attention": shaped["attention"] or [], "needs_decision": shaped["needs_decision"],
-            "text": row["text"], "relayed": shaped["relayed"] or [], "notice": shaped["notice"]}
+    return {
+        "id": row["id"],
+        "pos": pos,
+        "conversation_id": row["conversation_id"],
+        "to": row["recipient"] if row["conversation_id"] is None else None,
+        "sender": f"guest:{row['alias_id']}" if row["alias_id"] else row["sender"],
+        "from_kind": row["author_kind"],
+        "alias": {"name": row["alias"], "code": row["alias_code"]} if row["alias_id"] else None,
+        "at": row["at"],
+        "reply_to": row["reply_to"],
+        "job_id": row["job_id"],
+        "attention": shaped["attention"] or [],
+        "needs_decision": shaped["needs_decision"],
+        "text": row["text"],
+        "relayed": shaped["relayed"] or [],
+        "notice": shaped["notice"],
+    }
 
 
 def _size(message: dict) -> int:
@@ -147,25 +171,36 @@ def _size(message: dict) -> int:
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """read's own options, shared by `baton secretary read` and `python -m baton.secretary_read`."""
-    parser.add_argument("--after", type=int,
-                        help="list what was delivered to the principal, and its context, after this event position")
+    parser.add_argument(
+        "--after", type=int, help="list what was delivered to the principal, and its context, after this event position"
+    )
     parser.add_argument("--ids", help="comma-separated message ids to read instead")
-    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
-                        help=f"at most this many events or messages (1-{MAX_LIMIT})")
-    parser.add_argument("--max-bytes", type=int, default=DEFAULT_BYTES,
-                        help=f"at most this many bytes of them, at least one ({BYTES[0]}-{BYTES[1]})")
+    parser.add_argument(
+        "--limit", type=int, default=DEFAULT_LIMIT, help=f"at most this many events or messages (1-{MAX_LIMIT})"
+    )
+    parser.add_argument(
+        "--max-bytes",
+        type=int,
+        default=DEFAULT_BYTES,
+        help=f"at most this many bytes of them, at least one ({BYTES[0]}-{BYTES[1]})",
+    )
 
 
 def options(args: argparse.Namespace) -> dict:
-    return {"after": args.after, "ids": args.ids.split(",") if args.ids is not None else None, "limit": args.limit,
-            "max_bytes": args.max_bytes}
+    return {
+        "after": args.after,
+        "ids": args.ids.split(",") if args.ids is not None else None,
+        "limit": args.limit,
+        "max_bytes": args.max_bytes,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
     """`python -m baton.secretary_read`: the same options, output and exit codes as `baton secretary read`, without
     the `baton` command's import time."""
-    parser = argparse.ArgumentParser(prog="python -m baton.secretary_read",
-                                     description="read what the secretary's principal was delivered")
+    parser = argparse.ArgumentParser(
+        prog="python -m baton.secretary_read", description="read what the secretary's principal was delivered"
+    )
     parser.add_argument("--config", help="config file (default: $BATON_CONFIG or ~/.config/baton/baton.toml)")
     parser.add_argument("--policy", type=Path, required=True, help="versioned secretary model policy")
     add_arguments(parser)

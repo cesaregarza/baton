@@ -54,11 +54,13 @@ class Interleaver:
             self.outcome = self.revoke_from_another_connection()
 
     def revoke_from_another_connection(self) -> str:
-        """"landed" if the revoke committed, "locked" if the write lock refused it, else what went wrong."""
+        """ "landed" if the revoke committed, "locked" if the write lock refused it, else what went wrong."""
         other = sqlite3.connect(self.path, timeout=0.05, isolation_level=None)
         try:
-            other.execute("UPDATE topic_grants SET revoked_at = ?, revoked_by = 'owner', revoke_reason = 'raced'"
-                          " WHERE id = ?", (self.at, self.grant_id))
+            other.execute(
+                "UPDATE topic_grants SET revoked_at = ?, revoked_by = 'owner', revoke_reason = 'raced' WHERE id = ?",
+                (self.at, self.grant_id),
+            )
             return "landed"
         except sqlite3.OperationalError as error:
             return "locked" if "locked" in str(error) else f"error: {error}"
@@ -110,8 +112,9 @@ def test_a_revoke_cannot_land_between_the_check_and_create_topics_write(build_sc
         interleaver.armed = True
         result = await held.call(client, "create_topic", path="job-hunt/raced")
         interleaver.armed = False
-        assert interleaver.outcome is not None, \
+        assert interleaver.outcome is not None, (
             "the call never read topic_grants before its first write, so no grant check ran in its transaction"
+        )
         if interleaver.outcome == "locked":
             succeeded(result)
             assert "job-hunt/raced" in scene.topic_paths()
@@ -137,8 +140,9 @@ def test_a_revoke_cannot_land_between_the_check_and_set_topics_write(build_scene
         interleaver.armed = True
         result = await held.call(client, "set_topic", conversation_id=moving, topic="job-hunt/boards")
         interleaver.armed = False
-        assert interleaver.outcome is not None, \
+        assert interleaver.outcome is not None, (
             "the call never read topic_grants before its first write, so no grant check ran in its transaction"
+        )
         if interleaver.outcome == "locked":
             succeeded(result)
             assert scene.thread_topic(moving) == "job-hunt/boards"
@@ -161,8 +165,11 @@ def test_a_write_that_committed_before_the_revoke_stands(build_scene):
         held = await scene.grantee(client, "lane-a", "job-hunt", ("topic.create_sub",))
         succeeded(await held.call(client, "create_topic", path="job-hunt/before"))
         scene.revoke(held.grant_id)
-        refused(await held.call(client, "create_topic", path="job-hunt/after"), "forbidden",
-                f"topic grant {held.grant_id} is revoked")
+        refused(
+            await held.call(client, "create_topic", path="job-hunt/after"),
+            "forbidden",
+            f"topic grant {held.grant_id} is revoked",
+        )
         assert "job-hunt/before" in scene.topic_paths() and "job-hunt/after" not in scene.topic_paths()
         rows = [row for row in scene.changes("create_topic") if row["grant_id"] == held.grant_id]
         assert len(rows) == 1, [tuple(row) for row in scene.changes()]

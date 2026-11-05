@@ -80,8 +80,11 @@ def test_a_worker_exiting_before_readiness_does_not_leave_a_waiter(monkeypatch, 
     assert server.should_exit
 
 
-@pytest.mark.parametrize(("started", "body_failure"), [(False, False), (True, False), (True, True)],
-                         ids=["startup-stalls", "shutdown-stalls", "test-fails-and-shutdown-stalls"])
+@pytest.mark.parametrize(
+    ("started", "body_failure"),
+    [(False, False), (True, False), (True, True)],
+    ids=["startup-stalls", "shutdown-stalls", "test-fails-and-shutdown-stalls"],
+)
 def test_a_worker_ignoring_shutdown_is_reported_within_a_bound(monkeypatch, started, body_failure):
     server, _ = make_server()
     server.started = started

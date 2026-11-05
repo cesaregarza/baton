@@ -113,8 +113,10 @@ def gzip_events(statuses: dict[str, int], seen: list[tuple[str, str]]):
             seen.append((target, "event"))
             answer = gzip.compress(b'{"ok": true}' * 50)
             status = statuses.get(target, 200)
-            tls.sendall(b"HTTP/1.1 %d X\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n" % (status, len(answer))
-                        + answer)
+            tls.sendall(
+                b"HTTP/1.1 %d X\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n" % (status, len(answer))
+                + answer
+            )
         tls.close()
 
     return behaviour
@@ -156,8 +158,11 @@ def test_gzip_bodied_delivery_answers_are_judged_by_status_alone(gzip_host, monk
     assert sorted(events) == ["/hooks/big", "/hooks/gone", "/hooks/ok"]  # each exactly once: no retries
     subs = {sub["url"].rsplit("/", 1)[1]: sub for sub in state(host)["subscriptions"].values()}
     assert (subs["gone"]["active"], subs["ok"]["active"], subs["big"]["active"]) == (False, True, True)
-    assert sorted(w["status"] for w in wakes.recent(connect(host.config.db_path))) \
-        == ["delivered", "scheduled", "scheduled"]  # the wake, and the two reminders it sets
+    assert sorted(w["status"] for w in wakes.recent(connect(host.config.db_path))) == [
+        "delivered",
+        "scheduled",
+        "scheduled",
+    ]  # the wake, and the two reminders it sets
 
 
 def test_a_gzip_challenge_answer_is_still_refused(bad_server_gzip_challenge) -> None:
@@ -181,10 +186,18 @@ def bad_server_gzip_challenge(receiver, tmp_path: Path):
         tls.close()
 
     server = BadServer(receiver.ca_file, tmp_path / "receiver-key.pem", behaviour)
-    config = parse({"host": {"public_url": "https://baton.example.test", "data_dir": str(tmp_path / "data")},
-                    "roles": {"worker": {}}})
-    settings = integration.Settings(callback_prefixes=(f"https://{NAME}:{server.port}/hooks/",), timeout_seconds=2,
-                                    allow_private_callbacks=True, ca_file=str(receiver.ca_file))
+    config = parse(
+        {
+            "host": {"public_url": "https://baton.example.test", "data_dir": str(tmp_path / "data")},
+            "roles": {"worker": {}},
+        }
+    )
+    settings = integration.Settings(
+        callback_prefixes=(f"https://{NAME}:{server.port}/hooks/",),
+        timeout_seconds=2,
+        allow_private_callbacks=True,
+        ca_file=str(receiver.ca_file),
+    )
     yield server, integration.McpEvents(config, settings, resolver=StubResolver())
     server.close()
 
@@ -213,7 +226,7 @@ def test_repeated_partial_startup_failures_never_exceed_the_pool_size(monkeypatc
             outcomes.append("resolved")
         except integration.CallbackError as error:
             outcomes.append(error.reason)
-        except Exception as error:  # noqa: BLE001 - a raw start failure is a missing guard, reported as such
+        except Exception as error:
             outcomes.append(type(error).__name__)
         assert resolver_threads() - before <= 4, f"{resolver_threads() - before} workers after {outcomes}"
     assert set(outcomes) <= {"unreachable", "resolved"}, outcomes

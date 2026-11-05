@@ -26,14 +26,22 @@ FROM, TO = "job-hunt/leads", "job-hunt/boards"
 def store_moved_notice(host, conversation_id: str) -> str:
     """Write a topic_moved notice into the thread to its participants, and return the grant id it names."""
     grant_id = "tgr_" + secrets.token_hex(8)
-    notice = {"event": "topic_moved", "from": FROM, "to": TO, "by": "guest via alias al_" + secrets.token_hex(8),
-              "alias": ALIAS, "alias_code": CODE, "grant_id": grant_id}
+    notice = {
+        "event": "topic_moved",
+        "from": FROM,
+        "to": TO,
+        "by": "guest via alias al_" + secrets.token_hex(8),
+        "alias": ALIAS,
+        "alias_code": CODE,
+        "grant_id": grant_id,
+    }
     text = f"alias {ALIAS} ({CODE}) moved this thread from {FROM} to {TO} under topic grant {grant_id}"
     conn = connect(host.config.db_path)
     try:
         with transaction(conn):
-            conversations._fan_out(conn, conversation_id, ["orchestrator", "operator"], sender=None, text=text,
-                                   notice=notice)
+            conversations._fan_out(
+                conn, conversation_id, ["orchestrator", "operator"], sender=None, text=text, notice=notice
+            )
     finally:
         conn.close()
     return grant_id
@@ -46,7 +54,7 @@ def test_the_dashboard_thread_page_renders_a_topic_moved_notice_as_a_notice_with
     config = host.config
     try:
         page = dashboard.respond(config, "GET", f"/c/{room}", f"127.0.0.1:{config.dashboard.listen_port}")
-    except Exception as error:  # noqa: BLE001 -- the page failing to render is a failed expectation, not an error here
+    except Exception as error:
         raise AssertionError(f"the thread page failed to render a topic_moved notice: {type(error).__name__}") from None
     assert page.status == 200, page.status
     body = page.body.decode()

@@ -143,9 +143,14 @@ from the CLI or MCP tool through the domain objects to the database.
 
 ```sh
 uv sync
-uv run ruff check .
-uv run pytest
+make check
+make test
 ```
+
+`make check` runs Ruff lint, Ruff's formatter check, and ty static type checking. `make format` sorts
+imports and formats Python files. The same checks run in CI, with tool versions pinned in `pyproject.toml`
+and `uv.lock`. Without Make, run `uv run --locked ruff check .`, `uv run --locked ruff format --check .`,
+and `uv run --locked ty check` directly. See [Code quality](docs/code-quality.md) for the limits and type baseline.
 
 <a name="licence"></a>
 

@@ -29,8 +29,7 @@ from baton.database.store import MIGRATES_FROM, SCHEMA_VERSION, SchemaMismatch, 
 FIXTURES = Path(__file__).parent / "fixtures"
 # Every older schema there is a real fixture for. Deliberately not read off MIGRATES_FROM: a version
 # missing from that list is the failure this is here to catch, not a case to stop generating.
-FIXTURE_VERSIONS = tuple(sorted(int(path.stem.removeprefix("schema_v"))
-                                for path in FIXTURES.glob("schema_v*.sql")))
+FIXTURE_VERSIONS = tuple(sorted(int(path.stem.removeprefix("schema_v")) for path in FIXTURES.glob("schema_v*.sql")))
 CONVERSATION = "conv_carried"
 GROUP = ("orchestrator", "reviewer", "assistant")
 # The columns each version added, which every older database must end up with.
@@ -44,59 +43,88 @@ def old_database(config: Config, version: int, request_id: str) -> None:
     raw = sqlite3.connect(config.db_path)
     raw.executescript((FIXTURES / f"schema_v{version}.sql").read_text())
     stamp = events.now()
-    digest = events.request_digest("send", {"sender": "reviewer", "recipient": "assistant", "text": "direct",
-                                            "job_id": None})
+    digest = events.request_digest(
+        "send", {"sender": "reviewer", "recipient": "assistant", "text": "direct", "job_id": None}
+    )
     with raw:
         raw.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES ('assistant', 1, 0)")
-        raw.execute("INSERT INTO messages (id, job_id, sender, recipient, seq, text, at)"
-                    " VALUES ('msg_direct', NULL, 'reviewer', 'assistant', 1, 'direct', ?)", (stamp,))
-        raw.execute("INSERT INTO message_requests (request_id, request_digest, message_id, seq, created_at)"
-                    " VALUES (?, ?, 'msg_direct', 1, ?)", (request_id, digest, stamp))
-        raw.execute("INSERT INTO events (job_id, seq, at, actor, audience, kind, summary, data)"
-                    " VALUES (NULL, 1, ?, 'reviewer', 'assistant', 'message', 'a message', ?)",
-                    (stamp, json.dumps({"message_id": "msg_direct", "seq": 1})))
+        raw.execute(
+            "INSERT INTO messages (id, job_id, sender, recipient, seq, text, at)"
+            " VALUES ('msg_direct', NULL, 'reviewer', 'assistant', 1, 'direct', ?)",
+            (stamp,),
+        )
+        raw.execute(
+            "INSERT INTO message_requests (request_id, request_digest, message_id, seq, created_at)"
+            " VALUES (?, ?, 'msg_direct', 1, ?)",
+            (request_id, digest, stamp),
+        )
+        raw.execute(
+            "INSERT INTO events (job_id, seq, at, actor, audience, kind, summary, data)"
+            " VALUES (NULL, 1, ?, 'reviewer', 'assistant', 'message', 'a message', ?)",
+            (stamp, json.dumps({"message_id": "msg_direct", "seq": 1})),
+        )
         if version >= 3:
-            raw.execute("INSERT INTO conversations (id, request_id, request_digest, title, created_by,"
-                        " created_at, last_seq) VALUES (?, 'conv-request', 'conv-digest', 'Carried over',"
-                        " 'orchestrator', ?, 2)", (CONVERSATION, stamp))
-            raw.executemany("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
-                            [(CONVERSATION, role, stamp) for role in GROUP])
+            raw.execute(
+                "INSERT INTO conversations (id, request_id, request_digest, title, created_by,"
+                " created_at, last_seq) VALUES (?, 'conv-request', 'conv-digest', 'Carried over',"
+                " 'orchestrator', ?, 2)",
+                (CONVERSATION, stamp),
+            )
+            raw.executemany(
+                "INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
+                [(CONVERSATION, role, stamp) for role in GROUP],
+            )
             # One message a role sent, and one notice the host sent, which has no author at all.
             for recipient, seq in (("reviewer", 1), ("assistant", 2)):
-                raw.execute("INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender,"
-                            " recipient, seq, text, at) VALUES ('msg_group', NULL, ?, 1, 'orchestrator', ?, ?,"
-                            " 'in the group', ?)", (CONVERSATION, recipient, seq, stamp))
+                raw.execute(
+                    "INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender,"
+                    " recipient, seq, text, at) VALUES ('msg_group', NULL, ?, 1, 'orchestrator', ?, ?,"
+                    " 'in the group', ?)",
+                    (CONVERSATION, recipient, seq, stamp),
+                )
             for recipient, seq in (("orchestrator", 1), ("reviewer", 2), ("assistant", 3)):
-                raw.execute("INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender,"
-                            " recipient, seq, text, notice, at) VALUES ('msg_notice', NULL, ?, 2, NULL, ?, ?,"
-                            " 'orchestrator added assistant', ?, ?)",
-                            (CONVERSATION, recipient, seq, json.dumps({"event": "participant_added",
-                             "participant": "assistant", "by": "orchestrator"}), stamp))
+                raw.execute(
+                    "INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender,"
+                    " recipient, seq, text, notice, at) VALUES ('msg_notice', NULL, ?, 2, NULL, ?, ?,"
+                    " 'orchestrator added assistant', ?, ?)",
+                    (
+                        CONVERSATION,
+                        recipient,
+                        seq,
+                        json.dumps({"event": "participant_added", "participant": "assistant", "by": "orchestrator"}),
+                        stamp,
+                    ),
+                )
             raw.execute("UPDATE mailboxes SET last_seq = 3 WHERE recipient = 'assistant'")
             for recipient, last in (("orchestrator", 1), ("reviewer", 2)):
-                raw.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)",
-                            (recipient, last))
+                raw.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)", (recipient, last))
         if version >= 5:
             # `author_kind` exists from this version, so a real database of it already holds values, a
             # person's own message among them. The backfill comes last so it covers every row above, and
             # the person's message goes to a mailbox nothing else here uses.
             raw.execute("UPDATE messages SET author_kind = 'agent' WHERE sender IS NOT NULL")
             raw.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES ('outsider', 1, 0)")
-            raw.execute("INSERT INTO messages (id, job_id, sender, author_kind, recipient, seq, text, at)"
-                        " VALUES ('msg_human', NULL, 'orchestrator', 'human', 'outsider', 1,"
-                        " 'from the person', ?)", (stamp,))
+            raw.execute(
+                "INSERT INTO messages (id, job_id, sender, author_kind, recipient, seq, text, at)"
+                " VALUES ('msg_human', NULL, 'orchestrator', 'human', 'outsider', 1,"
+                " 'from the person', ?)",
+                (stamp,),
+            )
     raw.close()
     os.chmod(config.db_path, 0o600)
 
 
 def rows(db: sqlite3.Connection) -> list[tuple[Any, ...]]:
-    return [tuple(row) for row in db.execute("SELECT id, recipient, seq, text, sender, author_kind FROM messages"
-                                             " ORDER BY recipient, seq")]
+    return [
+        tuple(row)
+        for row in db.execute(
+            "SELECT id, recipient, seq, text, sender, author_kind FROM messages ORDER BY recipient, seq"
+        )
+    ]
 
 
 @pytest.mark.parametrize("version", FIXTURE_VERSIONS)
-def test_every_older_schema_there_is_a_fixture_for_reaches_the_current_one_whole(tmp_path: Path,
-                                                                                version: int) -> None:
+def test_every_older_schema_there_is_a_fixture_for_reaches_the_current_one_whole(tmp_path: Path, version: int) -> None:
     config = group_config(tmp_path)
     request_id = rid(f"from-v{version}")
     old_database(config, version, request_id)
@@ -110,8 +138,9 @@ def test_every_older_schema_there_is_a_fixture_for_reaches_the_current_one_whole
     assert set(ADDED) <= columns, f"version {version} did not pick up every step: missing {set(ADDED) - columns}"
 
     # Every row is still there, and every message a role sent now reads as an agent's.
-    kinds = {(row["sender"] is None, row["author_kind"]) for row in db.execute("SELECT sender, author_kind"
-                                                                              " FROM messages")}
+    kinds = {
+        (row["sender"] is None, row["author_kind"]) for row in db.execute("SELECT sender, author_kind FROM messages")
+    }
     expected = {(False, "agent")}
     if version >= 3:
         expected.add((True, None))  # a host notice has no author at all
@@ -119,8 +148,9 @@ def test_every_older_schema_there_is_a_fixture_for_reaches_the_current_one_whole
         expected.add((False, "human"))  # and a person's own message is still the person's
     assert kinds == expected, kinds
     if version >= 5:
-        assert db.execute("SELECT author_kind FROM messages WHERE id = 'msg_human'").fetchone()[0] == "human", \
+        assert db.execute("SELECT author_kind FROM messages WHERE id = 'msg_human'").fetchone()[0] == "human", (
             "an upgrade relabelled a person's message as an agent's"
+        )
     if carried is not None:
         assert rows(db) == carried
 
@@ -129,14 +159,21 @@ def test_every_older_schema_there_is_a_fixture_for_reaches_the_current_one_whole
     assert (replay["created"], replay["message_id"], replay["seq"]) == (False, "msg_direct", 1)
 
     if version >= 3:  # a carried-over conversation takes a reply straight away, numbered on from before
-        answer = conversations.send(db, config, sender="reviewer", conversation_id=CONVERSATION,
-                                    text="answering", reply_to="msg_group", attention=["orchestrator"],
-                                    needs_decision=True)
-        [shown] = [m for m in conversations.history(db, "assistant", CONVERSATION)["messages"]
-                   if m["text"] == "answering"]
+        answer = conversations.send(
+            db,
+            config,
+            sender="reviewer",
+            conversation_id=CONVERSATION,
+            text="answering",
+            reply_to="msg_group",
+            attention=["orchestrator"],
+            needs_decision=True,
+        )
+        [shown] = [
+            m for m in conversations.history(db, "assistant", CONVERSATION)["messages"] if m["text"] == "answering"
+        ]
         assert shown["seq"] == 3 and shown["reply_to"] == {"message_id": "msg_group", "seq": 1}
-        assert (shown["attention"], shown["needs_decision"], shown["author_kind"]) == \
-            (["orchestrator"], True, "agent")
+        assert (shown["attention"], shown["needs_decision"], shown["author_kind"]) == (["orchestrator"], True, "agent")
         assert answer["seqs"]["assistant"] == 4
     db.close()
     connect(config.db_path).close()  # a second open changes nothing
@@ -147,8 +184,9 @@ def test_every_other_version_is_still_refused_before_anything_changes(tmp_path: 
     config = group_config(tmp_path)
     config.data_dir.mkdir(mode=0o700)
     raw = sqlite3.connect(config.db_path)
-    raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL);"
-                      f" INSERT INTO schema_version VALUES ({version});")
+    raw.executescript(
+        f"CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES ({version});"
+    )
     raw.close()
     os.chmod(config.db_path, 0o600)
     with pytest.raises(SchemaMismatch, match=f"version {version}"):
@@ -165,30 +203,40 @@ def test_the_upgrade_steps_cover_every_version_there_is_a_fixture_for() -> None:
     A version baton accepts but has no step above it migrates silently and arrives missing columns; a
     version with a fixture but absent from MIGRATES_FROM is refused outright instead of upgraded.
     """
-    assert set(MIGRATES_FROM) == set(FIXTURE_VERSIONS), \
+    assert set(MIGRATES_FROM) == set(FIXTURE_VERSIONS), (
         f"baton migrates from {sorted(MIGRATES_FROM)} but there are fixtures for {list(FIXTURE_VERSIONS)}"
-    assert set(MIGRATES_FROM) == set(range(min(MIGRATES_FROM), SCHEMA_VERSION)), \
+    )
+    assert set(MIGRATES_FROM) == set(range(min(MIGRATES_FROM), SCHEMA_VERSION)), (
         "MIGRATES_FROM skips a version between the oldest it accepts and the current one"
+    )
     assert store._STEPS, "no upgrade steps are declared"
     assert max(store._STEPS) == SCHEMA_VERSION, "the newest step is not the current version"
     assert min(FIXTURE_VERSIONS) < min(store._STEPS), "nothing climbs from the oldest version baton accepts"
 
 
 # The tables each step adds whole, written out so a step's declared list can't quietly stand in for them.
-WHOLE_TABLES = {8: {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"},  # the browser seat
-                9: {"change_log", "log_meta"},  # the conversation change log
-                10: {"generations", "batches", "batch_pages", "artifact_versions", "artifact_inputs",
-                     "artifact_depends_on", "commit_requests"},  # the local indexing writer's derived data
-                11: {"vectors", "vector_skips"},  # embeddings a producer supplies, per generation
-                12: {"aliases", "alias_bindings", "alias_claims"},
-                13: {"alias_posts"},  # guest continuity
-                14: {"alias_arms", "core_enrolment", "alias_roles", "events_targets"},  # per-call identity
-                15: {"topics"},  # topics as containers
-                16: {"topic_changes"},  # the history of every topic change
-                17: {"topic_grants", "topic_grant_events"},  # the owner's topic grant records and their log
-                18: {"reference_docs", "reference_revisions"},  # the documents a topic keeps, and their revisions
-                19: {"alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes",
-                     "events_receipts"}}  # records kept instead of overwritten or expired
+WHOLE_TABLES = {
+    8: {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"},  # the browser seat
+    9: {"change_log", "log_meta"},  # the conversation change log
+    10: {
+        "generations",
+        "batches",
+        "batch_pages",
+        "artifact_versions",
+        "artifact_inputs",
+        "artifact_depends_on",
+        "commit_requests",
+    },  # the local indexing writer's derived data
+    11: {"vectors", "vector_skips"},  # embeddings a producer supplies, per generation
+    12: {"aliases", "alias_bindings", "alias_claims"},
+    13: {"alias_posts"},  # guest continuity
+    14: {"alias_arms", "core_enrolment", "alias_roles", "events_targets"},  # per-call identity
+    15: {"topics"},  # topics as containers
+    16: {"topic_changes"},  # the history of every topic change
+    17: {"topic_grants", "topic_grant_events"},  # the owner's topic grant records and their log
+    18: {"reference_docs", "reference_revisions"},  # the documents a topic keeps, and their revisions
+    19: {"alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes", "events_receipts"},
+}  # records kept instead of overwritten or expired
 
 
 @pytest.mark.parametrize("version", FIXTURE_VERSIONS)

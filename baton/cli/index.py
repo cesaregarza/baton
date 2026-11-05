@@ -19,60 +19,103 @@ from baton.errors import InvalidRequest
 
 def add_commands(commands: Any) -> None:
     """Local commands for the host owner's indexing worker: no role, no token, no MCP."""
-    index = commands.add_parser("index", help="change feed and derived-data writer for a local indexing worker"
-                                ).add_subparsers(dest="index_command", required=True)
+    index = commands.add_parser(
+        "index", help="change feed and derived-data writer for a local indexing worker"
+    ).add_subparsers(dest="index_command", required=True)
     changes_parser = index.add_parser("changes", help="changes after a cursor, oldest first, metadata only")
     changes_parser.add_argument("--after", help="the next_cursor of the last call; omit to start at the oldest kept")
     changes_parser.add_argument("--limit", type=int, default=100)
-    changes_parser.set_defaults(handler=lambda config, args: _index(config, lambda conn: changes.read(
-        conn, changes.Scope.ALL, cursor=args.after, limit=args.limit), read_only=True))
+    changes_parser.set_defaults(
+        handler=lambda config, args: _index(
+            config,
+            lambda conn: changes.read(conn, changes.Scope.ALL, cursor=args.after, limit=args.limit),
+            read_only=True,
+        )
+    )
     wait_parser = index.add_parser("wait", help="block until something changes after a cursor; prints only its seq")
     wait_parser.add_argument("--after", required=True)
     wait_parser.add_argument("--timeout", type=float, default=30.0, help="seconds")
-    wait_parser.set_defaults(handler=lambda config, args: _index(config, lambda conn: changes.wait(
-        conn, changes.Scope.ALL, cursor=args.after, timeout_seconds=args.timeout), read_only=True))
+    wait_parser.set_defaults(
+        handler=lambda config, args: _index(
+            config,
+            lambda conn: changes.wait(conn, changes.Scope.ALL, cursor=args.after, timeout_seconds=args.timeout),
+            read_only=True,
+        )
+    )
     dirty_parser = index.add_parser("dirty", help="what a producer has no current version of; read-only")
     dirty_parser.add_argument("--producer", required=True, help="whose set to list; not checked against the config")
     dirty_parser.add_argument("--generation", help="which of its generations; default: the active one")
-    dirty_parser.set_defaults(handler=lambda config, args: _index(config, lambda conn: derived.dirty(
-        conn, config, args.producer, generation=args.generation), read_only=True))
+    dirty_parser.set_defaults(
+        handler=lambda config, args: _index(
+            config, lambda conn: derived.dirty(conn, config, args.producer, generation=args.generation), read_only=True
+        )
+    )
     begin = index.add_parser("begin-batch", help="issue a manifest of the messages a batch reads")
     begin.add_argument("--producer", required=True)
     begin.add_argument("--conversation", required=True)
-    begin.add_argument("--kinds", required=True, help=f"comma-separated, from {', '.join(derived.KINDS)}; or "
-                       f"{derived.RECENT} alone, when [search] rolling_window_messages is set")
+    begin.add_argument(
+        "--kinds",
+        required=True,
+        help=f"comma-separated, from {', '.join(derived.KINDS)}; or "
+        f"{derived.RECENT} alone, when [search] rolling_window_messages is set",
+    )
     begin.add_argument("--generation", help="the generation to fill; default: the active one")
-    begin.set_defaults(handler=lambda config, args: _index(config, lambda conn: derived.begin_batch(
-        conn, config, args.producer, args.conversation, args.kinds.split(","), generation=args.generation)))
+    begin.set_defaults(
+        handler=lambda config, args: _index(
+            config,
+            lambda conn: derived.begin_batch(
+                conn, config, args.producer, args.conversation, args.kinds.split(","), generation=args.generation
+            ),
+        )
+    )
     read = index.add_parser("read-batch", help="one page of a batch's messages, recorded as delivered")
     read.add_argument("batch")
     read.add_argument("--page", type=int, required=True)
     read.add_argument("--producer", required=True)
-    read.set_defaults(handler=lambda config, args: _index(config, lambda conn: derived.read_batch(
-        conn, config, args.producer, args.batch, args.page)))
+    read.set_defaults(
+        handler=lambda config, args: _index(
+            config, lambda conn: derived.read_batch(conn, config, args.producer, args.batch, args.page)
+        )
+    )
     commit = index.add_parser("commit-batch", help="write a version of each kind from a delivered batch")
     commit.add_argument("batch")
     commit.add_argument("--file", required=True, help="the commit as JSON: request_id and artifacts; - for stdin")
     commit.add_argument("--producer", required=True)
-    commit.set_defaults(handler=lambda config, args: _index(config, lambda conn: derived.commit_batch(
-        conn, config, args.producer, args.batch, _json_file(args.file))))
-    generation = index.add_parser("generation", help="make, switch to, or drop a producer's generations"
-                                  ).add_subparsers(dest="generation_command", required=True)
+    commit.set_defaults(
+        handler=lambda config, args: _index(
+            config, lambda conn: derived.commit_batch(conn, config, args.producer, args.batch, _json_file(args.file))
+        )
+    )
+    generation = index.add_parser(
+        "generation", help="make, switch to, or drop a producer's generations"
+    ).add_subparsers(dest="generation_command", required=True)
     create = generation.add_parser("create", help="a new, inactive generation to fill")
     create.add_argument("--producer", required=True)
     create.add_argument("--profile", help="its profile as JSON (summarizer, embedding); - for stdin")
-    create.set_defaults(handler=lambda config, args: _index(config, lambda conn: derived.generation_create(
-        conn, config, args.producer, _json_file(args.profile, "--profile") if args.profile else None)))
+    create.set_defaults(
+        handler=lambda config, args: _index(
+            config,
+            lambda conn: derived.generation_create(
+                conn, config, args.producer, _json_file(args.profile, "--profile") if args.profile else None
+            ),
+        )
+    )
     activate = generation.add_parser("activate", help="switch readers to a generation, if it is complete")
     activate.add_argument("generation")
     activate.add_argument("--producer", required=True)
-    activate.set_defaults(handler=lambda config, args: _index(config, lambda conn: derived.generation_activate(
-        conn, config, args.producer, args.generation)))
+    activate.set_defaults(
+        handler=lambda config, args: _index(
+            config, lambda conn: derived.generation_activate(conn, config, args.producer, args.generation)
+        )
+    )
     drop = generation.add_parser("drop", help="drop an inactive generation and free its slot")
     drop.add_argument("generation")
     drop.add_argument("--producer", required=True)
-    drop.set_defaults(handler=lambda config, args: _index(config, lambda conn: derived.generation_drop(
-        conn, config, args.producer, args.generation)))
+    drop.set_defaults(
+        handler=lambda config, args: _index(
+            config, lambda conn: derived.generation_drop(conn, config, args.producer, args.generation)
+        )
+    )
 
 
 def _index(config: Config, operation: Any, *, read_only: bool = False) -> Any:

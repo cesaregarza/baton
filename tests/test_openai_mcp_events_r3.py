@@ -54,11 +54,24 @@ def events_of(host, events: Any = None) -> Any:
 # --- R2-1: one canonical callback, checked and sent as the same string ------------------------------
 
 
-@pytest.mark.parametrize("path", [
-    "/hooks/../outside", "/hooks/./a", "/hooks/%2e%2e/outside", "/hooks/%2E%2E/outside", "/hooks/a%2fb",
-    "/hooks/a%2Fb", "/hooks/a%5cb", "/hooks/a%5Cb", "/hooks/a\\b", "/hooks//a", "/hooks/a?x=1", "/hooks/a#f",
-    "/hooks/%252e%252e/outside",
-])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/hooks/../outside",
+        "/hooks/./a",
+        "/hooks/%2e%2e/outside",
+        "/hooks/%2E%2E/outside",
+        "/hooks/a%2fb",
+        "/hooks/a%2Fb",
+        "/hooks/a%5cb",
+        "/hooks/a%5Cb",
+        "/hooks/a\\b",
+        "/hooks//a",
+        "/hooks/a?x=1",
+        "/hooks/a#f",
+        "/hooks/%252e%252e/outside",
+    ],
+)
 def test_non_canonical_callbacks_are_refused_before_any_request(events_host, receiver, path: str) -> None:
     host = events_host()
     error = subscribe(host, "worker", receiver.url(path), new_secret()).get("error", {})
@@ -93,8 +106,10 @@ def test_a_static_token_replaced_under_the_same_name_ends_delivery(events_host, 
     host = events_host()
     subscribe(host, "worker", receiver.url(), new_secret())
     _, other_digest = auth.new_token()
-    replaced = replace(host.config, tokens=tuple(replace(t, sha256=other_digest) if t.role == "worker" else t
-                                                 for t in host.config.tokens))
+    replaced = replace(
+        host.config,
+        tokens=tuple(replace(t, sha256=other_digest) if t.role == "worker" else t for t in host.config.tokens),
+    )
     send(host, "worker", "hello")
     dispatch(host, integration.McpEvents(replaced, events_of(host).settings, resolver=host.resolver))
     assert receiver.events() == []
@@ -142,8 +157,14 @@ def test_a_normal_oauth_refresh_keeps_delivery_live(events_host, receiver) -> No
     tokens = authorize(host)
     host.tokens["planner"] = tokens["access_token"]
     subscribe(host, "planner", receiver.url("/hooks/p"), new_secret())
-    refreshed = httpx.post(host.base + "/token", data={"grant_type": "refresh_token", "client_id": tokens["client_id"],
-                                                       "refresh_token": tokens["refresh_token"]}).json()
+    refreshed = httpx.post(
+        host.base + "/token",
+        data={
+            "grant_type": "refresh_token",
+            "client_id": tokens["client_id"],
+            "refresh_token": tokens["refresh_token"],
+        },
+    ).json()
     assert "access_token" in refreshed
     # Let the first access token lapse, so only the refreshed grant remains.
     store = auth.TokenStore.load(host.config.oauth_state_path)
@@ -292,12 +313,24 @@ def test_a_slow_resolver_counts_against_the_deadline(events_host, receiver) -> N
 BASE = {"enabled": True, "callback_prefixes": [f"https://{NAME}/hooks/"]}
 
 
-@pytest.mark.parametrize("change", [
-    {"allow_private_callbacks": True}, {"ca_file": "/tmp/ca.pem"},
-    {"max_per_role": 0}, {"max_per_role": -1}, {"max_per_role": True}, {"max_total": 0}, {"max_total": 10**6},
-    {"timeout_seconds": 0}, {"timeout_seconds": 3600}, {"timeout_seconds": "10"},
-    {"min_ttl_seconds": 0}, {"max_ttl_seconds": 10**9}, {"default_ttl_seconds": "60"},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"allow_private_callbacks": True},
+        {"ca_file": "/tmp/ca.pem"},
+        {"max_per_role": 0},
+        {"max_per_role": -1},
+        {"max_per_role": True},
+        {"max_total": 0},
+        {"max_total": 10**6},
+        {"timeout_seconds": 0},
+        {"timeout_seconds": 3600},
+        {"timeout_seconds": "10"},
+        {"min_ttl_seconds": 0},
+        {"max_ttl_seconds": 10**9},
+        {"default_ttl_seconds": "60"},
+    ],
+)
 def test_test_only_or_out_of_range_settings_are_refused(change: dict) -> None:
     try:
         integration.parse_settings({**BASE, **change})
@@ -310,8 +343,11 @@ def test_test_only_or_out_of_range_settings_are_refused(change: dict) -> None:
 
 @pytest.mark.parametrize("enabled", ["false", "true", 1, 0])
 def test_enabled_must_be_a_toml_boolean(enabled: Any) -> None:
-    raw = {"host": {"public_url": "https://baton.example.test"}, "roles": {"worker": {}},
-           "integrations": {"openai_mcp_events": {**BASE, "enabled": enabled}}}
+    raw = {
+        "host": {"public_url": "https://baton.example.test"},
+        "roles": {"worker": {}},
+        "integrations": {"openai_mcp_events": {**BASE, "enabled": enabled}},
+    }
     with pytest.raises(ConfigError, match="boolean"):
         parse(raw)
 

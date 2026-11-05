@@ -12,30 +12,69 @@ from baton.database import Connection
 HOST_ACTOR = "@host"
 
 
-def store_copy(conn: Connection, *, message_id: str, sender: str | None, recipient: str, text: str,
-               job_id: str | None = None, conversation_id: str | None = None, conversation_seq: int | None = None,
-               relayed: list[dict] | None = None, notice: dict[str, str] | None = None,
-               author_kind: str | None = None, reply_to: str | None = None,
-               attention: list[str] | None = None, needs_decision: bool = False,
-               identity: dict[str, str] | None = None) -> int:
+def store_copy(
+    conn: Connection,
+    *,
+    message_id: str,
+    sender: str | None,
+    recipient: str,
+    text: str,
+    job_id: str | None = None,
+    conversation_id: str | None = None,
+    conversation_seq: int | None = None,
+    relayed: list[dict] | None = None,
+    notice: dict[str, str] | None = None,
+    author_kind: str | None = None,
+    reply_to: str | None = None,
+    attention: list[str] | None = None,
+    needs_decision: bool = False,
+    identity: dict[str, str] | None = None,
+) -> int:
     """Store one copy as the recipient's next seq, with its event; the caller holds the write lock and checked room."""
     last_seq = positions(conn, recipient)[0]
     seq = last_seq + 1
-    conn.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)"
-                 " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq", (recipient, seq))
-    conn.execute("INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, author_kind,"
-                 " recipient, seq, text, relayed, notice, reply_to, attention, needs_decision, at,"
-                 " alias_id, alias, alias_code)"
-                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                 (message_id, job_id, conversation_id, conversation_seq, sender, author_kind, recipient, seq,
-                  text, json.dumps(relayed) if relayed else None, json.dumps(notice) if notice else None,
-                  reply_to, json.dumps(attention) if attention else None, int(needs_decision), events.now(),
-                  (identity or {}).get("alias_id"), (identity or {}).get("alias"), (identity or {}).get("code")))
+    conn.execute(
+        "INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)"
+        " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq",
+        (recipient, seq),
+    )
+    conn.execute(
+        "INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, author_kind,"
+        " recipient, seq, text, relayed, notice, reply_to, attention, needs_decision, at,"
+        " alias_id, alias, alias_code)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            message_id,
+            job_id,
+            conversation_id,
+            conversation_seq,
+            sender,
+            author_kind,
+            recipient,
+            seq,
+            text,
+            json.dumps(relayed) if relayed else None,
+            json.dumps(notice) if notice else None,
+            reply_to,
+            json.dumps(attention) if attention else None,
+            int(needs_decision),
+            events.now(),
+            (identity or {}).get("alias_id"),
+            (identity or {}).get("alias"),
+            (identity or {}).get("code"),
+        ),
+    )
     # A job-less event uses the message's seq as its own.
-    events.append(conn, job_id=job_id, seq=None if job_id else seq, actor=sender or HOST_ACTOR,
-                  audience=recipient, kind="message", summary=f"message {seq} from {sender or 'the host'}",
-                  data={"message_id": message_id, "seq": seq,
-                        **({"alias_id": identity["alias_id"]} if identity else {})})
+    events.append(
+        conn,
+        job_id=job_id,
+        seq=None if job_id else seq,
+        actor=sender or HOST_ACTOR,
+        audience=recipient,
+        kind="message",
+        summary=f"message {seq} from {sender or 'the host'}",
+        data={"message_id": message_id, "seq": seq, **({"alias_id": identity["alias_id"]} if identity else {})},
+    )
     return seq
 
 
@@ -55,8 +94,10 @@ def addressed_to(conn: Connection, recipient: str, seq: int) -> bool:
     attention or asks for a decision; one that does neither still arrives, but singles nobody out. A
     message with no copy left singles nobody out either: there is nothing left to look at.
     """
-    row = conn.execute("SELECT conversation_id, attention, needs_decision FROM messages"
-                       " WHERE recipient = ? AND seq = ?", (recipient, seq)).fetchone()
+    row = conn.execute(
+        "SELECT conversation_id, attention, needs_decision FROM messages WHERE recipient = ? AND seq = ?",
+        (recipient, seq),
+    ).fetchone()
     if row is None:
         return False
     if row["conversation_id"] is None:
@@ -85,11 +126,13 @@ def mark_read(conn: Connection, recipient: str, seq: int) -> None:
     nothing here has to parse `messages:9:r2` or rely on how SQLite casts the text after the seq.
     """
     conn.execute("UPDATE mailboxes SET read_seq = MAX(read_seq, ?) WHERE recipient = ?", (seq, recipient))
-    conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ?"
-                 " AND status IN ('pending', 'scheduled', 'capped') AND ("
-                 "   (ordinal IS NULL AND key LIKE 'messages:%' AND CAST(substr(key, 10) AS INTEGER) <= ?)"
-                 "   OR (ordinal IS NOT NULL AND baseline_seq < ?))",
-                 (events.now(), recipient, seq, seq))
+    conn.execute(
+        "UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ?"
+        " AND status IN ('pending', 'scheduled', 'capped') AND ("
+        "   (ordinal IS NULL AND key LIKE 'messages:%' AND CAST(substr(key, 10) AS INTEGER) <= ?)"
+        "   OR (ordinal IS NOT NULL AND baseline_seq < ?))",
+        (events.now(), recipient, seq, seq),
+    )
 
 
 def positions(conn: Connection, recipient: str) -> tuple[int, int]:

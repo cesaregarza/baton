@@ -28,9 +28,15 @@ class Instance:
     def load(cls, path: Path) -> Instance:
         path = datadir.canonical(path)
         integration = IntegrationConfig.load(path)
-        return cls(path, integration.product, integration.project,
-                   Secretary(config.load(integration.config), integration.state, integration.policy),
-                   integration.poll_seconds, integration.budget_seconds, integration.codex)
+        return cls(
+            path,
+            integration.product,
+            integration.project,
+            Secretary(config.load(integration.config), integration.state, integration.policy),
+            integration.poll_seconds,
+            integration.budget_seconds,
+            integration.codex,
+        )
 
     @property
     def signal_path(self) -> Path:
@@ -51,8 +57,9 @@ class Receipts:
         conn = open_private(self.path)
         with conn.transaction():
             conn.execute("CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            conn.execute("CREATE TABLE IF NOT EXISTS offered (session TEXT, decision TEXT, "
-                         "PRIMARY KEY(session,decision))")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS offered (session TEXT, decision TEXT, PRIMARY KEY(session,decision))"
+            )
         return conn
 
     def get(self, name: str, default=None):
@@ -62,8 +69,10 @@ class Receipts:
 
     def set(self, name: str, value) -> None:
         with self.connection() as conn, conn.transaction():
-            conn.execute("INSERT INTO settings VALUES (?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value",
-                         (name, json.dumps(value)))
+            conn.execute(
+                "INSERT INTO settings VALUES (?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value",
+                (name, json.dumps(value)),
+            )
 
     def bind(self, session: str, *, replace: bool = False) -> bool:
         if not isinstance(session, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,160}", session):

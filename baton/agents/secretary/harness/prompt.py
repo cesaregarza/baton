@@ -51,12 +51,17 @@ class PromptLayers:
 
     def messages(self, *, cache: bool = False) -> list[dict]:
         principal = {key: self.context[key] for key in ("principal", "instructions", "summary_bytes")}
-        event = {key: value for key, value in self.context.items()
-                 if key not in {"principal", "instructions", "summary_bytes", "knowledge"}}
-        return [self._message("developer", INSTRUCTIONS, cache),
-                self._message("developer", "Contextual knowledge:\n" + self.context.get("knowledge", ""), cache),
-                self._message("developer", "Principal-specific guidance:\n" + _json(principal), cache),
-                self._message("user", _json(event), False)]
+        event = {
+            key: value
+            for key, value in self.context.items()
+            if key not in {"principal", "instructions", "summary_bytes", "knowledge"}
+        }
+        return [
+            self._message("developer", INSTRUCTIONS, cache),
+            self._message("developer", "Contextual knowledge:\n" + self.context.get("knowledge", ""), cache),
+            self._message("developer", "Principal-specific guidance:\n" + _json(principal), cache),
+            self._message("user", _json(event), False),
+        ]
 
     @staticmethod
     def _message(role: str, text: str, cache: bool) -> dict:
@@ -68,6 +73,7 @@ class PromptLayers:
 
 def _json(value: object) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
 
 RESPONSE_SCHEMA = {
     "type": "object",

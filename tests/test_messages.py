@@ -53,8 +53,9 @@ def test_a_retry_replays_and_a_changed_retry_conflicts(conn) -> None:
     assert len(messages.read(conn, "worker")["messages"]) == 1
 
 
-@pytest.mark.parametrize("request_id", ["no-time", "20261399T000000Z-x", rid("future", datetime.now(UTC) +
-                                                                              timedelta(hours=1))])
+@pytest.mark.parametrize(
+    "request_id", ["no-time", "20261399T000000Z-x", rid("future", datetime.now(UTC) + timedelta(hours=1))]
+)
 def test_malformed_or_future_request_ids_are_refused(conn, request_id: str) -> None:
     with pytest.raises(InvalidRequest):
         messages.send(conn, sender="planner", recipient="worker", text="x", request_id=request_id)
@@ -62,8 +63,13 @@ def test_malformed_or_future_request_ids_are_refused(conn, request_id: str) -> N
 
 def test_an_old_request_id_is_refused(conn) -> None:
     with pytest.raises(RequestTooOld):
-        messages.send(conn, sender="planner", recipient="worker", text="x",
-                      request_id=rid("old", datetime.now(UTC) - timedelta(days=31)))
+        messages.send(
+            conn,
+            sender="planner",
+            recipient="worker",
+            text="x",
+            request_id=rid("old", datetime.now(UTC) - timedelta(days=31)),
+        )
 
 
 def test_oversized_messages_are_refused(conn) -> None:

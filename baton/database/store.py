@@ -85,9 +85,11 @@ def _refuse_other_schema(conn: Connection) -> int | None:
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").fetchone():
         row = conn.execute("SELECT version FROM schema_version").fetchone()
         if row is not None and row["version"] != SCHEMA_VERSION and row["version"] not in MIGRATES_FROM:
-            raise SchemaMismatch(f"the database's schema is version {row['version']}, and this baton needs "
-                                 f"version {SCHEMA_VERSION}. baton migrates only from "
-                                 f"{_listed(MIGRATES_FROM)}: move the old database aside to start fresh.")
+            raise SchemaMismatch(
+                f"the database's schema is version {row['version']}, and this baton needs "
+                f"version {SCHEMA_VERSION}. baton migrates only from "
+                f"{_listed(MIGRATES_FROM)}: move the old database aside to start fresh."
+            )
         return row["version"] if row is not None else None
     return None
 
@@ -101,53 +103,69 @@ def _listed(versions: tuple[int, ...]) -> str:
 def _ensure_schema(conn: Connection) -> None:
     """Create the schema, or upgrade an older database, in one transaction: a crash leaves the old one intact."""
     with transaction(conn):
-        conn.execute(_SCHEMA[0])
-        row = conn.execute("SELECT version FROM schema_version").fetchone()
-        version = row["version"] if row is not None else None
-        if version is not None and version != SCHEMA_VERSION and version not in MIGRATES_FROM:
-            raise SchemaMismatch(f"schema version {version}, expected {SCHEMA_VERSION}")  # a second line of defence
-        # Version 3 lets a conversation message's copies share one id and a send record several seqs, which
-        # SQLite can't change in place: the two tables are set aside, recreated, and every row copied back.
-        # A rebuild creates them from the current schema, so it needs the backfills but no column step.
-        rebuilding = version == 2
-        if rebuilding:
-            for table in _REBUILT:
-                conn.execute(f"ALTER TABLE {table} RENAME TO {table}_v2")
-        for statement in _SCHEMA[1:]:
-            conn.execute(statement)
-        if rebuilding:
-            for table, columns in _REBUILT.items():
-                conn.execute(f"INSERT INTO {table} ({columns}) SELECT {columns} FROM {table}_v2")
-                conn.execute(f"DROP TABLE {table}_v2")
-        # Every step above the database's own version, in order: two versions behind needs both.
-        # Another opener may have completed the migration while this connection waited for the lock.
-        for step in _STEPS:
-            if version is None or version >= step:
-                continue
-            for table, columns in _ADDED_COLUMNS.get(step, {}).items():
-                # Add only what is missing. Several paths reach this point: a table the version-3
-                # rebuild recreated, or one the statements above created for the first time, already
-                # has every column of the current schema, while a table carried over from an older
-                # database has none of them. Asking the table is simpler, and safer, than tracking
-                # which of those happened.
-                present = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-                for column in columns:
-                    if column.split()[0] not in present:
-                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
-            for statement in _BACKFILL.get(step, ()):
-                conn.execute(statement)
-            for procedure in _PROCEDURES.get(step, ()):
-                procedure(conn)
+        version = _create_or_upgrade_tables(conn)
         conn.execute(_BINDINGS_BY_ISSUE)
         # A random epoch no client can already hold, written once: at creation, or at the upgrade adding the log.
-        conn.execute("INSERT OR IGNORE INTO log_meta (key, value) VALUES ('log_epoch', ?), ('pruned_through', '0')",
-                     (secrets.token_hex(16),))
+        conn.execute(
+            "INSERT OR IGNORE INTO log_meta (key, value) VALUES ('log_epoch', ?), ('pruned_through', '0')",
+            (secrets.token_hex(16),),
+        )
         _ensure_search_index(conn)
         _ensure_artifact_index(conn)
-        if version is None:
-            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
-        elif version != SCHEMA_VERSION:
-            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+        _update_schema_version(conn, version)
+
+
+def _create_or_upgrade_tables(conn: Connection) -> int | None:
+    conn.execute(_SCHEMA[0])
+    row = conn.execute("SELECT version FROM schema_version").fetchone()
+    version = row["version"] if row is not None else None
+    if version is not None and version != SCHEMA_VERSION and version not in MIGRATES_FROM:
+        raise SchemaMismatch(f"schema version {version}, expected {SCHEMA_VERSION}")  # a second line of defence
+    rebuilding = version == 2
+    _create_schema_tables(conn, rebuilding)
+    _apply_schema_steps(conn, version)
+    return version
+
+
+def _update_schema_version(conn: Connection, version: int | None) -> None:
+    if version is None:
+        conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+    elif version != SCHEMA_VERSION:
+        conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+
+
+def _create_schema_tables(conn: Connection, rebuilding: bool) -> None:
+    # Version 3 needs two message tables rebuilt because SQLite cannot change their identity constraints in place.
+    if rebuilding:
+        for table in _REBUILT:
+            conn.execute(f"ALTER TABLE {table} RENAME TO {table}_v2")
+    for statement in _SCHEMA[1:]:
+        conn.execute(statement)
+    if rebuilding:
+        for table, columns in _REBUILT.items():
+            conn.execute(f"INSERT INTO {table} ({columns}) SELECT {columns} FROM {table}_v2")
+            conn.execute(f"DROP TABLE {table}_v2")
+
+
+def _apply_schema_steps(conn: Connection, version: int | None) -> None:
+    # Fresh schemas already include every step; otherwise run unapplied steps in order.
+    for step in _STEPS:
+        if version is None or version >= step:
+            continue
+        _apply_added_columns(conn, step)
+        for statement in _BACKFILL.get(step, ()):
+            conn.execute(statement)
+        for procedure in _PROCEDURES.get(step, ()):
+            procedure(conn)
+
+
+def _apply_added_columns(conn: Connection, step: int) -> None:
+    for table, columns in _ADDED_COLUMNS.get(step, {}).items():
+        # Newly created or rebuilt tables may already have these columns; inspect before altering.
+        present = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column in columns:
+            if column.split()[0] not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
 
 
 def fts5_available(conn: Connection) -> bool:
@@ -170,29 +188,42 @@ def _ensure_search_index(conn: Connection) -> None:
     """
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'messages_fts'").fetchone() or not fts5_available(conn):
         return
-    conn.execute("CREATE VIRTUAL TABLE messages_fts USING fts5(text, recipient UNINDEXED, seq UNINDEXED,"
-                 " tokenize = 'unicode61 remove_diacritics 2')")
-    conn.execute("INSERT INTO messages_fts (rowid, text, recipient, seq)"
-                 " SELECT rowid, text, recipient, seq FROM messages")
-    conn.execute("CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN"
-                 " INSERT INTO messages_fts (rowid, text, recipient, seq) VALUES (new.rowid, new.text, new.recipient,"
-                 " new.seq); END")
-    conn.execute("CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN"
-                 " DELETE FROM messages_fts WHERE rowid = old.rowid AND recipient = old.recipient AND seq = old.seq;"
-                 " END")
+    conn.execute(
+        "CREATE VIRTUAL TABLE messages_fts USING fts5(text, recipient UNINDEXED, seq UNINDEXED,"
+        " tokenize = 'unicode61 remove_diacritics 2')"
+    )
+    conn.execute(
+        "INSERT INTO messages_fts (rowid, text, recipient, seq) SELECT rowid, text, recipient, seq FROM messages"
+    )
+    conn.execute(
+        "CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN"
+        " INSERT INTO messages_fts (rowid, text, recipient, seq) VALUES (new.rowid, new.text, new.recipient,"
+        " new.seq); END"
+    )
+    conn.execute(
+        "CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN"
+        " DELETE FROM messages_fts WHERE rowid = old.rowid AND recipient = old.recipient AND seq = old.seq;"
+        " END"
+    )
 
 
 def _ensure_artifact_index(conn: Connection) -> None:
     """The keyword index over artifact bodies, kept by triggers as the messages' is. Nothing reads it yet."""
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'artifacts_fts'").fetchone() or not fts5_available(conn):
         return
-    conn.execute("CREATE VIRTUAL TABLE artifacts_fts USING fts5(body, version_id UNINDEXED,"
-                 " tokenize = 'unicode61 remove_diacritics 2')")
+    conn.execute(
+        "CREATE VIRTUAL TABLE artifacts_fts USING fts5(body, version_id UNINDEXED,"
+        " tokenize = 'unicode61 remove_diacritics 2')"
+    )
     conn.execute("INSERT INTO artifacts_fts (rowid, body, version_id) SELECT rowid, body, id FROM artifact_versions")
-    conn.execute("CREATE TRIGGER artifacts_fts_insert AFTER INSERT ON artifact_versions BEGIN"
-                 " INSERT INTO artifacts_fts (rowid, body, version_id) VALUES (new.rowid, new.body, new.id); END")
-    conn.execute("CREATE TRIGGER artifacts_fts_delete AFTER DELETE ON artifact_versions BEGIN"
-                 " DELETE FROM artifacts_fts WHERE rowid = old.rowid AND version_id = old.id; END")
+    conn.execute(
+        "CREATE TRIGGER artifacts_fts_insert AFTER INSERT ON artifact_versions BEGIN"
+        " INSERT INTO artifacts_fts (rowid, body, version_id) VALUES (new.rowid, new.body, new.id); END"
+    )
+    conn.execute(
+        "CREATE TRIGGER artifacts_fts_delete AFTER DELETE ON artifact_versions BEGIN"
+        " DELETE FROM artifacts_fts WHERE rowid = old.rowid AND version_id = old.id; END"
+    )
 
 
 def connect_read_only(path: Path) -> Connection:
@@ -212,8 +243,10 @@ def connect_read_only(path: Path) -> Connection:
         conn.execute("PRAGMA query_only = ON")
         row = conn.execute("SELECT version FROM schema_version").fetchone()
         if row is None or row["version"] != SCHEMA_VERSION:
-            raise SchemaMismatch(f"the database's schema is version {row['version'] if row else 'unknown'}, and this "
-                                 f"baton reads version {SCHEMA_VERSION}: start the host once to migrate it first")
+            raise SchemaMismatch(
+                f"the database's schema is version {row['version'] if row else 'unknown'}, and this "
+                f"baton reads version {SCHEMA_VERSION}: start the host once to migrate it first"
+            )
     except BaseException:
         conn.close()
         raise

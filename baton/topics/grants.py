@@ -35,8 +35,7 @@ OWNER = "owner"
 NEEDS_BINDING = "a topic grant key works only with the alias's binding token"
 UNKNOWN_KEY = "unknown topic grant key"
 # A grant joined to the topic it is on, read by id: that topic's path is its current one.
-WITH_ROOT = ("SELECT g.*, root.path AS root_path FROM topic_grants g"
-             " LEFT JOIN topics root ON root.id = g.topic_id")
+WITH_ROOT = "SELECT g.*, root.path AS root_path FROM topic_grants g LEFT JOIN topics root ON root.id = g.topic_id"
 
 
 class GrantRefused(Forbidden):
@@ -71,11 +70,19 @@ def _digest(row: Any) -> str:
     Checks always recompute it from the row. A stored copy would only say what the row claimed when it was
     written, so an edit made since would go unnoticed.
     """
-    covered = {"alias_id": row["alias_id"], "alias_name": row["alias_name_seen"],
-               "alias_code": row["alias_code_seen"], "topic_id": row["topic_id"],
-               "topic_path": row["topic_path_seen"], "capabilities": json.loads(row["capabilities"]),
-               "inherit": row["inherit"], "expires_at": row["expires_at"], "proposed_by": row["proposed_by"],
-               "proposed_at": row["proposed_at"], "nonce": row["nonce"]}
+    covered = {
+        "alias_id": row["alias_id"],
+        "alias_name": row["alias_name_seen"],
+        "alias_code": row["alias_code_seen"],
+        "topic_id": row["topic_id"],
+        "topic_path": row["topic_path_seen"],
+        "capabilities": json.loads(row["capabilities"]),
+        "inherit": row["inherit"],
+        "expires_at": row["expires_at"],
+        "proposed_by": row["proposed_by"],
+        "proposed_at": row["proposed_at"],
+        "nonce": row["nonce"],
+    }
     text = json.dumps(covered, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -102,14 +109,27 @@ def _proposal_order(row: Any) -> tuple[datetime, str]:
 
 def _render(row: Any, now: datetime) -> dict[str, Any]:
     """A grant as the owner reads it, with its state. Never the proof digest or the nonce."""
-    return {"id": row["id"], "alias_id": row["alias_id"], "alias_name": row["alias_name_seen"],
-            "alias_code": row["alias_code_seen"], "topic_id": row["topic_id"], "topic_path": row["topic_path_seen"],
-            "capabilities": json.loads(row["capabilities"]), "inherit": row["inherit"],
-            "proposed_by": row["proposed_by"], "proposed_at": row["proposed_at"],
-            "proposal_expires_at": row["proposal_expires_at"], "expires_at": row["expires_at"],
-            "digest": row["digest"], "authorized_by": row["authorized_by"], "authorized_at": row["authorized_at"],
-            "revoked_by": row["revoked_by"], "revoked_at": row["revoked_at"], "revoke_reason": row["revoke_reason"],
-            "state": _state(row, now)}
+    return {
+        "id": row["id"],
+        "alias_id": row["alias_id"],
+        "alias_name": row["alias_name_seen"],
+        "alias_code": row["alias_code_seen"],
+        "topic_id": row["topic_id"],
+        "topic_path": row["topic_path_seen"],
+        "capabilities": json.loads(row["capabilities"]),
+        "inherit": row["inherit"],
+        "proposed_by": row["proposed_by"],
+        "proposed_at": row["proposed_at"],
+        "proposal_expires_at": row["proposal_expires_at"],
+        "expires_at": row["expires_at"],
+        "digest": row["digest"],
+        "authorized_by": row["authorized_by"],
+        "authorized_at": row["authorized_at"],
+        "revoked_by": row["revoked_by"],
+        "revoked_at": row["revoked_at"],
+        "revoke_reason": row["revoke_reason"],
+        "state": _state(row, now),
+    }
 
 
 def _row(conn: Connection, grant_id: str) -> Row:
@@ -119,19 +139,25 @@ def _row(conn: Connection, grant_id: str) -> Row:
     return row
 
 
-def _event(conn: Connection, grant_id: str, event: str, now: datetime, actor: str = OWNER,
-           detail: dict[str, str] | None = None) -> None:
+def _event(
+    conn: Connection, grant_id: str, event: str, now: datetime, actor: str = OWNER, detail: dict[str, str] | None = None
+) -> None:
     """One line in the grant's log. `detail` holds only ids, states, tool names and checked topic paths, never
     free-form text, so it cannot carry a key ("tgk_" plus urlsafe base64 is never a lowercase slug)."""
-    conn.execute("INSERT INTO topic_grant_events (grant_id, event, actor, detail, at) VALUES (?, ?, ?, ?, ?)",
-                 (grant_id, event, actor, None if detail is None else json.dumps(detail), now.isoformat()))
+    conn.execute(
+        "INSERT INTO topic_grant_events (grant_id, event, actor, detail, at) VALUES (?, ?, ?, ?, ?)",
+        (grant_id, event, actor, None if detail is None else json.dumps(detail), now.isoformat()),
+    )
 
 
 def _checked_capabilities(capabilities: Any) -> list[str]:
     """One or more of the three names, sorted and without repeats. Any other name is refused, never dropped: a typo
     must not quietly grant less than the owner asked for."""
-    if not isinstance(capabilities, (list, tuple)) or not capabilities \
-            or not all(name in CAPABILITIES for name in capabilities):
+    if (
+        not isinstance(capabilities, (list, tuple))
+        or not capabilities
+        or not all(name in CAPABILITIES for name in capabilities)
+    ):
         raise InvalidRequest(f"capabilities are one or more of {', '.join(CAPABILITIES)}")
     return sorted(set(capabilities))
 
@@ -164,8 +190,9 @@ def _topic_at(conn: Connection, path: str) -> Row:
     return row
 
 
-def propose(conn: Connection, alias_name: Any, topic_path: Any, capabilities: Any, inherit: Any,
-            days: Any) -> dict[str, Any]:
+def propose(
+    conn: Connection, alias_name: Any, topic_path: Any, capabilities: Any, inherit: Any, days: Any
+) -> dict[str, Any]:
     """Write a proposal and return it for the owner to read. It grants nothing until it is authorized.
 
     Every refusal comes before the first write, and the whole operation is one transaction.
@@ -178,18 +205,25 @@ def propose(conn: Connection, alias_name: Any, topic_path: Any, capabilities: An
         now = _now()
         fields = {
             "id": "tgr_" + secrets.token_hex(8),
-            "alias_id": alias["id"], "topic_id": topic["id"], "capabilities": json.dumps(names),
-            "inherit": 1 if inherit else 0, "expires_at": (now + timedelta(days=days)).isoformat(),
-            "proposed_by": OWNER, "proposed_at": now.isoformat(),
+            "alias_id": alias["id"],
+            "topic_id": topic["id"],
+            "capabilities": json.dumps(names),
+            "inherit": 1 if inherit else 0,
+            "expires_at": (now + timedelta(days=days)).isoformat(),
+            "proposed_by": OWNER,
+            "proposed_at": now.isoformat(),
             "proposal_expires_at": (now + timedelta(hours=PROPOSAL_HOURS)).isoformat(),
             # A fresh nonce, so two proposals for the same pair never share a digest.
             "nonce": secrets.token_hex(16),
-            "alias_name_seen": alias["name"], "alias_code_seen": alias_code(alias["id"]),
+            "alias_name_seen": alias["name"],
+            "alias_code_seen": alias_code(alias["id"]),
             "topic_path_seen": topic["path"],
         }
         fields["digest"] = _digest(fields)
-        conn.execute(f"INSERT INTO topic_grants ({', '.join(fields)}) VALUES ({','.join('?' * len(fields))})",
-                     tuple(fields.values()))
+        conn.execute(
+            f"INSERT INTO topic_grants ({', '.join(fields)}) VALUES ({','.join('?' * len(fields))})",
+            tuple(fields.values()),
+        )
         _event(conn, fields["id"], "propose", now)
         return _render(_row(conn, fields["id"]), now)
 
@@ -211,9 +245,11 @@ def authorize(conn: Connection, grant_id: str, digest: Any) -> dict[str, Any]:
             raise InvalidRequest("the digest does not match this proposal: read the proposal again, or propose again")
         _require_names_unchanged(conn, row)
         key = "tgk_" + secrets.token_urlsafe(32)
-        conn.execute("UPDATE topic_grants SET authorized_by = ?, authorized_at = ?, authorized_digest = ?,"
-                     " proof_digest = ? WHERE id = ?",
-                     (OWNER, now.isoformat(), current, hashlib.sha256(key.encode()).hexdigest(), grant_id))
+        conn.execute(
+            "UPDATE topic_grants SET authorized_by = ?, authorized_at = ?, authorized_digest = ?,"
+            " proof_digest = ? WHERE id = ?",
+            (OWNER, now.isoformat(), current, hashlib.sha256(key.encode()).hexdigest(), grant_id),
+        )
         _event(conn, grant_id, "authorize", now)
         return {**_render(_row(conn, grant_id), now), "grant_key": key}
 
@@ -228,8 +264,12 @@ def _require_names_unchanged(conn: Connection, row: Row) -> None:
     """The owner read the alias and topic by name. Matching is by id, so a moved name means a different proposal."""
     alias = conn.execute("SELECT name FROM aliases WHERE id = ?", (row["alias_id"],)).fetchone()
     topic = conn.execute("SELECT path FROM topics WHERE id = ?", (row["topic_id"],)).fetchone()
-    if alias is None or alias["name"] != row["alias_name_seen"] or topic is None \
-            or topic["path"] != row["topic_path_seen"]:
+    if (
+        alias is None
+        or alias["name"] != row["alias_name_seen"]
+        or topic is None
+        or topic["path"] != row["topic_path_seen"]
+    ):
         raise InvalidRequest("the alias or topic changed since this was proposed: propose again")
 
 
@@ -241,8 +281,10 @@ def revoke(conn: Connection, grant_id: str, reason: Any) -> dict[str, Any]:
         if row["revoked_at"] is not None:
             raise IllegalTransition(f"topic grant {grant_id} is already revoked; its first reason stands")
         now = _now()
-        conn.execute("UPDATE topic_grants SET revoked_at = ?, revoked_by = ?, revoke_reason = ? WHERE id = ?",
-                     (now.isoformat(), OWNER, text, grant_id))
+        conn.execute(
+            "UPDATE topic_grants SET revoked_at = ?, revoked_by = ?, revoke_reason = ? WHERE id = ?",
+            (now.isoformat(), OWNER, text, grant_id),
+        )
         _event(conn, grant_id, "revoke", now)
         return _render(_row(conn, grant_id), now)
 
@@ -277,8 +319,9 @@ def covering_grant(conn: Connection, alias_id: str, topic_path: str, capability:
         return None
     now = _now()
     rows = conn.execute(f"{WITH_ROOT} WHERE g.alias_id = ?", (alias_id,)).fetchall()
-    covering = [row for row in rows if _covers(row, topic["id"], topic_path, capability)
-                and _state(row, now) == "active"]
+    covering = [
+        row for row in rows if _covers(row, topic["id"], topic_path, capability) and _state(row, now) == "active"
+    ]
     return min(covering, key=_proposal_order, default=None)
 
 
@@ -295,8 +338,11 @@ def _covers(row: Row, topic_id: str, topic_path: str, capability: str) -> bool:
         return False
     if row["topic_id"] == topic_id:
         return True
-    return bool(row["inherit"]) and row["root_path"] is not None \
+    return (
+        bool(row["inherit"])
+        and row["root_path"] is not None
         and topic_path.split("/")[:-1] == row["root_path"].split("/")
+    )
 
 
 def grant_for_use(conn: Connection, identity: dict[str, str] | None, key: str) -> Row:
@@ -324,12 +370,10 @@ def grant_for_use(conn: Connection, identity: dict[str, str] | None, key: str) -
 
 
 def _not_allowed(grant: Row, capability: str, shown: str) -> GrantRefused:
-    return GrantRefused(f"topic grant {grant['id']} does not allow {capability} on {shown}",
-                        grant["id"], "not_covered")
+    return GrantRefused(f"topic grant {grant['id']} does not allow {capability} on {shown}", grant["id"], "not_covered")
 
 
-def require_covers(conn: Connection, grant: Row, capability: str, path: str | None,
-                   shown: str | None = None) -> Row:
+def require_covers(conn: Connection, grant: Row, capability: str, path: str | None, shown: str | None = None) -> Row:
     """The topic at `path`, unless the grant does not cover it for `capability`, which is refused.
 
     No topic at that path (none given, or a stale label with no row) is not covered either. A refusal names the
@@ -349,8 +393,9 @@ def require_names(conn: Connection, grant: Row, capability: str, new_path: str) 
     not of creating, so a grant that merely covers the parent does not qualify. A root has no parent to name.
     """
     parent_path = _parent_path(new_path)
-    parent = None if parent_path is None else conn.execute(
-        "SELECT * FROM topics WHERE path = ?", (parent_path,)).fetchone()
+    parent = (
+        None if parent_path is None else conn.execute("SELECT * FROM topics WHERE path = ?", (parent_path,)).fetchone()
+    )
     if parent is None or parent["id"] != grant["topic_id"] or not _lists(grant, capability):
         raise _not_allowed(grant, capability, new_path)
     return parent
@@ -390,8 +435,7 @@ def affected_by_rename(conn: Connection, renamed: str, target: str, moving: dict
     return affected
 
 
-def record_rename(conn: Connection, grant_ids: list[str], actor: str, topic_id: str, old: str,
-                  new: str) -> None:
+def record_rename(conn: Connection, grant_ids: list[str], actor: str, topic_id: str, old: str, new: str) -> None:
     """One `rename` event on each grant a rename affected, describing the rename: the topic named, and its two paths.
 
     The caller holds the write transaction the rename runs in, so the events exist only if the rename does.

@@ -40,19 +40,34 @@ _ADDED_COLUMNS = {
     # last had a message.
     9: {"conversations": ("revision INTEGER NOT NULL DEFAULT 0", "last_activity_at TEXT")},
     # A generation's watermark, when it was switched to and from, and whether its owner dropped it.
-    11: {"generations": ("watermark_epoch TEXT", "watermark_seq INTEGER", "activated_at TEXT", "deactivated_at TEXT",
-                         "dropped_at TEXT", "last_write_at TEXT")},
+    11: {
+        "generations": (
+            "watermark_epoch TEXT",
+            "watermark_seq INTEGER",
+            "activated_at TEXT",
+            "deactivated_at TEXT",
+            "dropped_at TEXT",
+            "last_write_at TEXT",
+        )
+    },
     13: {"messages": ("alias_id TEXT REFERENCES aliases(id)", "alias TEXT", "alias_code TEXT")},
     # Who started a guest thread, recorded the way a guest post is attributed. A thread a role started
     # leaves all three NULL.
-    15: {"conversations": ("created_by_alias_id TEXT REFERENCES aliases(id)", "created_by_alias TEXT",
-                           "created_by_alias_code TEXT")},
+    15: {
+        "conversations": (
+            "created_by_alias_id TEXT REFERENCES aliases(id)",
+            "created_by_alias TEXT",
+            "created_by_alias_code TEXT",
+        )
+    },
     # A topic's stable id, beside its path. SQLite cannot add a UNIQUE or NOT NULL column in place, so the
     # column is added bare here, and `_give_topic_ids` gives every existing topic its own id and the index.
     16: {"topics": ("id TEXT",)},
     # When and how a seat row ended. A row that ends is kept, and every check refuses it by this state.
-    19: {table: ("ended_at REAL", "end_reason TEXT")
-         for table in ("seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests")},
+    19: {
+        table: ("ended_at REAL", "end_reason TEXT")
+        for table in ("seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests")
+    },
     # Each binding's place in its alias's issuance order, which picks the one a claim at the cap replaces.
     20: {"alias_bindings": ("issued INTEGER",)},
 }
@@ -60,11 +75,15 @@ _BACKFILL = {
     # Before version 5 no role could be human, so every message a role sent was an agent's.
     5: ("UPDATE messages SET author_kind = 'agent' WHERE sender IS NOT NULL",),
     # Revisions start at 0 for every existing conversation; activity is the newest message still held.
-    9: ("UPDATE conversations SET last_activity_at = COALESCE((SELECT MAX(at) FROM messages m"
-        " WHERE m.conversation_id = conversations.id), created_at)",),
+    9: (
+        "UPDATE conversations SET last_activity_at = COALESCE((SELECT MAX(at) FROM messages m"
+        " WHERE m.conversation_id = conversations.id), created_at)",
+    ),
     # A version-10 producer's one generation was active from creation.
-    11: ("UPDATE generations SET activated_at = created_at WHERE active = 1 AND activated_at IS NULL",
-         "UPDATE generations SET last_write_at = created_at WHERE last_write_at IS NULL"),
+    11: (
+        "UPDATE generations SET activated_at = created_at WHERE active = 1 AND activated_at IS NULL",
+        "UPDATE generations SET last_write_at = created_at WHERE last_write_at IS NULL",
+    ),
 }
 # Tables a version adds whole. `_SCHEMA` creates them (IF NOT EXISTS) during initialization, so an upgrade needs no
 # statement of its own for them; naming them here makes the version a step, and the tests check each exists.
@@ -76,8 +95,15 @@ _ADDED_TABLES = {
     9: ("change_log", "log_meta"),
     # The local indexing writer's derived data (`baton.derived`). Its keyword index is not listed, for the
     # same reason as the messages'.
-    10: ("generations", "batches", "batch_pages", "artifact_versions", "artifact_inputs", "artifact_depends_on",
-         "commit_requests"),
+    10: (
+        "generations",
+        "batches",
+        "batch_pages",
+        "artifact_versions",
+        "artifact_inputs",
+        "artifact_depends_on",
+        "commit_requests",
+    ),
     # Vectors a producer supplies for a generation's artifacts and messages, and the items it skipped.
     11: ("vectors", "vector_skips"),
     12: ("aliases", "alias_bindings", "alias_claims"),
@@ -114,20 +140,29 @@ def _discover_topics(conn: Connection) -> None:
     """
     from baton import conversations, events  # lazily: both import this module
 
-    stored = [row[0] for row in conn.execute(
-        "SELECT DISTINCT topic FROM conversations WHERE topic IS NOT NULL ORDER BY topic")]
+    stored = [
+        row[0]
+        for row in conn.execute("SELECT DISTINCT topic FROM conversations WHERE topic IS NOT NULL ORDER BY topic")
+    ]
     for label in stored:
         conversations.check_topic(label, field="the stored conversation topic")
     stamp = events.now()
     for path in sorted({part for label in stored for part in (label, label.split("/")[0])}):
-        members = [row[0] for row in conn.execute(
-            "SELECT DISTINCT p.role FROM participants p JOIN conversations c ON c.id = p.conversation_id"
-            " WHERE c.topic = ? AND p.role != 'guest' ORDER BY p.role", (path,))]
+        members = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT p.role FROM participants p JOIN conversations c ON c.id = p.conversation_id"
+                " WHERE c.topic = ? AND p.role != 'guest' ORDER BY p.role",
+                (path,),
+            )
+        ]
         if len(members) < conversations.MIN_PARTICIPANTS:
             members = []
-        conn.execute("INSERT OR IGNORE INTO topics (id, path, title, members, created_by, created_at)"
-                     " VALUES (?, ?, ?, ?, 'migration', ?)",
-                     (new_topic_id(), path, path.split("/")[-1], json.dumps(members), stamp))
+        conn.execute(
+            "INSERT OR IGNORE INTO topics (id, path, title, members, created_by, created_at)"
+            " VALUES (?, ?, ?, ?, 'migration', ?)",
+            (new_topic_id(), path, path.split("/")[-1], json.dumps(members), stamp),
+        )
 
 
 def new_topic_id() -> str:
@@ -153,8 +188,10 @@ def _number_bindings(conn: Connection) -> None:
     breaks ties, so the order is deterministic.
     """
     ordered = conn.execute("SELECT digest FROM alias_bindings ORDER BY expires_at, rowid").fetchall()
-    conn.executemany("UPDATE alias_bindings SET issued = ? WHERE digest = ?",
-                     [(issued, digest) for issued, (digest,) in enumerate(ordered, 1)])
+    conn.executemany(
+        "UPDATE alias_bindings SET issued = ? WHERE digest = ?",
+        [(issued, digest) for issued, (digest,) in enumerate(ordered, 1)],
+    )
 
 
 # Steps a plain statement cannot express, because they read the data and may refuse the upgrade.
@@ -164,4 +201,3 @@ _PROCEDURES: dict[int, tuple[Callable[[Connection], None], ...]] = {
     20: (_number_bindings,),
 }
 _STEPS = tuple(sorted(_ADDED_COLUMNS.keys() | _BACKFILL.keys() | _ADDED_TABLES.keys() | _PROCEDURES.keys()))
-

@@ -32,8 +32,10 @@ from .models import (
 
 ROLE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 # A DNS name of lowercase labels, then an optional port of 1-5 digits without a leading zero.
-PROXY_HOST = re.compile(r"(?P<name>[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)"
-                        r"(?::(?P<port>[1-9][0-9]{0,4}))?")
+PROXY_HOST = re.compile(
+    r"(?P<name>[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)"
+    r"(?::(?P<port>[1-9][0-9]{0,4}))?"
+)
 INTEGRATION_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
@@ -47,21 +49,37 @@ DEFAULT_JOB_STATES: dict[str, dict[str, Any]] = {
 }
 
 
-ALIAS_LIMITS = {"max_posts_per_alias_per_hour": (1, 10000), "max_posts_per_credential_per_hour": (1, 10000),
-                "binding_ttl_seconds": (1, 86400), "mapped_binding_ttl_seconds": (1, 604800),
-                "max_bindings_per_alias": (1, 1000),
-                "max_claims_per_credential_per_hour": (1, 10000), "max_claims_per_alias_per_hour": (1, 10000),
-                "max_claims_per_hour": (1, 10000),
-                "max_threads_per_alias_per_hour": (1, 10000), "max_threads_per_guest_per_hour": (1, 10000)}
+ALIAS_LIMITS = {
+    "max_posts_per_alias_per_hour": (1, 10000),
+    "max_posts_per_credential_per_hour": (1, 10000),
+    "binding_ttl_seconds": (1, 86400),
+    "mapped_binding_ttl_seconds": (1, 604800),
+    "max_bindings_per_alias": (1, 1000),
+    "max_claims_per_credential_per_hour": (1, 10000),
+    "max_claims_per_alias_per_hour": (1, 10000),
+    "max_claims_per_hour": (1, 10000),
+    "max_threads_per_alias_per_hour": (1, 10000),
+    "max_threads_per_guest_per_hour": (1, 10000),
+}
 
 
 # Each limit and its accepted range; the defaults are the dataclass's.
-INDEXER_LIMITS = {"max_artifact_bytes": (1, 1 << 20), "max_citations": (1, 1000), "max_manifest_items": (1, 10000),
-                  "max_manifest_segments": (1, 1000), "page_items": (1, 1000), "max_open_batches": (1, 100),
-                  "batch_ttl_seconds": (60, 86400), "max_input_segments": (1, 10000),
-                  "max_commits_per_hour": (1, 10000), "receipt_retention_days": (1, 365),
-                  "max_generations": (1, 100), "generation_retention_days": (1, 365),
-                  "max_activation_reconcile": (1, 100000), "max_vectors_per_generation": (1, 100000000)}
+INDEXER_LIMITS = {
+    "max_artifact_bytes": (1, 1 << 20),
+    "max_citations": (1, 1000),
+    "max_manifest_items": (1, 10000),
+    "max_manifest_segments": (1, 1000),
+    "page_items": (1, 1000),
+    "max_open_batches": (1, 100),
+    "batch_ttl_seconds": (60, 86400),
+    "max_input_segments": (1, 10000),
+    "max_commits_per_hour": (1, 10000),
+    "receipt_retention_days": (1, 365),
+    "max_generations": (1, 100),
+    "generation_retention_days": (1, 365),
+    "max_activation_reconcile": (1, 100000),
+    "max_vectors_per_generation": (1, 100000000),
+}
 
 
 # The dashboard binds only here: it has no login, so anyone who can reach its port can read it.
@@ -94,25 +112,32 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
     names = [token.name for token in tokens]
     twice = sorted({name for name in names if names.count(name) > 1})
     if twice:
-        raise ConfigError(f"auth.tokens has more than one entry named {twice[0]!r}: a token's name must be unique, "
-                          "so that revoking it ends exactly that token")
+        raise ConfigError(
+            f"auth.tokens has more than one entry named {twice[0]!r}: a token's name must be unique, "
+            "so that revoking it ends exactly that token"
+        )
     conversations = _conversations(raw.get("conversations", {}), roles)
     displayed = [token for token in tokens if roles[token.role].display_only]
     if displayed:
-        raise ConfigError(f"auth.tokens entry {displayed[0].name!r} is for {displayed[0].role!r}, a display_only "
-                          "role: a role that only displays never holds a credential")
+        raise ConfigError(
+            f"auth.tokens entry {displayed[0].name!r} is for {displayed[0].role!r}, a display_only "
+            "role: a role that only displays never holds a credential"
+        )
     dashboard = _dashboard(raw.get("dashboard", {}), roles, conversations)
     search_table = _table(raw.get("search", {}), "search")
-    search = Search(enabled=_boolean(search_table, "enabled", False, "search.enabled"),
-                    rolling_window_messages=_number(search_table, "rolling_window_messages", 0,
-                                                    "search.rolling_window_messages", 0, 10000, integer=True),
-                    max_vector_dim=_number(search_table, "max_vector_dim", 1024, "search.max_vector_dim", 1, 16384,
-                                           integer=True),
-                    embeddings=_boolean(search_table, "embeddings", False, "search.embeddings"))
+    search = Search(
+        enabled=_boolean(search_table, "enabled", False, "search.enabled"),
+        rolling_window_messages=_number(
+            search_table, "rolling_window_messages", 0, "search.rolling_window_messages", 0, 10000, integer=True
+        ),
+        max_vector_dim=_number(search_table, "max_vector_dim", 1024, "search.max_vector_dim", 1, 16384, integer=True),
+        embeddings=_boolean(search_table, "embeddings", False, "search.embeddings"),
+    )
     indexer = _indexer(raw.get("indexer", {}), roles)
     if search.rolling_window_messages > indexer.max_manifest_items:
-        raise ConfigError("search.rolling_window_messages must be at most indexer.max_manifest_items: a recent "
-                          "window is one batch")
+        raise ConfigError(
+            "search.rolling_window_messages must be at most indexer.max_manifest_items: a recent window is one batch"
+        )
     return Config(
         public_url=public_url,
         listen_host=str(host.get("listen_host", "127.0.0.1")),
@@ -139,14 +164,16 @@ def _aliases(table: dict[str, Any], roles: dict[str, Role]) -> Aliases:
     alert_role = table.get("guest_cap_alert_role")
     # A role that cannot be delivered to would make the alert fail at the moment it matters, so it is
     # refused at load instead: an unset value is the way to ask for no alert.
-    if alert_role is not None and (not isinstance(alert_role, str) or alert_role not in roles
-                                   or alert_role == "guest"):
-        raise ConfigError(f"aliases.guest_cap_alert_role must name a configured non-guest role; "
-                          f"got {alert_role!r}")
+    if alert_role is not None and (not isinstance(alert_role, str) or alert_role not in roles or alert_role == "guest"):
+        raise ConfigError(f"aliases.guest_cap_alert_role must name a configured non-guest role; got {alert_role!r}")
     defaults = Aliases()
-    return Aliases(guest_cap_alert_role=alert_role,
-                   **{key: _number(table, key, getattr(defaults, key), f"aliases.{key}", low, high, integer=True)
-                      for key, (low, high) in ALIAS_LIMITS.items()})
+    return Aliases(
+        guest_cap_alert_role=alert_role,
+        **{
+            key: _number(table, key, getattr(defaults, key), f"aliases.{key}", low, high, integer=True)
+            for key, (low, high) in ALIAS_LIMITS.items()
+        },
+    )
 
 
 def _indexer(table: Mapping[str, Any], roles: dict[str, Role]) -> Indexer:
@@ -164,8 +191,10 @@ def _indexer(table: Mapping[str, Any], roles: dict[str, Role]) -> Indexer:
     if len(set(producers)) != len(producers):
         raise ConfigError("indexer.producers lists a name more than once")
     defaults = Indexer()
-    limits = {key: _number(table, key, getattr(defaults, key), f"indexer.{key}", low, high, integer=True)
-              for key, (low, high) in INDEXER_LIMITS.items()}
+    limits = {
+        key: _number(table, key, getattr(defaults, key), f"indexer.{key}", low, high, integer=True)
+        for key, (low, high) in INDEXER_LIMITS.items()
+    }
     return Indexer(producers=tuple(producers), **limits)
 
 
@@ -211,11 +240,15 @@ def _require_canonical(public_url: str) -> None:
     """
     canonical = canonical_issuer(public_url)
     if "%" in urlparse(canonical).path:
-        raise ConfigError(f"host.public_url {public_url!r} has a percent-encoded (or non-ASCII) path, under which the "
-                          "OAuth metadata routes can't be reached; use a plain ASCII path")
+        raise ConfigError(
+            f"host.public_url {public_url!r} has a percent-encoded (or non-ASCII) path, under which the "
+            "OAuth metadata routes can't be reached; use a plain ASCII path"
+        )
     if canonical != public_url:
-        raise ConfigError(f"host.public_url must be written exactly as the OAuth metadata publishes it, since clients "
-                          f"compare the issuer character for character: write public_url = {canonical!r}")
+        raise ConfigError(
+            f"host.public_url must be written exactly as the OAuth metadata publishes it, since clients "
+            f"compare the issuer character for character: write public_url = {canonical!r}"
+        )
 
 
 def _table(value: Any, where: str) -> Mapping[str, Any]:
@@ -233,8 +266,9 @@ def _boolean(table: Mapping[str, Any], key: str, default: bool, where: str) -> b
     return value
 
 
-def _number(table: Mapping[str, Any], key: str, default: float, where: str, low: float, high: float, *,
-            integer: bool = False) -> Any:
+def _number(
+    table: Mapping[str, Any], key: str, default: float, where: str, low: float, high: float, *, integer: bool = False
+) -> Any:
     """A TOML number within [low, high], or `default` when missing. Strings and booleans are refused."""
     value = table.get(key, default)
     kinds = (int,) if integer else (int, float)
@@ -259,8 +293,10 @@ def _role(name: str, table: Mapping[str, Any]) -> Role:
     if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
         raise ConfigError(f"roles.{name}.wake.command must be a list of strings (argv, no shell)")
     if _boolean(table, "display_only", False, f"roles.{name}.display_only") and table.get("human") is True:
-        raise ConfigError(f"roles.{name} sets both display_only and human: a person's role holds a credential, and "
-                          "a display_only one never does")
+        raise ConfigError(
+            f"roles.{name} sets both display_only and human: a person's role holds a credential, and "
+            "a display_only one never does"
+        )
     display_name = table.get("display_name", "")
     if not isinstance(display_name, str) or len(display_name) > 80 or display_name != display_name.strip():
         raise ConfigError(f"roles.{name}.display_name must be text of at most 80 characters")
@@ -274,20 +310,22 @@ def _role(name: str, table: Mapping[str, Any]) -> Role:
         command=tuple(command),
         integration=integration,
         timeout_seconds=_number(wake, "timeout_seconds", 10.0, f"roles.{name}.wake.timeout_seconds", 0.1, 300),
-        only_when_addressed=_boolean(wake, "only_when_addressed", False,
-                                     f"roles.{name}.wake.only_when_addressed"),
+        only_when_addressed=_boolean(wake, "only_when_addressed", False, f"roles.{name}.wake.only_when_addressed"),
     )
     return Role(
         name=name,
         description=description,
         wake=wake_settings,
-        can_create_conversations=_boolean(table, "can_create_conversations", False,
-                                          f"roles.{name}.can_create_conversations"),
-        can_manage_participants=_boolean(table, "can_manage_participants", False,
-                                         f"roles.{name}.can_manage_participants"),
+        can_create_conversations=_boolean(
+            table, "can_create_conversations", False, f"roles.{name}.can_create_conversations"
+        ),
+        can_manage_participants=_boolean(
+            table, "can_manage_participants", False, f"roles.{name}.can_manage_participants"
+        ),
         can_create_topics=_boolean(table, "can_create_topics", False, f"roles.{name}.can_create_topics"),
-        can_view_all_conversations=_boolean(table, "can_view_all_conversations", False,
-                                            f"roles.{name}.can_view_all_conversations"),
+        can_view_all_conversations=_boolean(
+            table, "can_view_all_conversations", False, f"roles.{name}.can_view_all_conversations"
+        ),
         human=_boolean(table, "human", False, f"roles.{name}.human"),
         display_only=_boolean(table, "display_only", False, f"roles.{name}.display_only"),
         display_name=str(table.get("display_name", "")),
@@ -311,10 +349,10 @@ def _conversations(table: Mapping[str, Any], roles: dict[str, Role]) -> Conversa
         raise ConfigError(f"conversations.escalation_role names unknown role {escalation_role!r}")
     return Conversations(
         enabled=_boolean(table, "enabled", False, "conversations.enabled"),
-        max_participants=_number(table, "max_participants", 8, "conversations.max_participants", 2, 1000,
-                                 integer=True),
-        max_messages_per_hour=_number(table, "max_messages_per_hour", 30, "conversations.max_messages_per_hour",
-                                      1, 100_000, integer=True),
+        max_participants=_number(table, "max_participants", 8, "conversations.max_participants", 2, 1000, integer=True),
+        max_messages_per_hour=_number(
+            table, "max_messages_per_hour", 30, "conversations.max_messages_per_hour", 1, 100_000, integer=True
+        ),
         escalation_role=escalation_role,
     )
 
@@ -327,14 +365,18 @@ def _dashboard(table: Mapping[str, Any], roles: dict[str, Role], conversations: 
     if viewer_role not in roles:
         raise ConfigError(f"dashboard.viewer_role must name a configured role; got {viewer_role!r}")
     if not roles[viewer_role].display_only:
-        raise ConfigError(f"dashboard.viewer_role {viewer_role!r} must set display_only = true (and not human): the "
-                          "view has no login, so its identity must never be one that holds a credential")
+        raise ConfigError(
+            f"dashboard.viewer_role {viewer_role!r} must set display_only = true (and not human): the "
+            "view has no login, so its identity must never be one that holds a credential"
+        )
     if not conversations.enabled:
         raise ConfigError("the dashboard shows conversations: set conversations.enabled = true to enable it")
     listen_host = table.get("listen_host", "127.0.0.1")
     if listen_host not in LOOPBACK_HOSTS:
-        raise ConfigError(f"dashboard.listen_host must be a loopback address ({' or '.join(LOOPBACK_HOSTS)}): the "
-                          "view has no login, so reaching it from elsewhere needs its own auth in front of it")
+        raise ConfigError(
+            f"dashboard.listen_host must be a loopback address ({' or '.join(LOOPBACK_HOSTS)}): the "
+            "view has no login, so reaching it from elsewhere needs its own auth in front of it"
+        )
     attention_role = table.get("attention_role", viewer_role)
     if not isinstance(attention_role, str) or attention_role not in roles:
         raise ConfigError(f"dashboard.attention_role must name a configured role; got {attention_role!r}")
@@ -355,34 +397,42 @@ def _seat(table: Mapping[str, Any], roles: dict[str, Role], public_url: str, das
         return Seat()
     role = table.get("role")
     if role not in roles or not roles[role].human or roles[role].display_only:
-        raise ConfigError(f"seat.role must name a configured human role (human = true, not display_only); got "
-                          f"{role!r}")
+        raise ConfigError(f"seat.role must name a configured human role (human = true, not display_only); got {role!r}")
     if role == dashboard.viewer_role:
         raise ConfigError("seat.role may not be the dashboard's viewer_role")
     origin = str(table.get("origin", ""))
     if not SEAT_ORIGIN.fullmatch(origin):
-        raise ConfigError(f"seat.origin must be one exact https origin, such as https://seat.example.com, with no "
-                          f"path, query or trailing slash; got {origin!r}")
-    shared = {urlparse(public_url).hostname, urlparse(f"//{dashboard.proxy_host}").hostname if dashboard.proxy_host
-              else None} - {None}
+        raise ConfigError(
+            f"seat.origin must be one exact https origin, such as https://seat.example.com, with no "
+            f"path, query or trailing slash; got {origin!r}"
+        )
+    shared = {
+        urlparse(public_url).hostname,
+        urlparse(f"//{dashboard.proxy_host}").hostname if dashboard.proxy_host else None,
+    } - {None}
     trusted = _boolean(table, "same_host_trust_accepted", False, "seat.same_host_trust_accepted")
     if urlparse(origin).hostname in shared and not trusted:
-        raise ConfigError(f"seat.origin {origin!r} shares its host name with the host or the dashboard, and a browser "
-                          "sends the seat's cookie to every service on that name. Give the seat a host name of its "
-                          "own, or set seat.same_host_trust_accepted = true to record that every service there is "
-                          "trusted with the person's authority")
+        raise ConfigError(
+            f"seat.origin {origin!r} shares its host name with the host or the dashboard, and a browser "
+            "sends the seat's cookie to every service on that name. Give the seat a host name of its "
+            "own, or set seat.same_host_trust_accepted = true to record that every service there is "
+            "trusted with the person's authority"
+        )
     listen_host = str(table.get("listen_host", "127.0.0.1"))
     if listen_host not in LOOPBACK_HOSTS:
-        raise ConfigError(f"seat.listen_host must be a loopback address ({' or '.join(LOOPBACK_HOSTS)}); the seat is "
-                          "reached only through the proxy at seat.origin")
+        raise ConfigError(
+            f"seat.listen_host must be a loopback address ({' or '.join(LOOPBACK_HOSTS)}); the seat is "
+            "reached only through the proxy at seat.origin"
+        )
     timezone = table.get("timezone", "UTC")
     try:
         if not isinstance(timezone, str) or timezone != timezone.strip():
             raise ValueError(timezone)
         ZoneInfo(timezone)
     except (ValueError, ZoneInfoNotFoundError):
-        raise ConfigError(f"seat.timezone must be an IANA time zone such as America/Chicago; "
-                          f"got {timezone!r}") from None
+        raise ConfigError(
+            f"seat.timezone must be an IANA time zone such as America/Chicago; got {timezone!r}"
+        ) from None
     return Seat(
         enabled=True,
         role=role,
@@ -391,8 +441,9 @@ def _seat(table: Mapping[str, Any], roles: dict[str, Role], public_url: str, das
         origin=origin,
         same_host_trust_accepted=trusted,
         idle_seconds=_number(table, "idle_seconds", 3600, "seat.idle_seconds", 60, 24 * 3600, integer=True),
-        absolute_seconds=_number(table, "absolute_seconds", 12 * 3600, "seat.absolute_seconds", 60, 7 * 86400,
-                                 integer=True),
+        absolute_seconds=_number(
+            table, "absolute_seconds", 12 * 3600, "seat.absolute_seconds", 60, 7 * 86400, integer=True
+        ),
         timezone=timezone,
     )
 
@@ -408,8 +459,10 @@ def _proxy_host(value: Any) -> str | None:
     match = PROXY_HOST.fullmatch(value) if isinstance(value, str) else None
     port = match and match["port"]
     if match is None or len(match["name"]) > 253 or (port is not None and not 1 <= int(port) <= 65535):
-        raise ConfigError("dashboard.proxy_host must be one exact host name, optionally with :port, such as "
-                          "dash.example.com or dash.example.com:8443: lowercase, with no wildcard, scheme or path")
+        raise ConfigError(
+            "dashboard.proxy_host must be one exact host name, optionally with :port, such as "
+            "dash.example.com or dash.example.com:8443: lowercase, with no wildcard, scheme or path"
+        )
     return value
 
 
@@ -426,8 +479,10 @@ def _integrations(tables: Mapping[str, Any], roles: dict[str, Role]) -> dict[str
             enabled[name] = table
     for role in roles.values():
         if role.wake.integration is not None and role.wake.integration not in enabled:
-            raise ConfigError(f"roles.{role.name}.wake names integration {role.wake.integration!r}, which is not "
-                              f"enabled under [integrations.{role.wake.integration}]")
+            raise ConfigError(
+                f"roles.{role.name}.wake names integration {role.wake.integration!r}, which is not "
+                f"enabled under [integrations.{role.wake.integration}]"
+            )
     return enabled
 
 
@@ -453,24 +508,30 @@ def _oauth(table: Mapping[str, Any], roles: dict[str, Role]) -> OAuth:
         raise ConfigError("auth.oauth.roles must list one or more configured roles an OAuth client may act as")
     displayed = [role for role in oauth_roles if roles[role].display_only]
     if displayed:
-        raise ConfigError(f"auth.oauth.roles lists the display_only role {displayed[0]!r}, which never holds a "
-                          "credential")
+        raise ConfigError(
+            f"auth.oauth.roles lists the display_only role {displayed[0]!r}, which never holds a credential"
+        )
     humans = [role for role in oauth_roles if roles[role].human]
     if humans:
-        raise ConfigError(f"auth.oauth.roles lists the human role {humans[0]!r}: a human role signs in only with "
-                          "its own token from `baton token new`, never through the consent page")
+        raise ConfigError(
+            f"auth.oauth.roles lists the human role {humans[0]!r}: a human role signs in only with "
+            "its own token from `baton token new`, never through the consent page"
+        )
     redirect_uris = tuple(table.get("redirect_uris", []))
     for uri in redirect_uris:
         if any(key.lower() == "iss" for key, _ in parse_qsl(urlparse(str(uri)).query, keep_blank_values=True)):
-            raise ConfigError(f"auth.oauth.redirect_uris has {uri!r}, which carries an iss parameter: the host adds "
-                              "iss itself (RFC 9207), so a callback may not carry one")
+            raise ConfigError(
+                f"auth.oauth.redirect_uris has {uri!r}, which carries an iss parameter: the host adds "
+                "iss itself (RFC 9207), so a callback may not carry one"
+            )
     return OAuth(
         enabled=True,
         passphrase_hash=str(passphrase_hash),
         roles=oauth_roles,
         redirect_uris=redirect_uris,
-        allow_loopback_redirects=_boolean(table, "allow_loopback_redirects", True,
-                                         "auth.oauth.allow_loopback_redirects"),
+        allow_loopback_redirects=_boolean(
+            table, "allow_loopback_redirects", True, "auth.oauth.allow_loopback_redirects"
+        ),
     )
 
 

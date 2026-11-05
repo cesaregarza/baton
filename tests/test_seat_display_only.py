@@ -51,12 +51,14 @@ def test_a_token_for_a_display_only_role_is_refused(tmp_path: Path) -> None:
 
 
 def test_oauth_may_not_grant_a_display_only_role(tmp_path: Path) -> None:
-    from conftest import PASSPHRASE, REDIRECT  # noqa: F401 - the shared synthetic values
+    from conftest import PASSPHRASE, REDIRECT
 
     from baton.auth import hash_passphrase
 
-    oauth = (f'[auth.oauth]\nenabled = true\npassphrase_hash = "{hash_passphrase(PASSPHRASE)}"\n'
-             f'roles = ["viewer"]\nredirect_uris = ["{REDIRECT}"]\n')
+    oauth = (
+        f'[auth.oauth]\nenabled = true\npassphrase_hash = "{hash_passphrase(PASSPHRASE)}"\n'
+        f'roles = ["viewer"]\nredirect_uris = ["{REDIRECT}"]\n'
+    )
     with pytest.raises(ConfigError, match="display_only"):
         _load(tmp_path, seat_extra="\n" + oauth)
 
@@ -99,8 +101,15 @@ def test_a_seat_on_the_hosts_own_name_needs_written_trust(tmp_path: Path, origin
     assert config.seat.same_host_trust_accepted
 
 
-@pytest.mark.parametrize("origin", ["http://seat.example.test", "https://seat.example.test/seat",
-                                    "https://seat.example.test?x=1", "seat.example.test"])
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://seat.example.test",
+        "https://seat.example.test/seat",
+        "https://seat.example.test?x=1",
+        "seat.example.test",
+    ],
+)
 def test_the_seat_origin_is_one_exact_https_origin(tmp_path: Path, origin: str) -> None:
     with pytest.raises(ConfigError, match="seat.origin"):
         _load(tmp_path, seat_origin=origin)

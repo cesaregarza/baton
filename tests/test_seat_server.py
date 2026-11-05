@@ -25,8 +25,11 @@ except ImportError:  # written before the module: each test then fails on its ow
 def served(tmp_path: Path):
     port = free_port()
     host = make_seat_host(tmp_path)
-    host.reload(host.path.read_text().replace('origin = "https://seat.example.test"',
-                                              f'origin = "https://seat.example.test"\nlisten_port = {port}'))
+    host.reload(
+        host.path.read_text().replace(
+            'origin = "https://seat.example.test"', f'origin = "https://seat.example.test"\nlisten_port = {port}'
+        )
+    )
     bound = seat.server(host.config)
     threading.Thread(target=bound.serve_forever, daemon=True).start()
     try:
@@ -57,9 +60,17 @@ def test_a_login_round_trips_over_http(served) -> None:
     form, page = _request(port, "GET", "/seat/login")
     pre = _cookie(form, PRE_COOKIE)
     body = urlencode({"token": host.seat_token, "pre": pre}).encode()
-    response, _ = _request(port, "POST", "/seat/login", body=body, headers={
-        "Origin": SEAT_ORIGIN, "Content-Type": "application/x-www-form-urlencoded",
-        "Cookie": f"{PRE_COOKIE}={pre}"})
+    response, _ = _request(
+        port,
+        "POST",
+        "/seat/login",
+        body=body,
+        headers={
+            "Origin": SEAT_ORIGIN,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Cookie": f"{PRE_COOKIE}={pre}",
+        },
+    )
     assert response.status == 303 and response.headers["Location"] == "/seat/"
     session = _cookie(response, SESSION_COOKIE)
     home, page = _request(port, "GET", "/seat/", headers={"Cookie": f"{SESSION_COOKIE}={session}"})
@@ -69,9 +80,11 @@ def test_a_login_round_trips_over_http(served) -> None:
 def test_chunked_framing_is_refused_and_the_connection_closed(served) -> None:
     _, port = served
     with socket.create_connection(("127.0.0.1", port), timeout=10) as raw:
-        raw.sendall(f"POST /seat/login HTTP/1.1\r\nHost: {SEAT_HOST}\r\nOrigin: {SEAT_ORIGIN}\r\n"
-                    "Content-Type: application/x-www-form-urlencoded\r\nTransfer-Encoding: chunked\r\n\r\n"
-                    f"5\r\ntoken\r\n0\r\n\r\nGET /seat/login HTTP/1.1\r\nHost: {SEAT_HOST}\r\n\r\n".encode())
+        raw.sendall(
+            f"POST /seat/login HTTP/1.1\r\nHost: {SEAT_HOST}\r\nOrigin: {SEAT_ORIGIN}\r\n"
+            "Content-Type: application/x-www-form-urlencoded\r\nTransfer-Encoding: chunked\r\n\r\n"
+            f"5\r\ntoken\r\n0\r\n\r\nGET /seat/login HTTP/1.1\r\nHost: {SEAT_HOST}\r\n\r\n".encode()
+        )
         received = b""
         while chunk := raw.recv(65536):
             received += chunk
@@ -93,8 +106,9 @@ def test_the_seat_is_off_unless_enabled(tmp_path: Path) -> None:
     from baton import config as config_module
     from baton.auth import new_token
 
-    text = seat_config_text(tmp_path, new_token()[1], new_token()[1]).replace("[seat]\nenabled = true",
-                                                                              "[seat]\nenabled = false")
+    text = seat_config_text(tmp_path, new_token()[1], new_token()[1]).replace(
+        "[seat]\nenabled = true", "[seat]\nenabled = false"
+    )
     path = tmp_path / "off.toml"
     path.write_text(text)
     assert seat.server(config_module.load(path)) is None

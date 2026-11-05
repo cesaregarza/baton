@@ -24,16 +24,29 @@ from baton.database.store import connect
 QUIET = "assistant"
 
 
-def quiet_config(tmp_path: Path, *, hooks: tuple[str, ...] = ("reviewer", "assistant"), quiet: str = QUIET,
-                 job_states_table: dict[str, Any] | None = None, **settings: Any) -> Config:
+def quiet_config(
+    tmp_path: Path,
+    *,
+    hooks: tuple[str, ...] = ("reviewer", "assistant"),
+    quiet: str = QUIET,
+    job_states_table: dict[str, Any] | None = None,
+    **settings: Any,
+) -> Config:
     """Lane A's generic roles. Every role in `hooks` can be woken; `quiet` only when a message addresses it."""
-    roles: dict[str, Any] = {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
-                             "reviewer": {}, "assistant": {}, "outsider": {}}
+    roles: dict[str, Any] = {
+        "orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
+        "reviewer": {},
+        "assistant": {},
+        "outsider": {},
+    }
     for role in hooks:
         roles[role] = {**roles[role], "wake": {"command": ["true"]}}
     roles[quiet] = {**roles[quiet], "wake": {"command": ["true"], "only_when_addressed": True}}
-    raw: dict[str, Any] = {"host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-                           "roles": roles, "conversations": {"enabled": True, **settings}}
+    raw: dict[str, Any] = {
+        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+        "roles": roles,
+        "conversations": {"enabled": True, **settings},
+    }
     if job_states_table is not None:
         raw["jobs"] = job_states_table
     return config_module.parse(raw)
@@ -45,9 +58,7 @@ def woken_then_reminded(seq: int) -> list[tuple[str, str]]:
     Delivering a message wake now schedules a reminder for five minutes and one for twenty, in case
     the role never reads. Neither is due here, so both sit scheduled.
     """
-    return [(f"messages:{seq}", "delivered"),
-            (f"messages:{seq}:r1", "scheduled"),
-            (f"messages:{seq}:r2", "scheduled")]
+    return [(f"messages:{seq}", "delivered"), (f"messages:{seq}:r1", "scheduled"), (f"messages:{seq}:r2", "scheduled")]
 
 
 def queued(db: sqlite3.Connection, role: str) -> list[tuple[str, str]]:
@@ -85,8 +96,10 @@ def test_4_needs_decision_wakes_a_quiet_role_even_when_it_names_nobody(tmp_path)
     say(db, config, "reviewer", conversation_id, "which way do we go?", needs_decision=True)
     assert [(c["role"], c["first_unread_seq"]) for c in woken(config)] == [(QUIET, 1)]
     page = messages.read(db, QUIET, after_seq=0)
-    assert [(m["text"], m["needs_decision"]) for m in page["messages"]] == \
-        [("chatter", False), ("which way do we go?", True)]
+    assert [(m["text"], m["needs_decision"]) for m in page["messages"]] == [
+        ("chatter", False),
+        ("which way do we go?", True),
+    ]
 
 
 def test_4_a_host_notice_does_not_wake_a_quiet_role(tmp_path) -> None:
@@ -96,8 +109,7 @@ def test_4_a_host_notice_does_not_wake_a_quiet_role(tmp_path) -> None:
     conversations.add(db, config, conversation_id, QUIET, actor="orchestrator")
     assert [c["role"] for c in woken(config)] == ["reviewer"]  # the loud participant is told
     assert queued(db, QUIET) == []
-    assert [m["notice"]["event"] for m in messages.read(db, QUIET, after_seq=0)["messages"]] == \
-        ["participant_added"]
+    assert [m["notice"]["event"] for m in messages.read(db, QUIET, after_seq=0)["messages"]] == ["participant_added"]
 
 
 def test_4_a_quiet_escalation_role_is_still_told_a_conversation_is_over_its_limit(tmp_path) -> None:
@@ -109,8 +121,11 @@ def test_4_a_quiet_escalation_role_is_still_told_a_conversation_is_over_its_limi
 
     refused("conversation_rate_limited", say, db, config, "reviewer", conversation_id, "two")
     [call] = woken(config)
-    assert (call["role"], call["reason"], call["conversation_id"]) == (QUIET, "conversation.rate_limited",
-                                                                      conversation_id)
+    assert (call["role"], call["reason"], call["conversation_id"]) == (
+        QUIET,
+        "conversation.rate_limited",
+        conversation_id,
+    )
     assert set(call) == {"id", "type", "role", "host", "reason", "conversation_id"}  # content-free
 
 
@@ -126,10 +141,25 @@ def test_5_marking_a_message_needs_decision_changes_no_job(tmp_path) -> None:
     before = job_states(db)
     conversation_id = start(db, config)
 
-    decision = say(db, config, "reviewer", conversation_id, APPROVAL, job_id=first["job_id"],
-                   needs_decision=True, attention=["orchestrator", QUIET])
-    say(db, config, "reviewer", conversation_id, "and this one answers it", reply_to=decision["message_id"],
-        needs_decision=True)
+    decision = say(
+        db,
+        config,
+        "reviewer",
+        conversation_id,
+        APPROVAL,
+        job_id=first["job_id"],
+        needs_decision=True,
+        attention=["orchestrator", QUIET],
+    )
+    say(
+        db,
+        config,
+        "reviewer",
+        conversation_id,
+        "and this one answers it",
+        reply_to=decision["message_id"],
+        needs_decision=True,
+    )
     for role in GROUP:
         messages.read(db, role)
     woken(config)
@@ -159,9 +189,11 @@ def test_7_unread_quiet_messages_still_leave_exactly_one_wake_for_the_one_that_a
     say(db, config, "orchestrator", conversation_id, "chatter after the read")
     assert woken(config) == []
     # The read answered the batch, so its reminders are retired rather than left to fire later.
-    assert queued(db, QUIET) == [("messages:1", "delivered"),
-                                 ("messages:1:r1", "superseded"),
-                                 ("messages:1:r2", "superseded")]
+    assert queued(db, QUIET) == [
+        ("messages:1", "delivered"),
+        ("messages:1:r1", "superseded"),
+        ("messages:1:r2", "superseded"),
+    ]
 
 
 def test_7_a_failed_wake_is_retried_under_one_id_and_never_duplicated(tmp_path, monkeypatch) -> None:
@@ -210,10 +242,16 @@ def test_8_attention_naming_a_role_outside_the_conversation_is_refused_and_adds_
     participants = conversations.list_for(db, "orchestrator")[0]["participants"]
     before = (count(db, "messages"), count(db, "events"), count(db, "message_requests"))
 
-    for code, attention in (("not_a_participant", ["outsider"]), ("not_a_participant", ["reviewer"]),
-                            ("not_a_participant", [QUIET, "reviewer"]), ("unknown_role", ["nobody"]),
-                            ("invalid_request", QUIET), ("invalid_request", [QUIET, QUIET]),
-                            ("invalid_request", [7]), ("invalid_request", [])):
+    for code, attention in (
+        ("not_a_participant", ["outsider"]),
+        ("not_a_participant", ["reviewer"]),
+        ("not_a_participant", [QUIET, "reviewer"]),
+        ("unknown_role", ["nobody"]),
+        ("invalid_request", QUIET),
+        ("invalid_request", [QUIET, QUIET]),
+        ("invalid_request", [7]),
+        ("invalid_request", []),
+    ):
         refused(code, say, db, config, "orchestrator", conversation_id, "x", attention=attention)
     assert (count(db, "messages"), count(db, "events"), count(db, "message_requests")) == before
     assert conversations.list_for(db, "orchestrator")[0]["participants"] == participants
@@ -247,8 +285,9 @@ def test_8_attention_and_needs_decision_belong_to_a_conversation(tmp_path) -> No
     config = quiet_config(tmp_path)
     db = connect(config.db_path)
     for extra in ({"attention": [QUIET]}, {"needs_decision": True}):
-        detail = refused("invalid_request", messages.send, db, sender="orchestrator", recipient=QUIET,
-                         text="x", **extra)
+        detail = refused(
+            "invalid_request", messages.send, db, sender="orchestrator", recipient=QUIET, text="x", **extra
+        )
         assert "conversation" in detail, detail
     assert count(db, "messages") == 0
 
@@ -259,8 +298,7 @@ def test_8_an_empty_conversation_only_field_on_a_direct_send_is_refused_too(tmp_
     config = quiet_config(tmp_path, hooks=(QUIET,))
     db = connect(config.db_path)
     [field] = extra
-    detail = refused("invalid_request", messages.send, db, sender="orchestrator", recipient=QUIET, text="x",
-                     **extra)
+    detail = refused("invalid_request", messages.send, db, sender="orchestrator", recipient=QUIET, text="x", **extra)
     assert detail.startswith(field) and "conversation" in detail, detail
     assert (count(db, "messages"), count(db, "events"), count(db, "message_requests")) == (0, 0, 0)
     assert woken(config) == []
@@ -271,11 +309,13 @@ def test_8_a_flag_left_unset_is_not_a_supplied_field(tmp_path) -> None:
     """needs_decision is False when it is left out, so a direct send that passes nothing still goes."""
     config = quiet_config(tmp_path, hooks=(QUIET,))
     db = connect(config.db_path)
-    sent = messages.send(db, sender="orchestrator", recipient=QUIET, text="plain", reply_to=None,
-                         attention=None, needs_decision=False)
+    sent = messages.send(
+        db, sender="orchestrator", recipient=QUIET, text="plain", reply_to=None, attention=None, needs_decision=False
+    )
     assert sent["created"] is True and count(db, "messages") == 1
-    assert [(m["reply_to"], m["attention"], m["needs_decision"]) for m in
-            messages.read(db, QUIET, after_seq=0)["messages"]] == [(None, None, False)]
+    assert [
+        (m["reply_to"], m["attention"], m["needs_decision"]) for m in messages.read(db, QUIET, after_seq=0)["messages"]
+    ] == [(None, None, False)]
 
 
 def test_8_attention_is_part_of_a_sends_retry_identity(tmp_path) -> None:
@@ -284,10 +324,29 @@ def test_8_attention_is_part_of_a_sends_retry_identity(tmp_path) -> None:
     conversation_id = start(db, config)
     request_id = rid("attention-once")
     say(db, config, "orchestrator", conversation_id, "same", attention=[QUIET], request_id=request_id)
-    refused("idempotency_conflict", say, db, config, "orchestrator", conversation_id, "same",
-            attention=["reviewer"], request_id=request_id)
-    refused("idempotency_conflict", say, db, config, "orchestrator", conversation_id, "same",
-            attention=[QUIET], needs_decision=True, request_id=request_id)
+    refused(
+        "idempotency_conflict",
+        say,
+        db,
+        config,
+        "orchestrator",
+        conversation_id,
+        "same",
+        attention=["reviewer"],
+        request_id=request_id,
+    )
+    refused(
+        "idempotency_conflict",
+        say,
+        db,
+        config,
+        "orchestrator",
+        conversation_id,
+        "same",
+        attention=[QUIET],
+        needs_decision=True,
+        request_id=request_id,
+    )
     again = say(db, config, "orchestrator", conversation_id, "same", attention=[QUIET], request_id=request_id)
     assert again["created"] is False
 
@@ -303,8 +362,10 @@ def test_a_role_is_woken_for_everything_unless_its_config_asks_otherwise(tmp_pat
 
 @pytest.mark.parametrize("value", ["true", "false", 1, 0.0])
 def test_only_when_addressed_is_a_checked_boolean(tmp_path, value: Any) -> None:
-    raw = {"host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-           "roles": {"reviewer": {"wake": {"command": ["true"], "only_when_addressed": value}}}}
+    raw = {
+        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+        "roles": {"reviewer": {"wake": {"command": ["true"], "only_when_addressed": value}}},
+    }
     with pytest.raises(ConfigError, match="only_when_addressed"):
         config_module.parse(raw)
 

@@ -29,12 +29,16 @@ def check_topic(topic: Any, field: str = "topic") -> str | None:
     if topic is None:
         return None
     if not isinstance(topic, str):
-        raise InvalidRequest(f"{field} must be a path of 1-{MAX_TOPIC_SEGMENTS} lowercase slug segments, "
-                             "such as project or project/subtopic, or left out")
+        raise InvalidRequest(
+            f"{field} must be a path of 1-{MAX_TOPIC_SEGMENTS} lowercase slug segments, "
+            "such as project or project/subtopic, or left out"
+        )
     segments = topic.split("/")
     if not 1 <= len(segments) <= MAX_TOPIC_SEGMENTS or not all(TOPIC_SEGMENT.fullmatch(s) for s in segments):
-        raise InvalidRequest(f"{field} {topic!r} must be 1-{MAX_TOPIC_SEGMENTS} segments joined by /, each "
-                             f"1-{MAX_TOPIC_SEGMENT} characters of a-z, 0-9 and inner hyphens")
+        raise InvalidRequest(
+            f"{field} {topic!r} must be 1-{MAX_TOPIC_SEGMENTS} segments joined by /, each "
+            f"1-{MAX_TOPIC_SEGMENT} characters of a-z, 0-9 and inner hyphens"
+        )
     return topic
 
 

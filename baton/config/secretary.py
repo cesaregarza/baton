@@ -39,8 +39,9 @@ MAX_COMMAND_RESPONSE_BYTES = 64 * 1024
 
 
 def fingerprint(value: object) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
-                                     ensure_ascii=False).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -76,8 +77,18 @@ def load_policy(config: Config, path: Path) -> Policy:
         raise ConfigError("secretary policy must name version 2")
     if raw["version"] != POLICY_VERSION:
         raise ConfigError("unsupported secretary policy version; use version 2 with a model configuration")
-    fields = {"version", "principal", "model", "decision_engine", "instructions", "knowledge", "max_tool_calls",
-              "max_events", "context_bytes", "summary_bytes"}
+    fields = {
+        "version",
+        "principal",
+        "model",
+        "decision_engine",
+        "instructions",
+        "knowledge",
+        "max_tool_calls",
+        "max_events",
+        "context_bytes",
+        "summary_bytes",
+    }
     if "principal" not in raw or raw.keys() - fields:
         raise ConfigError("secretary policy fields are invalid")
     principal = raw["principal"]
@@ -88,14 +99,23 @@ def load_policy(config: Config, path: Path) -> Policy:
     knowledge = _text(raw.get("knowledge", ""), "knowledge")
     model = _model(raw.get("model", {}))
     engine = _engine(raw.get("decision_engine"))
-    normalized = {"version": POLICY_VERSION, "principal": principal, "model": model,
-                  "decision_engine": engine, "instructions": instructions, "knowledge": knowledge,
-                  "max_tool_calls": _integer(raw.get("max_tool_calls", 2), "max_tool_calls", 1, 8),
-                  "max_events": _integer(raw.get("max_events", 1000), "max_events", 1, 10000),
-                  "context_bytes": _integer(raw.get("context_bytes", 1024 * 1024), "context_bytes", 1024, 8388608),
-                  "summary_bytes": _integer(raw.get("summary_bytes", 8192), "summary_bytes", 256, 65536)}
-    return Policy(**{key: value for key, value in normalized.items() if key != "version"},
-                  raw=normalized, digest=fingerprint(normalized))
+    normalized = {
+        "version": POLICY_VERSION,
+        "principal": principal,
+        "model": model,
+        "decision_engine": engine,
+        "instructions": instructions,
+        "knowledge": knowledge,
+        "max_tool_calls": _integer(raw.get("max_tool_calls", 2), "max_tool_calls", 1, 8),
+        "max_events": _integer(raw.get("max_events", 1000), "max_events", 1, 10000),
+        "context_bytes": _integer(raw.get("context_bytes", 1024 * 1024), "context_bytes", 1024, 8388608),
+        "summary_bytes": _integer(raw.get("summary_bytes", 8192), "summary_bytes", 256, 65536),
+    }
+    return Policy(
+        **{key: value for key, value in normalized.items() if key != "version"},
+        raw=normalized,
+        digest=fingerprint(normalized),
+    )
 
 
 def require_hook_summary(policy: Policy) -> None:
@@ -130,8 +150,7 @@ class IntegrationConfig:
     def from_dict(cls, value: object, *, instance_path: Path | None = None) -> IntegrationConfig:
         if not isinstance(value, dict):
             raise ConfigError("unsupported secretary integration")
-        if value.get("version") != INTEGRATION_VERSION or value.get("product") not in {
-                "codex", "claude-code"}:
+        if value.get("version") != INTEGRATION_VERSION or value.get("product") not in {"codex", "claude-code"}:
             raise ConfigError("unsupported secretary integration")
         values = {}
         for name in ("project", "config", "policy", "state"):
@@ -149,16 +168,29 @@ class IntegrationConfig:
         product = value["product"]
         executable = value.get("codex")
         if product == "codex" and (
-                not isinstance(executable, str) or not Path(executable).is_absolute()
-                or not os.access(executable, os.X_OK)):
+            not isinstance(executable, str) or not Path(executable).is_absolute() or not os.access(executable, os.X_OK)
+        ):
             raise ConfigError("codex must name an absolute executable path")
-        return cls(product=product, **values, codex=executable, poll_seconds=poll_seconds,
-                   budget_seconds=budget_seconds, version=INTEGRATION_VERSION)
+        return cls(
+            product=product,
+            **values,
+            codex=executable,
+            poll_seconds=poll_seconds,
+            budget_seconds=budget_seconds,
+            version=INTEGRATION_VERSION,
+        )
 
     def as_dict(self) -> dict:
-        value = {"version": self.version, "product": self.product, "project": str(self.project),
-                 "config": str(self.config), "policy": str(self.policy), "state": str(self.state),
-                 "poll_seconds": self.poll_seconds, "budget_seconds": self.budget_seconds}
+        value = {
+            "version": self.version,
+            "product": self.product,
+            "project": str(self.project),
+            "config": str(self.config),
+            "policy": str(self.policy),
+            "state": str(self.state),
+            "poll_seconds": self.poll_seconds,
+            "budget_seconds": self.budget_seconds,
+        }
         if self.codex is not None:
             value["codex"] = self.codex
         return value
@@ -172,15 +204,31 @@ def _model(value: object) -> dict:
     if provider == "command":
         if value.keys() - common - {"command"}:
             raise ConfigError("command model fields are invalid")
-        return {"provider": provider, "command": _command(value.get("command")),
-                "timeout_seconds": _timeout(value.get("timeout_seconds", DEFAULT_MODEL_TIMEOUT_SECONDS))}
+        return {
+            "provider": provider,
+            "command": _command(value.get("command")),
+            "timeout_seconds": _timeout(value.get("timeout_seconds", DEFAULT_MODEL_TIMEOUT_SECONDS)),
+        }
     if provider != DEFAULT_MODEL_PROVIDER or value.keys() - common - {
-            "model", "base_url", "api_key_env", "reasoning_effort", "max_output_tokens", "cache_mode"}:
+        "model",
+        "base_url",
+        "api_key_env",
+        "reasoning_effort",
+        "max_output_tokens",
+        "cache_mode",
+    }:
         raise ConfigError("model provider or fields are invalid")
-    settings = {"provider": DEFAULT_MODEL_PROVIDER, "model": DEFAULT_MODEL,
-                "base_url": DEFAULT_MODEL_BASE_URL, "api_key_env": DEFAULT_MODEL_API_KEY_ENV,
-                "reasoning_effort": DEFAULT_REASONING_EFFORT, "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
-                "timeout_seconds": DEFAULT_MODEL_TIMEOUT_SECONDS, "cache_mode": DEFAULT_MODEL_CACHE_MODE, **value}
+    settings = {
+        "provider": DEFAULT_MODEL_PROVIDER,
+        "model": DEFAULT_MODEL,
+        "base_url": DEFAULT_MODEL_BASE_URL,
+        "api_key_env": DEFAULT_MODEL_API_KEY_ENV,
+        "reasoning_effort": DEFAULT_REASONING_EFFORT,
+        "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        "timeout_seconds": DEFAULT_MODEL_TIMEOUT_SECONDS,
+        "cache_mode": DEFAULT_MODEL_CACHE_MODE,
+        **value,
+    }
     if settings["cache_mode"] not in ("implicit", "layered"):
         raise ConfigError("model.cache_mode must be implicit or layered")
     if settings["reasoning_effort"] not in ("none", "low", "medium", "high", "xhigh", "max"):
@@ -192,13 +240,17 @@ def _model(value: object) -> dict:
 def _http_settings(settings: dict, label: str) -> dict:
     if not isinstance(settings["model"], str) or not settings["model"].strip() or len(settings["model"]) > 200:
         raise ConfigError(f"{label}.model must be a nonempty model ID")
-    if not isinstance(settings["api_key_env"], str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*",
-                                                                      settings["api_key_env"]):
+    if not isinstance(settings["api_key_env"], str) or not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*", settings["api_key_env"]
+    ):
         raise ConfigError(f"{label}.api_key_env must name an environment variable")
     try:
         url = urlsplit(settings["base_url"])
-        valid = url.scheme in ("http", "https") and url.hostname and not (
-            url.username or url.password or url.query or url.fragment)
+        valid = (
+            url.scheme in ("http", "https")
+            and url.hostname
+            and not (url.username or url.password or url.query or url.fragment)
+        )
         # HTTP is useful for a local model server; credentials must not cross plaintext remote networks.
         valid = valid and (url.scheme == "https" or url.hostname in ("localhost", "127.0.0.1", "::1"))
     except (AttributeError, TypeError, ValueError):
@@ -219,15 +271,30 @@ def _engine(value: object) -> dict | None:
     if provider == "command":
         if value.keys() - {"provider", "command", "timeout_seconds"}:
             raise ConfigError("command decision_engine fields are invalid")
-        return {"provider": provider, "command": _command(value.get("command")),
-                "timeout_seconds": _timeout(value.get("timeout_seconds", DEFAULT_DECISION_TIMEOUT_SECONDS))}
+        return {
+            "provider": provider,
+            "command": _command(value.get("command")),
+            "timeout_seconds": _timeout(value.get("timeout_seconds", DEFAULT_DECISION_TIMEOUT_SECONDS)),
+        }
     if provider != DEFAULT_DECISION_ENGINE_PROVIDER or value.keys() - {
-            "provider", "model", "base_url", "api_key_env", "timeout_seconds"}:
+        "provider",
+        "model",
+        "base_url",
+        "api_key_env",
+        "timeout_seconds",
+    }:
         raise ConfigError("decision_engine must name provider jev or command; automatic advice is retired")
-    return _http_settings({"provider": DEFAULT_DECISION_ENGINE_PROVIDER, "model": DEFAULT_DECISION_ENGINE_MODEL,
-                           "base_url": DEFAULT_DECISION_ENGINE_BASE_URL,
-                           "api_key_env": DEFAULT_DECISION_ENGINE_API_KEY_ENV,
-                           "timeout_seconds": DEFAULT_DECISION_TIMEOUT_SECONDS, **value}, "decision_engine")
+    return _http_settings(
+        {
+            "provider": DEFAULT_DECISION_ENGINE_PROVIDER,
+            "model": DEFAULT_DECISION_ENGINE_MODEL,
+            "base_url": DEFAULT_DECISION_ENGINE_BASE_URL,
+            "api_key_env": DEFAULT_DECISION_ENGINE_API_KEY_ENV,
+            "timeout_seconds": DEFAULT_DECISION_TIMEOUT_SECONDS,
+            **value,
+        },
+        "decision_engine",
+    )
 
 
 def _text(value: object, field: str) -> str:
@@ -237,9 +304,12 @@ def _text(value: object, field: str) -> str:
 
 
 def _command(value: object) -> list[str]:
-    if not isinstance(value, list) or not 1 <= len(value) <= 32 or not all(
-            isinstance(part, str) and 0 < len(part) <= 4096 and "\0" not in part for part in value) \
-            or not Path(value[0]).is_absolute():
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= 32
+        or not all(isinstance(part, str) and 0 < len(part) <= 4096 and "\0" not in part for part in value)
+        or not Path(value[0]).is_absolute()
+    ):
         raise ConfigError("command must be an argv list starting with an absolute executable path")
     return value
 

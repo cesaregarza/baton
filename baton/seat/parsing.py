@@ -14,14 +14,16 @@ SESSION_COOKIE = "__Host-baton_seat"
 PRE_COOKIE = "__Host-baton_seat_pre"
 FORM = "application/x-www-form-urlencoded"
 # Headers a request may carry once at most; two of them would leave it ambiguous which one counts.
-SINGLE_HEADERS = ("host", "origin", "cookie", "content-type", "content-length", "sec-fetch-site",
-                  "transfer-encoding")
+SINGLE_HEADERS = ("host", "origin", "cookie", "content-type", "content-length", "sec-fetch-site", "transfer-encoding")
 MAX_BODY = 16 * 1024
 SEND_PATH = re.compile(r"/seat/c/([A-Za-z0-9_-]{1,64})/send")
 # Each POST route's fields; anything else, or a field given twice, is refused before it is read.
-FIELDS = {"/seat/login": ({"token", "pre"}, {"token", "pre"}), "/seat/logout": ({"csrf"}, {"csrf"}),
-          "/seat/ack": ({"csrf", "receipt"}, {"csrf", "receipt"}),
-          "send": ({"text", "reply_to", "csrf", "request_id"}, {"text", "csrf", "request_id"})}
+FIELDS = {
+    "/seat/login": ({"token", "pre"}, {"token", "pre"}),
+    "/seat/logout": ({"csrf"}, {"csrf"}),
+    "/seat/ack": ({"csrf", "receipt"}, {"csrf", "receipt"}),
+    "send": ({"text", "reply_to", "csrf", "request_id"}, {"text", "csrf", "request_id"}),
+}
 
 
 def _parse(config: Config, method: str, target: str, headers: list[tuple[str, str]], body: bytes) -> _Request:
@@ -36,8 +38,13 @@ def _parse(config: Config, method: str, target: str, headers: list[tuple[str, st
     if "transfer-encoding" in one:
         raise _Refusal(_page(400, "Bad request", "<p>Only a plain body with a Content-Length is accepted.</p>"))
     if method not in ("GET", "HEAD", "POST"):
-        raise _Refusal(Response(405, b"not allowed\n", {**HEADERS, "Allow": "GET, HEAD, POST",
-                                                        "Content-Type": "text/plain; charset=utf-8"}))
+        raise _Refusal(
+            Response(
+                405,
+                b"not allowed\n",
+                {**HEADERS, "Allow": "GET, HEAD, POST", "Content-Type": "text/plain; charset=utf-8"},
+            )
+        )
     url = urlsplit(target)
     cookies = _cookies(one.get("cookie", ""))
     form: dict[str, str] = {}
@@ -73,8 +80,9 @@ def _form(headers: dict[str, str], body: bytes, allowed: set[str], required: set
     if headers.get("content-type", "").strip().lower() != FORM:
         raise _Refusal(_page(415, "Bad request", "<p>Only a plain form is accepted.</p>"))
     try:
-        pairs = parse_qsl(body.decode("ascii"), keep_blank_values=True, strict_parsing=bool(body),
-                          encoding="utf-8", errors="strict")
+        pairs = parse_qsl(
+            body.decode("ascii"), keep_blank_values=True, strict_parsing=bool(body), encoding="utf-8", errors="strict"
+        )
     except (UnicodeDecodeError, ValueError):
         raise _Refusal(_page(400, "Bad request", "<p>The form could not be read.</p>")) from None
     names = [name for name, _ in pairs]

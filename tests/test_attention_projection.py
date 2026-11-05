@@ -28,23 +28,25 @@ except ImportError:  # each test then fails on its own
     dashboard = None  # type: ignore[assignment]
 
 PERSON = "Alex Rivera"
-JOB_STATES = {"initial": "open", "states": {
-    "open": {"waiting_on": "person", "next": ["done"]},
-    "done": {}}}
+JOB_STATES = {"initial": "open", "states": {"open": {"waiting_on": "person", "next": ["done"]}, "done": {}}}
 
 
 def projection_config(tmp_path: Path, display_name: str = PERSON, **dashboard_keys: Any) -> Config:
     """`viewer` sees every conversation; `person` is the human the projection is about, in some of them."""
-    return config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
-                  "assistant": {},
-                  "person": {"human": True, "display_name": display_name},
-                  "viewer": {"display_only": True, "can_view_all_conversations": True}},
-        "conversations": {"enabled": True, "max_messages_per_hour": 1000},
-        "jobs": JOB_STATES,
-        "dashboard": {"enabled": True, "viewer_role": "viewer", **dashboard_keys},
-    })
+    return config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": {
+                "orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
+                "assistant": {},
+                "person": {"human": True, "display_name": display_name},
+                "viewer": {"display_only": True, "can_view_all_conversations": True},
+            },
+            "conversations": {"enabled": True, "max_messages_per_hour": 1000},
+            "jobs": JOB_STATES,
+            "dashboard": {"enabled": True, "viewer_role": "viewer", **dashboard_keys},
+        }
+    )
 
 
 def get(config: Config, target: str) -> Any:
@@ -54,8 +56,9 @@ def get(config: Config, target: str) -> Any:
 def say(config: Config, conversation_id: str, sender: str, words: str, **kw: Any) -> str:
     conn = connect(config.db_path)
     try:
-        return conversations.send(conn, config, sender=sender, conversation_id=conversation_id, text=words,
-                                  **kw)["message_id"]
+        return conversations.send(conn, config, sender=sender, conversation_id=conversation_id, text=words, **kw)[
+            "message_id"
+        ]
     finally:
         conn.close()
 
@@ -63,15 +66,22 @@ def say(config: Config, conversation_id: str, sender: str, words: str, **kw: Any
 def seeded(config: Config) -> dict[str, str]:
     conn = connect(config.db_path)
     try:
-        room = conversations.create(conn, config, actor="orchestrator", title="Release room",
-                                    participants=["orchestrator", "assistant", "person"])["conversation_id"]
+        room = conversations.create(
+            conn,
+            config,
+            actor="orchestrator",
+            title="Release room",
+            participants=["orchestrator", "assistant", "person"],
+        )["conversation_id"]
     finally:
         conn.close()
     ids = {"room": room}
-    ids["needs_person"] = say(config, room, "orchestrator", "Alex, approve the release?", attention=["person"],
-                              needs_decision=True)
-    ids["to_assistant"] = say(config, room, "orchestrator", "assistant, run the checks", attention=["assistant"],
-                              needs_decision=True)
+    ids["needs_person"] = say(
+        config, room, "orchestrator", "Alex, approve the release?", attention=["person"], needs_decision=True
+    )
+    ids["to_assistant"] = say(
+        config, room, "orchestrator", "assistant, run the checks", attention=["assistant"], needs_decision=True
+    )
     return ids
 
 
@@ -79,7 +89,7 @@ def section(body: str, start: str, end: str) -> str:
     """The text between two markers, so a test can tell which block an item sits in."""
     head = body.index(start)
     tail = body.find(end, head)
-    return body[head:tail if tail >= 0 else len(body)]
+    return body[head : tail if tail >= 0 else len(body)]
 
 
 def test_a_real_needs_person_message_shows_under_needs_that_person(tmp_path) -> None:
@@ -97,8 +107,13 @@ def test_attention_naming_the_viewer_confers_nothing_when_attention_role_is_else
     config = projection_config(tmp_path, attention_role="person")
     conn = connect(config.db_path)
     try:
-        room = conversations.create(conn, config, actor="orchestrator", title="Side room",
-                                    participants=["orchestrator", "assistant", "person", "viewer"])["conversation_id"]
+        room = conversations.create(
+            conn,
+            config,
+            actor="orchestrator",
+            title="Side room",
+            participants=["orchestrator", "assistant", "person", "viewer"],
+        )["conversation_id"]
     finally:
         conn.close()
     say(config, room, "orchestrator", "viewer, glance at this", attention=["viewer"])
@@ -157,17 +172,25 @@ def test_without_attention_role_the_page_is_todays_needs_you(tmp_path) -> None:
 
 
 def test_the_projection_never_widens_what_the_viewer_reads(tmp_path) -> None:
-    config = config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": {"orchestrator": {"can_create_conversations": True}, "assistant": {},
-                  "person": {"human": True, "display_name": PERSON}, "viewer": {"display_only": True}},
-        "conversations": {"enabled": True, "max_messages_per_hour": 1000}, "jobs": JOB_STATES,
-        "dashboard": {"enabled": True, "viewer_role": "viewer", "attention_role": "person"},
-    })
+    config = config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": {
+                "orchestrator": {"can_create_conversations": True},
+                "assistant": {},
+                "person": {"human": True, "display_name": PERSON},
+                "viewer": {"display_only": True},
+            },
+            "conversations": {"enabled": True, "max_messages_per_hour": 1000},
+            "jobs": JOB_STATES,
+            "dashboard": {"enabled": True, "viewer_role": "viewer", "attention_role": "person"},
+        }
+    )
     conn = connect(config.db_path)
     try:
-        room = conversations.create(conn, config, actor="orchestrator", title="Person only",
-                                    participants=["orchestrator", "person"])["conversation_id"]
+        room = conversations.create(
+            conn, config, actor="orchestrator", title="Person only", participants=["orchestrator", "person"]
+        )["conversation_id"]
     finally:
         conn.close()
     say(config, room, "orchestrator", "private ask for Alex", attention=["person"], needs_decision=True)
@@ -176,11 +199,14 @@ def test_the_projection_never_widens_what_the_viewer_reads(tmp_path) -> None:
     assert "private ask for Alex" not in body, "the viewer isn't in it, so it can't show"
 
 
-@pytest.mark.parametrize(("keys", "fragment"), [
-    ({"attention_role": "nobody"}, "dashboard.attention_role"),
-    ({"attention_role": 7}, "dashboard.attention_role"),
-    ({"attention_role": "person", "attention_jobs": "yes"}, "dashboard.attention_jobs"),
-])
+@pytest.mark.parametrize(
+    ("keys", "fragment"),
+    [
+        ({"attention_role": "nobody"}, "dashboard.attention_role"),
+        ({"attention_role": 7}, "dashboard.attention_role"),
+        ({"attention_role": "person", "attention_jobs": "yes"}, "dashboard.attention_jobs"),
+    ],
+)
 def test_config_refuses_a_bad_attention_setting(tmp_path, keys, fragment) -> None:
     with pytest.raises(ConfigError, match=re.escape(fragment)):
         projection_config(tmp_path, **keys)
@@ -255,7 +281,7 @@ def test_a_display_name_with_markup_is_escaped_in_each_needs_label(tmp_path) -> 
 def test_a_display_name_with_markup_is_escaped_in_the_needs_pager(tmp_path) -> None:
     config = projection_config(tmp_path, display_name=MARKUP, attention_role="person")
     room = seeded(config)["room"]
-    for n in range(dashboard.MAX_NEEDS):   # one page more than fits: the pager shows
+    for n in range(dashboard.MAX_NEEDS):  # one page more than fits: the pager shows
         say(config, room, "orchestrator", f"ask {n}", attention=["person"])
     body = text(get(config, "/needs"))
     assert f"Older messages for {ESCAPED}" in body
@@ -267,8 +293,9 @@ def test_projected_pages_say_needs_the_person_in_the_title_and_the_index_links(t
     conn = connect(config.db_path)
     try:
         back_topics(conn, "alpha")
-        conversations.create(conn, config, actor="orchestrator", title="Topical",
-                             participants=["orchestrator", "person"], topic="alpha")
+        conversations.create(
+            conn, config, actor="orchestrator", title="Topical", participants=["orchestrator", "person"], topic="alpha"
+        )
     finally:
         conn.close()
     needs = text(get(config, "/needs"))

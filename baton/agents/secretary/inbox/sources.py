@@ -18,20 +18,23 @@ def _epoch(baton: Connection) -> str:
     return row["value"]
 
 
-def _visible_message(baton: Connection, config: Config, principal: str,
-                     message_id: str) -> Row | None:
+def _visible_message(baton: Connection, config: Config, principal: str, message_id: str) -> Row | None:
     condition, params = board_read.message_condition(config, principal)
-    return baton.execute(f"SELECT m.* FROM messages m WHERE m.id=:message_id AND {condition}"
-                         " ORDER BY (m.recipient = :reader) DESC, m.seq LIMIT 1",
-                         {**params, "message_id": message_id}).fetchone()
+    return baton.execute(
+        f"SELECT m.* FROM messages m WHERE m.id=:message_id AND {condition}"
+        " ORDER BY (m.recipient = :reader) DESC, m.seq LIMIT 1",
+        {**params, "message_id": message_id},
+    ).fetchone()
 
 
-def _event_message(baton: Connection, config: Config, principal: str,
-                   message_id: str, seq: int, recipient: str) -> Row | None:
+def _event_message(
+    baton: Connection, config: Config, principal: str, message_id: str, seq: int, recipient: str
+) -> Row | None:
     condition, params = board_read.message_condition(config, principal)
-    return baton.execute(f"SELECT m.* FROM messages m WHERE m.id=:message_id AND m.seq=:seq"
-                         f" AND m.recipient=:recipient AND {condition}",
-                         {**params, "message_id": message_id, "seq": seq, "recipient": recipient}).fetchone()
+    return baton.execute(
+        f"SELECT m.* FROM messages m WHERE m.id=:message_id AND m.seq=:seq AND m.recipient=:recipient AND {condition}",
+        {**params, "message_id": message_id, "seq": seq, "recipient": recipient},
+    ).fetchone()
 
 
 def visible_event(baton: Connection, config: Config, principal: str, event: Row) -> bool:
@@ -45,10 +48,13 @@ def visible_event(baton: Connection, config: Config, principal: str, event: Row)
 def _source_rows(baton: Connection, principal: str, after: int, limit: int) -> list[Row]:
     # An earlier job event authored by P is in P's stream and seeds job tracking. The correlated
     # source-event predicate rebuilds that set across batch boundaries without mutable job state.
-    return baton.execute("SELECT e.* FROM events e WHERE e.pos>? AND (e.audience=? OR e.actor=? OR"
-                         " (e.job_id IS NOT NULL AND EXISTS (SELECT 1 FROM events seed WHERE seed.job_id=e.job_id"
-                         " AND seed.pos<e.pos AND seed.actor=? AND seed.kind IN ('job.created','job.moved'))))"
-                         " ORDER BY e.pos LIMIT ?", (after, principal, principal, principal, limit)).fetchall()
+    return baton.execute(
+        "SELECT e.* FROM events e WHERE e.pos>? AND (e.audience=? OR e.actor=? OR"
+        " (e.job_id IS NOT NULL AND EXISTS (SELECT 1 FROM events seed WHERE seed.job_id=e.job_id"
+        " AND seed.pos<e.pos AND seed.actor=? AND seed.kind IN ('job.created','job.moved'))))"
+        " ORDER BY e.pos LIMIT ?",
+        (after, principal, principal, principal, limit),
+    ).fetchall()
 
 
 def delivered_to(principal: str, audience: str | None) -> bool:

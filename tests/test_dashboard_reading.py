@@ -47,8 +47,9 @@ def test_the_page_never_scrolls_sideways_and_keeps_a_phone_viewport(tmp_path) ->
     conn = connect(config.db_path)
     try:
         conversation = made(conn, config, "y" * 190, MINE, "alpha")
-        conversations.send(conn, config, sender="orchestrator", conversation_id=conversation, text=LONG,
-                           attention=["operator"])
+        conversations.send(
+            conn, config, sender="orchestrator", conversation_id=conversation, text=LONG, attention=["operator"]
+        )
     finally:
         conn.close()
     for target in ("/", "/t/alpha", "/needs", f"/c/{conversation}"):
@@ -76,8 +77,10 @@ def test_every_conversation_past_the_list_cap_can_be_reached(tmp_path) -> None:
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
-        names = [made(conn, config, f"Conversation {index:03d}", MINE, "alpha") and f"Conversation {index:03d}"
-                 for index in range(dashboard.MAX_LISTED + 6)]
+        names = [
+            made(conn, config, f"Conversation {index:03d}", MINE, "alpha") and f"Conversation {index:03d}"
+            for index in range(dashboard.MAX_LISTED + 6)
+        ]
     finally:
         conn.close()
     for first in ("/", "/t/alpha"):
@@ -92,8 +95,9 @@ def test_every_signal_past_the_needs_cap_can_be_reached(tmp_path) -> None:
     try:
         mine = made(conn, config, "Many asks", MINE)
         for index in range(dashboard.MAX_NEEDS + 11):
-            conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"ask {index:03d}",
-                               attention=["operator"])
+            conversations.send(
+                conn, config, sender="reviewer", conversation_id=mine, text=f"ask {index:03d}", attention=["operator"]
+            )
     finally:
         conn.close()
     seen = walk(config, "/needs", r'<p class="text">([^<]*)</p>', "page=")
@@ -106,8 +110,13 @@ def test_every_job_past_the_jobs_cap_can_be_reached(tmp_path) -> None:
     conn = connect(config.db_path)
     try:
         for index in range(dashboard.MAX_NEEDS_JOBS + 2):
-            jobs.create(conn, config.jobs, request_id=f"20261029T120000Z-reach-{index}", actor="orchestrator",
-                        title=f"Job {index:03d}")
+            jobs.create(
+                conn,
+                config.jobs,
+                request_id=f"20261029T120000Z-reach-{index}",
+                actor="orchestrator",
+                title=f"Job {index:03d}",
+            )
     finally:
         conn.close()
     seen = walk(config, "/needs", r"(Job \d{3})", "jobs_page=")
@@ -122,8 +131,9 @@ def test_a_needs_page_keeps_its_topic_filter_on_the_onward_link(tmp_path, monkey
     try:
         mine = made(conn, config, "Topic asks", MINE, "alpha")
         for index in range(5):
-            conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"alpha ask {index}",
-                               attention=["operator"])
+            conversations.send(
+                conn, config, sender="reviewer", conversation_id=mine, text=f"alpha ask {index}", attention=["operator"]
+            )
     finally:
         conn.close()
     monkeypatch.setattr(dashboard, "MAX_NEEDS", 2)
@@ -131,8 +141,20 @@ def test_a_needs_page_keeps_its_topic_filter_on_the_onward_link(tmp_path, monkey
     assert onward and all("topic=alpha" in href for href in onward)
 
 
-@pytest.mark.parametrize("query", ["page=0", "page=-1", "page=abc", "page=1e3", "page=99999999999999999999",
-                                   "page=2&page=3", "jobs_page=0", "jobs_page=x", "jobs_page=1&jobs_page=2"])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "page=0",
+        "page=-1",
+        "page=abc",
+        "page=1e3",
+        "page=99999999999999999999",
+        "page=2&page=3",
+        "jobs_page=0",
+        "jobs_page=x",
+        "jobs_page=1&jobs_page=2",
+    ],
+)
 def test_a_bad_page_number_is_a_bad_request_with_the_standard_headers(tmp_path, query: str) -> None:
     config = page_config(tmp_path)
     for path in ("/", "/needs"):
@@ -163,12 +185,20 @@ def threaded(config: Any) -> tuple[str, int, int]:
     conn = connect(config.db_path)
     try:
         conversation = made(conn, config, "Deep thread", MINE)
-        parent = conversations.send(conn, config, sender="reviewer", conversation_id=conversation,
-                                    text="the original question")["message_id"]
+        parent = conversations.send(
+            conn, config, sender="reviewer", conversation_id=conversation, text="the original question"
+        )["message_id"]
         for index in range(28):
             conversations.send(conn, config, sender="reviewer", conversation_id=conversation, text=f"chatter {index}")
-        conversations.send(conn, config, sender="orchestrator", conversation_id=conversation,
-                           text="replying to the original", reply_to=parent, attention=["operator"])
+        conversations.send(
+            conn,
+            config,
+            sender="orchestrator",
+            conversation_id=conversation,
+            text="replying to the original",
+            reply_to=parent,
+            attention=["operator"],
+        )
         history = conversations.history(conn, "operator", conversation)["messages"]
     finally:
         conn.close()
@@ -211,11 +241,19 @@ def test_a_parent_the_viewer_cannot_see_stays_unavailable_and_shows_nothing_of_i
     conn = connect(config.db_path)
     try:
         late = made(conn, config, "Joined later", ["orchestrator", "reviewer"])
-        hidden = conversations.send(conn, config, sender="reviewer", conversation_id=late,
-                                    text="words from before the join")["message_id"]
+        hidden = conversations.send(
+            conn, config, sender="reviewer", conversation_id=late, text="words from before the join"
+        )["message_id"]
         conversations.add(conn, config, late, "operator", actor="orchestrator")
-        conversations.send(conn, config, sender="orchestrator", conversation_id=late, text="a reply after the join",
-                           reply_to=hidden, attention=["operator"])
+        conversations.send(
+            conn,
+            config,
+            sender="orchestrator",
+            conversation_id=late,
+            text="a reply after the join",
+            reply_to=hidden,
+            attention=["operator"],
+        )
     finally:
         conn.close()
     needs = text(get(config, "/needs"))
@@ -237,13 +275,13 @@ def mixed(config: Any) -> dict[str, str]:
         ids = {"mine": mine}
 
         def say(sender: str, words: str, **kwargs: Any) -> str:
-            return conversations.send(conn, config, sender=sender, conversation_id=mine, text=words,
-                                      **kwargs)["message_id"]
+            return conversations.send(conn, config, sender=sender, conversation_id=mine, text=words, **kwargs)[
+                "message_id"
+            ]
 
         ids["for_me"] = say("orchestrator", "operator, please look", attention=["operator"])
         ids["decide_for_me"] = say("reviewer", "operator, A or B?", attention=["operator"], needs_decision=True)
-        ids["decide_for_other"] = say("orchestrator", "reviewer, A or B?", attention=["reviewer"],
-                                      needs_decision=True)
+        ids["decide_for_other"] = say("orchestrator", "reviewer, A or B?", attention=["reviewer"], needs_decision=True)
         ids["decide_for_anyone"] = say("reviewer", "anyone, A or B?", needs_decision=True)
         say("operator", "on it", reply_to=ids["for_me"])
     finally:
@@ -254,7 +292,7 @@ def mixed(config: Any) -> dict[str, str]:
 def section(body: str, marker: str) -> str:
     """The part of the page from a section's opening marker to the next heading or the end."""
     start = body.index(marker)
-    rest = body[start + len(marker):]
+    rest = body[start + len(marker) :]
     end = min([i for i in (rest.find("<h2"), rest.find("<details")) if i != -1] or [len(rest)])
     return rest[:end]
 
@@ -263,7 +301,7 @@ def test_by_default_needs_lists_only_what_names_the_viewer(tmp_path) -> None:
     config = page_config(tmp_path)
     mixed(config)
     body = text(get(config, "/needs"))
-    mine = section(body, "<h2 id=\"for-you\">For you</h2>")
+    mine = section(body, '<h2 id="for-you">For you</h2>')
     assert needs_items(mine) == ["operator, A or B?", "operator, please look"]
     assert "2 messages asked for you" in body
 
@@ -274,7 +312,7 @@ def test_decisions_not_addressed_to_the_viewer_sit_in_a_collapsed_labelled_secti
     body = text(get(config, "/needs"))
     match = re.search(r"<details[^>]*>\s*<summary>([^<]*)</summary>(.*?)</details>", body, re.S)
     assert match, "a collapsed section, closed by default"
-    opening = body[body.index("<details"):body.index(">", body.index("<details")) + 1]
+    opening = body[body.index("<details") : body.index(">", body.index("<details")) + 1]
     assert "open" not in opening, opening
     assert "Decisions not addressed to you (2)" in match.group(1)
     others = match.group(2)
@@ -299,8 +337,14 @@ def test_you_replied_comes_only_from_the_viewers_own_reply_links(tmp_path) -> No
     ids = mixed(config)
     conn = connect(config.db_path)
     try:
-        conversations.send(conn, config, sender="reviewer", conversation_id=ids["mine"], text="reviewer replies",
-                           reply_to=ids["decide_for_me"])
+        conversations.send(
+            conn,
+            config,
+            sender="reviewer",
+            conversation_id=ids["mine"],
+            text="reviewer replies",
+            reply_to=ids["decide_for_me"],
+        )
     finally:
         conn.close()
     body = text(get(config, "/needs")).lower()
@@ -327,8 +371,9 @@ def test_job_ids_are_shortened_on_narrow_screens_with_the_full_id_kept(tmp_path)
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
-        job = jobs.create(conn, config.jobs, request_id="20261029T120000Z-dense", actor="orchestrator",
-                          title="Dense job")
+        job = jobs.create(
+            conn, config.jobs, request_id="20261029T120000Z-dense", actor="orchestrator", title="Dense job"
+        )
     finally:
         conn.close()
     body = text(get(config, "/needs"))
@@ -345,12 +390,25 @@ def test_advancing_one_needs_list_keeps_the_others_where_they_are(tmp_path, monk
     try:
         mine = made(conn, config, "Three lists", MINE, "alpha")
         for index in range(5):
-            conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"for you {index}",
-                               attention=["operator"])
-            conversations.send(conn, config, sender="orchestrator", conversation_id=mine, text=f"other {index}",
-                               attention=["reviewer"], needs_decision=True)
-            jobs.create(conn, config.jobs, request_id=f"20261029T120000Z-three-{index}", actor="orchestrator",
-                        title=f"Job {index}")
+            conversations.send(
+                conn, config, sender="reviewer", conversation_id=mine, text=f"for you {index}", attention=["operator"]
+            )
+            conversations.send(
+                conn,
+                config,
+                sender="orchestrator",
+                conversation_id=mine,
+                text=f"other {index}",
+                attention=["reviewer"],
+                needs_decision=True,
+            )
+            jobs.create(
+                conn,
+                config.jobs,
+                request_id=f"20261029T120000Z-three-{index}",
+                actor="orchestrator",
+                title=f"Job {index}",
+            )
     finally:
         conn.close()
     for name in ("MAX_NEEDS", "MAX_NEEDS_JOBS"):
@@ -367,26 +425,38 @@ def test_advancing_one_needs_list_keeps_the_others_where_they_are(tmp_path, monk
     assert any("others_page=2" in href and "page=3" in href.replace("others_page", "") for href in filtered)
 
 
-
 def three_lists(config: Any) -> None:
     """Five messages for the viewer, five decisions for someone else and five jobs, for small page caps."""
     conn = connect(config.db_path)
     try:
         mine = made(conn, config, "Navigation", MINE, "alpha")
         for index in range(5):
-            conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"for you {index}",
-                               attention=["operator"])
-            conversations.send(conn, config, sender="orchestrator", conversation_id=mine, text=f"other {index}",
-                               attention=["reviewer"], needs_decision=True)
-            jobs.create(conn, config.jobs, request_id=f"20261029T120000Z-nav-{index}", actor="orchestrator",
-                        title=f"Nav job {index}")
+            conversations.send(
+                conn, config, sender="reviewer", conversation_id=mine, text=f"for you {index}", attention=["operator"]
+            )
+            conversations.send(
+                conn,
+                config,
+                sender="orchestrator",
+                conversation_id=mine,
+                text=f"other {index}",
+                attention=["reviewer"],
+                needs_decision=True,
+            )
+            jobs.create(
+                conn,
+                config.jobs,
+                request_id=f"20261029T120000Z-nav-{index}",
+                actor="orchestrator",
+                title=f"Nav job {index}",
+            )
     finally:
         conn.close()
 
 
 def details_tag(body: str) -> str:
     start = body.index("<details")
-    return body[start:body.index(">", start) + 1]
+    return body[start : body.index(">", start) + 1]
 
 
 def test_paging_the_collapsed_decisions_reloads_with_them_open(tmp_path, monkeypatch) -> None:
@@ -419,5 +489,5 @@ def test_the_needs_page_offers_jumps_to_its_lists(tmp_path) -> None:
     config = page_config(tmp_path)
     three_lists(config)
     body = text(get(config, "/needs"))
-    top = body[:body.index('id="for-you"')]
+    top = body[: body.index('id="for-you"')]
     assert 'href="#for-you"' in top and 'href="#jobs"' in top

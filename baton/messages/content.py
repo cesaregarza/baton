@@ -16,8 +16,19 @@ REQUEST_ID = re.compile(r"(\d{8}T\d{6}Z)-[A-Za-z0-9._:-]{1,100}")
 REQUEST_MAX_AGE = timedelta(days=30)
 REQUEST_MAX_SKEW = timedelta(minutes=5)
 RELAYED_FIELDS = ("source", "at", "text")
-AUTHOR_FIELDS = ("from_role", "author_kind", "author", "sender", "from", "role", "on_behalf_of",
-                 "alias", "alias_id", "identity", "code")
+AUTHOR_FIELDS = (
+    "from_role",
+    "author_kind",
+    "author",
+    "sender",
+    "from",
+    "role",
+    "on_behalf_of",
+    "alias",
+    "alias_id",
+    "identity",
+    "code",
+)
 MAX_SOURCE = 200
 
 
@@ -29,8 +40,9 @@ def check(text: str, relayed: Any) -> list[dict[str, str]] | None:
     """Refuse an oversized message or malformed relayed entry; return entries as stored."""
     relayed = check_relayed(relayed)
     if wire_bytes(text) + (len(json.dumps(relayed)) if relayed else 0) > MAX_MESSAGE_BYTES:
-        raise InvalidRequest(f"a message, with any relayed entries, is at most {MAX_MESSAGE_BYTES} bytes "
-                             "once JSON-escaped")
+        raise InvalidRequest(
+            f"a message, with any relayed entries, is at most {MAX_MESSAGE_BYTES} bytes once JSON-escaped"
+        )
     return relayed
 
 
@@ -50,8 +62,9 @@ def check_relayed(relayed: Any) -> list[dict[str, str]] | None:
         if not isinstance(entry.get("source"), str) or not 1 <= len(entry["source"]) <= MAX_SOURCE:
             raise InvalidRequest(f"{where}.source must name who said it, in 1-{MAX_SOURCE} characters")
         if not isinstance(entry.get("at"), str) or not _zoned_time(entry["at"]):
-            raise InvalidRequest(f"{where}.at must be an ISO 8601 time with its UTC offset, such as "
-                                 "2026-10-29T07:00:00Z")
+            raise InvalidRequest(
+                f"{where}.at must be an ISO 8601 time with its UTC offset, such as 2026-10-29T07:00:00Z"
+            )
         if not isinstance(entry.get("text"), str) or not entry["text"]:
             raise InvalidRequest(f"{where}.text must be the relayed words")
     return [{key: entry[key] for key in RELAYED_FIELDS} for entry in relayed]
@@ -72,8 +85,9 @@ def request_time(request_id: str) -> datetime:
     """Read the UTC creation time in a retry id and reject malformed, future or old ids."""
     match = REQUEST_ID.fullmatch(request_id)
     if match is None:
-        raise InvalidRequest("a request_id is YYYYMMDDTHHMMSSZ-<suffix>: its UTC creation time, then up "
-                             "to 100 of [A-Za-z0-9._:-]")
+        raise InvalidRequest(
+            "a request_id is YYYYMMDDTHHMMSSZ-<suffix>: its UTC creation time, then up to 100 of [A-Za-z0-9._:-]"
+        )
     try:
         created_at = datetime.strptime(match[1], "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
     except ValueError:
@@ -96,6 +110,8 @@ def only_in_a_conversation(**fields: Any) -> None:
     """
     named = sorted(name for name, value in fields.items() if value is not None and value is not False)
     if named:
-        raise InvalidRequest(f"{', '.join(named)}: only a conversation send carries that. Pass a "
-                             "conversation_id, or leave it out, since a direct message is already "
-                             "addressed to its recipient.")
+        raise InvalidRequest(
+            f"{', '.join(named)}: only a conversation send carries that. Pass a "
+            "conversation_id, or leave it out, since a direct message is already "
+            "addressed to its recipient."
+        )

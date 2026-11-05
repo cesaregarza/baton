@@ -63,7 +63,11 @@ def test_a_revision_beyond_the_databases_integers_is_an_unknown_revision_and_the
         assert len(scene.audit()) == lines + 1, "the call left no audit line"
         line = scene.audit()[-1]
         assert (line["tool"], line["outcome"], line["topic"], line["reference"]) == (
-            "read_reference", "unknown_reference", BOARDS, NAME)
+            "read_reference",
+            "unknown_reference",
+            BOARDS,
+            NAME,
+        )
 
     play(scene.host, scenario)
 
@@ -79,12 +83,23 @@ def test_a_history_cursor_beyond_the_databases_integers_reads_an_empty_page_and_
         lines = len(scene.audit())
         asked = {"topic": BOARDS, "name": NAME, "after_revision": 2**63}
         page = an_answer(await answer_text(client, scene.host, "reference_history", asked))
-        assert page == {"topic": BOARDS, "topic_id": scene.topic_id(BOARDS), "name": NAME, "current_revision": 3,
-                        "revisions": [], "next_revision": 2**63}
+        assert page == {
+            "topic": BOARDS,
+            "topic_id": scene.topic_id(BOARDS),
+            "name": NAME,
+            "current_revision": 3,
+            "revisions": [],
+            "next_revision": 2**63,
+        }
         assert len(scene.audit()) == lines + 1, "the call left no audit line"
         line = scene.audit()[-1]
         assert (line["tool"], line["outcome"], line["topic"], line["topic_id"], line["reference"]) == (
-            "reference_history", "ok", BOARDS, scene.topic_id(BOARDS), NAME)
+            "reference_history",
+            "ok",
+            BOARDS,
+            scene.topic_id(BOARDS),
+            NAME,
+        )
 
     play(scene.host, scenario)
 
@@ -101,8 +116,11 @@ def test_an_edit_expecting_a_revision_beyond_the_databases_integers_is_stale_and
         tables = scene.tables()
         for name, current in ((NAME, 3), ("not-there", 0)):
             stale = await core_edit(client, scene, BOARDS, name, "text", 2**63)
-            assert stale == {"error": "stale_revision", "detail": f5(name, BOARDS, current, 2**63),
-                             "current_revision": current}, stale
+            assert stale == {
+                "error": "stale_revision",
+                "detail": f5(name, BOARDS, current, 2**63),
+                "current_revision": current,
+            }, stale
         assert scene.tables() == tables
 
     play(scene.host, scenario)

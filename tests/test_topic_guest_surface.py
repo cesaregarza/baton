@@ -29,8 +29,12 @@ def topic_host(guest_host):  # noqa: F811 -- imported pytest fixture
     config = guest_host.config
     roles = {
         **config.roles,
-        "planner": replace(config.roles["planner"], can_create_conversations=True,
-                           can_create_topics=True, can_view_all_conversations=True),
+        "planner": replace(
+            config.roles["planner"],
+            can_create_conversations=True,
+            can_create_topics=True,
+            can_view_all_conversations=True,
+        ),
         "guest": Role(name="guest", can_view_all_conversations=True),
     }
     guest_host.config = replace(
@@ -96,8 +100,12 @@ def test_an_aliased_guest_starts_a_thread_and_is_attributed(topic_host):
     async def scenario(client):
         await make_topic(client, topic_host)
         bound = await claim(client, topic_host)
-        made = await call(client, topic_host, "create_conversation",
-                          {"title": "A guest thread", "topic": TOPIC, "token": bound["binding_token"]})
+        made = await call(
+            client,
+            topic_host,
+            "create_conversation",
+            {"title": "A guest thread", "topic": TOPIC, "token": bound["binding_token"]},
+        )
         assert made.get("created") is True, refusal(made)
         assert made.get("topic") == TOPIC, refusal(made)
         assert made.get("created_by") == "guest", refusal(made)
@@ -111,9 +119,12 @@ def test_an_aliased_guest_may_not_name_participants(topic_host):
     async def scenario(client):
         await make_topic(client, topic_host)
         bound = await claim(client, topic_host)
-        result = await call(client, topic_host, "create_conversation",
-                            {"title": "Mine", "topic": TOPIC, "participants": ["planner"],
-                             "token": bound["binding_token"]})
+        result = await call(
+            client,
+            topic_host,
+            "create_conversation",
+            {"title": "Mine", "topic": TOPIC, "participants": ["planner"], "token": bound["binding_token"]},
+        )
         assert "participants" in refusal(result), refusal(result)
 
     dispatch(topic_host, scenario)
@@ -122,8 +133,12 @@ def test_an_aliased_guest_may_not_name_participants(topic_host):
 def test_a_guest_cannot_create_a_topic_over_the_wire(topic_host):
     async def scenario(client):
         bound = await claim(client, topic_host)
-        result = await call(client, topic_host, "create_topic",
-                            {"path": "mine", "members": ["planner", "worker"], "token": bound["binding_token"]})
+        result = await call(
+            client,
+            topic_host,
+            "create_topic",
+            {"path": "mine", "members": ["planner", "worker"], "token": bound["binding_token"]},
+        )
         assert result.get("error") == "forbidden", refusal(result)
         assert "guest may not call create_topic" in refusal(result), refusal(result)
 
@@ -145,8 +160,13 @@ def test_a_core_role_still_names_participants(topic_host):
     """The core path is unchanged: participants are given, and the topic is optional."""
 
     async def scenario(client):
-        made = await call(client, topic_host, "create_conversation",
-                          {"title": "Core", "participants": ["planner", "worker"]}, role="planner")
+        made = await call(
+            client,
+            topic_host,
+            "create_conversation",
+            {"title": "Core", "participants": ["planner", "worker"]},
+            role="planner",
+        )
         assert made.get("created") is True, refusal(made)
         assert made.get("topic") is None
 

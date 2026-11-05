@@ -35,8 +35,10 @@ MAX_NAME = topic_paths.MAX_TOPIC_SEGMENT
 MAX_HISTORY_PAGE = 100
 # A revision as every answer describes it, without its text. SQLite counts the size in UTF-8 bytes, so a list of
 # documents or a page of history never loads a body.
-_DESCRIBED = ("revision, base_revision, at, author_role, author_alias_id, author_alias_name, author_alias_code,"
-              " grant_id, LENGTH(CAST(body AS BLOB)) AS size")
+_DESCRIBED = (
+    "revision, base_revision, at, author_role, author_alias_id, author_alias_name, author_alias_code,"
+    " grant_id, LENGTH(CAST(body AS BLOB)) AS size"
+)
 
 
 def is_name(value: Any) -> bool:
@@ -71,16 +73,18 @@ def _check_body(body: Any) -> None:
     if size == 0:
         raise InvalidRequest(f"body must be text of 1-{MAX_BODY_BYTES} bytes of UTF-8")
     if size > MAX_BODY_BYTES:
-        raise LimitExceeded(f"a reference body is at most {MAX_BODY_BYTES} bytes of UTF-8; this one is {size}",
-                            "reference_body_bytes")
+        raise LimitExceeded(
+            f"a reference body is at most {MAX_BODY_BYTES} bytes of UTF-8; this one is {size}", "reference_body_bytes"
+        )
 
 
 def _check_expected(expected: Any) -> None:
     """The revision the caller read must be given: a missing one would skip the compare, so the schema's
     requirement is not left to the schema alone."""
     if not _is_count(expected, 0):
-        raise InvalidRequest("expected_revision is required: 0 to create the reference, "
-                             "otherwise the revision you read")
+        raise InvalidRequest(
+            "expected_revision is required: 0 to create the reference, otherwise the revision you read"
+        )
 
 
 def _request_id(request_id: Any) -> str:
@@ -102,8 +106,9 @@ def _may_edit(config: Config, actor: str) -> None:
     )
 
 
-def _authorize(conn: Connection, identity: dict[str, str] | None, grant_key: str | None,
-               path: str) -> tuple[Row, Row | None]:
+def _authorize(
+    conn: Connection, identity: dict[str, str] | None, grant_key: str | None, path: str
+) -> tuple[Row, Row | None]:
     """The topic at `path` and the grant the caller acts under, or the refusal.
 
     A core role was settled by its flag. A guest is decided by its key's grant, which reads the topic itself and
@@ -121,16 +126,26 @@ def _digest(actor: str, identity: dict[str, str] | None, topic_id: str, name: st
     The alias is in it because every guest acts as the same role, and the topic's id because a path can be given
     to another topic. Never a key or a binding token, so a retry made after claiming the alias again still replays.
     """
-    return events.request_digest("edit_reference", {
-        "actor": actor, "alias_id": (identity or {}).get("alias_id"), "topic_id": topic_id, "name": name,
-        "body": body, "expected_revision": expected})
+    return events.request_digest(
+        "edit_reference",
+        {
+            "actor": actor,
+            "alias_id": (identity or {}).get("alias_id"),
+            "topic_id": topic_id,
+            "name": name,
+            "body": body,
+            "expected_revision": expected,
+        },
+    )
 
 
 def _locate(conn: Connection, topic_id: str, name: str) -> tuple[str | None, int]:
     """A document's id and its current revision, its highest. A document that does not exist is at revision 0."""
-    row = conn.execute("SELECT d.id, r.revision FROM reference_docs d JOIN reference_revisions r ON r.doc_id = d.id"
-                       " WHERE d.topic_id = ? AND d.name = ? ORDER BY r.revision DESC LIMIT 1",
-                       (topic_id, name)).fetchone()
+    row = conn.execute(
+        "SELECT d.id, r.revision FROM reference_docs d JOIN reference_revisions r ON r.doc_id = d.id"
+        " WHERE d.topic_id = ? AND d.name = ? ORDER BY r.revision DESC LIMIT 1",
+        (topic_id, name),
+    ).fetchone()
     return (None, 0) if row is None else (row["id"], row["revision"])
 
 
@@ -142,33 +157,62 @@ def _document(conn: Connection, topic_id: str, path: str, name: str, expected: i
     """
     doc_id, current = _locate(conn, topic_id, name)
     if expected != current:
-        raise StaleReference(f"reference {name!r} in {path!r} is at revision {current}, not {expected}; "
-                             "read it again before editing it", current)
+        raise StaleReference(
+            f"reference {name!r} in {path!r} is at revision {current}, not {expected}; read it again before editing it",
+            current,
+        )
     if doc_id is not None:
         return doc_id
     held = conn.execute("SELECT COUNT(*) FROM reference_docs WHERE topic_id = ?", (topic_id,)).fetchone()[0]
     if held >= MAX_DOCS_PER_TOPIC:
-        raise LimitExceeded(f"topic {path!r} already holds {MAX_DOCS_PER_TOPIC} references; edit one of them",
-                            "references_per_topic")
+        raise LimitExceeded(
+            f"topic {path!r} already holds {MAX_DOCS_PER_TOPIC} references; edit one of them", "references_per_topic"
+        )
     doc_id = "ref_" + secrets.token_hex(8)
-    conn.execute("INSERT INTO reference_docs (id, topic_id, name, created_at) VALUES (?, ?, ?, ?)",
-                 (doc_id, topic_id, name, events.now()))
+    conn.execute(
+        "INSERT INTO reference_docs (id, topic_id, name, created_at) VALUES (?, ?, ?, ?)",
+        (doc_id, topic_id, name, events.now()),
+    )
     return doc_id
 
 
-def _append(conn: Connection, *, doc_id: str, number: int, body: str, actor: str,
-            identity: dict[str, str] | None, grant_id: str | None, request_id: str, digest: str) -> None:
+def _append(
+    conn: Connection,
+    *,
+    doc_id: str,
+    number: int,
+    body: str,
+    actor: str,
+    identity: dict[str, str] | None,
+    grant_id: str | None,
+    request_id: str,
+    digest: str,
+) -> None:
     """Write revision `number`, based on the one before it, with who wrote it and under which grant.
 
     The alias's name and code are what it is called now, kept for reading only. The retry identity is stored with
     the revision and lives as long as it does.
     """
     who = identity or {}
-    conn.execute("INSERT INTO reference_revisions (doc_id, revision, body, author_role, author_alias_id,"
-                 " author_alias_name, author_alias_code, grant_id, request_id, request_digest, base_revision, at)"
-                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                 (doc_id, number, body, actor, who.get("alias_id"), who.get("alias"), who.get("code"), grant_id,
-                  request_id, digest, number - 1, events.now()))
+    conn.execute(
+        "INSERT INTO reference_revisions (doc_id, revision, body, author_role, author_alias_id,"
+        " author_alias_name, author_alias_code, grant_id, request_id, request_digest, base_revision, at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            doc_id,
+            number,
+            body,
+            actor,
+            who.get("alias_id"),
+            who.get("alias"),
+            who.get("code"),
+            grant_id,
+            request_id,
+            digest,
+            number - 1,
+            events.now(),
+        ),
+    )
 
 
 def _revision(conn: Connection, doc_id: str, number: int) -> Row:
@@ -177,8 +221,9 @@ def _revision(conn: Connection, doc_id: str, number: int) -> Row:
     Every answer about a revision is read back from here, so an edit, its retry and a later read cannot describe it
     differently.
     """
-    return conn.execute(f"SELECT {_DESCRIBED}, body FROM reference_revisions WHERE doc_id = ? AND revision = ?",
-                        (doc_id, number)).fetchone()
+    return conn.execute(
+        f"SELECT {_DESCRIBED}, body FROM reference_revisions WHERE doc_id = ? AND revision = ?", (doc_id, number)
+    ).fetchone()
 
 
 def _author(row: Row) -> dict[str, str]:
@@ -191,13 +236,30 @@ def _author(row: Row) -> dict[str, str]:
 
 def _summary(row: Row) -> dict[str, Any]:
     """What an answer says of a revision besides its text."""
-    return {"revision": row["revision"], "base_revision": row["base_revision"], "at": row["at"],
-            "size": row["size"], "author": _author(row), "grant_id": row["grant_id"]}
+    return {
+        "revision": row["revision"],
+        "base_revision": row["base_revision"],
+        "at": row["at"],
+        "size": row["size"],
+        "author": _author(row),
+        "grant_id": row["grant_id"],
+    }
 
 
-def edit(conn: Connection, config: Config, *, actor: str, topic: Any, name: Any, body: Any,
-         expected_revision: Any, request_id: Any = None, identity: dict[str, str] | None = None,
-         grant_key: str | None = None, seen: dict[str, Any] | None = None) -> dict[str, Any]:
+def edit(
+    conn: Connection,
+    config: Config,
+    *,
+    actor: str,
+    topic: Any,
+    name: Any,
+    body: Any,
+    expected_revision: Any,
+    request_id: Any = None,
+    identity: dict[str, str] | None = None,
+    grant_key: str | None = None,
+    seen: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Append a document's next revision, or answer the retry of one already appended.
 
     With no `grant_key` the caller is a core role and needs `can_create_topics`. With one it is a guest, and its
@@ -220,13 +282,28 @@ def edit(conn: Connection, config: Config, *, actor: str, topic: Any, name: Any,
         if stored is None:
             doc_id = _document(conn, topic_row["id"], path, name, expected_revision)
             number = expected_revision + 1
-            _append(conn, doc_id=doc_id, number=number, body=body, actor=actor, identity=identity,
-                    grant_id=grant_id, request_id=request_id, digest=digest)
+            _append(
+                conn,
+                doc_id=doc_id,
+                number=number,
+                body=body,
+                actor=actor,
+                identity=identity,
+                grant_id=grant_id,
+                request_id=request_id,
+                digest=digest,
+            )
         else:
             doc_id, number = stored["doc_id"], stored["revision"]
         topics.record_seen(seen, path, topic_row, reference=name, revision=number, grant_id=grant_id)
-        return {"topic": path, "topic_id": topic_row["id"], "name": name, **_summary(_revision(conn, doc_id, number)),
-                "request_id": request_id, "created": stored is None}
+        return {
+            "topic": path,
+            "topic_id": topic_row["id"],
+            "name": name,
+            **_summary(_revision(conn, doc_id, number)),
+            "request_id": request_id,
+            "created": stored is None,
+        }
 
 
 def _existing(conn: Connection, topic_id: str, path: str, name: str) -> tuple[str, int]:
@@ -239,16 +316,28 @@ def _existing(conn: Connection, topic_id: str, path: str, name: str) -> tuple[st
 
 def _listing(conn: Connection, topic_id: str) -> list[dict[str, Any]]:
     """The topic's own documents by name, each described by its current revision."""
-    rows = conn.execute(f"SELECT d.name, {_DESCRIBED} FROM reference_docs d JOIN reference_revisions r"
-                        " ON r.doc_id = d.id WHERE d.topic_id = ? AND r.revision ="
-                        " (SELECT MAX(revision) FROM reference_revisions WHERE doc_id = d.id) ORDER BY d.name",
-                        (topic_id,)).fetchall()
-    return [{"name": row["name"], "current_revision": row["revision"], "at": row["at"], "size": row["size"],
-             "author": _author(row), "grant_id": row["grant_id"]} for row in rows]
+    rows = conn.execute(
+        f"SELECT d.name, {_DESCRIBED} FROM reference_docs d JOIN reference_revisions r"
+        " ON r.doc_id = d.id WHERE d.topic_id = ? AND r.revision ="
+        " (SELECT MAX(revision) FROM reference_revisions WHERE doc_id = d.id) ORDER BY d.name",
+        (topic_id,),
+    ).fetchall()
+    return [
+        {
+            "name": row["name"],
+            "current_revision": row["revision"],
+            "at": row["at"],
+            "size": row["size"],
+            "author": _author(row),
+            "grant_id": row["grant_id"],
+        }
+        for row in rows
+    ]
 
 
-def read(conn: Connection, *, topic: Any, name: Any = None, revision: Any = None,
-         seen: dict[str, Any] | None = None) -> dict[str, Any]:
+def read(
+    conn: Connection, *, topic: Any, name: Any = None, revision: Any = None, seen: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """A topic's references, or one reference's current text, or one old revision of it, as it was written.
 
     The list holds only the topic's own documents. A revision needs a name, and a revision the document does not
@@ -270,15 +359,29 @@ def read(conn: Connection, *, topic: Any, name: Any = None, revision: Any = None
         # Compared here, not asked of the database: it cannot take a number beyond its integers, and every number up
         # to the current revision has a row.
         if revision is not None and revision > current:
-            raise UnknownReference(f"reference {name!r} in {path!r} has no revision {revision}; "
-                                   f"its current revision is {current}")
+            raise UnknownReference(
+                f"reference {name!r} in {path!r} has no revision {revision}; its current revision is {current}"
+            )
         found = _revision(conn, doc_id, current if revision is None else revision)
-        return {"topic": path, "topic_id": topic_row["id"], "name": name, "current_revision": current,
-                "body": found["body"], **_summary(found)}
+        return {
+            "topic": path,
+            "topic_id": topic_row["id"],
+            "name": name,
+            "current_revision": current,
+            "body": found["body"],
+            **_summary(found),
+        }
 
 
-def history(conn: Connection, *, topic: Any, name: Any, after_revision: Any = 0, limit: Any = 50,
-            seen: dict[str, Any] | None = None) -> dict[str, Any]:
+def history(
+    conn: Connection,
+    *,
+    topic: Any,
+    name: Any,
+    after_revision: Any = 0,
+    limit: Any = 50,
+    seen: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """A reference's revisions after `after_revision`, oldest first and without their text.
 
     `next_revision` is the last one returned, or `after_revision` when the page is empty, so feeding it back
@@ -293,9 +396,20 @@ def history(conn: Connection, *, topic: Any, name: Any, after_revision: Any = 0,
         topics.record_seen(seen, path, topic_row, reference=name)
         doc_id, current = _existing(conn, topic_row["id"], path, name)
         # A cursor at or past the last revision reads nothing, and one beyond the database's integers cannot be bound.
-        rows = [] if after_revision >= current else conn.execute(
-            f"SELECT {_DESCRIBED} FROM reference_revisions WHERE doc_id = ? AND revision > ? ORDER BY revision LIMIT ?",
-            (doc_id, after_revision, limit)).fetchall()
-        return {"topic": path, "topic_id": topic_row["id"], "name": name, "current_revision": current,
-                "revisions": [_summary(row) for row in rows],
-                "next_revision": rows[-1]["revision"] if rows else after_revision}
+        rows = (
+            []
+            if after_revision >= current
+            else conn.execute(
+                f"SELECT {_DESCRIBED} FROM reference_revisions "
+                "WHERE doc_id = ? AND revision > ? ORDER BY revision LIMIT ?",
+                (doc_id, after_revision, limit),
+            ).fetchall()
+        )
+        return {
+            "topic": path,
+            "topic_id": topic_row["id"],
+            "name": name,
+            "current_revision": current,
+            "revisions": [_summary(row) for row in rows],
+            "next_revision": rows[-1]["revision"] if rows else after_revision,
+        }

@@ -45,8 +45,10 @@ VOLATILE_IDS = {"request_id", "conversation_id", "message_id", "id", "job_id", "
 def normal(value):
     """A response or an audit line with its times and generated ids replaced, so a run can be compared to a record."""
     if isinstance(value, dict):
-        return {key: TIME if key in VOLATILE_TIMES and item else ID if key in VOLATILE_IDS and item else normal(item)
-                for key, item in value.items()}
+        return {
+            key: TIME if key in VOLATILE_TIMES and item else ID if key in VOLATILE_IDS and item else normal(item)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [normal(item) for item in value]
     if isinstance(value, str):
@@ -60,6 +62,7 @@ async def listed_tools(client, host, role):
 
 # 1. The tools that existed ---------------------------------------------------------------------------------
 
+
 def test_every_tool_that_existed_keeps_its_schema_annotations_description_and_place(build_scene):
     """GUARD. Seen by a core role and by a guest alike: each earlier tool's fingerprint (name, description with its
     whitespace collapsed, input schema, annotations) is what the topic grant checks left it, and they come in the
@@ -71,7 +74,8 @@ def test_every_tool_that_existed_keeps_its_schema_annotations_description_and_pl
             shown = {one["name"]: fingerprint(one) for one in await listed_tools(client, scene.host, role)}
             assert [name for name in shown if name in OLD_TOOLS] == list(OLD_TOOLS), f"{role} sees another order"
             assert {name: shown.get(name) for name in OLD_TOOLS} == OLD_TOOLS, [
-                name for name in OLD_TOOLS if shown.get(name) != OLD_TOOLS[name]]
+                name for name in OLD_TOOLS if shown.get(name) != OLD_TOOLS[name]
+            ]
 
     play(scene.host, scenario)
 
@@ -96,15 +100,20 @@ def test_a_guest_is_refused_every_tool_that_was_not_a_guest_tool_in_the_same_wor
 
     async def scenario(client):
         held = await board(client, scene)
-        tools = [one for one in await listed_tools(client, scene.host, "guest")
-                 if one["name"] in OLD_TOOLS and one["name"] not in GUEST_MAY_CALL]
+        tools = [
+            one
+            for one in await listed_tools(client, scene.host, "guest")
+            if one["name"] in OLD_TOOLS and one["name"] not in GUEST_MAY_CALL
+        ]
         assert len(tools) == 16, [one["name"] for one in tools]
         callers = [Anonymous(scene.host), await bound_guest(client, scene), Bound.of(held)]
         for one in tools:
             for who in callers:
                 result = await who.call(client, one["name"], **required_arguments(one))
                 assert result == {"error": "forbidden", "detail": f"guest may not call {one['name']}"}, (
-                    one["name"], result)
+                    one["name"],
+                    result,
+                )
 
     play(scene.host, scenario)
 
@@ -112,43 +121,118 @@ def test_a_guest_is_refused_every_tool_that_was_not_a_guest_tool_in_the_same_wor
 # 2. A run of core calls, answered and audited as before -------------------------------------------------------
 
 GOLDEN = {
-    "create a topic": {"created": True, "created_at": TIME, "created_by": "planner", "description": None,
-                       "members": ["planner", "worker"], "path": "alpha", "request_id": ID, "title": "Alpha"},
-    "create a subtopic": {"created": True, "created_at": TIME, "created_by": "planner", "description": None,
-                          "members": [], "path": "alpha/sub", "request_id": ID, "title": "sub"},
+    "create a topic": {
+        "created": True,
+        "created_at": TIME,
+        "created_by": "planner",
+        "description": None,
+        "members": ["planner", "worker"],
+        "path": "alpha",
+        "request_id": ID,
+        "title": "Alpha",
+    },
+    "create a subtopic": {
+        "created": True,
+        "created_at": TIME,
+        "created_by": "planner",
+        "description": None,
+        "members": [],
+        "path": "alpha/sub",
+        "request_id": ID,
+        "title": "sub",
+    },
     "create it again": {"error": "invalid_request", "detail": "topic 'alpha' already exists"},
     "a role without the flag": {
-        "error": "forbidden", "detail": "worker may not create or change topics (roles.worker.can_create_topics)"},
-    "get a topic": {"created_at": TIME, "created_by": "planner", "description": None, "members": ["planner", "worker"],
-                    "path": "alpha", "subtopics": ["alpha/sub"], "threads": 0, "title": "Alpha"},
+        "error": "forbidden",
+        "detail": "worker may not create or change topics (roles.worker.can_create_topics)",
+    },
+    "get a topic": {
+        "created_at": TIME,
+        "created_by": "planner",
+        "description": None,
+        "members": ["planner", "worker"],
+        "path": "alpha",
+        "subtopics": ["alpha/sub"],
+        "threads": 0,
+        "title": "Alpha",
+    },
     "get an unknown topic": {"error": "unknown_topic", "detail": "no topic 'nope'"},
-    "update a topic": {"created_at": TIME, "created_by": "planner", "description": "d",
-                       "members": ["planner", "worker"], "path": "alpha", "title": "Alpha"},
-    "rename a subtopic": {"created_at": TIME, "created_by": "planner", "description": None, "members": [],
-                          "path": "alpha/other", "renamed_from": "alpha/sub", "subtopics": 0, "title": "sub"},
-    "start a thread": {"conversation_id": ID, "created": True, "created_at": TIME, "created_by": "planner",
-                       "last_activity_at": TIME, "last_seq": 0, "participants": ["planner", "worker"],
-                       "request_id": ID, "revision": 0, "title": "T", "topic": "alpha"},
+    "update a topic": {
+        "created_at": TIME,
+        "created_by": "planner",
+        "description": "d",
+        "members": ["planner", "worker"],
+        "path": "alpha",
+        "title": "Alpha",
+    },
+    "rename a subtopic": {
+        "created_at": TIME,
+        "created_by": "planner",
+        "description": None,
+        "members": [],
+        "path": "alpha/other",
+        "renamed_from": "alpha/sub",
+        "subtopics": 0,
+        "title": "sub",
+    },
+    "start a thread": {
+        "conversation_id": ID,
+        "created": True,
+        "created_at": TIME,
+        "created_by": "planner",
+        "last_activity_at": TIME,
+        "last_seq": 0,
+        "participants": ["planner", "worker"],
+        "request_id": ID,
+        "revision": 0,
+        "title": "T",
+        "topic": "alpha",
+    },
     "move the thread": {"changed": True, "conversation_id": ID, "topic": "alpha/other"},
     "move it to where it is": {"changed": False, "conversation_id": ID, "topic": "alpha/other"},
-    "list threads": {"conversations": [{"conversation_id": ID, "created_at": TIME, "created_by": "planner",
-                                        "last_activity_at": TIME, "last_seq": 0, "participants": ["planner", "worker"],
-                                        "revision": 0, "title": "T", "topic": "alpha/other"}], "next_cursor": None},
+    "list threads": {
+        "conversations": [
+            {
+                "conversation_id": ID,
+                "created_at": TIME,
+                "created_by": "planner",
+                "last_activity_at": TIME,
+                "last_seq": 0,
+                "participants": ["planner", "worker"],
+                "revision": 0,
+                "title": "T",
+                "topic": "alpha/other",
+            }
+        ],
+        "next_cursor": None,
+    },
     "post": {"conversation_id": ID, "created": True, "message_id": ID, "request_id": ID, "seqs": {"worker": 1}},
 }
 
 
 def planner_line(name, outcome, **extra):
-    return {"role": "planner", "credential_role": "planner", "credential_id": "planner-token", "tool": name,
-            "outcome": outcome, **extra}
+    return {
+        "role": "planner",
+        "credential_role": "planner",
+        "credential_id": "planner-token",
+        "tool": name,
+        "outcome": outcome,
+        **extra,
+    }
 
 
 GOLDEN_AUDIT = [
     planner_line("create_topic", "ok", topic="alpha", topic_id=ID, request_id=ID),
     planner_line("create_topic", "ok", topic="alpha/sub", topic_id=ID),
     planner_line("create_topic", "invalid_request", topic="alpha"),
-    {"role": "worker", "credential_role": "worker", "credential_id": "worker-token", "tool": "create_topic",
-     "outcome": "forbidden", "topic": "beta"},
+    {
+        "role": "worker",
+        "credential_role": "worker",
+        "credential_id": "worker-token",
+        "tool": "create_topic",
+        "outcome": "forbidden",
+        "topic": "beta",
+    },
     planner_line("get_topic", "ok", topic="alpha", topic_id=ID),
     planner_line("get_topic", "unknown_topic", topic="nope"),
     planner_line("update_topic", "ok", topic="alpha", topic_id=ID),
@@ -172,8 +256,11 @@ def test_a_run_of_core_calls_with_no_reference_in_it_answers_and_audits_as_befor
         async def step(label, name, arguments, role="planner"):
             seen[label] = normal(await tool(client, scene.host, name, arguments, role=role))
 
-        await step("create a topic", "create_topic", {"path": "alpha", "title": "Alpha",
-                                                      "members": ["planner", "worker"], "request_id": "fixed-1"})
+        await step(
+            "create a topic",
+            "create_topic",
+            {"path": "alpha", "title": "Alpha", "members": ["planner", "worker"], "request_id": "fixed-1"},
+        )
         await step("create a subtopic", "create_topic", {"path": "alpha/sub"})
         await step("create it again", "create_topic", {"path": "alpha"})
         await step("a role without the flag", "create_topic", {"path": "beta"}, "worker")
@@ -181,8 +268,13 @@ def test_a_run_of_core_calls_with_no_reference_in_it_answers_and_audits_as_befor
         await step("get an unknown topic", "get_topic", {"path": "nope"})
         await step("update a topic", "update_topic", {"path": "alpha", "description": "d"})
         await step("rename a subtopic", "rename_topic", {"path": "alpha/sub", "new_path": "alpha/other"})
-        made = await tool(client, scene.host, "create_conversation", {
-            "title": "T", "participants": ["planner", "worker"], "topic": "alpha"}, role="planner")
+        made = await tool(
+            client,
+            scene.host,
+            "create_conversation",
+            {"title": "T", "participants": ["planner", "worker"], "topic": "alpha"},
+            role="planner",
+        )
         seen["start a thread"] = normal(made)
         move = {"conversation_id": made["conversation_id"], "topic": "alpha/other"}
         await step("move the thread", "set_topic", move)
@@ -203,13 +295,32 @@ def test_no_existing_tools_response_gained_a_field_and_a_stale_job_move_has_no_c
     scene = build_scene()
     expected = {
         "create_job": {"created", "job_id", "revision", "state"},
-        "move_job": {"body", "created", "created_at", "created_by", "id", "request_id", "revision", "state", "title",
-                     "updated_at", "waiting_on"},
-        "get_job": {"body", "created_at", "created_by", "id", "revision", "state", "title", "updated_at",
-                    "waiting_on"},
+        "move_job": {
+            "body",
+            "created",
+            "created_at",
+            "created_by",
+            "id",
+            "request_id",
+            "revision",
+            "state",
+            "title",
+            "updated_at",
+            "waiting_on",
+        },
+        "get_job": {"body", "created_at", "created_by", "id", "revision", "state", "title", "updated_at", "waiting_on"},
         "read_history": {"messages", "next_seq", "prev_seq", "retention_gaps"},
-        "whoami": {"alias", "code", "credential_role", "effective_role", "initial_job_state", "job_states", "role",
-                   "roles", "search"},
+        "whoami": {
+            "alias",
+            "code",
+            "credential_role",
+            "effective_role",
+            "initial_job_state",
+            "job_states",
+            "role",
+            "roles",
+            "search",
+        },
         "claim_alias": {"alias_id", "alias", "badge", "code", "effective_role", "binding_token", "expires_at"},
         "list_topics": {"topics"},
     }
@@ -221,12 +332,14 @@ def test_no_existing_tools_response_gained_a_field_and_a_stale_job_move_has_no_c
         moved = await planner.call(client, "move_job", job_id=job["job_id"], to_state="working", expected_revision=1)
         conversation = await support.thread(client, scene.host, "job-hunt")
         got = {
-            "create_job": job, "move_job": moved,
+            "create_job": job,
+            "move_job": moved,
             "get_job": await planner.call(client, "get_job", job_id=job["job_id"]),
             "read_history": await planner.call(client, "read_history", conversation_id=conversation),
             "whoami": await planner.call(client, "whoami"),
-            "claim_alias": await tool(client, scene.host, "claim_alias", {
-                "name": "lead-scout", "passphrase": support.PASSPHRASE}),
+            "claim_alias": await tool(
+                client, scene.host, "claim_alias", {"name": "lead-scout", "passphrase": support.PASSPHRASE}
+            ),
             "list_topics": await planner.call(client, "list_topics"),
         }
         assert {name: set(answer) for name, answer in got.items()} == expected
@@ -247,6 +360,7 @@ def test_there_is_no_command_line_command_for_references():
 
 
 # 3. The size of the wiring ---------------------------------------------------------------------------------
+
 
 def test_app_py_is_at_most_800_lines():
     """GUARD. `baton/app.py` stays one screen of wiring: the reference tools' bodies are not in it."""

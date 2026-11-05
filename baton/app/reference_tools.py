@@ -34,8 +34,9 @@ class LiteralArguments(FuncMetadata):
 
 
 TOPIC = Annotated[str, Field(description="1-2 lowercase slug segments, such as project or project/subtopic.")]
-NAME = Annotated[str, Field(description=f"1-{references.MAX_NAME} characters of a-z, 0-9 and inner hyphens, "
-                                        "such as job-board.")]
+NAME = Annotated[
+    str, Field(description=f"1-{references.MAX_NAME} characters of a-z, 0-9 and inner hyphens, such as job-board.")
+]
 
 
 class _Host(Protocol):
@@ -46,22 +47,42 @@ class _Host(Protocol):
 
     def _conn(self) -> AbstractContextManager[Connection]: ...
 
-    def _under_grant(self, tool: str, role: str, identity: dict[str, str] | None, call: dict[str, Any] | None,
-                     operate: Callable[[Any, str | None], dict[str, Any]]) -> dict[str, Any]: ...
+    def _under_grant(
+        self,
+        tool: str,
+        role: str,
+        identity: dict[str, str] | None,
+        call: dict[str, Any] | None,
+        operate: Callable[[Any, str | None], dict[str, Any]],
+    ) -> dict[str, Any]: ...
 
 
 class ReferenceTools:
     """edit_reference, read_reference and reference_history."""
 
     def edit_reference(
-        self: _Host, role: str, topic: TOPIC, name: NAME,
-        body: Annotated[str, Field(description=f"The whole new text, 1 to {references.MAX_BODY_BYTES} bytes of "
-                                               "UTF-8. It is kept exactly as sent.")],
-        expected_revision: Annotated[StrictInt, Field(
-            ge=0, description="The revision you read, or 0 to create the reference. If it has moved on, nothing is "
-                              "written and the edit is refused as stale_revision.")],
-        request_id: Annotated[str | None, Field(
-            description="1-200 characters. Reuse it to retry safely; omit it and the host makes one.")] = None,
+        self: _Host,
+        role: str,
+        topic: TOPIC,
+        name: NAME,
+        body: Annotated[
+            str,
+            Field(
+                description=f"The whole new text, 1 to {references.MAX_BODY_BYTES} bytes of "
+                "UTF-8. It is kept exactly as sent."
+            ),
+        ],
+        expected_revision: Annotated[
+            StrictInt,
+            Field(
+                ge=0,
+                description="The revision you read, or 0 to create the reference. If it has moved on, nothing is "
+                "written and the edit is refused as stale_revision.",
+            ),
+        ],
+        request_id: Annotated[
+            str | None, Field(description="1-200 characters. Reuse it to retry safely; omit it and the host makes one.")
+        ] = None,
         grant_token: GRANT_TOKEN = None,
         identity: dict[str, str] | None = None,
         call: dict[str, Any] | None = None,
@@ -81,17 +102,41 @@ class ReferenceTools:
         reference.edit may edit in the grant's topic, or directly under it if the grant inherits, with its
         binding `token` and `grant_token`.
         """
-        return self._under_grant("edit_reference", role, identity, call, lambda conn, key: references.edit(
-            conn, self._config, actor=role, topic=topic, name=name, body=body, expected_revision=expected_revision,
-            request_id=request_id, identity=identity, grant_key=key, seen=topics.seen_by(call)))
+        return self._under_grant(
+            "edit_reference",
+            role,
+            identity,
+            call,
+            lambda conn, key: references.edit(
+                conn,
+                self._config,
+                actor=role,
+                topic=topic,
+                name=name,
+                body=body,
+                expected_revision=expected_revision,
+                request_id=request_id,
+                identity=identity,
+                grant_key=key,
+                seen=topics.seen_by(call),
+            ),
+        )
 
     def read_reference(
-        self: _Host, role: str, topic: TOPIC,
-        name: Annotated[str | None, Field(
-            description=f"1-{references.MAX_NAME} characters of a-z, 0-9 and inner hyphens. Left out, the topic's "
-                        "references are listed.")] = None,
-        revision: Annotated[StrictInt | None, Field(
-            ge=1, description="An earlier revision to read, which needs a name. Left out, the current one.")] = None,
+        self: _Host,
+        role: str,
+        topic: TOPIC,
+        name: Annotated[
+            str | None,
+            Field(
+                description=f"1-{references.MAX_NAME} characters of a-z, 0-9 and inner hyphens. Left out, the topic's "
+                "references are listed."
+            ),
+        ] = None,
+        revision: Annotated[
+            StrictInt | None,
+            Field(ge=1, description="An earlier revision to read, which needs a name. Left out, the current one."),
+        ] = None,
         call: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Read a topic's references: the list of them, one reference's current text, or an earlier revision of it.
@@ -106,7 +151,10 @@ class ReferenceTools:
             return references.read(conn, topic=topic, name=name, revision=revision, seen=topics.seen_by(call))
 
     def reference_history(
-        self: _Host, role: str, topic: TOPIC, name: NAME,
+        self: _Host,
+        role: str,
+        topic: TOPIC,
+        name: NAME,
         after_revision: Annotated[StrictInt, Field(ge=0, description="Only the revisions after this one.")] = 0,
         limit: Annotated[StrictInt, Field(ge=1, le=references.MAX_HISTORY_PAGE)] = 50,
         call: dict[str, Any] | None = None,
@@ -121,5 +169,6 @@ class ReferenceTools:
         changes nothing.
         """
         with self._conn() as conn:
-            return references.history(conn, topic=topic, name=name, after_revision=after_revision, limit=limit,
-                                      seen=topics.seen_by(call))
+            return references.history(
+                conn, topic=topic, name=name, after_revision=after_revision, limit=limit, seen=topics.seen_by(call)
+            )

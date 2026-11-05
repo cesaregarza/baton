@@ -20,17 +20,28 @@ from baton.config import parse
 
 
 def register(host: Host, redirect: str = REDIRECT) -> httpx.Response:
-    return httpx.post(host.base + "/register", json={"redirect_uris": [redirect], "client_name": "Example client",
-                                                     "token_endpoint_auth_method": "none"})
+    return httpx.post(
+        host.base + "/register",
+        json={"redirect_uris": [redirect], "client_name": "Example client", "token_endpoint_auth_method": "none"},
+    )
 
 
 def authorize(host: Host, *, role: str = "planner", passphrase: str = PASSPHRASE) -> dict:
     client_id = register(host).json()["client_id"]
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-    started = httpx.get(host.base + "/authorize", params={
-        "response_type": "code", "client_id": client_id, "redirect_uri": REDIRECT, "code_challenge": challenge,
-        "code_challenge_method": "S256", "state": "s1", "resource": host.mcp_url})
+    started = httpx.get(
+        host.base + "/authorize",
+        params={
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": REDIRECT,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": "s1",
+            "resource": host.mcp_url,
+        },
+    )
     login_id = parse_qs(urlparse(started.headers["location"]).query)["id"][0]
     page = httpx.get(host.base + "/login", params={"id": login_id})
     assert "Example client" in page.text and "<option>planner</option>" in page.text
@@ -39,9 +50,16 @@ def authorize(host: Host, *, role: str = "planner", passphrase: str = PASSPHRASE
         return {"refused": approved.status_code}
     query = parse_qs(urlparse(approved.headers["location"]).query)
     assert query["state"] == ["s1"]
-    tokens = httpx.post(host.base + "/token", data={
-        "grant_type": "authorization_code", "code": query["code"][0], "client_id": client_id,
-        "redirect_uri": REDIRECT, "code_verifier": verifier}).json()
+    tokens = httpx.post(
+        host.base + "/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": query["code"][0],
+            "client_id": client_id,
+            "redirect_uri": REDIRECT,
+            "code_verifier": verifier,
+        },
+    ).json()
     return {**tokens, "client_id": client_id}
 
 
@@ -74,17 +92,31 @@ def test_a_client_authorizes_with_the_passphrase_and_acts_as_the_chosen_role(sta
     # Bearer tokens keep working beside OAuth.
     assert whoami(host, host.tokens["worker"])["role"] == "worker"
 
-    refreshed = httpx.post(host.base + "/token", data={"grant_type": "refresh_token", "client_id": tokens["client_id"],
-                                                       "refresh_token": tokens["refresh_token"]}).json()
+    refreshed = httpx.post(
+        host.base + "/token",
+        data={
+            "grant_type": "refresh_token",
+            "client_id": tokens["client_id"],
+            "refresh_token": tokens["refresh_token"],
+        },
+    ).json()
     assert whoami(host, refreshed["access_token"])["role"] == "planner"
-    reused = httpx.post(host.base + "/token", data={"grant_type": "refresh_token", "client_id": tokens["client_id"],
-                                                    "refresh_token": tokens["refresh_token"]})
+    reused = httpx.post(
+        host.base + "/token",
+        data={
+            "grant_type": "refresh_token",
+            "client_id": tokens["client_id"],
+            "refresh_token": tokens["refresh_token"],
+        },
+    )
     assert reused.status_code == 400  # rotation spent the first refresh token
 
     # Both access tokens (refreshing does not end the old one early) and the live refresh token.
     assert auth.revoke_all(host.config.oauth_state_path) == 3
-    assert httpx.post(host.mcp_url, json={}, headers={"Authorization": f"Bearer {refreshed['access_token']}"}
-                      ).status_code == 401
+    assert (
+        httpx.post(host.mcp_url, json={}, headers={"Authorization": f"Bearer {refreshed['access_token']}"}).status_code
+        == 401
+    )
 
 
 def test_a_wrong_passphrase_or_a_role_not_offered_is_refused(start_host) -> None:
@@ -100,9 +132,21 @@ def test_registration_needs_an_allowed_redirect(start_host) -> None:
 
 
 def test_redirect_rules() -> None:
-    config = parse({"host": {"public_url": "https://baton.example.test"}, "roles": {"planner": {}},
-                    "auth": {"oauth": {"enabled": True, "passphrase_hash": "scrypt$00$00", "roles": ["planner"],
-                                       "redirect_uris": [REDIRECT], "allow_loopback_redirects": False}}})
+    config = parse(
+        {
+            "host": {"public_url": "https://baton.example.test"},
+            "roles": {"planner": {}},
+            "auth": {
+                "oauth": {
+                    "enabled": True,
+                    "passphrase_hash": "scrypt$00$00",
+                    "roles": ["planner"],
+                    "redirect_uris": [REDIRECT],
+                    "allow_loopback_redirects": False,
+                }
+            },
+        }
+    )
     assert auth.valid_redirect_uri(REDIRECT, config)
     assert not auth.valid_redirect_uri(REDIRECT + "/extra", config)
     assert not auth.valid_redirect_uri("http://127.0.0.1:5000/cb", config)

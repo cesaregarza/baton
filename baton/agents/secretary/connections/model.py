@@ -27,8 +27,12 @@ class ToolCall:
         return cls(**value)
 
     def item(self) -> dict:
-        return {"type": "function_call", "call_id": self.id, "name": self.name,
-                "arguments": json.dumps(self.arguments, sort_keys=True, separators=(",", ":"))}
+        return {
+            "type": "function_call",
+            "call_id": self.id,
+            "name": self.name,
+            "arguments": json.dumps(self.arguments, sort_keys=True, separators=(",", ":")),
+        }
 
 
 @dataclass(frozen=True)
@@ -62,15 +66,25 @@ class ModelTurn:
                 case "reasoning":
                     pass  # Preserve the encrypted reasoning item for stateless continuation.
                 case "function_call":
-                    calls.append(ToolCall.parse({"id": item.get("call_id"), "name": item.get("name"),
-                                                 "arguments": json_object(item.get("arguments", ""))}))
+                    calls.append(
+                        ToolCall.parse(
+                            {
+                                "id": item.get("call_id"),
+                                "name": item.get("name"),
+                                "arguments": json_object(item.get("arguments", "")),
+                            }
+                        )
+                    )
                 case "message":
                     content = item.get("content")
                     if not isinstance(content, list):
                         raise ModelUnavailable("model message has invalid content")
                     for part in content:
-                        if not isinstance(part, dict) or part.get("type") != "output_text" \
-                                or not isinstance(part.get("text"), str):
+                        if (
+                            not isinstance(part, dict)
+                            or part.get("type") != "output_text"
+                            or not isinstance(part.get("text"), str)
+                        ):
                             raise ModelUnavailable("model message was refused or invalid")
                         texts.append(part["text"])
                 case _:
@@ -85,8 +99,11 @@ def _usage(value: object) -> dict | None:
     if not isinstance(value, dict):
         return None
     details = value.get("input_tokens_details")
-    counts = {"input_tokens": value.get("input_tokens"), "output_tokens": value.get("output_tokens"),
-              "cached_tokens": details.get("cached_tokens") if isinstance(details, dict) else None}
+    counts = {
+        "input_tokens": value.get("input_tokens"),
+        "output_tokens": value.get("output_tokens"),
+        "cached_tokens": details.get("cached_tokens") if isinstance(details, dict) else None,
+    }
     return counts if all(type(n) is int and n >= 0 for n in counts.values()) else None
 
 
@@ -100,20 +117,27 @@ class SecretaryModel:
 
     async def turn(self, messages: list[dict], tools: list[dict], timeout: float) -> ModelTurn:
         if self.settings["provider"] == "command":
-            value = await command_json(self.settings, {"version": 3, "input": messages, "tools": tools,
-                                                       "response_schema": RESPONSE_SCHEMA}, timeout)
+            value = await command_json(
+                self.settings,
+                {"version": 3, "input": messages, "tools": tools, "response_schema": RESPONSE_SCHEMA},
+                timeout,
+            )
             return ModelTurn.command(value)
         api_key = os.environ.get(self.settings["api_key_env"])
         if not api_key:
             raise ModelUnavailable("model credential is unavailable")
         body = {
-            "model": self.settings["model"], "store": False, "input": messages,
-            "tools": tools, "parallel_tool_calls": False,
+            "model": self.settings["model"],
+            "store": False,
+            "input": messages,
+            "tools": tools,
+            "parallel_tool_calls": False,
             "include": ["reasoning.encrypted_content"],
             "reasoning": {"effort": self.settings["reasoning_effort"]},
             "max_output_tokens": self.settings["max_output_tokens"],
-            "text": {"format": {"type": "json_schema", "name": "secretary_triage", "strict": True,
-                                "schema": RESPONSE_SCHEMA}},
+            "text": {
+                "format": {"type": "json_schema", "name": "secretary_triage", "strict": True, "schema": RESPONSE_SCHEMA}
+            },
         }
         if self.layered_cache:
             # Three stable breakpoints plus the implicit window/tool-result boundary (four writes maximum).

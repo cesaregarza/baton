@@ -12,8 +12,10 @@ from baton.database import Connection, memory
 from baton.errors import CursorExpired, InvalidRequest
 
 INVALID_DETAIL = "a cursor is <log_epoch>:<change_seq>, as next_cursor gave it"
-EXPIRED_DETAIL = ("that cursor is from another log or older than the oldest change kept; rebuild from "
-                  "state, then continue from reset_cursor")
+EXPIRED_DETAIL = (
+    "that cursor is from another log or older than the oldest change kept; rebuild from "
+    "state, then continue from reset_cursor"
+)
 INVALID_NUMBERS = [
     pytest.param("²", id="non-decimal-digit"),
     pytest.param("1²", id="mixed-digits"),
@@ -67,16 +69,19 @@ def test_invalid_numbers_are_refusals(log, operation, number: str) -> None:
     assert str(raised.value) == INVALID_DETAIL
 
 
-@pytest.mark.parametrize(("number", "position", "remaining"), [
-    ("0", 0, [5, 11]),
-    ("0005", 5, [11]),
-    ("٥", 5, [11]),
-    ("٠5", 5, [11]),
-    ("１２", 12, []),
-    ("100", 100, []),
-    ("9223372036854775807", 9223372036854775807, []),
-    pytest.param("0" * 1000 + "5", 5, [11], id="many-leading-zeros"),
-])
+@pytest.mark.parametrize(
+    ("number", "position", "remaining"),
+    [
+        ("0", 0, [5, 11]),
+        ("0005", 5, [11]),
+        ("٥", 5, [11]),
+        ("٠5", 5, [11]),
+        ("１２", 12, []),
+        ("100", 100, []),
+        ("9223372036854775807", 9223372036854775807, []),
+        pytest.param("0" * 1000 + "5", 5, [11], id="many-leading-zeros"),
+    ],
+)
 def test_accepted_numbers_keep_their_position(log, operation, number: str, position: int, remaining: list[int]) -> None:
     result = follow(log, operation, f"current:{number}")
     if operation == "read":

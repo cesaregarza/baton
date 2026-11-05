@@ -25,8 +25,7 @@ from baton.database.store import SCHEMA_VERSION, connect
 FIXTURES = Path(__file__).parent / "fixtures"
 # Every older schema there is a real fixture for. Not read off MIGRATES_FROM on purpose: a version missing
 # from that list is a failure to catch, not a case to stop generating.
-FIXTURE_VERSIONS = tuple(sorted(int(path.stem.removeprefix("schema_v"))
-                                for path in FIXTURES.glob("schema_v*.sql")))
+FIXTURE_VERSIONS = tuple(sorted(int(path.stem.removeprefix("schema_v")) for path in FIXTURES.glob("schema_v*.sql")))
 
 
 @pytest.fixture
@@ -47,8 +46,9 @@ def open_one(db: sqlite3.Connection, config: Config, title: str, **kwargs: Any) 
     # assertion below as it was. Which roles may open a topic is test_topic_containers.py's subject.
     if kwargs.get("topic"):
         back_topics(db, kwargs["topic"])
-    made = conversations.create(db, config, actor="orchestrator", title=title, participants=GROUP,
-                                request_id=rid(f"open-{title}"), **kwargs)
+    made = conversations.create(
+        db, config, actor="orchestrator", title=title, participants=GROUP, request_id=rid(f"open-{title}"), **kwargs
+    )
     return made["conversation_id"]
 
 
@@ -59,28 +59,40 @@ def titles(listed: list[dict[str, Any]]) -> list[tuple[str, Any]]:
 # The grammar ----------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("topic", [
-    "Project",                      # uppercase
-    "project/sub/deeper",           # three segments
-    "project//sub",                 # an empty segment in the middle
-    "/project",                     # an empty first segment
-    "project/",                     # an empty second segment
-    "",                             # empty
-    "/",                            # nothing but a separator
-    "pro ject",                     # a space
-    "pro_ject",                     # an underscore
-    "-project",                     # a leading hyphen
-    "project-",                     # a trailing hyphen
-    "project/-sub",                 # a leading hyphen in the second segment
-    "projé",                        # not ASCII
-    "pro%ject",                     # a LIKE metacharacter, which filtering must never see
-    "pro_ject/x",                   # the other LIKE metacharacter
-    7,                              # not a string
-    ["project"],                    # not a string
-])
+@pytest.mark.parametrize(
+    "topic",
+    [
+        "Project",  # uppercase
+        "project/sub/deeper",  # three segments
+        "project//sub",  # an empty segment in the middle
+        "/project",  # an empty first segment
+        "project/",  # an empty second segment
+        "",  # empty
+        "/",  # nothing but a separator
+        "pro ject",  # a space
+        "pro_ject",  # an underscore
+        "-project",  # a leading hyphen
+        "project-",  # a trailing hyphen
+        "project/-sub",  # a leading hyphen in the second segment
+        "projé",  # not ASCII
+        "pro%ject",  # a LIKE metacharacter, which filtering must never see
+        "pro_ject/x",  # the other LIKE metacharacter
+        7,  # not a string
+        ["project"],  # not a string
+    ],
+)
 def test_a_topic_that_is_not_two_lowercase_slugs_is_refused(db, config, topic: Any) -> None:
-    detail = refused("invalid_request", conversations.create, db, config, actor="orchestrator", title="t",
-                     participants=GROUP, topic=topic, request_id=rid("bad-topic"))
+    detail = refused(
+        "invalid_request",
+        conversations.create,
+        db,
+        config,
+        actor="orchestrator",
+        title="t",
+        participants=GROUP,
+        topic=topic,
+        request_id=rid("bad-topic"),
+    )
     assert "topic" in detail, detail
     assert count(db, "conversations") == 0
 
@@ -88,8 +100,17 @@ def test_a_topic_that_is_not_two_lowercase_slugs_is_refused(db, config, topic: A
 def test_a_segment_is_bounded_in_length(db, config) -> None:
     longest = "a" * conversations.MAX_TOPIC_SEGMENT
     assert open_one(db, config, "at the limit", topic=f"{longest}/{longest}")
-    refused("invalid_request", conversations.create, db, config, actor="orchestrator", title="t",
-            participants=GROUP, topic=longest + "a", request_id=rid("too-long"))
+    refused(
+        "invalid_request",
+        conversations.create,
+        db,
+        config,
+        actor="orchestrator",
+        title="t",
+        participants=GROUP,
+        topic=longest + "a",
+        request_id=rid("too-long"),
+    )
     assert count(db, "conversations") == 1
 
 
@@ -118,8 +139,11 @@ def test_setting_renaming_and_clearing_a_topic_keeps_the_conversation_id(db, con
     assert (again["topic"], again["changed"]) == ("project", False)
 
     renamed = conversations.set_topic(db, config, conversation_id, "project/alpha", actor="orchestrator")
-    assert (renamed["conversation_id"], renamed["topic"], renamed["changed"]) == \
-        (conversation_id, "project/alpha", True)
+    assert (renamed["conversation_id"], renamed["topic"], renamed["changed"]) == (
+        conversation_id,
+        "project/alpha",
+        True,
+    )
     cleared = conversations.set_topic(db, config, conversation_id, None, actor="orchestrator")
     assert (cleared["conversation_id"], cleared["topic"], cleared["changed"]) == (conversation_id, None, True)
 
@@ -135,12 +159,11 @@ def test_setting_a_topic_needs_the_permission_and_membership(db, config) -> None
     # A role with the permission that is not in this conversation: the only managing role here is the
     # creator, so it leaves the conversation first.
     conversations.remove(db, config, conversation_id, "orchestrator", actor="orchestrator")
-    refused("not_a_participant", conversations.set_topic, db, config, conversation_id, "other",
-            actor="orchestrator")
-    refused("unknown_conversation", conversations.set_topic, db, config, "conv_nonexistent", "other",
-            actor="orchestrator")
-    refused("invalid_request", conversations.set_topic, db, config, conversation_id, "Bad",
-            actor="orchestrator")
+    refused("not_a_participant", conversations.set_topic, db, config, conversation_id, "other", actor="orchestrator")
+    refused(
+        "unknown_conversation", conversations.set_topic, db, config, "conv_nonexistent", "other", actor="orchestrator"
+    )
+    refused("invalid_request", conversations.set_topic, db, config, conversation_id, "Bad", actor="orchestrator")
     [listed] = conversations.list_for(db, "reviewer")
     assert (listed["conversation_id"], listed["topic"]) == (conversation_id, "project")  # nothing changed
 
@@ -148,16 +171,34 @@ def test_setting_a_topic_needs_the_permission_and_membership(db, config) -> None
 def test_a_topic_is_part_of_a_creates_retry_identity(db, config) -> None:
     back_topics(db, "project", "project/other")
     request_id = rid("topic-once")
-    first = conversations.create(db, config, actor="orchestrator", title="t", participants=GROUP,
-                                 topic="project", request_id=request_id)
-    again = conversations.create(db, config, actor="orchestrator", title="t", participants=GROUP,
-                                 topic="project", request_id=request_id)
-    assert (again["created"], again["conversation_id"], again["topic"]) == \
-        (False, first["conversation_id"], "project")
-    refused("idempotency_conflict", conversations.create, db, config, actor="orchestrator", title="t",
-            participants=GROUP, topic="project/other", request_id=request_id)
-    refused("idempotency_conflict", conversations.create, db, config, actor="orchestrator", title="t",
-            participants=GROUP, request_id=request_id)
+    first = conversations.create(
+        db, config, actor="orchestrator", title="t", participants=GROUP, topic="project", request_id=request_id
+    )
+    again = conversations.create(
+        db, config, actor="orchestrator", title="t", participants=GROUP, topic="project", request_id=request_id
+    )
+    assert (again["created"], again["conversation_id"], again["topic"]) == (False, first["conversation_id"], "project")
+    refused(
+        "idempotency_conflict",
+        conversations.create,
+        db,
+        config,
+        actor="orchestrator",
+        title="t",
+        participants=GROUP,
+        topic="project/other",
+        request_id=request_id,
+    )
+    refused(
+        "idempotency_conflict",
+        conversations.create,
+        db,
+        config,
+        actor="orchestrator",
+        title="t",
+        participants=GROUP,
+        request_id=request_id,
+    )
     assert count(db, "conversations") == 1
 
 
@@ -176,22 +217,34 @@ def tagged(db, config) -> sqlite3.Connection:
 
 
 def test_a_prefix_matches_whole_segments_and_never_a_longer_word(tagged, config) -> None:
-    assert titles(conversations.list_for(tagged, "reviewer", topic="project")) == \
-        [("a subtopic", "project/alpha"), ("another subtopic", "project/beta"), ("the project", "project")]
-    assert titles(conversations.list_for(tagged, "reviewer", topic="projectile")) == \
-        [("a different topic", "projectile")]
-    assert titles(conversations.list_for(tagged, "reviewer", topic="project/alpha")) == \
-        [("a subtopic", "project/alpha")]
+    assert titles(conversations.list_for(tagged, "reviewer", topic="project")) == [
+        ("a subtopic", "project/alpha"),
+        ("another subtopic", "project/beta"),
+        ("the project", "project"),
+    ]
+    assert titles(conversations.list_for(tagged, "reviewer", topic="projectile")) == [
+        ("a different topic", "projectile")
+    ]
+    assert titles(conversations.list_for(tagged, "reviewer", topic="project/alpha")) == [
+        ("a subtopic", "project/alpha")
+    ]
     assert conversations.list_for(tagged, "reviewer", topic="proj") == []
 
 
 def test_an_unfiltered_list_keeps_the_untagged_conversations(tagged, config) -> None:
-    assert titles(conversations.list_for(tagged, "reviewer")) == \
-        [("a different topic", "projectile"), ("a subtopic", "project/alpha"),
-         ("another subtopic", "project/beta"), ("the project", "project"), ("untagged", None)]
+    assert titles(conversations.list_for(tagged, "reviewer")) == [
+        ("a different topic", "projectile"),
+        ("a subtopic", "project/alpha"),
+        ("another subtopic", "project/beta"),
+        ("the project", "project"),
+        ("untagged", None),
+    ]
     assert titles(conversations.list_all(tagged)) == titles(conversations.list_for(tagged, "reviewer"))
-    assert titles(conversations.list_all(tagged, topic="project")) == \
-        [("a subtopic", "project/alpha"), ("another subtopic", "project/beta"), ("the project", "project")]
+    assert titles(conversations.list_all(tagged, topic="project")) == [
+        ("a subtopic", "project/alpha"),
+        ("another subtopic", "project/beta"),
+        ("the project", "project"),
+    ]
 
 
 def test_a_filter_must_itself_be_a_well_formed_topic(tagged, config) -> None:
@@ -220,13 +273,19 @@ def test_every_older_database_gains_a_null_topic(tmp_path: Path, version: int) -
     raw.executescript((FIXTURES / f"schema_v{version}.sql").read_text())
     if version >= 3:  # conversations exist from version 3 on
         with raw:
-            raw.execute("INSERT INTO conversations (id, request_id, request_digest, title, created_by,"
-                        " created_at, last_seq) VALUES ('conv_old', 'r', 'd', 'Carried over', 'orchestrator',"
-                        " '2026-10-01T00:00:00+00:00', 0)")
-            raw.execute("INSERT INTO participants (conversation_id, role, added_at) VALUES"
-                        " ('conv_old', 'orchestrator', '2026-10-01T00:00:00+00:00')")
-            raw.execute("INSERT INTO participants (conversation_id, role, added_at) VALUES"
-                        " ('conv_old', 'reviewer', '2026-10-01T00:00:00+00:00')")
+            raw.execute(
+                "INSERT INTO conversations (id, request_id, request_digest, title, created_by,"
+                " created_at, last_seq) VALUES ('conv_old', 'r', 'd', 'Carried over', 'orchestrator',"
+                " '2026-10-01T00:00:00+00:00', 0)"
+            )
+            raw.execute(
+                "INSERT INTO participants (conversation_id, role, added_at) VALUES"
+                " ('conv_old', 'orchestrator', '2026-10-01T00:00:00+00:00')"
+            )
+            raw.execute(
+                "INSERT INTO participants (conversation_id, role, added_at) VALUES"
+                " ('conv_old', 'reviewer', '2026-10-01T00:00:00+00:00')"
+            )
     raw.close()
     os.chmod(config.db_path, 0o600)
 
@@ -235,12 +294,13 @@ def test_every_older_database_gains_a_null_topic(tmp_path: Path, version: int) -
     assert "topic" in {row["name"] for row in db.execute("PRAGMA table_info(conversations)")}
     if version >= 3:
         [carried] = conversations.list_for(db, "reviewer")
-        assert (carried["conversation_id"], carried["title"], carried["topic"]) == \
-            ("conv_old", "Carried over", None)
+        assert (carried["conversation_id"], carried["title"], carried["topic"]) == ("conv_old", "Carried over", None)
         # And a carried-over conversation can be given one straight away, once the topic exists.
         back_topics(db, "project/carried")
-        assert conversations.set_topic(db, config, "conv_old", "project/carried",
-                                       actor="orchestrator")["topic"] == "project/carried"
+        assert (
+            conversations.set_topic(db, config, "conv_old", "project/carried", actor="orchestrator")["topic"]
+            == "project/carried"
+        )
     db.close()
 
 
@@ -253,6 +313,15 @@ def test_the_topic_step_names_the_table_it_alters() -> None:
     # Named by its own version, not by the current one, so a later step adding a column elsewhere
     # does not read as a failure of the topic step. The set below is still exact: a step that alters
     # a new table has to be added here deliberately, which is the point of the assertion.
-    assert {table for step in store._ADDED_COLUMNS.values() for table in step} \
-        == {"messages", "conversations", "wakes", "generations", "topics", "seat_sessions", "seat_prelogin",
-            "seat_receipts", "seat_requests", "alias_bindings"}
+    assert {table for step in store._ADDED_COLUMNS.values() for table in step} == {
+        "messages",
+        "conversations",
+        "wakes",
+        "generations",
+        "topics",
+        "seat_sessions",
+        "seat_prelogin",
+        "seat_receipts",
+        "seat_requests",
+        "alias_bindings",
+    }

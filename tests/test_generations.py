@@ -40,14 +40,28 @@ def refused(code: str, operation, *args, **kwargs) -> BatonError:
     return raised.value
 
 
-def fill(db, config, conversation_id: str, generation: str | None = None, kinds=derived.KINDS,
-         producer: str = "alpha", request_id: str | None = None, body: str | None = None) -> dict[str, Any]:
+def fill(
+    db,
+    config,
+    conversation_id: str,
+    generation: str | None = None,
+    kinds=derived.KINDS,
+    producer: str = "alpha",
+    request_id: str | None = None,
+    body: str | None = None,
+) -> dict[str, Any]:
     """One batch over every kind asked for, read in full and committed."""
     manifest = derived.begin_batch(db, config, producer, conversation_id, list(kinds), generation=generation)
     read_all(db, config, manifest, producer)
     overrides = {"body": body} if body else {}
-    return commit(db, config, manifest, artifacts_for(manifest, **overrides),
-                  request_id=request_id or manifest["batch_id"], producer=producer)
+    return commit(
+        db,
+        config,
+        manifest,
+        artifacts_for(manifest, **overrides),
+        request_id=request_id or manifest["batch_id"],
+        producer=producer,
+    )
 
 
 def create(db, config, producer: str = "alpha", profile: dict | None = None) -> str:
@@ -65,6 +79,7 @@ def active(db, producer: str = "alpha") -> str | None:
 
 def served_generation(db, config, conversation_id: str) -> set[str]:
     from baton import search
+
     return {a["generation"] for a in search.read_artifacts(db, config, "viewer", conversation_id)["artifacts"]}
 
 
@@ -91,13 +106,16 @@ def derived_epoch(db) -> str:
     return db.execute("SELECT value FROM log_meta WHERE key = 'log_epoch'").fetchone()[0]
 
 
-@pytest.mark.parametrize("profile", [
-    {"colour": "blue"},
-    {"embedding": {"model": "m", "dim": 2048, "normalization": "unit", "distance": "cosine"}},
-    {"embedding": {"model": "m", "dim": 8, "normalization": "sometimes", "distance": "cosine"}},
-    {"embedding": {"model": "", "dim": 8, "normalization": "unit", "distance": "cosine"}},
-    {"summarizer": 7},
-])
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {"colour": "blue"},
+        {"embedding": {"model": "m", "dim": 2048, "normalization": "unit", "distance": "cosine"}},
+        {"embedding": {"model": "m", "dim": 8, "normalization": "sometimes", "distance": "cosine"}},
+        {"embedding": {"model": "", "dim": 8, "normalization": "unit", "distance": "cosine"}},
+        {"summarizer": 7},
+    ],
+)
 def test_a_profile_is_checked_when_the_generation_is_made(db, config, profile) -> None:
     refused("invalid_request", derived.generation_create, db, config, "alpha", profile)
 
@@ -121,8 +139,9 @@ def test_a_generation_fills_while_the_active_one_keeps_serving_then_switches_who
     fill(db, config, conversation_id)
     old = active(db)
     new = create(db, config)
-    assert {kind for (_, kind), p in pairs(db, config, generation=new).items() if p["state"] == "none"} \
-        == set(derived.KINDS)
+    assert {kind for (_, kind), p in pairs(db, config, generation=new).items() if p["state"] == "none"} == set(
+        derived.KINDS
+    )
     fill(db, config, conversation_id, generation=new, kinds=("summary", "decisions"))
     assert served_generation(db, config, conversation_id) == {old}  # still the old one, while filling
     refused("generation_incomplete", activate, db, config, new)  # open_questions not yet in it
@@ -156,8 +175,9 @@ def test_19_a_pair_held_by_the_provenance_bound_keeps_activation_incomplete(tmp_
     new = create(db, config)
     fill(db, config, conversation_id, generation=new)  # covers 1-4 within two ranges, then can't go on
     error = refused("generation_incomplete", activate, db, config, new)
-    assert {(p["conversation_id"], p["kind"]) for p in error.extra["pairs"]} == \
-        {(conversation_id, kind) for kind in derived.KINDS}
+    assert {(p["conversation_id"], p["kind"]) for p in error.extra["pairs"]} == {
+        (conversation_id, kind) for kind in derived.KINDS
+    }
     assert active(db) != new
     db.close()
 
@@ -278,8 +298,7 @@ def test_a_conversation_emptied_before_activation_is_required_by_nothing(db, con
     lose(db, *sent)  # every copy goes
     db.execute("UPDATE artifact_versions SET state = 'invalid' WHERE generation = ?", (new,))  # as losing them did
     assert not [key for key in pairs(db, config, generation=new) if key[0] == conversation_id]
-    refused("nothing_to_index", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"],
-            generation=new)
+    refused("nothing_to_index", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"], generation=new)
     versions_before = db.execute("SELECT COUNT(*) FROM artifact_versions").fetchone()[0]
     assert activate(db, config, new)["generation"] == new  # nothing committed for it, empty or otherwise
     assert db.execute("SELECT COUNT(*) FROM artifact_versions").fetchone()[0] == versions_before
@@ -341,8 +360,9 @@ def test_a_dropped_generation_takes_no_batch_and_its_open_batches_close(db, conf
     derived.generation_drop(db, config, "alpha", new)
     assert db.execute("SELECT state FROM batches WHERE id = ?", (manifest["batch_id"],)).fetchone()[0] == "discarded"
     refused("batch_closed", commit, db, config, manifest)
-    refused("generation_dropped", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"],
-            generation=new)
+    refused(
+        "generation_dropped", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"], generation=new
+    )
     refused("generation_dropped", activate, db, config, new)
 
 
@@ -354,23 +374,34 @@ def test_a_dropped_generation_s_rows_stay_and_receipts_say_invalid(tmp_path: Pat
     fill(db, config, conversation_id, generation=new, request_id="r-drop")
     batch_id = receipt_batch(db, "r-drop")
     derived.generation_drop(db, config, "alpha", new)
-    held = lambda: db.execute("SELECT COUNT(*) FROM artifact_versions WHERE generation = ?",  # noqa: E731
-                              (new,)).fetchone()[0]
+
+    def held():
+        return db.execute("SELECT COUNT(*) FROM artifact_versions WHERE generation = ?", (new,)).fetchone()[0]
+
     assert held() == 3
     other, _ = converse(db, config, 1)
     derived.begin_batch(db, config, "alpha", other, ["summary"])  # a writer call deletes nothing
     assert held() == 3
-    replay = commit(db, config, {"batch_id": batch_id, "kinds": {}}, [
-        {"kind": kind, "body": f"{kind} of the release plan", "citations": [], "expected_version": 0}
-        for kind in derived.KINDS], request_id="r-drop")
+    replay = commit(
+        db,
+        config,
+        {"batch_id": batch_id, "kinds": {}},
+        [
+            {"kind": kind, "body": f"{kind} of the release plan", "citations": [], "expected_version": 0}
+            for kind in derived.KINDS
+        ],
+        request_id="r-drop",
+    )
     assert {v["state"] for v in replay["versions"]} == {"invalid"} and replay["created"] is False
     db.close()
 
 
 def receipt_batch(db, request_id: str) -> str:
     import json
-    receipt = json.loads(db.execute("SELECT receipt FROM commit_requests WHERE request_id = ?",
-                                    (request_id,)).fetchone()[0])
+
+    receipt = json.loads(
+        db.execute("SELECT receipt FROM commit_requests WHERE request_id = ?", (request_id,)).fetchone()[0]
+    )
     version_id = receipt["versions"][0]["version_id"]
     return db.execute("SELECT batch_id FROM artifact_versions WHERE id = ?", (version_id,)).fetchone()[0]
 
@@ -412,8 +443,16 @@ def test_dirty_for_a_generation_creates_nothing_and_omits_empty_conversations(db
 
 def test_begin_batch_refuses_a_generation_it_cannot_use(db, config) -> None:
     conversation_id, _ = converse(db, config, 1)
-    refused("unknown_generation", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"],
-            generation="gen_missing")
+    refused(
+        "unknown_generation",
+        derived.begin_batch,
+        db,
+        config,
+        "alpha",
+        conversation_id,
+        ["summary"],
+        generation="gen_missing",
+    )
 
 
 # Schema --------------------------------------------------------------------------------------------------
@@ -442,6 +481,7 @@ def test_a_real_participant_change_posts_a_notice_that_must_be_covered(db, confi
     """Through conversations.add a participant change also posts a host notice, a message of its own: the rule
     for the change itself is covered above; the notice is covered like any other message."""
     from baton import conversations
+
     conversation_id, _ = converse(db, config, 2)
     new = create(db, config)
     fill(db, config, conversation_id, generation=new)
@@ -473,14 +513,16 @@ def test_a_generation_retired_by_the_sweep_takes_no_new_batch(tmp_path: Path) ->
     stale = create(db, config)
     old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     db.execute("UPDATE generations SET last_write_at = ?, created_at = ? WHERE id = ?", (old, old, stale))
-    refused("generation_dropped", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"],
-            generation=stale)  # validated after the sweep that retires it, so nothing is written for it
+    refused(
+        "generation_dropped", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"], generation=stale
+    )  # validated after the sweep that retires it, so nothing is written for it
     assert db.execute("SELECT COUNT(*) FROM batches WHERE generation = ?", (stale,)).fetchone()[0] == 0
     other, _ = converse(db, config, 1)
     derived.begin_batch(db, config, "alpha", other, ["summary"])  # a writer call that succeeds keeps the sweep
     refused("generation_dropped", activate, db, config, stale)  # its row stays, as a tombstone
-    refused("generation_dropped", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"],
-            generation=stale)
+    refused(
+        "generation_dropped", derived.begin_batch, db, config, "alpha", conversation_id, ["summary"], generation=stale
+    )
     db.close()
 
 
@@ -543,6 +585,7 @@ def test_the_bound_holds_on_the_watermark_path_too(tmp_path: Path) -> None:
 
 def test_the_bound_has_a_ceiling(tmp_path: Path) -> None:
     from baton.config import ConfigError
+
     with pytest.raises(ConfigError, match="max_activation_reconcile"):
         reads_config(tmp_path, max_activation_reconcile=100001)
     assert reads_config(tmp_path, max_activation_reconcile=100000).indexer.max_activation_reconcile == 100000
@@ -552,24 +595,41 @@ def test_a_bad_profile_file_is_named_as_the_profile(tmp_path: Path, capsys) -> N
     import json
 
     from baton import cli
+
     config = reads_config(tmp_path)
     connect(config.db_path).close()
     path = tmp_path / "baton.toml"
-    path.write_text("\n".join([
-        "[host]", 'public_url = "http://127.0.0.1:8765"', f'data_dir = "{config.data_dir}"',
-        "[roles.orchestrator]", "[indexer]", 'producers = ["alpha"]', ""]))
+    path.write_text(
+        "\n".join(
+            [
+                "[host]",
+                'public_url = "http://127.0.0.1:8765"',
+                f'data_dir = "{config.data_dir}"',
+                "[roles.orchestrator]",
+                "[indexer]",
+                'producers = ["alpha"]',
+                "",
+            ]
+        )
+    )
     profile = tmp_path / "profile.json"
     profile.write_text("{not json")
-    assert cli.main(["--config", str(path), "index", "generation", "create", "--producer", "alpha",
-                     "--profile", str(profile)]) == 1
+    assert (
+        cli.main(
+            ["--config", str(path), "index", "generation", "create", "--producer", "alpha", "--profile", str(profile)]
+        )
+        == 1
+    )
     assert "--profile" in json.loads(capsys.readouterr().out)["detail"]
 
 
 def test_begin_and_commit_each_reset_the_retention_clock(db, config) -> None:
     conversation_id, _ = converse(db, config, 2)
     building = create(db, config)
-    clock = lambda: db.execute("SELECT last_write_at FROM generations WHERE id = ?",  # noqa: E731
-                               (building,)).fetchone()[0]
+
+    def clock():
+        return db.execute("SELECT last_write_at FROM generations WHERE id = ?", (building,)).fetchone()[0]
+
     aging = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     db.execute("UPDATE generations SET last_write_at = ? WHERE id = ?", (aging, building))
     manifest = derived.begin_batch(db, config, "alpha", conversation_id, ["summary"], generation=building)
@@ -604,8 +664,11 @@ def test_a_conversation_empty_at_the_watermark_and_refilled_after_is_behind(db, 
 def logged_expiry(db, conversation_id: str, message_id: str) -> None:
     """A `message_expired` row as an earlier version of baton wrote it when a copy expired by retention."""
     at = datetime.now(UTC).isoformat()
-    db.execute("INSERT INTO change_log (conversation_id, revision, kind, message_id, role, at)"
-               " VALUES (?, 0, 'message_expired', ?, 'reviewer', ?)", (conversation_id, message_id, at))
+    db.execute(
+        "INSERT INTO change_log (conversation_id, revision, kind, message_id, role, at)"
+        " VALUES (?, 0, 'message_expired', ?, 'reviewer', ?)",
+        (conversation_id, message_id, at),
+    )
 
 
 def test_an_obligation_owed_at_the_watermark_stays_incomplete_after_its_copies_expire(db, config) -> None:

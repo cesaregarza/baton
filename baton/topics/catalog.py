@@ -77,8 +77,9 @@ def _check_members(config: Config, members: Any) -> list[str]:
     if "guest" in members:
         raise InvalidRequest("guest cannot be a topic member: a guest is never a conversation participant")
     if len(members) > config.conversations.max_participants:
-        raise InvalidRequest(f"a topic has at most {config.conversations.max_participants} members "
-                             "(conversations.max_participants)")
+        raise InvalidRequest(
+            f"a topic has at most {config.conversations.max_participants} members (conversations.max_participants)"
+        )
     return members
 
 
@@ -121,21 +122,30 @@ def members_for_thread(conn: Connection, config: Config, path: str) -> list[str]
     members = json.loads(require_exists(conn, path)["members"])
     missing = [role for role in members if role not in config.roles]
     if missing:
-        raise InvalidRequest(f"topic {path!r} has members this host no longer configures ({missing[0]!r}): "
-                             "a core role can set them with update_topic")
+        raise InvalidRequest(
+            f"topic {path!r} has members this host no longer configures ({missing[0]!r}): "
+            "a core role can set them with update_topic"
+        )
     from baton import conversations  # lazily: conversations imports this module
 
     if not conversations.MIN_PARTICIPANTS <= len(members) <= config.conversations.max_participants:
-        raise InvalidRequest(f"topic {path!r} has {len(members)} members, and a thread here needs "
-                             f"{conversations.MIN_PARTICIPANTS}-{config.conversations.max_participants}: "
-                             "a core role can set them with update_topic")
+        raise InvalidRequest(
+            f"topic {path!r} has {len(members)} members, and a thread here needs "
+            f"{conversations.MIN_PARTICIPANTS}-{config.conversations.max_participants}: "
+            "a core role can set them with update_topic"
+        )
     return members
 
 
 def _summary(row: Row) -> dict[str, Any]:
-    return {"path": row["path"], "title": row["title"], "description": row["description"],
-            "members": json.loads(row["members"]), "created_by": row["created_by"],
-            "created_at": row["created_at"]}
+    return {
+        "path": row["path"],
+        "title": row["title"],
+        "description": row["description"],
+        "members": json.loads(row["members"]),
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+    }
 
 
 def _state(row: Row) -> dict[str, Any]:
@@ -152,15 +162,25 @@ def history_actor(actor: str, identity: dict[str, str] | None) -> str:
     return actor if identity is None else f"{actor} via alias {identity['alias_id']}"
 
 
-def record(conn: Connection, *, topic_id: str, operation: str, actor: str,
-           before: dict[str, Any] | None, after: dict[str, Any] | None, grant_id: str | None = None) -> None:
+def record(
+    conn: Connection,
+    *,
+    topic_id: str,
+    operation: str,
+    actor: str,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    grant_id: str | None = None,
+) -> None:
     """Append one change to the history. The caller holds the write lock and has made the change.
 
     `grant_id` is the topic grant a guest acted under, and is None for a core role.
     """
-    conn.execute("INSERT INTO topic_changes (topic_id, operation, actor, grant_id, before, after, at)"
-                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 (topic_id, operation, actor, grant_id, _encoded(before), _encoded(after), events.now()))
+    conn.execute(
+        "INSERT INTO topic_changes (topic_id, operation, actor, grant_id, before, after, at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (topic_id, operation, actor, grant_id, _encoded(before), _encoded(after), events.now()),
+    )
 
 
 def _encoded(state: dict[str, Any] | None) -> str | None:
@@ -181,8 +201,7 @@ REFERENCE_AUDIT = frozenset({"edit_reference", "read_reference", "reference_hist
 AUDIT_TOOLS = PATH_TOOLS | {"set_topic", "create_conversation", "list_conversations"} | REFERENCE_AUDIT
 
 
-def record_seen(seen: dict[str, Any] | None, path: str, row: Row | None = None,
-                **more: str | int | None) -> None:
+def record_seen(seen: dict[str, Any] | None, path: str, row: Row | None = None, **more: str | int | None) -> None:
     """Note in `seen`, when the caller gave one, the topic this call resolved: `path` and the id of `row`, if any.
 
     `path` is what the call named, and `row` the topic its result is, or is in, read while the call held a
@@ -192,8 +211,13 @@ def record_seen(seen: dict[str, Any] | None, path: str, row: Row | None = None,
     An extra whose value is None is left out, so a core role's line has no `grant_id`.
     """
     if seen is not None:
-        seen.update({"topic": path, **({} if row is None else {"topic_id": row["id"]}),
-                     **{key: value for key, value in more.items() if value is not None}})
+        seen.update(
+            {
+                "topic": path,
+                **({} if row is None else {"topic_id": row["id"]}),
+                **{key: value for key, value in more.items() if value is not None},
+            }
+        )
 
 
 def seen_by(call: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -207,8 +231,7 @@ def note_path(conn: Connection, seen: dict[str, Any] | None, path: str | None) -
         record_seen(seen, path, _row(conn, path))
 
 
-def note_replay(conn: Connection, seen: dict[str, Any] | None, path: str | None,
-                filed_in: str | None) -> None:
+def note_replay(conn: Connection, seen: dict[str, Any] | None, path: str | None, filed_in: str | None) -> None:
     """record_seen for a replay: the path it named, and the id of the topic its returned thread is in now.
 
     That is `filed_in`, the thread's current topic path, not whatever topic holds `path` today. A thread with no
@@ -256,8 +279,10 @@ def audit_fields(tool: str, arguments: dict[str, Any], outcome: str, seen: dict[
     if tool not in AUDIT_TOOLS:
         return {}
     if outcome != "ok":
-        seen = {"topic": arguments.get("path" if tool in PATH_TOOLS else "topic"),
-                **({"reference": arguments.get("name")} if tool in REFERENCE_AUDIT else {})}
+        seen = {
+            "topic": arguments.get("path" if tool in PATH_TOOLS else "topic"),
+            **({"reference": arguments.get("name")} if tool in REFERENCE_AUDIT else {}),
+        }
     return {key: value for key, value in seen.items() if _well_formed(key, value)}
 
 
@@ -268,8 +293,9 @@ def _no_members(members: Any) -> list[str]:
     return []
 
 
-def _grant_and_parent(conn: Connection, identity: dict[str, str] | None, grant_key: str | None,
-                      path: str) -> tuple[Row | None, Row | None]:
+def _grant_and_parent(
+    conn: Connection, identity: dict[str, str] | None, grant_key: str | None, path: str
+) -> tuple[Row | None, Row | None]:
     """The grant the key opens and the parent it names for a new topic at `path`; neither for a core role."""
     if grant_key is None:
         return None, None
@@ -277,10 +303,20 @@ def _grant_and_parent(conn: Connection, identity: dict[str, str] | None, grant_k
     return grant, topic_grants.require_names(conn, grant, "topic.create_sub", path)
 
 
-def create(conn: Connection, config: Config, *, actor: str, path: Any, title: Any = None,
-           description: Any = None, members: Any = None, request_id: str | None = None,
-           identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None,
-           grant_key: str | None = None) -> dict[str, Any]:
+def create(
+    conn: Connection,
+    config: Config,
+    *,
+    actor: str,
+    path: Any,
+    title: Any = None,
+    description: Any = None,
+    members: Any = None,
+    request_id: str | None = None,
+    identity: dict[str, str] | None = None,
+    seen: dict[str, Any] | None = None,
+    grant_key: str | None = None,
+) -> dict[str, Any]:
     """Open a topic. A replay rechecks authority and the parent, then returns the topic as it now stands.
 
     With `grant_key` the caller is a guest, and may only open a subtopic of the topic its key's grant names. Its
@@ -297,8 +333,10 @@ def create(conn: Connection, config: Config, *, actor: str, path: Any, title: An
     if not 1 <= len(request_id) <= 200:
         raise InvalidRequest("request_id is 1-200 characters")
     whose = {} if grant_key is None else {"alias_id": (identity or {}).get("alias_id")}
-    digest = events.request_digest("create_topic", {"actor": actor, "path": checked, "title": title,
-                                                    "description": description, "members": chosen, **whose})
+    digest = events.request_digest(
+        "create_topic",
+        {"actor": actor, "path": checked, "title": title, "description": description, "members": chosen, **whose},
+    )
     with conn.transaction():
         grant, parent = _grant_and_parent(conn, identity, grant_key, checked)
         grant_id = None if grant is None else grant["id"]
@@ -313,21 +351,38 @@ def create(conn: Connection, config: Config, *, actor: str, path: Any, title: An
             chosen = json.loads(parent["members"])
         stamp = events.now()
         topic_id = new_topic_id()
-        conn.execute("INSERT INTO topics (path, title, description, members, created_by, created_at,"
-                     " request_id, request_digest, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                     (checked, title, description, json.dumps(chosen), actor, stamp, request_id, digest,
-                      topic_id))
+        conn.execute(
+            "INSERT INTO topics (path, title, description, members, created_by, created_at,"
+            " request_id, request_digest, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (checked, title, description, json.dumps(chosen), actor, stamp, request_id, digest, topic_id),
+        )
         created = _row(conn, checked)
         record_seen(seen, checked, created, grant_id=grant_id)
-        record(conn, topic_id=topic_id, operation="create_topic", actor=history_actor(actor, identity),
-               before=None, after={"path": checked, **_state(created)}, grant_id=grant_id)
+        record(
+            conn,
+            topic_id=topic_id,
+            operation="create_topic",
+            actor=history_actor(actor, identity),
+            before=None,
+            after={"path": checked, **_state(created)},
+            grant_id=grant_id,
+        )
         made = _summary(created)
     return {**made, "request_id": request_id, "created": True}
 
 
-def update(conn: Connection, config: Config, *, actor: str, path: Any, title: Any = None,
-           description: Any = UNSET, members: Any = UNSET, identity: dict[str, str] | None = None,
-           seen: dict[str, Any] | None = None) -> dict[str, Any]:
+def update(
+    conn: Connection,
+    config: Config,
+    *,
+    actor: str,
+    path: Any,
+    title: Any = None,
+    description: Any = UNSET,
+    members: Any = UNSET,
+    identity: dict[str, str] | None = None,
+    seen: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Edit a topic's title, description or members. An omitted argument leaves that field as it is.
 
     A call that changes none of them writes no history row, as a set_topic to the topic it already has does not.
@@ -335,21 +390,30 @@ def update(conn: Connection, config: Config, *, actor: str, path: Any, title: An
     _may_manage(config, actor)
     checked = check_path(path)
     new_title = _check_text(title, "title", MAX_TITLE)
-    new_description = (UNSET if description is UNSET
-                       else _check_text(description, "description", MAX_DESCRIPTION))
+    new_description = UNSET if description is UNSET else _check_text(description, "description", MAX_DESCRIPTION)
     new_members = UNSET if members is UNSET else _check_members(config, members)
     with conn.transaction():
         row = require_exists(conn, checked)
         record_seen(seen, checked, row)
-        conn.execute("UPDATE topics SET title = ?, description = ?, members = ? WHERE path = ?",
-                     (new_title or row["title"],
-                      row["description"] if new_description is UNSET else new_description,
-                      row["members"] if new_members is UNSET else json.dumps(new_members),
-                      checked))
+        conn.execute(
+            "UPDATE topics SET title = ?, description = ?, members = ? WHERE path = ?",
+            (
+                new_title or row["title"],
+                row["description"] if new_description is UNSET else new_description,
+                row["members"] if new_members is UNSET else json.dumps(new_members),
+                checked,
+            ),
+        )
         updated = _row(conn, checked)
         if _state(updated) != _state(row):
-            record(conn, topic_id=row["id"], operation="update_topic", actor=history_actor(actor, identity),
-                   before=_state(row), after=_state(updated))
+            record(
+                conn,
+                topic_id=row["id"],
+                operation="update_topic",
+                actor=history_actor(actor, identity),
+                before=_state(row),
+                after=_state(updated),
+            )
         return _summary(updated)
 
 
@@ -361,15 +425,26 @@ def _require_acknowledged(path: str, affected: list[str], acknowledged: list[str
     if named == set(affected):
         return
     if not affected:
-        raise InvalidRequest(f"none of the topic grants are affected by renaming {path}, "
-                             "so leave acknowledge_topic_grants out")
-    raise InvalidRequest(f"renaming {path} changes what topic grants {', '.join(affected)} cover; "
-                         "repeat the call with acknowledge_topic_grants set to exactly those ids")
+        raise InvalidRequest(
+            f"none of the topic grants are affected by renaming {path}, so leave acknowledge_topic_grants out"
+        )
+    raise InvalidRequest(
+        f"renaming {path} changes what topic grants {', '.join(affected)} cover; "
+        "repeat the call with acknowledge_topic_grants set to exactly those ids"
+    )
 
 
-def rename(conn: Connection, config: Config, *, actor: str, path: Any, new_path: Any,
-           identity: dict[str, str] | None = None, seen: dict[str, Any] | None = None,
-           acknowledge_topic_grants: list[str] | None = None) -> dict[str, Any]:
+def rename(
+    conn: Connection,
+    config: Config,
+    *,
+    actor: str,
+    path: Any,
+    new_path: Any,
+    identity: dict[str, str] | None = None,
+    seen: dict[str, Any] | None = None,
+    acknowledge_topic_grants: list[str] | None = None,
+) -> dict[str, Any]:
     """Move a topic, its subtopics and every thread filed under them, in one transaction.
 
     Conversation ids never change, and neither do any thread's participants: a rename is a change of
@@ -386,12 +461,14 @@ def rename(conn: Connection, config: Config, *, actor: str, path: Any, new_path:
     with conn.transaction():
         require_exists(conn, checked)
         _require_parent(conn, target)
-        children = [row[0] for row in conn.execute(
-            "SELECT path FROM topics WHERE path LIKE ? ORDER BY path", (f"{checked}/%",))]
+        children = [
+            row[0] for row in conn.execute("SELECT path FROM topics WHERE path LIKE ? ORDER BY path", (f"{checked}/%",))
+        ]
         if children and "/" in target:
-            raise InvalidRequest(f"{path!r} has subtopics, so moving it under {target.split('/')[0]!r} "
-                                 "would make three levels")
-        moving = {old: target + old[len(checked):] for old in [checked, *children]}
+            raise InvalidRequest(
+                f"{path!r} has subtopics, so moving it under {target.split('/')[0]!r} would make three levels"
+            )
+        moving = {old: target + old[len(checked) :] for old in [checked, *children]}
         taken = [new for new in moving.values() if _row(conn, new) is not None]
         if taken:
             raise InvalidRequest(f"new_path {taken[0]!r} is already a topic")
@@ -404,25 +481,39 @@ def rename(conn: Connection, config: Config, *, actor: str, path: Any, new_path:
             conn.execute("UPDATE conversations SET topic = ? WHERE topic = ?", (moving[old], old))
         who = history_actor(actor, identity)
         for old, new in moving.items():
-            record(conn, topic_id=ids[old], operation="rename_topic", actor=who, before={"path": old},
-                   after={"path": new})
+            record(
+                conn, topic_id=ids[old], operation="rename_topic", actor=who, before={"path": old}, after={"path": new}
+            )
         topic_grants.record_rename(conn, affected, who, ids[checked], checked, target)
         renamed = _row(conn, target)
         record_seen(seen, checked, renamed, new_path=target)
         return {**_summary(renamed), "renamed_from": checked, "subtopics": len(children)}
 
 
-def record_move(conn: Connection, *, conversation_id: str, actor: str, before: str | None,
-                after: str | None, grant_id: str | None = None) -> None:
+def record_move(
+    conn: Connection,
+    *,
+    conversation_id: str,
+    actor: str,
+    before: str | None,
+    after: str | None,
+    grant_id: str | None = None,
+) -> None:
     """Record a conversation's topic changing: a move, or a clear, which is filed under the topic it left.
 
     Both sides carry their ids, so the move can be followed after either topic has been renamed.
     """
     before_id = None if before is None else id_of(conn, before)
     after_id = None if after is None else id_of(conn, after)
-    record(conn, topic_id=after_id or before_id, operation="set_topic", actor=actor,
-           before={"conversation_id": conversation_id, "topic": before, "topic_id": before_id},
-           after={"conversation_id": conversation_id, "topic": after, "topic_id": after_id}, grant_id=grant_id)
+    record(
+        conn,
+        topic_id=after_id or before_id,
+        operation="set_topic",
+        actor=actor,
+        before={"conversation_id": conversation_id, "topic": before, "topic_id": before_id},
+        after={"conversation_id": conversation_id, "topic": after, "topic_id": after_id},
+        grant_id=grant_id,
+    )
 
 
 def may_open(conn: Connection, config: Config, reader: str, path: str) -> bool:
@@ -436,8 +527,9 @@ def may_open(conn: Connection, config: Config, reader: str, path: str) -> bool:
     return board_read.sees_all(config, reader) or _readable(conn, config, reader, path)[0] > 0
 
 
-def get(conn: Connection, config: Config, *, reader: str, path: Any,
-        seen: dict[str, Any] | None = None) -> dict[str, Any]:
+def get(
+    conn: Connection, config: Config, *, reader: str, path: Any, seen: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """One topic, with the number of threads in it this reader may see and the subtopics it may open."""
     checked = check_path(path)
     with conn.snapshot():  # one view, so a rename in between cannot mix two topics into one answer
@@ -446,21 +538,24 @@ def get(conn: Connection, config: Config, *, reader: str, path: Any,
         threads, _ = _readable(conn, config, reader, checked)
         # Filtered, because the subtopic list is the other way this could name a topic the reader may not
         # see into -- the page renders these as links, and the tool hands them to whoever called it.
-        children = [entry[0] for entry in conn.execute(
-            "SELECT path FROM topics WHERE path LIKE ? ORDER BY path", (f"{checked}/%",))]
-        return {**_summary(row), "threads": threads,
-                "subtopics": [child for child in children if may_open(conn, config, reader, child)]}
+        children = [
+            entry[0]
+            for entry in conn.execute("SELECT path FROM topics WHERE path LIKE ? ORDER BY path", (f"{checked}/%",))
+        ]
+        return {
+            **_summary(row),
+            "threads": threads,
+            "subtopics": [child for child in children if may_open(conn, config, reader, child)],
+        }
 
 
-def listing(conn: Connection, config: Config, *, reader: str,
-            parent: Any = None) -> list[dict[str, Any]]:
+def listing(conn: Connection, config: Config, *, reader: str, parent: Any = None) -> list[dict[str, Any]]:
     """Every topic, or only those directly under `parent`, each with this reader's own thread count."""
     if parent is None:
         rows = conn.execute("SELECT * FROM topics ORDER BY path").fetchall()
     else:
         checked = check_path(parent, field="parent")
-        rows = conn.execute("SELECT * FROM topics WHERE path LIKE ? ORDER BY path",
-                            (f"{checked}/%",)).fetchall()
+        rows = conn.execute("SELECT * FROM topics WHERE path LIKE ? ORDER BY path", (f"{checked}/%",)).fetchall()
     listed = []
     for row in rows:
         threads, last_activity_at = _readable(conn, config, reader, row["path"])
@@ -468,8 +563,7 @@ def listing(conn: Connection, config: Config, *, reader: str,
     return listed
 
 
-def _readable(conn: Connection, config: Config, reader: str,
-              path: str) -> tuple[int, str | None]:
+def _readable(conn: Connection, config: Config, reader: str, path: str) -> tuple[int, str | None]:
     """The threads in this topic's subtree the reader may see, and the newest activity among those same ones.
 
     The subtree, because a topic's page has always listed itself and everything one separator deeper: a
@@ -483,11 +577,16 @@ def _readable(conn: Connection, config: Config, reader: str,
     path carries neither `LIKE` metacharacter, so the prefix matches literally with nothing to escape.
     """
     if board_read.sees_all(config, reader):
-        row = conn.execute("SELECT COUNT(*), MAX(last_activity_at) FROM conversations"
-                           " WHERE topic = ? OR topic LIKE ?", (path, f"{path}/%")).fetchone()
+        row = conn.execute(
+            "SELECT COUNT(*), MAX(last_activity_at) FROM conversations WHERE topic = ? OR topic LIKE ?",
+            (path, f"{path}/%"),
+        ).fetchone()
     else:
-        row = conn.execute("SELECT COUNT(*), MAX(c.last_activity_at) FROM conversations c"
-                           " WHERE (c.topic = ? OR c.topic LIKE ?) AND EXISTS"
-                           " (SELECT 1 FROM participants p WHERE p.conversation_id = c.id"
-                           " AND p.role = ?)", (path, f"{path}/%", reader)).fetchone()
+        row = conn.execute(
+            "SELECT COUNT(*), MAX(c.last_activity_at) FROM conversations c"
+            " WHERE (c.topic = ? OR c.topic LIKE ?) AND EXISTS"
+            " (SELECT 1 FROM participants p WHERE p.conversation_id = c.id"
+            " AND p.role = ?)",
+            (path, f"{path}/%", reader),
+        ).fetchone()
     return row[0], row[1]

@@ -17,8 +17,11 @@ type Shape = Callable[[Row, dict[str, Any] | None], dict[str, Any]]
 
 def attribution(row: Row) -> dict[str, str]:
     """Persisted server-bound attribution, optional so legacy/fixed-role results keep their shape."""
-    return ({"alias_id": row["alias_id"], "alias": row["alias"], "badge": "guest", "code": row["alias_code"]}
-            if row["alias_id"] else {})
+    return (
+        {"alias_id": row["alias_id"], "alias": row["alias"], "badge": "guest", "code": row["alias_code"]}
+        if row["alias_id"]
+        else {}
+    )
 
 
 def author_label(item: dict[str, Any]) -> str:
@@ -27,8 +30,9 @@ def author_label(item: dict[str, Any]) -> str:
     return item.get("from_role") or "the host"
 
 
-def reply_references(conn: Connection, reader: str, rows: list[Row], config: Any = None
-                     ) -> dict[tuple[str | None, str], dict[str, Any]]:
+def reply_references(
+    conn: Connection, reader: str, rows: list[Row], config: Any = None
+) -> dict[tuple[str | None, str], dict[str, Any]]:
     """What `reader` may be told about each parent the rows answer, keyed by (conversation, parent id).
 
     A parent is resolved only when it is retained and the shared board predicate allows the reader to see
@@ -47,11 +51,22 @@ def reply_references(conn: Connection, reader: str, rows: list[Row], config: Any
     else:
         condition, values = board_read.message_condition(config, reader)
     params = {**values, **{f"parent_{index}": parent for index, (_, parent) in enumerate(answered)}}
-    visible = {(found["conversation_id"], found["id"]): found for found in conn.execute(
-        f"SELECT m.id, m.conversation_id, m.conversation_seq, m.alias_id, m.alias, m.alias_code"
-        f" FROM messages m WHERE m.id IN ({places}) AND {condition}", params)}
-    return {key: {"message_id": key[1], "seq": visible[key]["conversation_seq"] if key in visible else None,
-                  **(attribution(visible[key]) if key in visible else {})} for key in answered}
+    visible = {
+        (found["conversation_id"], found["id"]): found
+        for found in conn.execute(
+            f"SELECT m.id, m.conversation_id, m.conversation_seq, m.alias_id, m.alias, m.alias_code"
+            f" FROM messages m WHERE m.id IN ({places}) AND {condition}",
+            params,
+        )
+    }
+    return {
+        key: {
+            "message_id": key[1],
+            "seq": visible[key]["conversation_seq"] if key in visible else None,
+            **(attribution(visible[key]) if key in visible else {}),
+        }
+        for key in answered
+    }
 
 
 def as_dict(row: Row, reply_to: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -65,15 +80,15 @@ def as_dict(row: Row, reply_to: dict[str, Any] | None = None) -> dict[str, Any]:
     return Post.from_row(row).to_dict(reply_to)
 
 
-def as_page_for(conn: Connection, reader: str, rows: list[Row],
-                shape: Shape = as_dict, config: Any = None) -> list[dict[str, Any]]:
+def as_page_for(
+    conn: Connection, reader: str, rows: list[Row], shape: Shape = as_dict, config: Any = None
+) -> list[dict[str, Any]]:
     """A page of messages as `reader` sees them, with each reply's parent resolved in one query."""
     references = reply_references(conn, reader, rows, config)
     return as_page(rows, lambda row: shape(row, references.get((row["conversation_id"], row["reply_to"]))))
 
 
-def as_page(rows: list[Row],
-            shape: Callable[[Row], dict[str, Any]] = as_dict) -> list[dict[str, Any]]:
+def as_page(rows: list[Row], shape: Callable[[Row], dict[str, Any]] = as_dict) -> list[dict[str, Any]]:
     page: list[dict[str, Any]] = []
     size = 0
     for row in rows:

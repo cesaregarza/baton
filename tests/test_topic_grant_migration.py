@@ -44,6 +44,7 @@ def tables_of(db: sqlite3.Connection) -> set[str]:
 
 # 1. The fixture and the version relationship ----------------------------------------------------------------
 
+
 def test_the_v16_fixture_has_the_topics_and_threads_it_is_documented_to_have():  # GUARD
     raw = sqlite3.connect(":memory:")
     raw.executescript((FIXTURES / "schema_v16.sql").read_text())
@@ -54,8 +55,12 @@ def test_the_v16_fixture_has_the_topics_and_threads_it_is_documented_to_have(): 
     assert len(set(topics.values())) == 3
     assert [row[0] for row in raw.execute("SELECT name FROM aliases")] == ["lane-a"]
     filed = {title: topic for title, topic in raw.execute("SELECT title, topic FROM conversations")}
-    assert filed == {"Release plan": "baton", "A guest question": "baton", "Schema work": "baton/development",
-                     "No topic": None}
+    assert filed == {
+        "Release plan": "baton",
+        "A guest question": "baton",
+        "Schema work": "baton/development",
+        "No topic": None,
+    }
     assert {"topic_changes"} <= {row[0] for row in raw.execute("SELECT name FROM sqlite_master")}
     assert not NEW_TABLES & {row[0] for row in raw.execute("SELECT name FROM sqlite_master")}, "the fixture is 16"
     raw.close()
@@ -73,6 +78,7 @@ def test_the_grant_tables_are_declared_as_the_step_above_the_v16_fixture():
 
 
 # 2. Every older fixture reaches the current schema with both tables, empty ---------------------------------
+
 
 # Only the fixtures below the step that adds the grant tables: a fixture from that step on carries grants.
 @pytest.mark.parametrize("version", [version for version in FIXTURE_VERSIONS if version < NEW_STEP])
@@ -132,6 +138,7 @@ def test_an_upgraded_database_takes_a_grant_for_the_fixtures_own_alias_and_topic
 
 # 3. The tables a fresh database declares -------------------------------------------------------------------
 
+
 def test_a_fresh_database_declares_topic_grants_as_the_spec_lists_it(tmp_path):
     db = connect(topic_config(tmp_path).db_path)
     try:
@@ -139,8 +146,15 @@ def test_a_fresh_database_declares_topic_grants_as_the_spec_lists_it(tmp_path):
         columns = columns_of(db, "topic_grants")
         assert set(columns) == GRANT_COLUMNS
         assert columns["id"]["pk"] == 1
-        nullable = {"authorized_by", "authorized_at", "authorized_digest", "proof_digest",
-                    "revoked_at", "revoked_by", "revoke_reason"}
+        nullable = {
+            "authorized_by",
+            "authorized_at",
+            "authorized_digest",
+            "proof_digest",
+            "revoked_at",
+            "revoked_by",
+            "revoke_reason",
+        }
         assert {name for name, row in columns.items() if not row["notnull"] and not row["pk"]} == nullable
         assert columns["inherit"]["type"] == "INTEGER"
         assert {row["type"] for name, row in columns.items() if name != "inherit"} == {"TEXT"}
@@ -155,8 +169,13 @@ def test_a_fresh_database_declares_topic_grant_events_as_an_autoincrementing_log
         sql = db.execute("SELECT sql FROM sqlite_master WHERE name = 'topic_grant_events'").fetchone()["sql"]
         assert "AUTOINCREMENT" in sql.upper()
         columns = columns_of(db, "topic_grant_events")
-        assert {name: row["notnull"] for name, row in columns.items() if name != "seq"} == \
-            {"grant_id": 1, "event": 1, "actor": 1, "detail": 0, "at": 1}
+        assert {name: row["notnull"] for name, row in columns.items() if name != "seq"} == {
+            "grant_id": 1,
+            "event": 1,
+            "actor": 1,
+            "detail": 0,
+            "at": 1,
+        }
     finally:
         db.close()
 
@@ -181,8 +200,9 @@ def test_an_upgraded_database_declares_the_same_grant_tables_as_a_fresh_one(tmp_
     try:
         for name in sorted(NEW_TABLES):
             assert table_exists(fresh, name) and table_exists(upgraded, name), f"{name} is missing"
-            assert [tuple(row) for row in upgraded.execute(f"PRAGMA table_info({name})")] == \
-                [tuple(row) for row in fresh.execute(f"PRAGMA table_info({name})")]
+            assert [tuple(row) for row in upgraded.execute(f"PRAGMA table_info({name})")] == [
+                tuple(row) for row in fresh.execute(f"PRAGMA table_info({name})")
+            ]
     finally:
         fresh.close()
         upgraded.close()

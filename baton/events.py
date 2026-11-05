@@ -19,8 +19,17 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def append(conn: Connection, *, job_id: str | None, seq: int | None = None, actor: str,
-           audience: str | None, kind: str, summary: str, data: dict[str, Any] | None = None) -> int:
+def append(
+    conn: Connection,
+    *,
+    job_id: str | None,
+    seq: int | None = None,
+    actor: str,
+    audience: str | None,
+    kind: str,
+    summary: str,
+    data: dict[str, Any] | None = None,
+) -> int:
     """Append one event; the caller holds the write lock. A job event without `seq` takes the job's next one."""
     if seq is None:
         seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE job_id = ?", (job_id,)).fetchone()[0]
@@ -43,8 +52,9 @@ def cursor(conn: Connection, name: str) -> int:
 
 
 def set_cursor(conn: Connection, name: str, pos: int) -> None:
-    conn.execute("INSERT INTO cursors (name, pos) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET pos = excluded.pos",
-                 (name, pos))
+    conn.execute(
+        "INSERT INTO cursors (name, pos) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET pos = excluded.pos", (name, pos)
+    )
 
 
 def request_digest(operation: str, body: dict[str, Any]) -> str:

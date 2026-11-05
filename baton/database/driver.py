@@ -170,9 +170,10 @@ class Connection:
         return self._max_parameters
 
     def table_exists(self, name: str) -> bool:
-        return self.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
-        ).fetchone() is not None
+        return (
+            self.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone()
+            is not None
+        )
 
     def transaction(self) -> AbstractContextManager[Connection]:
         return transaction(self)

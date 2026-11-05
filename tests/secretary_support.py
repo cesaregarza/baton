@@ -88,19 +88,26 @@ def policy(world: World, **changes: object) -> Path:
 
 
 def conversation(world: World, participants: list[str] | None = None) -> str:
-    made = conversations.create(world.baton, world.config, actor="planner", title="Synthetic work",
-                                participants=participants or ["planner", "worker", "reviewer"])
+    made = conversations.create(
+        world.baton,
+        world.config,
+        actor="planner",
+        title="Synthetic work",
+        participants=participants or ["planner", "worker", "reviewer"],
+    )
     return made["conversation_id"]
 
 
 def say(world: World, room: str, sender: str, text: str, **kwargs: object) -> dict:
-    return conversations.send(world.baton, world.config, sender=sender, conversation_id=room,
-                              text=text, **kwargs)
+    return conversations.send(world.baton, world.config, sender=sender, conversation_id=room, text=text, **kwargs)
 
 
 def table_hashes(conn: sqlite3.Connection) -> dict[str, str]:
     """All Baton tables, including delivery positions, with stable order and no sidecar rows."""
     names = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
-    return {name: hashlib.sha256("\n".join(sorted(repr(tuple(row)) for row in conn.execute(
-        f'SELECT * FROM "{name}"'))).encode()).hexdigest()
-            for name in names}
+    return {
+        name: hashlib.sha256(
+            "\n".join(sorted(repr(tuple(row)) for row in conn.execute(f'SELECT * FROM "{name}"'))).encode()
+        ).hexdigest()
+        for name in names
+    }

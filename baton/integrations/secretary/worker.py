@@ -25,8 +25,7 @@ log = logging.getLogger(__name__)
 
 
 def invocation(instance: Instance, *action: str) -> str:
-    return shlex.join([sys.executable, "-m", "baton.integrations.secretary",
-                       "--instance", str(instance.path), *action])
+    return shlex.join([sys.executable, "-m", "baton.integrations.secretary", "--instance", str(instance.path), *action])
 
 
 @contextmanager
@@ -53,30 +52,33 @@ class Worker:
     async def run(self) -> None:
         with exclusive(self.instance):
             async with DatabaseWorker() as database:
-                policy = await database.call(load_policy, self.instance.secretary.config,
-                                             self.instance.secretary.policy_path)
+                policy = await database.call(
+                    load_policy, self.instance.secretary.config, self.instance.secretary.policy_path
+                )
                 require_hook_summary(policy)
                 retry_seconds = 5
                 while True:
                     try:
                         await self.step(database)
-                        await database.call(self.instance.receipts.set, "health",
-                                            {"status": "running", "checked_at": time.time()})
+                        await database.call(
+                            self.instance.receipts.set, "health", {"status": "running", "checked_at": time.time()}
+                        )
                         retry_seconds = 5
                     except Exception as error:
                         # No inbound text, model output, URLs or credentials in service logs.
                         log.warning("secretary pass failed: %s", type(error).__name__)
-                        await database.call(self.instance.receipts.set, "health",
-                                            {"status": "retrying", "error": type(error).__name__,
-                                             "checked_at": time.time()})
+                        await database.call(
+                            self.instance.receipts.set,
+                            "health",
+                            {"status": "retrying", "error": type(error).__name__, "checked_at": time.time()},
+                        )
                         await asyncio.sleep(max(retry_seconds, self.instance.poll_seconds))
                         retry_seconds = min(300, retry_seconds * 2)
                     await asyncio.sleep(self.instance.poll_seconds)
 
     async def step(self, database: DatabaseWorker) -> None:
         secretary, receipts = self.instance.secretary, self.instance.receipts
-        page = await database.call(read, secretary.config, secretary.policy_path,
-                                   after=self.seen or 0, limit=1)
+        page = await database.call(read, secretary.config, secretary.policy_path, after=self.seen or 0, limit=1)
         if self.seen is None or page["deliveries"] or page["context"]:
             result = await secretary.decide(budget_seconds=self.instance.budget_seconds)
             await database.call(receipts.set, "pending", result["decision_id"] if result["brief"] else None)
@@ -100,21 +102,34 @@ class Worker:
         # Only a pointer is watched; summaries are read through current authorization checks.
         with datadir.opened(self.instance.path.parent) as directory:
             raw = json.dumps({"decision_id": decision}).encode()
-            fd = datadir.open_file(directory, self.instance.signal_path.name, os.O_CREAT | os.O_RDONLY,
-                                   directory=self.instance.path.parent)
+            fd = datadir.open_file(
+                directory, self.instance.signal_path.name, os.O_CREAT | os.O_RDONLY, directory=self.instance.path.parent
+            )
             with os.fdopen(fd, "rb") as source:
                 previous = source.read()
             if previous != raw:
                 datadir.replace_file(directory, self.instance.signal_path.name, raw)
 
     async def _queue(self, session: str) -> bool:
-        message = ("Baton secretary has an attention summary. Receive it with "
-                   + invocation(self.instance, "receive")
-                   + ". Acknowledge only after reading it. If no summary remains, no action is needed.")
+        message = (
+            "Baton secretary has an attention summary. Receive it with "
+            + invocation(self.instance, "receive")
+            + ". Acknowledge only after reading it. If no summary remains, no action is needed."
+        )
         process = await asyncio.create_subprocess_exec(
-            self.instance.codex, "queue", "--thread", session, "--message", message, "--resume",
-            cwd=self.instance.project, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+            self.instance.codex,
+            "queue",
+            "--thread",
+            session,
+            "--message",
+            message,
+            "--resume",
+            cwd=self.instance.project,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
         try:
             async with asyncio.timeout(10):
                 return await process.wait() == 0

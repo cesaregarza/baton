@@ -60,15 +60,30 @@ def workers_end_with_their_test() -> Any:
 
 def push_config(tmp_path: Path, *, table: dict[str, Any] | None = None, roles: dict[str, Any] | None = None) -> Config:
     """Lane A's generic roles with the push on for `assistant`, unless `table` says otherwise."""
-    settings = {"enabled": True, "role": ROLE, "url": "https://push.example.test/decisions",
-                "link_base": "https://dash.example.test"} if table is None else table
-    return config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": roles or {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
-                           "reviewer": {}, "assistant": {}, "outsider": {}},
-        "conversations": {"enabled": True},
-        "integrations": {"decision_push": settings},
-    })
+    settings = (
+        {
+            "enabled": True,
+            "role": ROLE,
+            "url": "https://push.example.test/decisions",
+            "link_base": "https://dash.example.test",
+        }
+        if table is None
+        else table
+    )
+    return config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": roles
+            or {
+                "orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
+                "reviewer": {},
+                "assistant": {},
+                "outsider": {},
+            },
+            "conversations": {"enabled": True},
+            "integrations": {"decision_push": settings},
+        }
+    )
 
 
 class Channel:
@@ -86,7 +101,8 @@ class Channel:
 
 def pusher(config: Config, channel: Channel | None = None, **kwargs: Any) -> Any:
     return decision_push.load(config, config.integrations["decision_push"]).with_transport(
-        channel or Channel(), **kwargs)
+        channel or Channel(), **kwargs
+    )
 
 
 def everything_sent(channel: Channel) -> str:
@@ -155,9 +171,21 @@ def test_the_push_carries_a_fixed_notice_and_a_link_and_nothing_of_the_message(t
     push = pusher(config, channel)
     push.poll_once()
     cid = start(db, config)
-    say(db, config, "orchestrator", cid, f"ship it? the key is {SECRET_SHAPED}", needs_decision=True,
-        relayed=[{"source": f"someone {SECRET_SHAPED}", "at": "2026-10-29T08:00:00+00:00",
-                  "text": f"relayed {SECRET_SHAPED}"}])
+    say(
+        db,
+        config,
+        "orchestrator",
+        cid,
+        f"ship it? the key is {SECRET_SHAPED}",
+        needs_decision=True,
+        relayed=[
+            {
+                "source": f"someone {SECRET_SHAPED}",
+                "at": "2026-10-29T08:00:00+00:00",
+                "text": f"relayed {SECRET_SHAPED}",
+            }
+        ],
+    )
     push.poll_once()
     [call] = channel.calls
     sent = everything_sent(channel)
@@ -186,8 +214,9 @@ def test_without_a_link_base_it_sends_the_notice_alone(tmp_path) -> None:
 
 def test_the_token_comes_only_from_the_named_environment_variable(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(TOKEN_ENV, TOKEN_VALUE)
-    config = push_config(tmp_path, table={"enabled": True, "role": ROLE, "url": "https://push.example.test/d",
-                                          "secret_env": TOKEN_ENV})
+    config = push_config(
+        tmp_path, table={"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "secret_env": TOKEN_ENV}
+    )
     db = connect(config.db_path)
     channel = Channel()
     push = pusher(config, channel)
@@ -201,7 +230,7 @@ def test_the_token_comes_only_from_the_named_environment_variable(tmp_path, monk
 
 
 class _Hang(http.server.BaseHTTPRequestHandler):
-    def do_POST(self) -> None:  # noqa: N802 - the base class's name
+    def do_POST(self) -> None:
         time.sleep(3)
 
     def log_message(self, *args: Any) -> None:
@@ -209,7 +238,7 @@ class _Hang(http.server.BaseHTTPRequestHandler):
 
 
 class _Fail(http.server.BaseHTTPRequestHandler):
-    def do_POST(self) -> None:  # noqa: N802 - the base class's name
+    def do_POST(self) -> None:
         self.send_response(500)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -233,8 +262,9 @@ def refused_url() -> str:
 
 
 @pytest.mark.parametrize("endpoint", ["timeout", "500", "refused"])
-def test_a_failing_endpoint_never_blocks_or_fails_the_send_and_logs_no_content(tmp_path, monkeypatch, caplog,
-                                                                               endpoint) -> None:
+def test_a_failing_endpoint_never_blocks_or_fails_the_send_and_logs_no_content(
+    tmp_path, monkeypatch, caplog, endpoint
+) -> None:
     monkeypatch.setenv(TOKEN_ENV, TOKEN_VALUE)
     server = None
     if endpoint == "timeout":
@@ -244,8 +274,9 @@ def test_a_failing_endpoint_never_blocks_or_fails_the_send_and_logs_no_content(t
     else:
         url = refused_url()
     try:
-        config = push_config(tmp_path, table={"enabled": True, "role": ROLE, "url": url, "secret_env": TOKEN_ENV,
-                                              "timeout_seconds": 0.5})
+        config = push_config(
+            tmp_path, table={"enabled": True, "role": ROLE, "url": url, "secret_env": TOKEN_ENV, "timeout_seconds": 0.5}
+        )
         db = connect(config.db_path)
         push = decision_push.load(config, config.integrations["decision_push"])
         push.poll_once()
@@ -279,8 +310,9 @@ def test_a_failing_endpoint_never_blocks_or_fails_the_send_and_logs_no_content(t
 
 
 def test_the_hourly_cap_holds_and_counts_what_it_held_back(tmp_path) -> None:
-    config = push_config(tmp_path, table={"enabled": True, "role": ROLE, "url": "https://push.example.test/d",
-                                          "max_per_hour": 2})
+    config = push_config(
+        tmp_path, table={"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "max_per_hour": 2}
+    )
     db = connect(config.db_path)
     clock = [1_000_000.0]
     channel = Channel()
@@ -306,18 +338,23 @@ def test_the_hourly_cap_holds_and_counts_what_it_held_back(tmp_path) -> None:
 
 
 def test_it_is_off_unless_enabled_and_serve_runs_it_when_it_is(tmp_path, monkeypatch) -> None:
-    plain = config_module.parse({"host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "p")},
-                                 "roles": {"worker": {}}})
+    plain = config_module.parse(
+        {"host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "p")}, "roles": {"worker": {}}}
+    )
     assert "decision_push" not in load_enabled(plain)
-    switched_off = push_config(tmp_path / "off", table={"enabled": False, "role": ROLE,
-                                                         "url": "https://push.example.test/d"})
+    switched_off = push_config(
+        tmp_path / "off", table={"enabled": False, "role": ROLE, "url": "https://push.example.test/d"}
+    )
     assert "decision_push" not in load_enabled(switched_off)
 
     # The threads each serve started, so one call's worker still ending can't be read as the next call's.
     names: list[list[str]] = []
     before: set[threading.Thread] = set()
-    monkeypatch.setattr(app_module.uvicorn, "run", lambda *a, **k: names.append(
-        sorted(thread.name for thread in threading.enumerate() if thread not in before)))
+    monkeypatch.setattr(
+        app_module.uvicorn,
+        "run",
+        lambda *a, **k: names.append(sorted(thread.name for thread in threading.enumerate() if thread not in before)),
+    )
     before = set(threading.enumerate())
     app_module.serve(push_config(tmp_path / "on"))
     started = [thread for thread in threading.enumerate() if thread not in before and thread.name in WORKERS]
@@ -332,41 +369,71 @@ def test_it_is_off_unless_enabled_and_serve_runs_it_when_it_is(tmp_path, monkeyp
 # Config ----------------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("table", "field"), [
-    ({"enabled": True, "role": ROLE}, "integrations.decision_push.url"),
-    ({"enabled": True, "role": ROLE, "url": "ftp://push.example.test/d"}, "integrations.decision_push.url"),
-    ({"enabled": True, "role": ROLE, "url": "https://" + "name" + ":" + "word" + "@push.example.test/d"},
-     "integrations.decision_push.url"),
-    ({"enabled": True, "url": "https://push.example.test/d"}, "integrations.decision_push.role"),
-    ({"enabled": True, "role": "nobody", "url": "https://push.example.test/d"}, "integrations.decision_push.role"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "token": "inline"},
-     "integrations.decision_push.token"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "secret_env": "not a name"},
-     "integrations.decision_push.secret_env must be the name of an environment variable"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "secret_env": "BATON_UNSET_PUSH_TOKEN"},
-     "BATON_UNSET_PUSH_TOKEN"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "max_per_hour": 0},
-     "integrations.decision_push.max_per_hour"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "max_per_hour": "5"},
-     "integrations.decision_push.max_per_hour"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "dash.example.test"},
-     "integrations.decision_push.link_base"),
-    ({"enabled": True, "role": ROLE, "url": "https:///d"}, "integrations.decision_push.url"),
-    ({"enabled": True, "role": ROLE, "url": "https://:443/d"}, "integrations.decision_push.url"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test:99999/d"}, "integrations.decision_push.url"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test:0/d"}, "integrations.decision_push.url"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test:http/d"}, "integrations.decision_push.url"),
-    ({"enabled": True, "role": ROLE, "url": "https://[::1/d"}, "integrations.decision_push.url"),
-    ({"enabled": True, "role": ROLE, "url": "https://[not-an-address]/d"}, "integrations.decision_push.url"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://:8443"},
-     "integrations.decision_push.link_base"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://d.test:70000"},
-     "integrations.decision_push.link_base"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://[fe80::1"},
-     "integrations.decision_push.link_base"),
-    ({"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://d.test/?x=1"},
-     "integrations.decision_push.link_base"),
-])
+@pytest.mark.parametrize(
+    ("table", "field"),
+    [
+        ({"enabled": True, "role": ROLE}, "integrations.decision_push.url"),
+        ({"enabled": True, "role": ROLE, "url": "ftp://push.example.test/d"}, "integrations.decision_push.url"),
+        (
+            {"enabled": True, "role": ROLE, "url": "https://" + "name" + ":" + "word" + "@push.example.test/d"},
+            "integrations.decision_push.url",
+        ),
+        ({"enabled": True, "url": "https://push.example.test/d"}, "integrations.decision_push.role"),
+        ({"enabled": True, "role": "nobody", "url": "https://push.example.test/d"}, "integrations.decision_push.role"),
+        (
+            {"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "token": "inline"},
+            "integrations.decision_push.token",
+        ),
+        (
+            {"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "secret_env": "not a name"},
+            "integrations.decision_push.secret_env must be the name of an environment variable",
+        ),
+        (
+            {
+                "enabled": True,
+                "role": ROLE,
+                "url": "https://push.example.test/d",
+                "secret_env": "BATON_UNSET_PUSH_TOKEN",
+            },
+            "BATON_UNSET_PUSH_TOKEN",
+        ),
+        (
+            {"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "max_per_hour": 0},
+            "integrations.decision_push.max_per_hour",
+        ),
+        (
+            {"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "max_per_hour": "5"},
+            "integrations.decision_push.max_per_hour",
+        ),
+        (
+            {"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "dash.example.test"},
+            "integrations.decision_push.link_base",
+        ),
+        ({"enabled": True, "role": ROLE, "url": "https:///d"}, "integrations.decision_push.url"),
+        ({"enabled": True, "role": ROLE, "url": "https://:443/d"}, "integrations.decision_push.url"),
+        ({"enabled": True, "role": ROLE, "url": "https://push.example.test:99999/d"}, "integrations.decision_push.url"),
+        ({"enabled": True, "role": ROLE, "url": "https://push.example.test:0/d"}, "integrations.decision_push.url"),
+        ({"enabled": True, "role": ROLE, "url": "https://push.example.test:http/d"}, "integrations.decision_push.url"),
+        ({"enabled": True, "role": ROLE, "url": "https://[::1/d"}, "integrations.decision_push.url"),
+        ({"enabled": True, "role": ROLE, "url": "https://[not-an-address]/d"}, "integrations.decision_push.url"),
+        (
+            {"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://:8443"},
+            "integrations.decision_push.link_base",
+        ),
+        (
+            {"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://d.test:70000"},
+            "integrations.decision_push.link_base",
+        ),
+        (
+            {"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://[fe80::1"},
+            "integrations.decision_push.link_base",
+        ),
+        (
+            {"enabled": True, "role": ROLE, "url": "https://push.example.test/d", "link_base": "https://d.test/?x=1"},
+            "integrations.decision_push.link_base",
+        ),
+    ],
+)
 def test_config_is_validated_and_names_the_field(tmp_path, monkeypatch, table, field) -> None:
     monkeypatch.delenv("BATON_UNSET_PUSH_TOKEN", raising=False)
     config = push_config(tmp_path, table=table)
@@ -377,16 +444,22 @@ def test_config_is_validated_and_names_the_field(tmp_path, monkeypatch, table, f
 
 
 def test_a_role_cannot_use_it_for_its_wakes(tmp_path) -> None:
-    roles = {"orchestrator": {"can_create_conversations": True}, "reviewer": {},
-             "assistant": {"wake": {"integration": "decision_push"}}, "outsider": {}}
+    roles = {
+        "orchestrator": {"can_create_conversations": True},
+        "reviewer": {},
+        "assistant": {"wake": {"integration": "decision_push"}},
+        "outsider": {},
+    }
     with pytest.raises(ConfigError, match="roles.assistant.wake.*not for wakes"):
         load_enabled(push_config(tmp_path, roles=roles))
 
 
 def test_the_url_and_token_never_appear_in_a_config_error(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(TOKEN_ENV, TOKEN_VALUE)
-    config = push_config(tmp_path, table={"enabled": True, "role": "nobody",
-                                          "url": "https://secret-host.example.test/d", "secret_env": TOKEN_ENV})
+    config = push_config(
+        tmp_path,
+        table={"enabled": True, "role": "nobody", "url": "https://secret-host.example.test/d", "secret_env": TOKEN_ENV},
+    )
     with pytest.raises(ConfigError) as raised:
         load_enabled(config)
     assert "integrations.decision_push.role" in str(raised.value)
@@ -395,8 +468,9 @@ def test_the_url_and_token_never_appear_in_a_config_error(tmp_path, monkeypatch)
 
 def test_valid_hosts_ports_and_addresses_load(tmp_path) -> None:
     for url in ("https://push.example.test/d", "http://127.0.0.1:8080/d", "https://[::1]:8443/d"):
-        config = push_config(tmp_path, table={"enabled": True, "role": ROLE, "url": url,
-                                              "link_base": "https://[2001:db8::1]:8443"})
+        config = push_config(
+            tmp_path, table={"enabled": True, "role": ROLE, "url": url, "link_base": "https://[2001:db8::1]:8443"}
+        )
         assert "decision_push" in load_enabled(config)
 
 
@@ -418,6 +492,7 @@ def test_a_decision_sent_before_the_workers_first_pass_is_still_pushed(tmp_path,
         def run_after_release(stop: threading.Event, **kwargs: Any) -> None:
             released.wait(10)
             original(stop, poll_seconds=0.05)
+
         push.run = run_after_release
         return loaded
 
@@ -442,15 +517,26 @@ def test_a_decision_sent_before_the_workers_first_pass_is_still_pushed(tmp_path,
 def test_a_link_past_the_first_page_opens_the_page_holding_the_message(tmp_path) -> None:
     from baton import dashboard
 
-    config = config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": {"orchestrator": {"can_create_conversations": True}, "reviewer": {},
-                  "assistant": {"display_only": True}},
-        "conversations": {"enabled": True, "max_messages_per_hour": 1000},
-        "dashboard": {"enabled": True, "viewer_role": ROLE, "listen_port": 8766},
-        "integrations": {"decision_push": {"enabled": True, "role": ROLE, "url": "https://push.example.test/d",
-                                           "link_base": "http://127.0.0.1:8766"}},
-    })
+    config = config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": {
+                "orchestrator": {"can_create_conversations": True},
+                "reviewer": {},
+                "assistant": {"display_only": True},
+            },
+            "conversations": {"enabled": True, "max_messages_per_hour": 1000},
+            "dashboard": {"enabled": True, "viewer_role": ROLE, "listen_port": 8766},
+            "integrations": {
+                "decision_push": {
+                    "enabled": True,
+                    "role": ROLE,
+                    "url": "https://push.example.test/d",
+                    "link_base": "http://127.0.0.1:8766",
+                }
+            },
+        }
+    )
     db = connect(config.db_path)
     channel = Channel()
     push = pusher(config, channel)
@@ -484,11 +570,12 @@ def corrupt_state(config: Config, content: str) -> None:
     path.chmod(0o600)
 
 
-
-@pytest.mark.parametrize("content", [f"not json {SECRET_SHAPED}",
-                                     json.dumps({"after_seq": f"x{SECRET_SHAPED}", "window": [], "counts": {}})])
-def test_an_unreadable_push_state_switches_the_push_off_and_baton_still_serves(tmp_path, monkeypatch, caplog,
-                                                                               content) -> None:
+@pytest.mark.parametrize(
+    "content", [f"not json {SECRET_SHAPED}", json.dumps({"after_seq": f"x{SECRET_SHAPED}", "window": [], "counts": {}})]
+)
+def test_an_unreadable_push_state_switches_the_push_off_and_baton_still_serves(
+    tmp_path, monkeypatch, caplog, content
+) -> None:
     config = push_config(tmp_path)
     corrupt_state(config, content)
     before = set(threading.enumerate())  # only this serve's threads count, never another test's still ending
@@ -496,8 +583,9 @@ def test_an_unreadable_push_state_switches_the_push_off_and_baton_still_serves(t
 
     def serving(app: Any, **kwargs: Any) -> None:
         seen["served"] = True
-        seen["push threads"] = sum(thread.name == "decision_push" for thread in threading.enumerate()
-                                   if thread not in before)
+        seen["push threads"] = sum(
+            thread.name == "decision_push" for thread in threading.enumerate() if thread not in before
+        )
 
     monkeypatch.setattr(app_module.uvicorn, "run", serving)
     caplog.set_level(logging.INFO)
@@ -554,8 +642,13 @@ def test_any_other_prepare_failure_is_contained_and_logged_by_type_alone(tmp_pat
     seen: dict[str, Any] = {}
     before = set(threading.enumerate())
     monkeypatch.setattr(decision_push.DecisionPush, "prepare", failing)
-    monkeypatch.setattr(app_module.uvicorn, "run", lambda *a, **k: seen.update(served=sum(
-        thread.name == "decision_push" for thread in threading.enumerate() if thread not in before)))
+    monkeypatch.setattr(
+        app_module.uvicorn,
+        "run",
+        lambda *a, **k: seen.update(
+            served=sum(thread.name == "decision_push" for thread in threading.enumerate() if thread not in before)
+        ),
+    )
     caplog.set_level(logging.INFO)
     app_module.serve(push_config(tmp_path))  # must not raise
     assert seen == {"served": 0}

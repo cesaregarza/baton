@@ -54,8 +54,11 @@ class Post:
 
     def to_dict(self, reply_to: dict[str, Any] | None = None) -> dict[str, Any]:
         """Render the established wire payload, with the caller's reader-specific reply view."""
-        attribution = ({"alias_id": self.alias_id, "alias": self.alias,
-                        "badge": "guest", "code": self.alias_code} if self.alias_id else {})
+        attribution = (
+            {"alias_id": self.alias_id, "alias": self.alias, "badge": "guest", "code": self.alias_code}
+            if self.alias_id
+            else {}
+        )
         return {
             **attribution,
             "seq": self.seq,

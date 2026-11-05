@@ -21,18 +21,26 @@ def message_condition(config: Config, role: str, alias: str = "m") -> tuple[str,
     ``can_view_all_conversations``; otherwise a role must still be a participant
     and hold a retained copy.
     """
-    member = (f"({alias}.recipient = :reader OR {alias}.sender = :reader) AND EXISTS "
-             f"(SELECT 1 FROM participants p WHERE p.conversation_id = {alias}.conversation_id "
-             "AND p.role = :reader)")
+    member = (
+        f"({alias}.recipient = :reader OR {alias}.sender = :reader) AND EXISTS "
+        f"(SELECT 1 FROM participants p WHERE p.conversation_id = {alias}.conversation_id "
+        "AND p.role = :reader)"
+    )
     conversation = "1" if sees_all(config, role) else member
-    return (f"(({alias}.conversation_id IS NULL AND ({alias}.recipient = :reader OR "
-            f"{alias}.sender = :reader)) OR ({alias}.conversation_id IS NOT NULL AND {conversation}))",
-            {"reader": role})
+    return (
+        f"(({alias}.conversation_id IS NULL AND ({alias}.recipient = :reader OR "
+        f"{alias}.sender = :reader)) OR ({alias}.conversation_id IS NOT NULL AND {conversation}))",
+        {"reader": role},
+    )
 
 
 def may_read_conversation(conn: Connection, config: Config, role: str, conversation_id: str) -> bool:
     """Apply the conversation-level part of the same rule before reading history."""
     if sees_all(config, role):
         return True
-    return conn.execute("SELECT 1 FROM participants WHERE conversation_id = ? AND role = ?",
-                        (conversation_id, role)).fetchone() is not None
+    return (
+        conn.execute(
+            "SELECT 1 FROM participants WHERE conversation_id = ? AND role = ?", (conversation_id, role)
+        ).fetchone()
+        is not None
+    )

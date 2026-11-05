@@ -25,7 +25,7 @@ WINDOW = 8
 
 
 def windows(key: str) -> list[str]:
-    return [key[start:start + WINDOW] for start in range(len(key) - WINDOW + 1)]
+    return [key[start : start + WINDOW] for start in range(len(key) - WINDOW + 1)]
 
 
 def test_a_refused_move_never_names_the_threads_current_topic(build_scene):
@@ -108,8 +108,13 @@ def test_a_core_roles_post_that_carries_a_stray_grant_token_still_goes_through(b
     async def scenario(client):
         await stage(client, scene.host)
         room = await thread(client, scene.host, "job-hunt/leads")
-        sent = await tool(client, scene.host, "send_message", {
-            "conversation_id": room, "text": "hello", "grant_token": support.new_key()}, role="planner")
+        sent = await tool(
+            client,
+            scene.host,
+            "send_message",
+            {"conversation_id": room, "text": "hello", "grant_token": support.new_key()},
+            role="planner",
+        )
         succeeded(sent)
 
     play(scene.host, scenario)

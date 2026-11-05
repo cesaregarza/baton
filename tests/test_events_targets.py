@@ -3,6 +3,7 @@
 
 Synthetic and offline: a real loopback host with OAuth, the loopback receiver and the stub resolver.
 """
+
 from __future__ import annotations
 
 import json
@@ -47,16 +48,25 @@ description = "Shared login"
 @pytest.fixture
 def host(start_host, receiver, tmp_path):
     made = {role: auth.new_token() for role in ("hilary", "guest")}
-    entries = "".join(f'[[auth.tokens]]\nname = "{role}-token"\nrole = "{role}"\nsha256 = "{digest}"\n'
-                      for role, (_, digest) in made.items())
+    entries = "".join(
+        f'[[auth.tokens]]\nname = "{role}-token"\nrole = "{role}"\nsha256 = "{digest}"\n'
+        for role, (_, digest) in made.items()
+    )
 
     def build(config):
         settings = integration.parse_settings(config.integrations["openai_mcp_events"])
-        return {"openai_mcp_events": integration.McpEvents(config, replace(
-            settings, allow_private_callbacks=True, ca_file=str(receiver.ca_file)))}
+        return {
+            "openai_mcp_events": integration.McpEvents(
+                config, replace(settings, allow_private_callbacks=True, ca_file=str(receiver.ca_file))
+            )
+        }
 
-    started = start_host(extra=ROLES + entries + settings_table(receiver, max_total=6), integrations=build,
-                         oauth=True, oauth_roles=("planner", "guest"))
+    started = start_host(
+        extra=ROLES + entries + settings_table(receiver, max_total=6),
+        integrations=build,
+        oauth=True,
+        oauth_roles=("planner", "guest"),
+    )
     started.resolver = StubResolver()
     started.integrations["openai_mcp_events"].resolver = started.resolver
     started.tokens.update({role: token for role, (token, _) in made.items()})
@@ -68,14 +78,28 @@ def host(start_host, receiver, tmp_path):
 
 
 def tool(host, credential, name, arguments=None):
-    meta = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
-            "io.modelcontextprotocol/clientInfo": {"name": "events-target-test", "version": "1"},
-            "io.modelcontextprotocol/clientCapabilities": {}}
-    response = httpx.post(host.mcp_url, headers={
-        "Authorization": f"Bearer {host.tokens[credential]}", "Accept": "application/json, text/event-stream",
-        "Mcp-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": name,
-    }, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-             "params": {"name": name, "arguments": arguments or {}, "_meta": meta}}, timeout=30).json()
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "events-target-test", "version": "1"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    response = httpx.post(
+        host.mcp_url,
+        headers={
+            "Authorization": f"Bearer {host.tokens[credential]}",
+            "Accept": "application/json, text/event-stream",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": name,
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments or {}, "_meta": meta},
+        },
+        timeout=30,
+    ).json()
     try:
         return payload(response)
     except (KeyError, ValueError, TypeError):
@@ -93,8 +117,10 @@ def proof(host, name, passphrase=SECRET, credential="grant"):
 
 def targets(host):
     with db(host) as conn:
-        return [tuple(row) for row in conn.execute("SELECT a.name FROM events_targets t JOIN aliases a"
-                                                   " ON a.id = t.alias_id")]
+        return [
+            tuple(row)
+            for row in conn.execute("SELECT a.name FROM events_targets t JOIN aliases a ON a.id = t.alias_id")
+        ]
 
 
 def woken_roles(receiver):
@@ -147,8 +173,14 @@ def test_a_grant_binds_one_alias_until_it_is_unbound(host):
     assert tool(host, "grant", "bind_events", {"token": worker}).get("error") == "forbidden"
     assert tool(host, "grant", "unbind_events", {"token": worker}).get("error") == "forbidden"
     assert targets(host) == [("hilary",)]
-    refreshed = httpx.post(host.base + "/token", data={"grant_type": "refresh_token", "client_id": host.refresh[
-        "client_id"], "refresh_token": host.refresh["refresh_token"]}).json()
+    refreshed = httpx.post(
+        host.base + "/token",
+        data={
+            "grant_type": "refresh_token",
+            "client_id": host.refresh["client_id"],
+            "refresh_token": host.refresh["refresh_token"],
+        },
+    ).json()
     host.tokens["grant"] = refreshed["access_token"]
     assert tool(host, "grant", "bind_events", {"token": hilary}).get("bound") is True, "a refresh keeps the grant"
     assert tool(host, "grant", "unbind_events", {"token": hilary}).get("unbound") is True
@@ -191,8 +223,9 @@ def test_guest_subscriptions_belong_to_their_grant(host, receiver):
     host.tokens["other"] = authorize(host, role="guest")["access_token"]
     other = subscribe(host, "other", url, new_secret())
     assert other["result"]["id"] != first, "a subscription's id comes from its grant, not the guest role"
-    rpc(host, "other", "events/unsubscribe", {"name": integration.EVENT_NAME, "arguments": {},
-                                              "delivery": {"url": url}})
+    rpc(
+        host, "other", "events/unsubscribe", {"name": integration.EVENT_NAME, "arguments": {}, "delivery": {"url": url}}
+    )
     assert first in state(host)["subscriptions"], "another grant can't unsubscribe it"
     assert "result" in subscribe(host, "grant", receiver.url("/hooks/h"), new_secret())
     capped = subscribe(host, "grant", receiver.url("/hooks/i"), new_secret())
@@ -214,8 +247,11 @@ def test_the_owner_status_shows_receipts_but_no_secrets_and_unbind_recovers(host
     assert owner(host, "events", "status") == 0
     printed = capsys.readouterr().out
     shown = json.loads(printed)
-    [grant] = {entry["grant"] for entry in auth.TokenStore.load(host.config.oauth_state_path).access.values()
-               if entry["role"] == "guest"}
+    [grant] = {
+        entry["grant"]
+        for entry in auth.TokenStore.load(host.config.oauth_state_path).access.values()
+        if entry["role"] == "guest"
+    }
     assert {"id": sub_id, "owner": f"grant:{grant}"}.items() <= shown["subscriptions"][0].items()
     [receipt] = [r for r in shown["receipts"] if r["subscription"] == sub_id]
     assert (receipt["wake_id"], receipt["outcome"]) == (json.loads(event["body"])["eventId"], "accepted")

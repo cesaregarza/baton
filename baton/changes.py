@@ -35,16 +35,19 @@ class Scope(Enum):
     ALL = "all"
 
 
-def record(conn: Connection, conversation_id: str, kind: str, *, message_id: str | None = None,
-           role: str | None = None) -> int:
+def record(
+    conn: Connection, conversation_id: str, kind: str, *, message_id: str | None = None, role: str | None = None
+) -> int:
     """Bump the conversation's revision and log the change; the caller holds the write lock. Returns the revision."""
     if kind not in KINDS:
         raise ValueError(f"unknown change kind {kind!r}")
     conn.execute("UPDATE conversations SET revision = revision + 1 WHERE id = ?", (conversation_id,))
     revision = conn.execute("SELECT revision FROM conversations WHERE id = ?", (conversation_id,)).fetchone()[0]
     now = datetime.now(UTC)
-    conn.execute("INSERT INTO change_log (conversation_id, revision, kind, message_id, role, at)"
-                 " VALUES (?, ?, ?, ?, ?, ?)", (conversation_id, revision, kind, message_id, role, now.isoformat()))
+    conn.execute(
+        "INSERT INTO change_log (conversation_id, revision, kind, message_id, role, at) VALUES (?, ?, ?, ?, ?, ?)",
+        (conversation_id, revision, kind, message_id, role, now.isoformat()),
+    )
     return revision
 
 
@@ -63,15 +66,18 @@ def read(conn: Connection, scope: Scope, *, cursor: str | None = None, limit: in
         raise InvalidRequest(f"limit must be 1-{MAX_LIMIT}")
     with conn.snapshot():  # a prune between checking the cursor and scanning would skip rows silently
         after = _position(conn, cursor)
-        rows = conn.execute(f"SELECT {', '.join(FIELDS)} FROM change_log WHERE change_seq > ? ORDER BY change_seq"
-                            " LIMIT ?", (after, min(limit, MAX_SCAN))).fetchall()
+        rows = conn.execute(
+            f"SELECT {', '.join(FIELDS)} FROM change_log WHERE change_seq > ? ORDER BY change_seq LIMIT ?",
+            (after, min(limit, MAX_SCAN)),
+        ).fetchall()
         entries = [{field: row[field] for field in FIELDS} for row in rows]
         last = entries[-1]["change_seq"] if entries else after
         return {"entries": entries, "next_cursor": f"{epoch(conn)}:{last}"}
 
 
-def wait(conn: Connection, scope: Scope, *, cursor: str, timeout_seconds: float,
-         poll_seconds: float = 0.5) -> dict[str, Any]:
+def wait(
+    conn: Connection, scope: Scope, *, cursor: str, timeout_seconds: float, poll_seconds: float = 0.5
+) -> dict[str, Any]:
     """Block until a change after `cursor` is logged, then return only its `change_seq`; or time out. No content."""
     _require(scope)
     deadline = time.monotonic() + max(0.0, timeout_seconds)
@@ -109,6 +115,8 @@ def _position(conn: Connection, cursor: str | None) -> int:
             if position > 2**63 - 1:  # SQLite stores change_seq as a signed 64-bit integer.
                 raise InvalidRequest(invalid_detail)
             return position
-    raise CursorExpired("that cursor is from another log or older than the oldest change kept; rebuild from "
-                        "state, then continue from reset_cursor", f"{current}:{pruned}")
-
+    raise CursorExpired(
+        "that cursor is from another log or older than the oldest change kept; rebuild from "
+        "state, then continue from reset_cursor",
+        f"{current}:{pruned}",
+    )

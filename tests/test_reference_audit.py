@@ -54,16 +54,31 @@ def without_time(line):
 
 
 def core_line(name, **extra):
-    return {"role": "planner", "credential_role": "planner", "credential_id": "planner-token", "tool": name,
-            "outcome": "ok", **extra}
+    return {
+        "role": "planner",
+        "credential_role": "planner",
+        "credential_id": "planner-token",
+        "tool": name,
+        "outcome": "ok",
+        **extra,
+    }
 
 
 def guest_line(held, name, **extra):
-    return {"role": "guest", "credential_role": "guest", "credential_id": "guest-token", "tool": name,
-            "alias_id": held.alias_id, "alias_code": held.code, "outcome": "ok", **extra}
+    return {
+        "role": "guest",
+        "credential_role": "guest",
+        "credential_id": "guest-token",
+        "tool": name,
+        "alias_id": held.alias_id,
+        "alias_code": held.code,
+        "outcome": "ok",
+        **extra,
+    }
 
 
 # 1. What the line holds ----------------------------------------------------------------------------------------
+
 
 def test_a_core_edit_audits_its_topic_its_id_the_reference_the_revision_and_the_request(build_scene):
     """R21. The line of a core success has the path the call named, the topic's id, the document's name, the revision
@@ -76,8 +91,14 @@ def test_a_core_edit_audits_its_topic_its_id_the_reference_the_revision_and_the_
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
         assert without_time(scene.audit()[-1]) == core_line(
-            "edit_reference", topic=BOARDS, topic_id=scene.topic_id(BOARDS), reference=NAME, revision=1,
-            request_id=rid, expected_revision=0)
+            "edit_reference",
+            topic=BOARDS,
+            topic_id=scene.topic_id(BOARDS),
+            reference=NAME,
+            revision=1,
+            request_id=rid,
+            expected_revision=0,
+        )
 
     play(scene.host, scenario)
 
@@ -91,8 +112,16 @@ def test_a_grantees_edit_audits_the_same_with_the_alias_and_the_grant(build_scen
         rid = request_id()
         succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0, request_id=rid))
         assert without_time(scene.audit()[-1]) == guest_line(
-            held, "edit_reference", topic=BOARDS, topic_id=scene.topic_id(BOARDS), reference=NAME, revision=1,
-            request_id=rid, expected_revision=0, grant_id=held.grant_id)
+            held,
+            "edit_reference",
+            topic=BOARDS,
+            topic_id=scene.topic_id(BOARDS),
+            reference=NAME,
+            revision=1,
+            request_id=rid,
+            expected_revision=0,
+            grant_id=held.grant_id,
+        )
 
     play(scene.host, scenario)
 
@@ -127,8 +156,9 @@ def test_a_stale_refusal_audits_the_topic_and_the_reference_and_no_id_revision_o
         stale = await grantee_edit(client, held, BOARDS, NAME, "text", 1, request_id=rid)
         assert stale.get("error") == "stale_revision", stale
         line = without_time(scene.audit()[-1])
-        assert line == guest_line(held, "edit_reference", topic=BOARDS, reference=NAME, request_id=rid,
-                                  expected_revision=1) | {"outcome": "stale_revision"}
+        assert line == guest_line(
+            held, "edit_reference", topic=BOARDS, reference=NAME, request_id=rid, expected_revision=1
+        ) | {"outcome": "stale_revision"}
         assert not {"topic_id", "revision", "grant_id"} & set(line)
 
     play(scene.host, scenario)
@@ -143,8 +173,9 @@ def test_a_refusal_for_a_grant_that_does_not_cover_the_topic_audits_no_id_and_no
         rid = request_id()
         assert (await grantee_edit(client, held, "resume", NAME, "text", 0, request_id=rid)).get("error") == "forbidden"
         line = without_time(scene.audit()[-1])
-        assert line == guest_line(held, "edit_reference", topic="resume", reference=NAME, request_id=rid,
-                                  expected_revision=0) | {"outcome": "forbidden"}
+        assert line == guest_line(
+            held, "edit_reference", topic="resume", reference=NAME, request_id=rid, expected_revision=0
+        ) | {"outcome": "forbidden"}
 
     play(scene.host, scenario)
 
@@ -163,25 +194,43 @@ def test_the_read_tools_audit_the_topic_its_id_and_the_name_and_no_revision_or_g
         topic = {"topic": BOARDS, "topic_id": scene.topic_id(BOARDS)}
         worker = {"role": "worker", "credential_role": "worker", "credential_id": "worker-token", "outcome": "ok"}
         for name, make, extra in (
-                ("read_reference", lambda: read_reference(client, who, BOARDS), {}),
-                ("read_reference", lambda: read_reference(client, who, BOARDS, NAME), {"reference": NAME}),
-                ("read_reference", lambda: read_reference(client, who, BOARDS, NAME, 2), {"reference": NAME}),
-                ("reference_history", lambda: reference_history(client, who, BOARDS, NAME, limit=2, after_revision=1),
-                 {"reference": NAME})):
+            ("read_reference", lambda: read_reference(client, who, BOARDS), {}),
+            ("read_reference", lambda: read_reference(client, who, BOARDS, NAME), {"reference": NAME}),
+            ("read_reference", lambda: read_reference(client, who, BOARDS, NAME, 2), {"reference": NAME}),
+            (
+                "reference_history",
+                lambda: reference_history(client, who, BOARDS, NAME, limit=2, after_revision=1),
+                {"reference": NAME},
+            ),
+        ):
             succeeded(await make())
             assert without_time(scene.audit()[-1]) == {**worker, "tool": name, **topic, **extra}
         succeeded(await read_reference(client, guest, BOARDS, NAME, 1))
         assert without_time(scene.audit()[-1]) == {
-            "role": "guest", "credential_role": "guest", "credential_id": "guest-token", "tool": "read_reference",
-            "alias_id": guest.alias_id, "alias_code": guest.code, "outcome": "ok", **topic, "reference": NAME}
+            "role": "guest",
+            "credential_role": "guest",
+            "credential_id": "guest-token",
+            "tool": "read_reference",
+            "alias_id": guest.alias_id,
+            "alias_code": guest.code,
+            "outcome": "ok",
+            **topic,
+            "reference": NAME,
+        }
         assert (await read_reference(client, who, BOARDS, "no-such")).get("error") == "unknown_reference"
-        assert without_time(scene.audit()[-1]) == {**worker, "tool": "read_reference", "topic": BOARDS,
-                                                   "reference": "no-such", "outcome": "unknown_reference"}
+        assert without_time(scene.audit()[-1]) == {
+            **worker,
+            "tool": "read_reference",
+            "topic": BOARDS,
+            "reference": "no-such",
+            "outcome": "unknown_reference",
+        }
 
     play(scene.host, scenario)
 
 
 # 2. What must never be in it ----------------------------------------------------------------------------------
+
 
 def test_a_body_is_in_no_audit_line_event_response_or_refusal_text(build_scene, caplog):
     """R21. A unique marker in a body is written to the revision, and to nowhere else: not the audit line, a grant
@@ -197,16 +246,23 @@ def test_a_body_is_in_no_audit_line_event_response_or_refusal_text(build_scene, 
         text = f"{marker} written by the planner"
         answers = [
             await core_edit(client, scene, BOARDS, NAME, text, 0),
-            await core_edit(client, scene, BOARDS, NAME, text, 0),                       # stale
-            await core_edit(client, scene, BOARDS, "Upper", text, 0),                    # name
-            await core_edit(client, scene, BOARDS, NAME, marker + "x" * 40000, 1),       # size
-            await core_edit(client, scene, BOARDS, "other", text, 0, role="worker"),     # role
+            await core_edit(client, scene, BOARDS, NAME, text, 0),  # stale
+            await core_edit(client, scene, BOARDS, "Upper", text, 0),  # name
+            await core_edit(client, scene, BOARDS, NAME, marker + "x" * 40000, 1),  # size
+            await core_edit(client, scene, BOARDS, "other", text, 0, role="worker"),  # role
             await grantee_edit(client, held, BOARDS, NAME, text, 1),
         ]
         scene.revoke(held.grant_id)
-        answers.append(await grantee_edit(client, held, BOARDS, NAME, text, 2))        # revoked
-        assert [one.get("error") for one in answers] == [None, "stale_revision", "invalid_request", "limit_exceeded",
-                                                         "forbidden", None, "forbidden"]
+        answers.append(await grantee_edit(client, held, BOARDS, NAME, text, 2))  # revoked
+        assert [one.get("error") for one in answers] == [
+            None,
+            "stale_revision",
+            "invalid_request",
+            "limit_exceeded",
+            "forbidden",
+            None,
+            "forbidden",
+        ]
         assert marker not in json.dumps(answers)
         assert marker not in scene.audit_text() and marker not in caplog.text
         with scene.db() as conn:
@@ -221,7 +277,8 @@ def test_a_body_is_in_no_audit_line_event_response_or_refusal_text(build_scene, 
 
 
 def test_the_grant_key_is_in_none_of_it_even_when_passed_as_the_topic_the_name_or_the_body_of_a_refused_call(
-        build_scene, caplog):
+    build_scene, caplog
+):
     """R22. A key mistakenly put in `topic`, `name` or the `body` of a call that is then refused appears in no response,
     audit line, event, table cell or log record, whether the caller is a grantee or a core role that sends the key
     along as its `grant_token`. The topic and the name it was given in are dropped from the line, not written."""
@@ -235,10 +292,14 @@ def test_the_grant_key_is_in_none_of_it_even_when_passed_as_the_topic_the_name_o
         answers = []
         for key_as in ({"topic": held.key}, {"name": held.key}, {"body": held.key, "expected_revision": 0}):
             arguments = {**edit_arguments(BOARDS, NAME, "text", 2), **key_as}
-            answers.append(await tool(client, scene.host, "edit_reference", {
-                **arguments, "token": held.token, "grant_token": held.key}))
-            answers.append(await tool(client, scene.host, "edit_reference", {**arguments, "grant_token": held.key},
-                                      role="planner"))
+            answers.append(
+                await tool(
+                    client, scene.host, "edit_reference", {**arguments, "token": held.token, "grant_token": held.key}
+                )
+            )
+            answers.append(
+                await tool(client, scene.host, "edit_reference", {**arguments, "grant_token": held.key}, role="planner")
+            )
             line = scene.audit()[-1]
             assert held.key not in json.dumps(line)
             assert ("topic" in line, "reference" in line) == ("topic" not in key_as, "name" not in key_as), line
@@ -281,10 +342,11 @@ def test_a_key_sent_to_a_read_tool_that_declares_none_appears_in_no_line_or_answ
     async def scenario(client):
         held = await board(client, scene)
         await write_revisions(client, scene, BOARDS, NAME, 1)
-        answers = [await Bound.of(held).call(client, "read_reference", topic=BOARDS, name=NAME, grant_token=held.key),
-                   await Bound.of(held).call(client, "reference_history", topic=BOARDS, name=NAME,
-                                             grant_token=held.key),
-                   await Core(scene.host).call(client, "read_reference", topic=BOARDS, grant_token=held.key)]
+        answers = [
+            await Bound.of(held).call(client, "read_reference", topic=BOARDS, name=NAME, grant_token=held.key),
+            await Bound.of(held).call(client, "reference_history", topic=BOARDS, name=NAME, grant_token=held.key),
+            await Core(scene.host).call(client, "read_reference", topic=BOARDS, grant_token=held.key),
+        ]
         assert held.key not in json.dumps(answers)
         assert held.key not in scene.audit_text() and held.key not in caplog.text
 
@@ -300,14 +362,16 @@ def test_a_binding_token_in_the_topic_or_the_name_is_dropped_from_the_line(build
     async def scenario(client):
         held = await board(client, scene)
         for bad in ({"topic": held.token}, {"name": held.token}):
-            result = await Keyed(held).call(client, "edit_reference", **{
-                **edit_arguments(BOARDS, NAME, "text", 0), **bad})
+            result = await Keyed(held).call(
+                client, "edit_reference", **{**edit_arguments(BOARDS, NAME, "text", 0), **bad}
+            )
             assert result.get("error") == "invalid_request", result
             assert held.token not in json.dumps(result) and held.token not in scene.audit_text()
         shaped = secrets.token_urlsafe(32)
         for bad in ({"topic": shaped}, {"name": shaped}):
-            assert (await core_edit(client, scene, **{"topic": BOARDS, "name": NAME, **bad}, body="x",
-                                    expected=0)).get("error") == "invalid_request"
+            assert (await core_edit(client, scene, **{"topic": BOARDS, "name": NAME, **bad}, body="x", expected=0)).get(
+                "error"
+            ) == "invalid_request"
             assert shaped not in scene.audit_text()
 
     play(scene.host, scenario)
@@ -321,10 +385,12 @@ def test_a_topic_or_name_that_is_not_well_formed_is_left_out_of_the_line_and_the
 
     async def scenario(client):
         await support.stage(client, scene.host)
-        for topic, name, body, expect in ((BOARDS, "Not A Name", "x", {"topic": BOARDS}),
-                                          ("Not/A/Topic", NAME, "x", {"reference": NAME}),
-                                          ("Upper", "Upper", "x", {}),
-                                          (BOARDS, NAME, "", {"topic": BOARDS, "reference": NAME})):
+        for topic, name, body, expect in (
+            (BOARDS, "Not A Name", "x", {"topic": BOARDS}),
+            ("Not/A/Topic", NAME, "x", {"reference": NAME}),
+            ("Upper", "Upper", "x", {}),
+            (BOARDS, NAME, "", {"topic": BOARDS, "reference": NAME}),
+        ):
             result = await core_edit(client, scene, topic, name, body, 0)
             assert result.get("error") == "invalid_request", result
             line = scene.audit()[-1]
@@ -335,6 +401,7 @@ def test_a_topic_or_name_that_is_not_well_formed_is_left_out_of_the_line_and_the
 
 
 # 3. What a call leaves behind ----------------------------------------------------------------------------------
+
 
 def test_a_successful_edit_writes_the_revision_and_nothing_more(build_scene):
     """R18. By a core role and by a grantee: the revision (and the document when it is new) is written, and no message,
@@ -350,9 +417,13 @@ def test_a_successful_edit_writes_the_revision_and_nothing_more(build_scene):
         succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(2), 1))
         after = scene.counts()
         assert {key: middle[key] - before[key] for key in before if middle[key] != before[key]} == {
-            "reference_docs": 1, "reference_revisions": 1}
+            "reference_docs": 1,
+            "reference_revisions": 1,
+        }
         assert {key: after[key] - middle[key] for key in middle if after[key] != middle[key]} == {
-            "reference_revisions": 1, "alias_posts": 1}
+            "reference_revisions": 1,
+            "alias_posts": 1,
+        }
 
     play(scene.host, scenario)
 

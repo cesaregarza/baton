@@ -51,16 +51,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from urllib.parse import SplitResult, parse_qs, quote, unquote, urlsplit
 
 from baton import board_read, conversations, jobs, messages, topics
 from baton.config import Config
+from baton.database import Connection
 from baton.database.store import connect
 from baton.errors import BatonError
 
 HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'; "
-                               "frame-ancestors 'none'",
+    "frame-ancestors 'none'",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Cache-Control": "no-store",
@@ -290,8 +291,9 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
     if host not in _own_hosts(config):
         return _page(421, "Wrong address", "<p>This view answers only at its own loopback address.</p>")
     if method not in READS:
-        return Response(405, b"read-only\n", {**HEADERS, "Allow": "GET, HEAD",
-                                              "Content-Type": "text/plain; charset=utf-8"})
+        return Response(
+            405, b"read-only\n", {**HEADERS, "Allow": "GET, HEAD", "Content-Type": "text/plain; charset=utf-8"}
+        )
     url = urlsplit(target)
     if url.path == "/style.css":
         return Response(200, STYLE.encode(), {**HEADERS, "Content-Type": "text/css; charset=utf-8"})
@@ -300,39 +302,58 @@ def respond(config: Config, method: str, target: str, host: str) -> Response:
     match = CONVERSATION_PATH.fullmatch(url.path)
     topic = _topic_route(url.path) if url.path.startswith("/t/") else None
     if (url.path.startswith("/t/") and topic is None) or (url.path == "/needs" and _needs_topic(url.query) is False):
-        return _page(400, "Bad request", "<p>A topic is one or two lowercase slug segments, such as project or "
-                                         "project/subtopic, given once." + BACK + "</p>")
+        return _page(
+            400,
+            "Bad request",
+            "<p>A topic is one or two lowercase slug segments, such as project or "
+            "project/subtopic, given once." + BACK + "</p>",
+        )
     pages = _pages(url.query)
     if pages is None:
         return _page(400, "Bad request", "<p>A page number is a whole number from 1, given once." + BACK + "</p>")
     if url.path not in ("/", "/needs") and not match and topic is None:
         return _not_found()
+    return _respond_page(config, url, match, topic, pages)
+
+
+def _respond_page(
+    config: Config, url: SplitResult, match: re.Match[str] | None, topic: str | None, pages: dict[str, int]
+) -> Response:
     conn = connect(config.db_path)
     try:
-        if url.path == "/needs":
-            body = _needs(config, conn, _needs_topic(url.query), pages)
-            return _page(200, f"Needs {_attention_label(config)}", body)
-        if topic is not None:
-            # A topic is a container, so one nobody opened is a missing page rather than an empty list.
-            # The grammar check above still answers 400 first, which keeps a malformed path distinct.
-            # A topic this viewer can see nothing under is missing too: the page carries the topic's
-            # description, creator and members, so answering 200 would hand those to anyone who guessed
-            # the path. 404 rather than a bare header also keeps the topic's existence out of it.
-            if not topics.exists(conn, topic) or not topics.may_open(
-                    conn, config, config.dashboard.viewer_role, topic):
-                return _not_found()
-            return _page(200, topic, _index(config, conn, topic, pages["page"]))
-        if match is None:
-            return _page(200, "Conversations", _index(config, conn, None, pages["page"]))
-        if match.group(2):
-            return _thread_text(config, conn, match.group(1))
-        after = _after_seq(parse_qs(url.query, keep_blank_values=True).get("after_seq", ["0"])[-1])
-        if after is None:
-            return _page(400, "Bad request",
-                         "<p>after_seq must be a whole number of at most 19 digits." + BACK + "</p>")
-        return _conversation(config, conn, match.group(1), after)
+        return _page_route(config, conn, url, match, topic, pages)
     finally:
         conn.close()
+
+
+def _page_route(
+    config: Config,
+    conn: Connection,
+    url: SplitResult,
+    match: re.Match[str] | None,
+    topic: str | None,
+    pages: dict[str, int],
+) -> Response:
+    if url.path == "/needs":
+        body = _needs(config, conn, _needs_topic(url.query), pages)
+        return _page(200, f"Needs {_attention_label(config)}", body)
+    if topic is not None:
+        return _topic_page(config, conn, topic, pages["page"])
+    if match is None:
+        return _page(200, "Conversations", _index(config, conn, None, pages["page"]))
+    if match.group(2):
+        return _thread_text(config, conn, match.group(1))
+    after = _after_seq(parse_qs(url.query, keep_blank_values=True).get("after_seq", ["0"])[-1])
+    if after is None:
+        return _page(400, "Bad request", "<p>after_seq must be a whole number of at most 19 digits." + BACK + "</p>")
+    return _conversation(config, conn, match.group(1), after)
+
+
+def _topic_page(config: Config, conn: Connection, topic: str, page: int) -> Response:
+    # Topic details are visible only to viewers who can open that topic.
+    if not topics.exists(conn, topic) or not topics.may_open(conn, config, config.dashboard.viewer_role, topic):
+        return _not_found()
+    return _page(200, topic, _index(config, conn, topic, page))
 
 
 def server(config: Config) -> ThreadingHTTPServer | None:
@@ -368,7 +389,7 @@ def _topic_route(path: str) -> str | None:
     An encoded slash stays inside its segment, so it makes the topic invalid instead of acting as a separator.
     """
     try:
-        segments = [unquote(segment, errors="strict") for segment in path[len("/t/"):].split("/")]
+        segments = [unquote(segment, errors="strict") for segment in path[len("/t/") :].split("/")]
     except UnicodeDecodeError:
         return None
     if any("/" in segment for segment in segments):
@@ -392,11 +413,11 @@ def _pages(query: str) -> dict[str, int] | None:
 
 
 def _slice(items: list[Any], page: int, size: int) -> list[Any]:
-    return items[(page - 1) * size:page * size]
+    return items[(page - 1) * size : page * size]
 
 
 def _span(shown: int, total: int, page: int, size: int, noun: str, newest: bool = True) -> str:
-    """"showing the newest N of M" on the first page, "showing A–B of M" after it, or nothing when all fit."""
+    """ "showing the newest N of M" on the first page, "showing A–B of M" after it, or nothing when all fit."""
     if total <= size and page == 1:
         return ""
     if page == 1:
@@ -407,15 +428,21 @@ def _span(shown: int, total: int, page: int, size: int, noun: str, newest: bool 
     return f"showing {first}–{first + shown - 1} of {total}{noun}"
 
 
-def _pager(path: str, params: dict[str, str], name: str, page: int, size: int, total: int, label: str,
-           anchor: str = "") -> str:
+def _pager(
+    path: str, params: dict[str, str], name: str, page: int, size: int, total: int, label: str, anchor: str = ""
+) -> str:
     """A link to the next page of one list, and one back to its first. Each keeps the page's other parameters,
     so the other lists stay where they are, and lands on its own list's `anchor`."""
+
     def href(number: int) -> str:
         query = {key: value for key, value in params.items() if key != name}
         query.update({name: str(number)} if number > 1 else {})
-        return (path + ("?" + "&amp;".join(f"{key}={_e(value)}" for key, value in query.items()) if query else "")
-                + (f"#{anchor}" if anchor else ""))
+        return (
+            path
+            + ("?" + "&amp;".join(f"{key}={_e(value)}" for key, value in query.items()) if query else "")
+            + (f"#{anchor}" if anchor else "")
+        )
+
     links = []
     if page * size < total:
         links.append(f'<a href="{href(page + 1)}">{_e(label)}</a>')
@@ -457,11 +484,13 @@ def _topic_header(config: Config, conn: Any, topic: str) -> str:
         details = topics.get(conn, config, reader=config.dashboard.viewer_role, path=topic)
     except BatonError:
         return ""
-    title = f'<h2>{_e(details["title"])}</h2>' if details["title"] != topic else ""
-    description = f'<p>{_e(details["description"])}</p>' if details["description"] else ""
+    title = f"<h2>{_e(details['title'])}</h2>" if details["title"] != topic else ""
+    description = f"<p>{_e(details['description'])}</p>" if details["description"] else ""
     members = ", ".join(details["members"]) or "none yet"
-    return (f'{title}{description}<p class="meta">Opened by {_e(details["created_by"])} · members '
-            f'{_e(members)}</p>' + _subtopics(details["subtopics"]))
+    return (
+        f'{title}{description}<p class="meta">Opened by {_e(details["created_by"])} · members '
+        f"{_e(members)}</p>" + _subtopics(details["subtopics"])
+    )
 
 
 def _subtopics(paths: list[str]) -> str:
@@ -469,8 +498,7 @@ def _subtopics(paths: list[str]) -> str:
         return ""
     # Styled by the existing .meta rule rather than a new one for h3: a bare h3 falls back to the
     # browser's larger, darker default and reads as outranking the h2 above it.
-    return ('<h3 class="meta">Subtopics</h3><ul>'
-            + "".join(f'<li>{_topic_link(path)}</li>' for path in paths) + "</ul>")
+    return '<h3 class="meta">Subtopics</h3><ul>' + "".join(f"<li>{_topic_link(path)}</li>" for path in paths) + "</ul>"
 
 
 def _directory(config: Config, conn: Any) -> str:
@@ -484,8 +512,7 @@ def _directory(config: Config, conn: Any) -> str:
     """
     viewer = config.dashboard.viewer_role
     every = board_read.sees_all(config, viewer)
-    listed = [entry for entry in topics.listing(conn, config, reader=viewer)
-              if every or entry["threads"]]
+    listed = [entry for entry in topics.listing(conn, config, reader=viewer) if every or entry["threads"]]
     children: dict[str, list[str]] = {}
     for entry in listed:
         if "/" in entry["path"]:
@@ -496,39 +523,48 @@ def _directory(config: Config, conn: Any) -> str:
     items = []
     for path, entry in sorted(roots.items()):
         shown = _subtopics(children.get(path, []))
-        description = f'<p>{_e(entry["description"])}</p>' if entry["description"] else ""
-        activity = f' · last {_time(entry["last_activity_at"])}' if entry["last_activity_at"] else ""
-        counted = f'{entry["threads"]} thread{"" if entry["threads"] == 1 else "s"}'
+        description = f"<p>{_e(entry['description'])}</p>" if entry["description"] else ""
+        activity = f" · last {_time(entry['last_activity_at'])}" if entry["last_activity_at"] else ""
+        counted = f"{entry['threads']} thread{'' if entry['threads'] == 1 else 's'}"
         # A topic titled after its own path would otherwise print that word as the link and again as
         # metadata; the path earns its place in the line only when it says something the title did not.
-        named = f'{_e(path)} · ' if entry["title"] != path else ""
-        items.append(f'<li><a href="/t/{_e(path)}">{_e(entry["title"])}</a>{description}'
-                     f'<div class="meta">{named}{counted}{activity}</div>{shown}</li>')
+        named = f"{_e(path)} · " if entry["title"] != path else ""
+        items.append(
+            f'<li><a href="/t/{_e(path)}">{_e(entry["title"])}</a>{description}'
+            f'<div class="meta">{named}{counted}{activity}</div>{shown}</li>'
+        )
     return "<h2>Topics</h2><ul>" + "".join(items) + "</ul>" if items else ""
 
 
 def _index(config: Config, conn: Any, topic: str | None = None, page: int = 1) -> str:
     viewer = config.dashboard.viewer_role
-    total, shown = conversations.list_readable_page(conn, config, viewer, topic, limit=MAX_LISTED,
-                                                    offset=(page - 1) * MAX_LISTED)
+    total, shown = conversations.list_readable_page(
+        conn, config, viewer, topic, limit=MAX_LISTED, offset=(page - 1) * MAX_LISTED
+    )
     scope = "every conversation" if board_read.sees_all(config, viewer) else f"the conversations {viewer} is in"
     needs = f"Needs {_e(_attention_label(config))}"
     if topic is None:
-        heading = (f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}. '
-                   f'<a href="/needs">{needs}</a></p>' + _directory(config, conn))
+        heading = (
+            f'<h1>Conversations</h1><p class="muted">Read-only. Showing {_e(scope)}, as {_e(viewer)}. '
+            f'<a href="/needs">{needs}</a></p>' + _directory(config, conn)
+        )
     else:
-        heading = (f'<p><a href="/">All conversations</a> · {_e(" › ".join(topic.split("/")))}</p>'
-                   f'<h1>{_e(topic)}</h1><p class="muted">Read-only. Showing {_e(scope)} under this topic, as '
-                   f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">{needs} here</a></p>'
-                   + _topic_header(config, conn, topic))
+        heading = (
+            f'<p><a href="/">All conversations</a> · {_e(" › ".join(topic.split("/")))}</p>'
+            f'<h1>{_e(topic)}</h1><p class="muted">Read-only. Showing {_e(scope)} under this topic, as '
+            f'{_e(viewer)}. <a href="/needs?topic={_e(topic)}">{needs} here</a></p>'
+            + _topic_header(config, conn, topic)
+        )
     if not total:
-        return heading + f'<ul><li class=muted>{"None yet." if topic is None else "None under this topic."}</li></ul>'
+        return heading + f"<ul><li class=muted>{'None yet.' if topic is None else 'None under this topic.'}</li></ul>"
     span = _span(len(shown), total, page, MAX_LISTED, " conversations")
     more = f'<p class="muted">More than one page holds: {span}.</p>' if span else ""
     path = f"/t/{topic}" if topic else "/"
     pager = _pager(path, {}, "page", page, MAX_LISTED, total, "Older conversations")
-    groups = "".join(f'<h2>{_topic_link(group)}</h2><ul>' + "".join(_listing(item) for item in items) + "</ul>"
-                     for group, items in _by_topic(shown))
+    groups = "".join(
+        f"<h2>{_topic_link(group)}</h2><ul>" + "".join(_listing(item) for item in items) + "</ul>"
+        for group, items in _by_topic(shown)
+    )
     if not shown:
         groups = f'<p class="muted">Nothing on this page. <a href="{_e(path)}">Back to the newest</a></p>'
     return heading + more + groups + pager
@@ -550,70 +586,102 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
     viewer = config.dashboard.viewer_role
     subject = config.dashboard.attention_role or viewer
     projected = subject != viewer
-    you = _attention_label(config)   # plain text: every use below escapes it
+    you = _attention_label(config)  # plain text: every use below escapes it
     mine, others, replied = _asking(config, conn, topic, subject)
     # Each list's links keep the topic and where the other lists are, so paging one leaves the others in place.
-    params = {**({"topic": topic} if topic else {}),
-              **{name: str(number) for name, number in pages.items() if number > 1}}
+    params = {
+        **({"topic": topic} if topic else {}),
+        **{name: str(number) for name, number in pages.items() if number > 1},
+    }
     shown = _slice(mine, pages["page"], MAX_NEEDS)
     span = _span(len(shown), len(mine), pages["page"], MAX_NEEDS, "")
-    count = f'{len(mine)} message{"" if len(mine) == 1 else "s"} asked for {_e(you)}' + (f", {span}" if span else "")
-    other_count = f' · {len(others)} decision{"" if len(others) == 1 else "s"} not addressed to {_e(you)}'
+    count = f"{len(mine)} message{'' if len(mine) == 1 else 's'} asked for {_e(you)}" + (f", {span}" if span else "")
+    other_count = f" · {len(others)} decision{'' if len(others) == 1 else 's'} not addressed to {_e(you)}"
     where = f" under {_e(topic)}" if topic else ""
     items = "".join(_signal(subject, you, conversation, item, replied) for conversation, item in shown)
-    pager = _pager("/needs", params, "page", pages["page"], MAX_NEEDS, len(mine), f"Older messages for {you}",
-                   "for-you")
+    pager = _pager(
+        "/needs", params, "page", pages["page"], MAX_NEEDS, len(mine), f"Older messages for {you}", "for-you"
+    )
     other_shown = _slice(others, pages["others_page"], MAX_NEEDS)
     other_span = _span(len(other_shown), len(others), pages["others_page"], MAX_NEEDS, "")
     other_items = "".join(_signal(subject, you, conversation, item, replied) for conversation, item in other_shown)
-    other_pager = _pager("/needs", params, "others_page", pages["others_page"], MAX_NEEDS, len(others),
-                         "Older decisions", "decisions")
+    other_pager = _pager(
+        "/needs", params, "others_page", pages["others_page"], MAX_NEEDS, len(others), "Older decisions", "decisions"
+    )
     # Collapsed until the reader pages through it; then it reloads open, where the new items start.
     opened = " open" if pages["others_page"] > 1 else ""
-    other_block = (f'<details id="decisions"{opened}>'
-                   f'<summary>Decisions not addressed to {_e(you)} ({len(others)})</summary>'
-                   f'<p class="muted">Decision requests that name another role, or nobody, in the conversations '
-                   f'{"you can read" if not projected else _e(viewer) + " can read"}.'
-                   f'{" " + other_span.capitalize() + "." if other_span else ""}</p>'
-                   f'<ul>{other_items or "<li class=muted>None.</li>"}</ul>{other_pager}</details>')
+    other_block = (
+        f'<details id="decisions"{opened}>'
+        f"<summary>Decisions not addressed to {_e(you)} ({len(others)})</summary>"
+        f'<p class="muted">Decision requests that name another role, or nobody, in the conversations '
+        f"{'you can read' if not projected else _e(viewer) + ' can read'}."
+        f"{' ' + other_span.capitalize() + '.' if other_span else ''}</p>"
+        f"<ul>{other_items or '<li class=muted>None.</li>'}</ul>{other_pager}</details>"
+    )
     if projected and not config.dashboard.attention_jobs:
         # Listing them would widen what the view's audience sees; that takes `dashboard.attention_jobs`.
-        job_count, job_block = "", (f'<h2 id="jobs">Jobs</h2><p class="muted">Jobs waiting on {_e(you)} aren\'t '
-                                    'shown in this read-only view.</p>')
+        job_count, job_block = (
+            "",
+            (
+                f'<h2 id="jobs">Jobs</h2><p class="muted">Jobs waiting on {_e(you)} aren\'t '
+                "shown in this read-only view.</p>"
+            ),
+        )
     elif topic is not None:
-        job_count, job_block = "", ('<h2 id="jobs">Jobs</h2><p class="muted">Jobs have no topic, so none are '
-                                    f'shown under a topic filter. <a href="/needs">See every job waiting on '
-                                    f'{_e(you)}</a>.</p>')
+        job_count, job_block = (
+            "",
+            (
+                '<h2 id="jobs">Jobs</h2><p class="muted">Jobs have no topic, so none are '
+                f'shown under a topic filter. <a href="/needs">See every job waiting on '
+                f"{_e(you)}</a>.</p>"
+            ),
+        )
     else:
         total = jobs.count_jobs(conn, waiting_on=subject)
-        waiting = jobs.list_jobs(conn, waiting_on=subject, limit=MAX_NEEDS_JOBS,
-                                 offset=(pages["jobs_page"] - 1) * MAX_NEEDS_JOBS)
+        waiting = jobs.list_jobs(
+            conn, waiting_on=subject, limit=MAX_NEEDS_JOBS, offset=(pages["jobs_page"] - 1) * MAX_NEEDS_JOBS
+        )
         job_span = _span(len(waiting), total, pages["jobs_page"], MAX_NEEDS_JOBS, "", newest=False)
-        job_count = f' · {total} job{" is" if total == 1 else "s are"} waiting on {_e(you)}' + (
-            f", {job_span}" if job_span else "")
-        job_pager = _pager("/needs", params, "jobs_page", pages["jobs_page"], MAX_NEEDS_JOBS, total, "More jobs",
-                           "jobs")
-        job_block = (f'<h2 id="jobs">Jobs waiting on {_e(you)}</h2><ul>' + ("".join(_job(job) for job in waiting)
-                     or "<li class=muted>None.</li>") + "</ul>" + job_pager)
+        job_count = f" · {total} job{' is' if total == 1 else 's are'} waiting on {_e(you)}" + (
+            f", {job_span}" if job_span else ""
+        )
+        job_pager = _pager(
+            "/needs", params, "jobs_page", pages["jobs_page"], MAX_NEEDS_JOBS, total, "More jobs", "jobs"
+        )
+        job_block = (
+            f'<h2 id="jobs">Jobs waiting on {_e(you)}</h2><ul>'
+            + ("".join(_job(job) for job in waiting) or "<li class=muted>None.</li>")
+            + "</ul>"
+            + job_pager
+        )
     needs = f"Needs {_e(you)}"
-    crumbs = ('<p class="crumbs"><a href="/">All conversations</a>'
-              + (f' · <a href="/needs">{needs}</a>' if topic else "") + "</p>")
+    crumbs = (
+        '<p class="crumbs"><a href="/">All conversations</a>'
+        + (f' · <a href="/needs">{needs}</a>' if topic else "")
+        + "</p>"
+    )
     if projected:
-        head = (f'<h1>{needs}{where}</h1><p class="muted">{needs}, read-only view, as visible to {_e(viewer)}. '
-                f'{count}{other_count}{job_count}.</p>'
-                f'<p class="muted">Each message is a retained signal: it asked for {_e(you)}, or for a decision, when '
-                f'it was sent. "{_e(you)} replied" only means {_e(you)} sent a reply to it, which approves or resolves '
-                'nothing, and viewing changes nothing.</p>')
+        head = (
+            f'<h1>{needs}{where}</h1><p class="muted">{needs}, read-only view, as visible to {_e(viewer)}. '
+            f"{count}{other_count}{job_count}.</p>"
+            f'<p class="muted">Each message is a retained signal: it asked for {_e(you)}, or for a decision, when '
+            f'it was sent. "{_e(you)} replied" only means {_e(you)} sent a reply to it, which approves or resolves '
+            "nothing, and viewing changes nothing.</p>"
+        )
     else:
-        head = (f'<h1>{needs}{where}</h1><p class="muted">As {_e(viewer)}. {count}{other_count}{job_count}.</p>'
-                '<p class="muted">Each message is a retained signal: it asked for you, or for a decision, when it was '
-                'sent. "you replied" only means you sent a reply to it, and viewing changes nothing.</p>')
+        head = (
+            f'<h1>{needs}{where}</h1><p class="muted">As {_e(viewer)}. {count}{other_count}{job_count}.</p>'
+            '<p class="muted">Each message is a retained signal: it asked for you, or for a decision, when it was '
+            'sent. "you replied" only means you sent a reply to it, and viewing changes nothing.</p>'
+        )
     for_you = f"For {_e(you)}"
-    return (f'{crumbs}{head}'
-            f'<p class="muted">Jump to <a href="#for-you">{for_you}</a> · <a href="#decisions">Decisions not '
-            f'addressed to {_e(you)}</a> · <a href="#jobs">Jobs</a></p>'
-            f'<h2 id="for-you">{for_you}</h2><ul>{items or "<li class=muted>None.</li>"}</ul>{pager}'
-            f'{other_block}{job_block}')
+    return (
+        f"{crumbs}{head}"
+        f'<p class="muted">Jump to <a href="#for-you">{for_you}</a> · <a href="#decisions">Decisions not '
+        f'addressed to {_e(you)}</a> · <a href="#jobs">Jobs</a></p>'
+        f'<h2 id="for-you">{for_you}</h2><ul>{items or "<li class=muted>None.</li>"}</ul>{pager}'
+        f"{other_block}{job_block}"
+    )
 
 
 def _attention_label(config: Config) -> str:
@@ -624,9 +692,9 @@ def _attention_label(config: Config) -> str:
     return "you" if subject == viewer else config.roles[subject].label
 
 
-def _asking(config: Config, conn: Any, topic: str | None,
-            subject: str) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]],
-                                   list[tuple[dict[str, Any], dict[str, Any]]], set[str]]:
+def _asking(
+    config: Config, conn: Any, topic: str | None, subject: str
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], list[tuple[dict[str, Any], dict[str, Any]]], set[str]]:
     """Messages addressed to `subject`, other decision signals, and replies, all from the viewer's readable set.
 
     It reads each visible conversation through the same `history` path as its page, under the viewer's
@@ -636,8 +704,7 @@ def _asking(config: Config, conn: Any, topic: str | None,
     a person's, so an agent relaying or quoting the person never counts.
     """
     viewer = config.dashboard.viewer_role
-    return conversations.attention_signals(conn, config, viewer, subject, topic,
-                                           human_replies_only=subject != viewer)
+    return conversations.attention_signals(conn, config, viewer, subject, topic, human_replies_only=subject != viewer)
 
 
 def _signal(subject: str, you: str, conversation: dict[str, Any], item: dict[str, Any], replied: set[str]) -> str:
@@ -658,15 +725,19 @@ def _signal(subject: str, you: str, conversation: dict[str, Any], item: dict[str
     if item["message_id"] in replied:
         labels.append(f"{you} replied")
     why = " · ".join(labels)
-    return (f'<li><div class="meta"><a href="{_e(message_path(conversation["conversation_id"], seq))}">'
-            f'{_e(conversation["title"])}</a><span class="sep"> · </span>'
-            f'<span class="role">{_e(messages.author_label(item))}</span> · '
-            f'{_time(item["at"])} · #{seq} · {_e(why)}</div><p class="text">{_e(item["text"])}</p></li>')
+    return (
+        f'<li><div class="meta"><a href="{_e(message_path(conversation["conversation_id"], seq))}">'
+        f'{_e(conversation["title"])}</a><span class="sep"> · </span>'
+        f'<span class="role">{_e(messages.author_label(item))}</span> · '
+        f'{_time(item["at"])} · #{seq} · {_e(why)}</div><p class="text">{_e(item["text"])}</p></li>'
+    )
 
 
 def _job(job: dict[str, Any]) -> str:
-    return (f'<li>{_e(job["title"])}<div class="meta">{_id(job["id"])} · {_e(job["state"])} · '
-            f'updated {_time(job["updated_at"])}</div></li>')
+    return (
+        f'<li>{_e(job["title"])}<div class="meta">{_id(job["id"])} · {_e(job["state"])} · '
+        f"updated {_time(job['updated_at'])}</div></li>"
+    )
 
 
 def _by_topic(listed: list[dict[str, Any]]) -> list[tuple[str | None, list[dict[str, Any]]]]:
@@ -685,11 +756,16 @@ def _by_topic(listed: list[dict[str, Any]]) -> list[tuple[str | None, list[dict[
 def _listing(item: dict[str, Any]) -> str:
     # A thread a guest started says so, with the alias and its code, exactly as a guest's posts are
     # attributed. A role's thread carries no alias, so it reads as it always did.
-    alias = (f' · started by {_e(item["created_by_alias"])} ({_e(item["created_by_alias_code"])})'
-             if item.get("created_by_alias") else "")
-    return (f'<li><a href="/c/{_e(item["conversation_id"])}">{_e(item["title"])}</a>'
-            f'<div class="meta">{_e(", ".join(item["participants"]))} · started '
-            f'{_time(item["created_at"])}{alias}</div></li>')
+    alias = (
+        f" · started by {_e(item['created_by_alias'])} ({_e(item['created_by_alias_code'])})"
+        if item.get("created_by_alias")
+        else ""
+    )
+    return (
+        f'<li><a href="/c/{_e(item["conversation_id"])}">{_e(item["title"])}</a>'
+        f'<div class="meta">{_e(", ".join(item["participants"]))} · started '
+        f"{_time(item['created_at'])}{alias}</div></li>"
+    )
 
 
 def _after_seq(value: str) -> int | None:
@@ -723,6 +799,7 @@ def _title(config: Config, conn: Any, conversation_id: str) -> str:
 def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -> Response:
     def read(after_seq: int, limit: int) -> dict[str, Any]:
         return _read(config, conn, conversation_id, after_seq, limit)
+
     try:
         page = read(after, messages.MAX_PAGE_MESSAGES)
         # A page ends at a byte budget as well as a row count, so ask whether anything follows it.
@@ -743,28 +820,41 @@ def _conversation(config: Config, conn: Any, conversation_id: str, after: int) -
     items = _thread(page["messages"], conversation_id, parents)
     missing = _gap_summary(page["retention_gaps"])
     measure = _gap_measure(page["retention_gaps"])
-    more = (f'<p class="pager"><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
-            if later else "")
-    earlier = (f'<p class="pager"><a href="/c/{_e(conversation_id)}'
-               f'?after_seq={max(0, after - messages.MAX_PAGE_MESSAGES)}">Earlier messages</a></p>'
-               if after > 0 else "")
-    return _page(200, title, scripts=True, body=_thread_top(conversation_id) +
-                             f'<h1>{_e(title)}</h1>{earlier}{missing}'
-                             f'<ul>{items or "<li class=muted>No messages yet.</li>"}</ul>{measure}{more}')
+    more = (
+        f'<p class="pager"><a href="/c/{_e(conversation_id)}?after_seq={page["next_seq"]}">Later messages</a></p>'
+        if later
+        else ""
+    )
+    earlier = (
+        f'<p class="pager"><a href="/c/{_e(conversation_id)}'
+        f'?after_seq={max(0, after - messages.MAX_PAGE_MESSAGES)}">Earlier messages</a></p>'
+        if after > 0
+        else ""
+    )
+    return _page(
+        200,
+        title,
+        scripts=True,
+        body=_thread_top(conversation_id) + f"<h1>{_e(title)}</h1>{earlier}{missing}"
+        f"<ul>{items or '<li class=muted>No messages yet.</li>'}</ul>{measure}{more}",
+    )
 
 
 def _thread_top(conversation_id: str) -> str:
     """A thread page's top row: the way back, the Copy button, and the line that says how the copy went. The
     button is wired by `/copy.js`, the one script any page loads, and fetches the thread's text from `data-src`."""
-    return ('<div class="top"><p class="crumbs"><a href="/">All conversations</a></p>'
-            f'<button type="button" id="copy" class="copy" data-src="/c/{_e(conversation_id)}/text" '
-            'title="Copy the whole thread as plain text">Copy</button>'
-            '<p id="copy-note" class="copy-note" role="status"></p></div>'
-            '<script src="/copy.js" defer></script>')
+    return (
+        '<div class="top"><p class="crumbs"><a href="/">All conversations</a></p>'
+        f'<button type="button" id="copy" class="copy" data-src="/c/{_e(conversation_id)}/text" '
+        'title="Copy the whole thread as plain text">Copy</button>'
+        '<p id="copy-note" class="copy-note" role="status"></p></div>'
+        '<script src="/copy.js" defer></script>'
+    )
 
 
-def _thread(items: list[dict[str, Any]], conversation_id: str = "",
-            parents: dict[int, dict[str, Any]] | None = None) -> str:
+def _thread(
+    items: list[dict[str, Any]], conversation_id: str = "", parents: dict[int, dict[str, Any]] | None = None
+) -> str:
     """The page's messages with each reply nested under its parent when the parent is on this page."""
     on_page = {item["seq"] for item in items}
     replies: dict[int, list[dict[str, Any]]] = {}
@@ -789,14 +879,17 @@ def _gap_summary(gaps: list[dict[str, int]]) -> str:
     missing messages once, above the thread, never among the messages, where a notice's place would imply when."""
     if not gaps:
         return ""
-    ranges = ", ".join(f"#{gap['from_seq']}" if gap["from_seq"] == gap["to_seq"]
-                       else f"#{gap['from_seq']}–#{gap['to_seq']}"
-                       for gap in sorted(gaps, key=lambda gap: gap["from_seq"]))
+    ranges = ", ".join(
+        f"#{gap['from_seq']}" if gap["from_seq"] == gap["to_seq"] else f"#{gap['from_seq']}–#{gap['to_seq']}"
+        for gap in sorted(gaps, key=lambda gap: gap["from_seq"])
+    )
     # Arriving by a message link skips the summary, so a bar at the bottom, where it can't cover the anchored message,
     # points back to it. It is CSS only (the page runs no scripts): shown once the message's end is in view, and
     # dismissed by the checkbox. The action row is a span so narrow screens can give it a row of its own.
-    return (f'<p class="notice" id="missing">Not kept any more on this page: messages {_e(ranges)}</p>'
-            '<input type="checkbox" id="gap-dismiss" class="gap-dismiss">' + _gap_bar())
+    return (
+        f'<p class="notice" id="missing">Not kept any more on this page: messages {_e(ranges)}</p>'
+        '<input type="checkbox" id="gap-dismiss" class="gap-dismiss">' + _gap_bar()
+    )
 
 
 def _gap_measure(gaps: list[dict[str, int]]) -> str:
@@ -809,31 +902,46 @@ def _gap_bar(measure: bool = False) -> str:
     The copy has no id or for, and is hidden from assistive technology."""
     attributes = 'class="gap-bar gap-measure" aria-hidden="true"' if measure else 'class="gap-bar"'
     dismiss = "" if measure else ' for="gap-dismiss"'
-    return (f'<p {attributes}>Some messages on this page are no longer kept<span class="gap-sep"> · </span>'
-            '<span class="gap-actions"><a href="#missing">view ranges</a>'
-            f'<label{dismiss}>Dismiss</label></span></p>')
+    return (
+        f'<p {attributes}>Some messages on this page are no longer kept<span class="gap-sep"> · </span>'
+        '<span class="gap-actions"><a href="#missing">view ranges</a>'
+        f"<label{dismiss}>Dismiss</label></span></p>"
+    )
 
 
-def _message(item: dict[str, Any], replies: str = "", on_page: frozenset[int] | set[int] = frozenset(),
-             conversation_id: str = "", parents: dict[int, dict[str, Any]] | None = None) -> str:
+def _message(
+    item: dict[str, Any],
+    replies: str = "",
+    on_page: frozenset[int] | set[int] = frozenset(),
+    conversation_id: str = "",
+    parents: dict[int, dict[str, Any]] | None = None,
+) -> str:
     if item.get("notice"):
         return f'<li class="notice">{_e(_notice_line(item))} · {_time(item["at"])}{replies}</li>'
     relayed = "".join(
         f'<blockquote class="relayed"><p class="source">relayed from {_e(entry["source"])} at {_e(entry["at"])}'
-        f'</p><p class="relayed-text">{_e(entry["text"])}</p></blockquote>' for entry in item.get("relayed") or [])
+        f'</p><p class="relayed-text">{_e(entry["text"])}</p></blockquote>'
+        for entry in item.get("relayed") or []
+    )
     kind = item.get("author_kind")
     badge = f'<span class="badge {kind}">{kind}</span>' if kind in ("human", "agent") else ""
-    return (f'<li class="message" id="m-{item["seq"]}"><div class="meta"><span class="role">'
-            f'{_e(messages.author_label(item))}</span>{badge} · {_time(item["at"])} · #{item["seq"]}</div>'
-            f'{_reply_marker(item.get("reply_to"), on_page, conversation_id, parents or {})}'
-            f'<p class="text">{_e(item["text"])}</p>{relayed}<span class="gap-end"></span>{replies}</li>')
+    return (
+        f'<li class="message" id="m-{item["seq"]}"><div class="meta"><span class="role">'
+        f"{_e(messages.author_label(item))}</span>{badge} · {_time(item['at'])} · #{item['seq']}</div>"
+        f"{_reply_marker(item.get('reply_to'), on_page, conversation_id, parents or {})}"
+        f'<p class="text">{_e(item["text"])}</p>{relayed}<span class="gap-end"></span>{replies}</li>'
+    )
 
 
 QUOTE = 160
 
 
-def _reply_marker(reply_to: dict[str, Any] | None, on_page: frozenset[int] | set[int], conversation_id: str = "",
-                  parents: dict[int, dict[str, Any]] | None = None) -> str:
+def _reply_marker(
+    reply_to: dict[str, Any] | None,
+    on_page: frozenset[int] | set[int],
+    conversation_id: str = "",
+    parents: dict[int, dict[str, Any]] | None = None,
+) -> str:
     """Where a reply's parent is: nothing when it's nested here; on another page, a link to it with a short
     quote of what it said; or 'parent unavailable' when the viewer can't see it, without its words or author."""
     if not reply_to:
@@ -843,13 +951,12 @@ def _reply_marker(reply_to: dict[str, Any] | None, on_page: frozenset[int] | set
     seq = int(reply_to["seq"])
     if seq in on_page:
         return ""
-    link = (f'<a href="{_e(message_path(conversation_id, seq))}">#{seq}</a>' if conversation_id
-            else f"#{seq}")
+    link = f'<a href="{_e(message_path(conversation_id, seq))}">#{seq}</a>' if conversation_id else f"#{seq}"
     parent = (parents or {}).get(seq)
     quote = ""
     if parent is not None:
         words = parent["text"] if len(parent["text"]) <= QUOTE else parent["text"][:QUOTE] + "…"
-        quote = f' · {_e(messages.author_label(parent))}: “{_e(words)}”'
+        quote = f" · {_e(messages.author_label(parent))}: “{_e(words)}”"
     return f'<p class="reply-to">in reply to {link}{quote}</p>'
 
 
@@ -868,21 +975,25 @@ def _thread_text(config: Config, conn: Any, conversation_id: str) -> Response:
     except BatonError:  # unknown, or one the viewer can't see: the same answer, so neither is revealed
         return _not_found()
     body = "\n\n".join(found[seq] for seq in sorted(found)) or "No messages yet."
-    return Response(200, f"Thread: {_title(config, conn, conversation_id)}\nId: {conversation_id}\n\n{body}\n".encode(),
-                    {**HEADERS, "Content-Type": "text/plain; charset=utf-8"})
+    return Response(
+        200,
+        f"Thread: {_title(config, conn, conversation_id)}\nId: {conversation_id}\n\n{body}\n".encode(),
+        {**HEADERS, "Content-Type": "text/plain; charset=utf-8"},
+    )
 
 
 def _plain(item: dict[str, Any]) -> str:
     """One message as plain text: its number, time and sender, where it answers, then its words and any it relays."""
-    head = [f'#{item["seq"]}', item["at"]]
+    head = [f"#{item['seq']}", item["at"]]
     if item.get("notice"):
         return " · ".join([*head, f"notice: {_notice_line(item)}"])
     head.append(messages.author_label(item))
     reply = item.get("reply_to")
     if reply:
-        head.append(f'in reply to #{reply["seq"]}' if reply.get("seq") is not None else "parent unavailable")
-    relayed = "".join(f'\n\nrelayed from {entry["source"]} at {entry["at"]}:\n{entry["text"]}'
-                      for entry in item.get("relayed") or [])
+        head.append(f"in reply to #{reply['seq']}" if reply.get("seq") is not None else "parent unavailable")
+    relayed = "".join(
+        f"\n\nrelayed from {entry['source']} at {entry['at']}:\n{entry['text']}" for entry in item.get("relayed") or []
+    )
     return " · ".join(head) + "\n" + item["text"] + relayed
 
 
@@ -891,19 +1002,24 @@ def _notice_line(item: dict[str, Any]) -> str:
     notice = item["notice"]
     if notice["event"] in ("participant_added", "participant_removed"):
         verb = "added" if notice["event"] == "participant_added" else "removed"
-        return f'{notice["participant"]} was {verb} by {notice["by"]}'
+        return f"{notice['participant']} was {verb} by {notice['by']}"
     return item["text"]
 
 
 def _page(status: int, title: str, body: str, scripts: bool = False) -> Response:
     """An HTML page. `scripts` is for a thread page alone, whose policy also lets it run the Copy button's script."""
-    document = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
-                '<meta name="viewport" content="width=device-width, initial-scale=1">'
-                f'<title>{_e(title)} · baton</title><link rel="stylesheet" href="/style.css"></head>'
-                f'<body>{body}</body></html>')
+    document = (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>{_e(title)} · baton</title><link rel="stylesheet" href="/style.css"></head>'
+        f"<body>{body}</body></html>"
+    )
     policy = COPY_POLICY if scripts else HEADERS["Content-Security-Policy"]
-    return Response(status, document.encode(), {**HEADERS, "Content-Security-Policy": policy,
-                                                "Content-Type": "text/html; charset=utf-8"})
+    return Response(
+        status,
+        document.encode(),
+        {**HEADERS, "Content-Security-Policy": policy, "Content-Type": "text/html; charset=utf-8"},
+    )
 
 
 def _not_found() -> Response:
@@ -930,7 +1046,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = do_TRACE = do_CONNECT = _answer
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - the base class's name
+    def log_message(self, format: str, *args: Any) -> None:
         """Paths name conversations; keep them out of the host's log."""
 
 

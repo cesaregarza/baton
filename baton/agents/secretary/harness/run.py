@@ -27,8 +27,10 @@ class SecretaryHarness:
     def metrics(self) -> dict:
         totals = None
         if self.usage and all(usage is not None for usage in self.usage):
-            totals = {key: sum(usage[key] for usage in self.usage)
-                      for key in ("input_tokens", "output_tokens", "cached_tokens")}
+            totals = {
+                key: sum(usage[key] for usage in self.usage)
+                for key in ("input_tokens", "output_tokens", "cached_tokens")
+            }
         return {"model_calls": self.model_calls, "tool_calls": self.tools.calls, "usage": totals}
 
     async def assess(self, context: dict, timeout: float) -> dict:
@@ -40,8 +42,11 @@ class SecretaryHarness:
         deadline = time.monotonic() + timeout
         async with asyncio.timeout(timeout):
             for _ in range(self.policy.max_tool_calls + 1):
-                turn = await self.model.turn(messages, self.tools.definitions,
-                                             min(self.policy.model["timeout_seconds"], deadline - time.monotonic()))
+                turn = await self.model.turn(
+                    messages,
+                    self.tools.definitions,
+                    min(self.policy.model["timeout_seconds"], deadline - time.monotonic()),
+                )
                 self.model_calls += 1
                 self.usage.append(turn.usage)
                 if turn.answer is not None:
@@ -55,9 +60,13 @@ class SecretaryHarness:
                 used_ids.update(ids)
                 messages.extend(turn.items)
                 for call in turn.calls:
-                    tool_timeout = min(self.policy.decision_timeout,
-                                       (deadline - time.monotonic()) / 2)
+                    tool_timeout = min(self.policy.decision_timeout, (deadline - time.monotonic()) / 2)
                     result = await self.tools.call(call, context, tool_timeout)
-                    messages.append({"type": "function_call_output", "call_id": call.id,
-                                     "output": json.dumps(result, sort_keys=True, separators=(",", ":"))})
+                    messages.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call.id,
+                            "output": json.dumps(result, sort_keys=True, separators=(",", ":")),
+                        }
+                    )
         raise ModelUnavailable("secretary did not finish an assessment")

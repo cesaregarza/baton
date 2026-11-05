@@ -8,6 +8,16 @@ from .driver import Connection, OperationalError, Row, connect_sqlite, memory, s
 from .store import SCHEMA_VERSION, SchemaMismatch, connect, connect_read_only, connection
 
 __all__ = [
-    "Connection", "OperationalError", "Row", "SCHEMA_VERSION", "SchemaMismatch", "connect",
-    "connect_read_only", "connect_sqlite", "connection", "memory", "snapshot", "transaction",
+    "Connection",
+    "OperationalError",
+    "Row",
+    "SCHEMA_VERSION",
+    "SchemaMismatch",
+    "connect",
+    "connect_read_only",
+    "connect_sqlite",
+    "connection",
+    "memory",
+    "snapshot",
+    "transaction",
 ]

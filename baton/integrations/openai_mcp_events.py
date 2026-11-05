@@ -203,7 +203,7 @@ class SubscribeParams(types.RequestParams):
     arguments: dict[str, Any] = {}
     delivery: dict[str, Any]
     cursor: str | None = None
-    ttlMs: int | None = None  # noqa: N815 - the contract's field name
+    ttlMs: int | None = None
 
 
 class UnsubscribeParams(types.RequestParams):
@@ -230,8 +230,9 @@ def signature_header(secrets_: Sequence[str], message_id: str, timestamp: int, b
 
 def subscription_id(role: str, url: str, name: str, arguments: dict[str, Any]) -> str:
     """Deterministic, from the principal (the role), the callback, the event and canonical arguments."""
-    identity = json.dumps({"principal": role, "url": url, "name": name, "arguments": arguments},
-                          sort_keys=True, separators=(",", ":"))
+    identity = json.dumps(
+        {"principal": role, "url": url, "name": name, "arguments": arguments}, sort_keys=True, separators=(",", ":")
+    )
     return "sub_" + hashlib.sha256(identity.encode()).hexdigest()[:32]
 
 
@@ -273,8 +274,17 @@ def canonical_callback(url: str) -> Callback:
         port = parts.port
     except ValueError:
         raise CallbackError("invalid_url") from None
-    if (parts.scheme != "https" or parts.username is not None or parts.password is not None or parts.query
-            or parts.fragment or "?" in url or "#" in url or not parts.hostname or not _HOST.fullmatch(parts.hostname)):
+    if (
+        parts.scheme != "https"
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+        or "?" in url
+        or "#" in url
+        or not parts.hostname
+        or not _HOST.fullmatch(parts.hostname)
+    ):
         raise CallbackError("invalid_url")
     segments = tuple(parts.path.split("/")[1:]) if parts.path.startswith("/") else ()
     if not segments or any(seg in ("", ".", "..") for seg in segments):
@@ -282,8 +292,10 @@ def canonical_callback(url: str) -> Callback:
     for seg in segments:
         if not _SEGMENT.fullmatch(seg):
             bad = next(c for c in seg if c not in UNRESERVED)
-            raise CallbackError("invalid_url", f"character {bad!r} is not allowed in a callback path; "
-                                               "use only A-Z a-z 0-9 . _ ~ - between slashes")
+            raise CallbackError(
+                "invalid_url",
+                f"character {bad!r} is not allowed in a callback path; use only A-Z a-z 0-9 . _ ~ - between slashes",
+            )
     port = port or 443
     callback = Callback(url, parts.hostname, port, segments)
     rebuilt = f"https://{callback.host}{'' if port == 443 else f':{port}'}{callback.target}"
@@ -319,10 +331,16 @@ class McpEvents:
         """
         wake = json.loads(body)
         occurred_at = self._occurrence(wake_id)
-        event = json.dumps({
-            "eventId": wake_id, "name": EVENT_NAME, "timestamp": occurred_at,
-            "data": {key: wake[key] for key in WAKE_FIELDS if key in wake}, "cursor": None,
-        }, separators=(",", ":")).encode()
+        event = json.dumps(
+            {
+                "eventId": wake_id,
+                "name": EVENT_NAME,
+                "timestamp": occurred_at,
+                "data": {key: wake[key] for key in WAKE_FIELDS if key in wake},
+                "cursor": None,
+            },
+            separators=(",", ":"),
+        ).encode()
         if len(event) > MAX_BODY_BYTES:
             raise ValueError("an event body exceeds the 256 KiB contract limit")
         self._sweep_targets()
@@ -334,8 +352,9 @@ class McpEvents:
             if sub is None:
                 continue
             try:
-                status, _ = self._post(sub["url"], self._signing_secrets(sub), sub["id"], wake_id, event,
-                                       want_body=False)
+                status, _ = self._post(
+                    sub["url"], self._signing_secrets(sub), sub["id"], wake_id, event, want_body=False
+                )
             except CallbackError as error:
                 log.warning("wake %s to %s failed: %s", wake_id, sub["id"], error.reason)
                 self._record(wake_id, sub, f"failed: {error.reason}")
@@ -373,8 +392,9 @@ class McpEvents:
         try:
             await anyio.to_thread.run_sync(self._verify, callback.url, secret, sub_id)
         except CallbackError as error:
-            raise MCPError(CALLBACK_ENDPOINT_ERROR, "callback endpoint verification failed",
-                           {"reason": error.reason}) from None
+            raise MCPError(
+                CALLBACK_ENDPOINT_ERROR, "callback endpoint verification failed", {"reason": error.reason}
+            ) from None
         now = time.time()
         with self._state() as state:
             self._check_caps(state, owner, sub_id)  # both again, under the lock
@@ -386,21 +406,36 @@ class McpEvents:
                 previous = [{"secret": existing["secret"], "until": now + self.settings.rotation_overlap_seconds}]
                 rotated_at = now
                 with self._db() as conn:
-                    conn.execute("INSERT INTO events_rotations (subscription, owner, at) VALUES (?, ?, ?)",
-                                 (sub_id, owner, now))
+                    conn.execute(
+                        "INSERT INTO events_rotations (subscription, owner, at) VALUES (?, ?, ?)", (sub_id, owner, now)
+                    )
             else:
-                previous = [p for p in (existing or {}).get("previous_secrets", [])[:1]
-                            if p["until"] > now and p["secret"] != secret]
+                previous = [
+                    p
+                    for p in (existing or {}).get("previous_secrets", [])[:1]
+                    if p["until"] > now and p["secret"] != secret
+                ]
                 rotated_at = (existing or {}).get("rotated_at")
             state["subscriptions"][sub_id] = {
-                "id": sub_id, "role": role, "owner": owner, "grant": grant,
-                "authority": auth.credential_authority(token), "url": callback.url,
-                "secret": secret, "previous_secrets": previous, "rotated_at": rotated_at,
-                "expires_at": expires_at, "active": True,
+                "id": sub_id,
+                "role": role,
+                "owner": owner,
+                "grant": grant,
+                "authority": auth.credential_authority(token),
+                "url": callback.url,
+                "secret": secret,
+                "previous_secrets": previous,
+                "rotated_at": rotated_at,
+                "expires_at": expires_at,
+                "active": True,
             }
         log.info("subscription %s active for %s", sub_id, "a guest grant" if grant else f"role {role}")
-        return {"id": sub_id, "refreshBefore": datetime.fromtimestamp(expires_at, UTC).isoformat(),
-                "cursor": None, "truncated": False}
+        return {
+            "id": sub_id,
+            "refreshBefore": datetime.fromtimestamp(expires_at, UTC).isoformat(),
+            "cursor": None,
+            "truncated": False,
+        }
 
     async def _unsubscribe(self, ctx: Any, params: UnsubscribeParams) -> dict[str, Any]:
         token, role = _principal()
@@ -435,7 +470,7 @@ class McpEvents:
         callback = canonical_callback(url)
         for prefix in self.settings.callback_prefixes:
             host, port, segments = _parse_prefix(prefix)
-            if (callback.host, callback.port) == (host, port) and callback.segments[:len(segments)] == segments:
+            if (callback.host, callback.port) == (host, port) and callback.segments[: len(segments)] == segments:
                 return callback
         log.warning("callback refused: https://%s is not on the allowlist", callback.host)
         raise CallbackError("not_allowed")
@@ -456,8 +491,11 @@ class McpEvents:
         if existing is None or existing["secret"] == secret:
             return
         if (existing.get("rotated_at") or 0) > time.time() - self.settings.rotation_overlap_seconds:
-            raise MCPError(INVALID_PARAMS, "this subscription's secret was rotated less than "
-                                           f"{self.settings.rotation_overlap_seconds} seconds ago; retry later")
+            raise MCPError(
+                INVALID_PARAMS,
+                "this subscription's secret was rotated less than "
+                f"{self.settings.rotation_overlap_seconds} seconds ago; retry later",
+            )
 
     def _check_caps(self, state: dict[str, Any], owner: str, sub_id: str) -> None:
         """`max_per_role` counts a fixed role's subscriptions, or a guest grant's."""
@@ -484,8 +522,9 @@ class McpEvents:
         if not isinstance(echoed, str) or not hmac.compare_digest(echoed, challenge):
             raise CallbackError("challenge_failed")
 
-    def _post(self, url: str, secrets_: Sequence[str], sub_id: str, message_id: str, body: bytes, *,
-              want_body: bool = True) -> tuple[int, bytes]:
+    def _post(
+        self, url: str, secrets_: Sequence[str], sub_id: str, message_id: str, body: bytes, *, want_body: bool = True
+    ) -> tuple[int, bytes]:
         """One signed POST within one absolute deadline: the status, and at most MAX_RESPONSE_BYTES of raw body.
 
         The deadline covers resolution, connecting, TLS, every write and every read, headers included: the
@@ -510,11 +549,18 @@ class McpEvents:
             literal = f"[{address}]" if ":" in address else address
             try:
                 # httpcore follows no redirects and reads no proxy settings from the environment.
-                with httpcore.ConnectionPool(ssl_context=context, network_backend=_DeadlineBackend(budget),
-                                             max_connections=1, retries=0) as pool, \
-                        pool.stream("POST", f"https://{literal}:{callback.port}{callback.target}", headers=headers,
-                                    content=body, extensions={"sni_hostname": callback.host,
-                                                              "timeout": budget.timeouts()}) as response:
+                with (
+                    httpcore.ConnectionPool(
+                        ssl_context=context, network_backend=_DeadlineBackend(budget), max_connections=1, retries=0
+                    ) as pool,
+                    pool.stream(
+                        "POST",
+                        f"https://{literal}:{callback.port}{callback.target}",
+                        headers=headers,
+                        content=body,
+                        extensions={"sni_hostname": callback.host, "timeout": budget.timeouts()},
+                    ) as response,
+                ):
                     if not want_body:
                         # A delivery is judged by its status alone; its body is never read or decoded.
                         return response.status, b""
@@ -549,9 +595,14 @@ class McpEvents:
     def _live_subscriptions(self, role: str) -> list[dict[str, Any]]:
         """`role`'s own subscriptions, and those of guest grants bound to an alias mapped to it right now."""
         grants = self._mapped_grants(role)
-        return [sub for sub in self._read()["subscriptions"].values()
-                if (sub["grant"] in grants if sub.get("grant") else sub["role"] == role)
-                and sub["active"] and _unexpired(sub) and auth.authority_live(self.config, sub.get("authority", {}))]
+        return [
+            sub
+            for sub in self._read()["subscriptions"].values()
+            if (sub["grant"] in grants if sub.get("grant") else sub["role"] == role)
+            and sub["active"]
+            and _unexpired(sub)
+            and auth.authority_live(self.config, sub.get("authority", {}))
+        ]
 
     def _mapped_grants(self, role: str) -> set[str]:
         conn = connect(self.config.db_path)
@@ -570,8 +621,11 @@ class McpEvents:
     def _signing_secrets(self, sub: dict[str, Any]) -> list[str]:
         """The current secret, then any replaced one still inside its rotation overlap."""
         now = time.time()
-        previous = [p["secret"] for p in sub.get("previous_secrets", [])[:1]
-                    if p["until"] > now and p["secret"] != sub["secret"]]
+        previous = [
+            p["secret"]
+            for p in sub.get("previous_secrets", [])[:1]
+            if p["until"] > now and p["secret"] != sub["secret"]
+        ]
         return [sub["secret"], *previous]
 
     def _occurrence(self, wake_id: str) -> str:
@@ -585,8 +639,12 @@ class McpEvents:
     def _outcomes(self, wake_id: str) -> dict[str, str]:
         conn = connect(self.config.db_path)
         try:
-            return {row["subscription"]: row["outcome"] for row in conn.execute(
-                "SELECT subscription, outcome FROM events_outcomes WHERE wake_id = ?", (wake_id,))}
+            return {
+                row["subscription"]: row["outcome"]
+                for row in conn.execute(
+                    "SELECT subscription, outcome FROM events_outcomes WHERE wake_id = ?", (wake_id,)
+                )
+            }
         finally:
             conn.close()
 
@@ -597,10 +655,15 @@ class McpEvents:
         with self._state(), self._db() as conn:
             if outcome in FINAL_OUTCOMES:
                 conn.execute("INSERT OR IGNORE INTO events_occurrences (wake_id, at) VALUES (?, ?)", (wake_id, now))
-                conn.execute("INSERT OR IGNORE INTO events_outcomes (wake_id, subscription, outcome) VALUES (?, ?, ?)",
-                             (wake_id, sub["id"], outcome))
-            conn.execute("INSERT OR IGNORE INTO events_receipts (at, wake_id, subscription, owner, outcome)"
-                         " VALUES (?, ?, ?, ?, ?)", (now, wake_id, sub["id"], _shown_owner(sub), outcome))
+                conn.execute(
+                    "INSERT OR IGNORE INTO events_outcomes (wake_id, subscription, outcome) VALUES (?, ?, ?)",
+                    (wake_id, sub["id"], outcome),
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO events_receipts (at, wake_id, subscription, owner, outcome)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (now, wake_id, sub["id"], _shown_owner(sub), outcome),
+            )
 
     def _deactivate(self, sub_id: str) -> None:
         with self._state() as state:
@@ -651,12 +714,18 @@ class McpEvents:
         that follows leaves them out of the file; a crash before it imports them again, which the tables ignore."""
         with self._db() as conn:
             for wake_id, entry in stored.get("outcomes", {}).items():
-                conn.execute("INSERT OR IGNORE INTO events_occurrences (wake_id, at) VALUES (?, ?)",
-                             (wake_id, entry["at"]))
-                conn.executemany("INSERT OR IGNORE INTO events_outcomes (wake_id, subscription, outcome)"
-                                 " VALUES (?, ?, ?)", [(wake_id, *pair) for pair in entry["destinations"].items()])
-            conn.executemany("INSERT OR IGNORE INTO events_receipts (at, wake_id, subscription, owner, outcome)"
-                             " VALUES (:at, :wake_id, :subscription, :owner, :outcome)", stored.get("receipts", []))
+                conn.execute(
+                    "INSERT OR IGNORE INTO events_occurrences (wake_id, at) VALUES (?, ?)", (wake_id, entry["at"])
+                )
+                conn.executemany(
+                    "INSERT OR IGNORE INTO events_outcomes (wake_id, subscription, outcome) VALUES (?, ?, ?)",
+                    [(wake_id, *pair) for pair in entry["destinations"].items()],
+                )
+            conn.executemany(
+                "INSERT OR IGNORE INTO events_receipts (at, wake_id, subscription, owner, outcome)"
+                " VALUES (:at, :wake_id, :subscription, :owner, :outcome)",
+                stored.get("receipts", []),
+            )
 
     def with_settings(self, **changes: Any) -> McpEvents:
         """A copy with changed settings (used by tests)."""
@@ -704,16 +773,25 @@ def status(config: Config) -> dict[str, Any]:
     stored = json.loads(found[1]) if found else {}
     conn = connect(config.db_path)
     try:
-        kept = [dict(row) for row in conn.execute(
-            "SELECT at, wake_id, subscription, owner, outcome FROM events_receipts WHERE at > ? ORDER BY at DESC"
-            " LIMIT ?", (time.time() - RECEIPT_SECONDS, MAX_RECEIPTS))]
+        kept = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT at, wake_id, subscription, owner, outcome FROM events_receipts WHERE at > ? ORDER BY at DESC"
+                " LIMIT ?",
+                (time.time() - RECEIPT_SECONDS, MAX_RECEIPTS),
+            )
+        ]
     finally:
         conn.close()
     # With receipts still in a state file that no write has passed through since the upgrade, until one moves them.
     receipts = {(r["wake_id"], r["subscription"], r["at"]): r for r in [*stored.get("receipts", []), *kept]}
-    return {"subscriptions": [{"id": sub["id"], "owner": _shown_owner(sub), "expires_at": sub["expires_at"],
-                               "active": sub["active"]} for sub in _shape(stored)["subscriptions"].values()],
-            "receipts": _recent(sorted(receipts.values(), key=lambda receipt: receipt["at"]))}
+    return {
+        "subscriptions": [
+            {"id": sub["id"], "owner": _shown_owner(sub), "expires_at": sub["expires_at"], "active": sub["active"]}
+            for sub in _shape(stored)["subscriptions"].values()
+        ],
+        "receipts": _recent(sorted(receipts.values(), key=lambda receipt: receipt["at"])),
+    }
 
 
 async def _advertise_events(ctx: Any, call_next: Any) -> Any:
@@ -743,8 +821,10 @@ def _parse_prefix(prefix: str) -> tuple[str, int, tuple[str, ...]]:
     try:
         callback = canonical_callback(prefix.rstrip("/") + "/x" if prefix.endswith("/") else prefix)
     except CallbackError:
-        raise ConfigError(f"callback prefix {prefix!r} must be a canonical https://host[:port]/path, with no "
-                          "wildcard, `.` or `..` segment, encoded character, credentials, query or fragment") from None
+        raise ConfigError(
+            f"callback prefix {prefix!r} must be a canonical https://host[:port]/path, with no "
+            "wildcard, `.` or `..` segment, encoded character, credentials, query or fragment"
+        ) from None
     segments = callback.segments[:-1] if prefix.endswith("/") else callback.segments
     return callback.host, callback.port, segments
 
@@ -814,10 +894,12 @@ class _DeadlineStream(httpcore.NetworkStream):
     def close(self) -> None:
         self._stream.close()
 
-    def start_tls(self, ssl_context: ssl.SSLContext, server_hostname: str | None = None,
-                  timeout: float | None = None) -> httpcore.NetworkStream:
-        return _DeadlineStream(self._stream.start_tls(ssl_context, server_hostname, self._budget.remaining(timeout)),
-                               self._budget)
+    def start_tls(
+        self, ssl_context: ssl.SSLContext, server_hostname: str | None = None, timeout: float | None = None
+    ) -> httpcore.NetworkStream:
+        return _DeadlineStream(
+            self._stream.start_tls(ssl_context, server_hostname, self._budget.remaining(timeout)), self._budget
+        )
 
     def get_extra_info(self, info: str) -> Any:
         return self._stream.get_extra_info(info)
@@ -828,13 +910,20 @@ class _DeadlineBackend(httpcore.NetworkBackend):
         self._backend = httpcore.SyncBackend()
         self._budget = budget
 
-    def connect_tcp(self, host: str, port: int, timeout: float | None = None, local_address: str | None = None,
-                    socket_options: Any = None) -> httpcore.NetworkStream:
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.NetworkStream:
         stream = self._backend.connect_tcp(host, port, self._budget.remaining(timeout), local_address, socket_options)
         return _DeadlineStream(stream, self._budget)
 
-    def connect_unix_socket(self, path: str, timeout: float | None = None,
-                            socket_options: Any = None) -> httpcore.NetworkStream:
+    def connect_unix_socket(
+        self, path: str, timeout: float | None = None, socket_options: Any = None
+    ) -> httpcore.NetworkStream:
         raise httpcore.ConnectError("unix sockets are not used for callbacks")
 
     def sleep(self, seconds: float) -> None:

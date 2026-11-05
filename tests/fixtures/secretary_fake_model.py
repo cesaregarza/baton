@@ -15,10 +15,15 @@ else:
     items = request.get("input", [])
     principal = json.loads(items[2]["content"][0]["text"].removeprefix("Principal-specific guidance:\n"))
     context = json.loads(items[3]["content"][0]["text"])
-    entry = {**request, "context": {**context, **principal,
-                                    "knowledge": items[1]["content"][0]["text"].removeprefix(
-                                        "Contextual knowledge:\n")},
-             "_pid": os.getpid()}
+    entry = {
+        **request,
+        "context": {
+            **context,
+            **principal,
+            "knowledge": items[1]["content"][0]["text"].removeprefix("Contextual knowledge:\n"),
+        },
+        "_pid": os.getpid(),
+    }
 with open(log_path, "a", encoding="utf-8") as stream:
     stream.write(json.dumps(entry) + "\n")
 with open(plan_path, encoding="utf-8") as stream:
@@ -42,10 +47,12 @@ else:
         refs = [event["source_key"] for event in [*events, *context.get("reply_context", [])]]
     elif refs == "first":
         refs = [events[0]["source_key"]] if events else []
-    response = {"decision": step.get("decision", plan.get("decision", "wake")),
-                "reason": step.get("reason", plan.get("reason", "The incoming context needs attention.")),
-                "summary": step.get("summary", plan.get("summary", "A concise summary of the incoming work.")),
-                "sources": refs}
+    response = {
+        "decision": step.get("decision", plan.get("decision", "wake")),
+        "reason": step.get("reason", plan.get("reason", "The incoming context needs attention.")),
+        "summary": step.get("summary", plan.get("summary", "A concise summary of the incoming work.")),
+        "sources": refs,
+    }
     sys.stdout.write(json.dumps(response))
 sys.stdout.flush()
 sys.exit(step.get("exit", 0))

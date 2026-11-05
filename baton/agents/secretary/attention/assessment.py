@@ -27,8 +27,11 @@ class Assessment:
         if not isinstance(summary, str) or len(summary.encode()) > summary_bytes:
             raise ModelUnavailable("model summary exceeds its configured bound")
         refs = value["sources"]
-        if not isinstance(refs, list) or not all(isinstance(ref, str) and ref in offered for ref in refs) \
-                or len(set(refs)) != len(refs):
+        if (
+            not isinstance(refs, list)
+            or not all(isinstance(ref, str) and ref in offered for ref in refs)
+            or len(set(refs)) != len(refs)
+        ):
             raise ModelUnavailable("model cited a source outside its inbox context")
         needs_summary = value["decision"] == "wake" or digest
         if needs_summary and (not summary.strip() or not refs):

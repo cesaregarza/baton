@@ -68,9 +68,7 @@ class Permissions:
         needs_decision: Any = False,
     ) -> str | None:
         """Return the existing send-message refusal for this role, if any."""
-        if self.is_guest and (
-            conversation_id is None or to is not None or job_id is not None or needs_decision
-        ):
+        if self.is_guest and (conversation_id is None or to is not None or job_id is not None or needs_decision):
             return "guest posts require a conversation, without jobs or decisions"
         if not self.is_guest and to == "guest":
             return "direct messages to guest are not allowed"

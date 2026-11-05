@@ -63,6 +63,7 @@ def db(config):
 
 # Helpers: each asserts the thing exists, so the old code fails on an assertion, not an OperationalError.
 
+
 def columns_of(db: sqlite3.Connection, table: str) -> dict[str, sqlite3.Row]:
     return {row["name"]: row for row in db.execute(f"PRAGMA table_info({table})")}
 
@@ -90,17 +91,20 @@ def decoded(row: sqlite3.Row, side: str) -> Any:
     return None if value is None else json.loads(value)
 
 
-def move_to(db: sqlite3.Connection, config: Any, conversation_id: str, topic: str | None,
-            actor: str = O) -> dict[str, Any]:
+def move_to(
+    db: sqlite3.Connection, config: Any, conversation_id: str, topic: str | None, actor: str = O
+) -> dict[str, Any]:
     return conversations.set_topic(db, config, conversation_id, topic, actor=actor)
 
 
 def thread(db: sqlite3.Connection, config: Any, topic: str | None = "baton", title: str = "A thread") -> str:
-    return conversations.create(db, config, actor=O, title=title, participants=[O, "reviewer"],
-                                topic=topic)["conversation_id"]
+    return conversations.create(db, config, actor=O, title=title, participants=[O, "reviewer"], topic=topic)[
+        "conversation_id"
+    ]
 
 
 # 1. The id column ------------------------------------------------------------------------------------
+
 
 def test_topics_gain_a_not_null_id_beside_path_which_stays_the_key(db):  # FAILS-ON-MAIN
     found = columns_of(db, "topics")
@@ -113,8 +117,11 @@ def test_the_database_refuses_two_topics_with_one_id(db, config):  # FAILS-ON-MA
     make_topic(db, config, "baton")
     taken = id_of(db, "baton")
     with pytest.raises(sqlite3.IntegrityError):
-        db.execute("INSERT INTO topics (id, path, title, members, created_by, created_at)"
-                   " VALUES (?, 'other', 'other', '[]', 'fixture', '2026-01-01T00:00:00+00:00')", (taken,))
+        db.execute(
+            "INSERT INTO topics (id, path, title, members, created_by, created_at)"
+            " VALUES (?, 'other', 'other', '[]', 'fixture', '2026-01-01T00:00:00+00:00')",
+            (taken,),
+        )
 
 
 def test_every_created_topic_has_its_own_non_empty_id(db, config):  # FAILS-ON-MAIN
@@ -189,6 +196,7 @@ def test_a_subtopic_path_freed_and_reused_gets_a_new_id(db, config):  # FAILS-ON
 
 # 2. The history table ---------------------------------------------------------------------------------
 
+
 def test_topic_changes_has_the_designed_columns_and_a_nullable_grant_id(db):  # FAILS-ON-MAIN
     exists = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'topic_changes'").fetchone()
     assert exists, "there is no topic_changes table"
@@ -213,8 +221,12 @@ def test_create_topic_writes_exactly_one_row(db, config):  # FAILS-ON-MAIN
     assert row["grant_id"] is None
     assert row["before"] is None
     after = decoded(row, "after")
-    assert (after["path"], after["title"], after["description"], after["members"]) == \
-        ("baton", "Baton", "The relay", [O, "reviewer"])
+    assert (after["path"], after["title"], after["description"], after["members"]) == (
+        "baton",
+        "Baton",
+        "The relay",
+        [O, "reviewer"],
+    )
     assert datetime.fromisoformat(row["at"]).tzinfo is not None, "at is an ISO time with its offset"
 
 
@@ -284,10 +296,11 @@ def test_a_rename_writes_one_row_for_the_topic_named_and_one_for_each_subtopic_i
     topics.rename(db, config, actor=O, path="baton", new_path="platform")
     renames = {row["topic_id"]: row for row in history(db) if row["operation"] == "rename_topic"}
     assert len(history(db)) == 4 and set(renames) == {root, child}
-    assert (decoded(renames[root], "before")["path"], decoded(renames[root], "after")["path"]) == (
-        "baton", "platform")
+    assert (decoded(renames[root], "before")["path"], decoded(renames[root], "after")["path"]) == ("baton", "platform")
     assert (decoded(renames[child], "before")["path"], decoded(renames[child], "after")["path"]) == (
-        "baton/development", "platform/development")
+        "baton/development",
+        "platform/development",
+    )
 
 
 def test_set_topic_writes_one_row_with_the_old_and_new_topic(db, config):  # FAILS-ON-MAIN
@@ -302,10 +315,16 @@ def test_set_topic_writes_one_row_with_the_old_and_new_topic(db, config):  # FAI
     assert row["actor"] == O
     assert row["grant_id"] is None
     before, after = decoded(row, "before"), decoded(row, "after")
-    assert (before["conversation_id"], before["topic"], before["topic_id"]) == \
-        (conversation, "baton", id_of(db, "baton"))
-    assert (after["conversation_id"], after["topic"], after["topic_id"]) == \
-        (conversation, "baton/development", id_of(db, "baton/development"))
+    assert (before["conversation_id"], before["topic"], before["topic_id"]) == (
+        conversation,
+        "baton",
+        id_of(db, "baton"),
+    )
+    assert (after["conversation_id"], after["topic"], after["topic_id"]) == (
+        conversation,
+        "baton/development",
+        id_of(db, "baton/development"),
+    )
 
 
 def test_filing_a_thread_that_had_no_topic_shows_none_before(db, config):  # FAILS-ON-MAIN
@@ -379,6 +398,7 @@ def test_a_rename_then_reuse_leaves_two_topics_in_history(db, config):  # FAILS-
 
 # 3. A refused call writes nothing ---------------------------------------------------------------------
 
+
 def setup_for_refusals(db, config) -> str:
     make_topic(db, config, "baton")
     make_topic(db, config, "baton/development")
@@ -388,35 +408,50 @@ def setup_for_refusals(db, config) -> str:
 
 REFUSALS = {
     "create by a role that may not": lambda db, config, cid: refused(
-        "forbidden", topics.create, db, config, actor="reviewer", path="elsewhere"),
+        "forbidden", topics.create, db, config, actor="reviewer", path="elsewhere"
+    ),
     "create a duplicate": lambda db, config, cid: refused(
-        "invalid_request", topics.create, db, config, actor=O, path="baton"),
+        "invalid_request", topics.create, db, config, actor=O, path="baton"
+    ),
     "create below a missing parent": lambda db, config, cid: refused(
-        "invalid_request", topics.create, db, config, actor=O, path="nowhere/child"),
+        "invalid_request", topics.create, db, config, actor=O, path="nowhere/child"
+    ),
     "create with a bad path": lambda db, config, cid: refused(
-        "invalid_request", topics.create, db, config, actor=O, path="Not A Topic"),
+        "invalid_request", topics.create, db, config, actor=O, path="Not A Topic"
+    ),
     "update by a role that may not": lambda db, config, cid: refused(
-        "forbidden", topics.update, db, config, actor="reviewer", path="baton", title="x"),
+        "forbidden", topics.update, db, config, actor="reviewer", path="baton", title="x"
+    ),
     "update a topic that is not there": lambda db, config, cid: refused(
-        "invalid_request", topics.update, db, config, actor=O, path="nowhere", title="x"),
+        "invalid_request", topics.update, db, config, actor=O, path="nowhere", title="x"
+    ),
     "update with an unknown member": lambda db, config, cid: refused(
-        "unknown_role", topics.update, db, config, actor=O, path="baton", members=["nobody-here"]),
+        "unknown_role", topics.update, db, config, actor=O, path="baton", members=["nobody-here"]
+    ),
     "rename by a role that may not": lambda db, config, cid: refused(
-        "forbidden", topics.rename, db, config, actor="reviewer", path="baton", new_path="platform"),
+        "forbidden", topics.rename, db, config, actor="reviewer", path="baton", new_path="platform"
+    ),
     "rename a topic that is not there": lambda db, config, cid: refused(
-        "invalid_request", topics.rename, db, config, actor=O, path="nowhere", new_path="platform"),
+        "invalid_request", topics.rename, db, config, actor=O, path="nowhere", new_path="platform"
+    ),
     "rename onto a taken path": lambda db, config, cid: refused(
-        "invalid_request", topics.rename, db, config, actor=O, path="baton", new_path="reviews"),
+        "invalid_request", topics.rename, db, config, actor=O, path="baton", new_path="reviews"
+    ),
     "rename into itself": lambda db, config, cid: refused(
-        "invalid_request", topics.rename, db, config, actor=O, path="baton", new_path="baton/inside"),
+        "invalid_request", topics.rename, db, config, actor=O, path="baton", new_path="baton/inside"
+    ),
     "rename that would make three levels": lambda db, config, cid: refused(
-        "invalid_request", topics.rename, db, config, actor=O, path="baton", new_path="reviews/baton"),
+        "invalid_request", topics.rename, db, config, actor=O, path="baton", new_path="reviews/baton"
+    ),
     "set_topic by a role that may not": lambda db, config, cid: refused(
-        "forbidden", conversations.set_topic, db, config, cid, "reviews", actor="reviewer"),
+        "forbidden", conversations.set_topic, db, config, cid, "reviews", actor="reviewer"
+    ),
     "set_topic to a topic that is not there": lambda db, config, cid: refused(
-        "invalid_request", conversations.set_topic, db, config, cid, "nowhere", actor=O),
+        "invalid_request", conversations.set_topic, db, config, cid, "nowhere", actor=O
+    ),
     "set_topic for a conversation that is not there": lambda db, config, cid: refused(
-        "unknown_conversation", conversations.set_topic, db, config, "conv_missing", "reviews", actor=O),
+        "unknown_conversation", conversations.set_topic, db, config, "conv_missing", "reviews", actor=O
+    ),
 }
 
 
@@ -432,8 +467,9 @@ def test_a_refused_call_writes_no_history_and_changes_no_id(db, config, case):  
 def test_set_topic_by_a_non_participant_writes_no_history(db, config):  # FAILS-ON-MAIN
     make_topic(db, config, "baton")
     make_topic(db, config, "reviews")
-    conversation = conversations.create(db, config, actor="reviewer", title="Theirs",
-                                        participants=["reviewer", "assistant"], topic="baton")["conversation_id"]
+    conversation = conversations.create(
+        db, config, actor="reviewer", title="Theirs", participants=["reviewer", "assistant"], topic="baton"
+    )["conversation_id"]
     before = [tuple(row) for row in history(db)]
     refused("not_a_participant", conversations.set_topic, db, config, conversation, "reviews", actor=O)
     assert [tuple(row) for row in history(db)] == before

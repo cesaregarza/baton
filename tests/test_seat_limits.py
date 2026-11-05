@@ -66,8 +66,9 @@ def test_a_non_ascii_pre_login_value_is_refused_not_raised(room) -> None:
     host, _, _ = room
     form = get(host.config, "/seat/login")
     pre = [c.split(";", 1)[0].split("=", 1)[1] for c in form.cookies if c.startswith(seat.PRE_COOKIE + "=")][0]
-    response = post(host.config, "/seat/login", {"token": host.seat_token, "pre": "é" + pre},
-                    cookies={seat.PRE_COOKIE: pre})
+    response = post(
+        host.config, "/seat/login", {"token": host.seat_token, "pre": "é" + pre}, cookies={seat.PRE_COOKIE: pre}
+    )
     assert response.status == 403
 
 
@@ -123,8 +124,9 @@ def test_a_resubmitted_form_is_not_counted_twice(room, monkeypatch) -> None:
 def _rows(host, *, ended: bool = False) -> int:
     """Form ids still live, which the bound is on; or, with `ended`, those that ended, which are kept."""
     conn = sqlite3.connect(host.config.db_path)
-    return conn.execute(f"SELECT COUNT(*) FROM seat_requests WHERE ended_at IS {'NOT ' if ended else ''}NULL"
-                        ).fetchone()[0]
+    return conn.execute(
+        f"SELECT COUNT(*) FROM seat_requests WHERE ended_at IS {'NOT ' if ended else ''}NULL"
+    ).fetchone()[0]
 
 
 def test_form_ids_kept_per_session_never_pass_the_bound(room, monkeypatch) -> None:
@@ -138,8 +140,10 @@ def test_form_ids_kept_per_session_never_pass_the_bound(room, monkeypatch) -> No
     assert _rows(host) <= 10 and _rows(host, ended=True) > 0, "the bound ends form ids and keeps them"
     assert len(stored_by_seat(host)) == 6
     # the latest form still works after the trimming
-    assert post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": "late"},
-                cookies=cookies).status == 429  # the quota, not a lost binding
+    assert (
+        post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": "late"}, cookies=cookies).status
+        == 429
+    )  # the quota, not a lost binding
 
 
 def test_form_ids_in_all_never_pass_the_bound(tmp_path: Path, monkeypatch) -> None:
@@ -218,16 +222,24 @@ def test_a_retry_that_stores_while_its_failed_twin_releases_is_still_counted(roo
             b_waiting.set()
             a_done.wait(30)  # B has passed its check; it stores only after A has failed and released
             return real_send(*args, **kwargs)
-        retry = threading.Thread(name="retry", target=lambda: results.setdefault("b", post(
-            host.config, f"/seat/c/{cid}/send", form | {"text": "two"}, cookies=cookies)))
+        retry = threading.Thread(
+            name="retry",
+            target=lambda: results.setdefault(
+                "b", post(host.config, f"/seat/c/{cid}/send", form | {"text": "two"}, cookies=cookies)
+            ),
+        )
         retry.start()
         b_waiting.wait(30)
         results["retry"] = retry
         return real_send(*args, **kwargs)  # A: its parent doesn't exist, so this raises and stores nothing
 
     monkeypatch.setattr(seat.conversations, "send", send)
-    a = post(host.config, f"/seat/c/{cid}/send", form | {"text": "two", "reply_to": "msg_000000000000000000000000"},
-             cookies=cookies)
+    a = post(
+        host.config,
+        f"/seat/c/{cid}/send",
+        form | {"text": "two", "reply_to": "msg_000000000000000000000000"},
+        cookies=cookies,
+    )
     a_done.set()
     results["retry"].join(30)
     monkeypatch.setattr(seat.conversations, "send", real_send)
@@ -256,16 +268,24 @@ def test_a_new_form_cannot_take_a_place_still_held_by_a_retry_in_flight(room, mo
             return real_send(*args, **kwargs)
         if kwargs.get("text") == "three":
             return real_send(*args, **kwargs)
-        retry = threading.Thread(name="retry", target=lambda: results.setdefault("b", post(
-            host.config, f"/seat/c/{cid}/send", form | {"text": "two"}, cookies=cookies)))
+        retry = threading.Thread(
+            name="retry",
+            target=lambda: results.setdefault(
+                "b", post(host.config, f"/seat/c/{cid}/send", form | {"text": "two"}, cookies=cookies)
+            ),
+        )
         retry.start()
         b_waiting.wait(30)
         results["retry"] = retry
         return real_send(*args, **kwargs)
 
     monkeypatch.setattr(seat.conversations, "send", send)
-    a = post(host.config, f"/seat/c/{cid}/send", form | {"text": "two", "reply_to": "msg_000000000000000000000000"},
-             cookies=cookies)
+    a = post(
+        host.config,
+        f"/seat/c/{cid}/send",
+        form | {"text": "two", "reply_to": "msg_000000000000000000000000"},
+        cookies=cookies,
+    )
     c = post(host.config, f"/seat/c/{cid}/send", other | {"text": "three"}, cookies=cookies)
     a_done.set()
     results["retry"].join(30)

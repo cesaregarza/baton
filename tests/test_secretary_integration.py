@@ -34,9 +34,16 @@ def _model(world, tmp_path: Path, *, plan: dict | None = None) -> Model:
 
 
 def _cli(instance: Path, action: str, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, "-m", "baton.integrations.secretary", "--instance", str(instance),
-                           action, *args], cwd=ROOT, env=_env(), input=input_text, text=True,
-                          capture_output=True, check=False, timeout=15)
+    return subprocess.run(
+        [sys.executable, "-m", "baton.integrations.secretary", "--instance", str(instance), action, *args],
+        cwd=ROOT,
+        env=_env(),
+        input=input_text,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
 
 
 def _install(world, tmp_path: Path, product: str, *, project_name: str = "project"):
@@ -44,8 +51,10 @@ def _install(world, tmp_path: Path, product: str, *, project_name: str = "projec
     project.mkdir()
     codex = tmp_path / "fake-codex"
     codex_log = tmp_path / "codex-argv.jsonl"
-    codex.write_text("#!/usr/bin/env python3\nimport json,sys\n"
-                     f"open({str(codex_log)!r}, 'a').write(json.dumps(sys.argv[1:])+'\\n')\n")
+    codex.write_text(
+        "#!/usr/bin/env python3\nimport json,sys\n"
+        f"open({str(codex_log)!r}, 'a').write(json.dumps(sys.argv[1:])+'\\n')\n"
+    )
     codex.chmod(0o700)
     destination = tmp_path / "instance"
     initial_hooks = project / (".codex/hooks.json" if product == "codex" else ".claude/settings.local.json")
@@ -53,12 +62,33 @@ def _install(world, tmp_path: Path, product: str, *, project_name: str = "projec
     original = b'{"userMarker":{"preserve":true},"hooks":{"Stop":[{"matcher":"existing"}]}}\n'
     initial_hooks.write_bytes(original)
     _model(world, tmp_path)
-    installed = subprocess.run([sys.executable, "-m", "baton.integrations.secretary", "install",
-                                "--product", product, "--destination", str(destination), "--project", str(project),
-                                "--config", str(world.config_path), "--policy", str(world.policy_path),
-                                "--codex", str(codex), "--apply-hooks"], cwd=ROOT, env=_env(), text=True,
-                               capture_output=True,
-                               check=False, timeout=15)
+    installed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "baton.integrations.secretary",
+            "install",
+            "--product",
+            product,
+            "--destination",
+            str(destination),
+            "--project",
+            str(project),
+            "--config",
+            str(world.config_path),
+            "--policy",
+            str(world.policy_path),
+            "--codex",
+            str(codex),
+            "--apply-hooks",
+        ],
+        cwd=ROOT,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
     assert installed.returncode == 0, installed.stderr
     result = json.loads(installed.stdout)
     instance = Path(result["instance"])
@@ -71,8 +101,16 @@ def _install(world, tmp_path: Path, product: str, *, project_name: str = "projec
 def _hook(project: Path, instance: Path, event: dict) -> tuple[subprocess.CompletedProcess, dict | None]:
     spec = json.loads(instance.with_name("hooks.json").read_text())
     command = spec["hooks"][event["hook_event_name"]][0]["hooks"][0]["command"]
-    run = subprocess.run(["/bin/sh", "-c", command], cwd=project, env=_env(),
-                         input=json.dumps(event), text=True, capture_output=True, check=False, timeout=15)
+    run = subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=project,
+        env=_env(),
+        input=json.dumps(event),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
     output = json.loads(run.stdout) if run.stdout.strip() else None
     return run, output
 
@@ -87,8 +125,13 @@ def _wait(predicate, *, timeout: float = 10) -> None:
 
 
 def _start_worker(instance: Path) -> subprocess.Popen:
-    return subprocess.Popen([sys.executable, "-m", "baton.integrations.secretary", "--instance", str(instance),
-                             "run"], cwd=ROOT, env=_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return subprocess.Popen(
+        [sys.executable, "-m", "baton.integrations.secretary", "--instance", str(instance), "run"],
+        cwd=ROOT,
+        env=_env(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def _stop_worker(process: subprocess.Popen, *, force: bool = False) -> None:
@@ -111,8 +154,13 @@ def _status(instance: Path) -> dict:
 def test_generated_service_accepts_project_paths_with_spaces_and_specifier_characters(tmp_path) -> None:
     with make_world(tmp_path) as world:
         *_, result = _install(world, tmp_path, "claude-code", project_name="project $percent% with spaces")
-        parsed = subprocess.run(["systemd-analyze", "--user", "verify", result["unit"]],
-                                text=True, capture_output=True, check=False, timeout=15)
+        parsed = subprocess.run(
+            ["systemd-analyze", "--user", "verify", result["unit"]],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
         assert parsed.returncode == 0, parsed.stderr
         assert parsed.stderr == "", parsed.stderr  # Invalid EnvironmentFile directives only emit warnings.
 
@@ -126,16 +174,18 @@ def test_install_generated_hook_worker_receive_and_explicit_ack_lifecycle(tmp_pa
     with make_world(tmp_path) as world:
         room = conversation(world)
         project, instance, codex_log, hooks_path, original, result = _install(world, tmp_path, product)
-        assert result["hook_events"] == (["SessionStart", "Stop"] if product == "codex"
-                                         else ["SessionStart", "Stop", "FileChanged"])
+        assert result["hook_events"] == (
+            ["SessionStart", "Stop"] if product == "codex" else ["SessionStart", "Stop", "FileChanged"]
+        )
         merged = json.loads(hooks_path.read_text())
         assert merged["userMarker"] == {"preserve": True} and len(merged["hooks"]["Stop"]) == 2
         applied = _cli(instance, "apply-hooks")
         assert applied.returncode == 0 and json.loads(applied.stdout)["changed"] is False
         assert hooks_path.read_bytes() != original
         assert result["applied"]["changed"] is True
-        assert sorted(path.read_bytes() for path in hooks_path.parent.glob(
-            hooks_path.name + ".baton-secretary-backup-*")) == [original]
+        assert sorted(
+            path.read_bytes() for path in hooks_path.parent.glob(hooks_path.name + ".baton-secretary-backup-*")
+        ) == [original]
 
         session_event = {"hook_event_name": "SessionStart", "session_id": SESSION, "cwd": str(project)}
         first, output = _hook(project, instance, session_event)
@@ -163,8 +213,9 @@ def test_install_generated_hook_worker_receive_and_explicit_ack_lifecycle(tmp_pa
             assert ack.returncode == 0
             second = say(world, room, "reviewer", "A new follow-up after acknowledgment")
             source_before = table_hashes(world.baton)
-            _wait(lambda: len(model.requests) >= 2
-                  and _status(instance)["pending"] not in (None, summary["decision_id"]))
+            _wait(
+                lambda: len(model.requests) >= 2 and _status(instance)["pending"] not in (None, summary["decision_id"])
+            )
             after = json.loads(_cli(instance, "receive").stdout)
             assert f"message:{second['message_id']}" in after["sources"]
             assert f"message:{sent['message_id']}" not in after["sources"]
@@ -184,8 +235,13 @@ def test_pending_result_survives_worker_kill_restart_and_duplicate_lock(tmp_path
         first = _start_worker(instance)
         second = None
         try:
-            _wait(lambda: bool(_status(instance)["pending"]) and codex_log.exists()
-                  and _status(instance)["health"] is not None)
+            _wait(
+                lambda: (
+                    bool(_status(instance)["pending"])
+                    and codex_log.exists()
+                    and _status(instance)["health"] is not None
+                )
+            )
             duplicate = _start_worker(instance)
             try:
                 _wait(lambda: duplicate.poll() is not None)
@@ -250,16 +306,24 @@ def test_claude_file_changed_wake_and_stop_loop_guard_are_session_scoped(tmp_pat
         try:
             _wait(lambda: bool(_status(instance)["pending"]))
             assert initial_output["hookSpecificOutput"]["watchPaths"] == [str(instance.parent / "pending.json")]
-            changed = {"hook_event_name": "FileChanged", "session_id": SESSION, "cwd": str(project),
-                       "file_path": str(instance.parent / "pending.json"), "event": "change"}
+            changed = {
+                "hook_event_name": "FileChanged",
+                "session_id": SESSION,
+                "cwd": str(project),
+                "file_path": str(instance.parent / "pending.json"),
+                "event": "change",
+            }
             first, _ = _hook(project, instance, changed)
             assert first.returncode == 2 and "Baton secretary attention summary" in first.stderr
             again, _ = _hook(project, instance, changed)
             assert again.returncode == 0 and again.stderr == ""
             wrong, _ = _hook(project, instance, {**changed, "file_path": str(project / "other")})
             assert wrong.returncode == 0 and wrong.stderr == ""
-            stop_guard, output = _hook(project, instance, {"hook_event_name": "Stop", "session_id": SESSION,
-                                                          "cwd": str(project), "stop_hook_active": True})
+            stop_guard, output = _hook(
+                project,
+                instance,
+                {"hook_event_name": "Stop", "session_id": SESSION, "cwd": str(project), "stop_hook_active": True},
+            )
             assert stop_guard.returncode == 0 and output is None and stop_guard.stderr == ""
             received = json.loads(_cli(instance, "receive").stdout)
             assert len(model.requests) == 1 and f"message:{sent['message_id']}" in received["sources"]
@@ -279,6 +343,7 @@ def test_visibility_revocation_before_receive_discards_brief_and_rejects_ack(tmp
             _wait(lambda: bool(_status(instance)["pending"]))
             decision_id = _status(instance)["pending"]
             from baton import conversations
+
             conversations.remove(world.baton, world.config, room, "planner", actor="planner")
             before_runner = table_hashes(world.baton)
             receive = _cli(instance, "receive")

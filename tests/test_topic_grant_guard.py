@@ -41,16 +41,36 @@ BINDING_GONE = "alias binding is missing, invalid or expired"
 # canonical JSON. The tool's description is left out on purpose: it comes from a docstring, which Python versions
 # compile differently, while the schema is the same on all of them.
 SCHEMAS = {
-    "whoami": "606df40868d8", "alias_exists": "70e62b96b695", "claim_alias": "57de127966e7",
-    "bind_events": "c51b179db678", "unbind_events": "869f97b8c7d1", "send_message": "591020d02a07",
-    "read_messages": "1687d21a8620", "wait": "d134a654de78", "create_job": "dce2e244767f",
-    "move_job": "060564d9e29a", "get_job": "c06fcdc9d84e", "list_jobs": "fe5579d7b511",
-    "read_job_events": "e6bdf0ef0ebd", "create_conversation": "2b861c85cbb1", "list_conversations": "a4bb4da0edbc",
-    "read_history": "63f54b713678", "add_participant": "18dac23653c9", "remove_participant": "fcffd1cdc0b6",
-    "set_topic": "20a40f8ad8aa", "create_topic": "9514eb63adbd", "update_topic": "0ea2c3a5982e",
-    "rename_topic": "e059705fa155", "list_topics": "1fcfff77f07f", "get_topic": "2c43e2242bf5",
-    "edit_reference": "5914d7459662", "read_reference": "1d11e9527348", "reference_history": "0d4b246122a7",
-    "search": "86e33946f89c", "get_message": "d82ecf551fcb", "read_artifacts": "1e4ef6c035c0",
+    "whoami": "606df40868d8",
+    "alias_exists": "70e62b96b695",
+    "claim_alias": "57de127966e7",
+    "bind_events": "c51b179db678",
+    "unbind_events": "869f97b8c7d1",
+    "send_message": "591020d02a07",
+    "read_messages": "1687d21a8620",
+    "wait": "d134a654de78",
+    "create_job": "dce2e244767f",
+    "move_job": "060564d9e29a",
+    "get_job": "c06fcdc9d84e",
+    "list_jobs": "fe5579d7b511",
+    "read_job_events": "e6bdf0ef0ebd",
+    "create_conversation": "2b861c85cbb1",
+    "list_conversations": "a4bb4da0edbc",
+    "read_history": "63f54b713678",
+    "add_participant": "18dac23653c9",
+    "remove_participant": "fcffd1cdc0b6",
+    "set_topic": "20a40f8ad8aa",
+    "create_topic": "9514eb63adbd",
+    "update_topic": "0ea2c3a5982e",
+    "rename_topic": "e059705fa155",
+    "list_topics": "1fcfff77f07f",
+    "get_topic": "2c43e2242bf5",
+    "edit_reference": "5914d7459662",
+    "read_reference": "1d11e9527348",
+    "reference_history": "0d4b246122a7",
+    "search": "86e33946f89c",
+    "get_message": "d82ecf551fcb",
+    "read_artifacts": "1e4ef6c035c0",
 }
 
 
@@ -74,6 +94,7 @@ def todays_refusal(name):
 
 # 1. A guest without a key is refused as it always was -------------------------------------------------------
 
+
 def test_a_bound_guest_without_a_key_gets_todays_refusal_even_when_its_alias_holds_a_grant(build_scene):
     """GUARD. The grant belongs to a key, not to the alias: holding one changes nothing for a call that does not
     present it. A null key is the same as none."""
@@ -84,8 +105,10 @@ def test_a_bound_guest_without_a_key_gets_todays_refusal_even_when_its_alias_hol
         await stage(client, scene.host)
         held = await scene.grantee(client, "lane-a", "job-hunt", inherit=True)
         moving = await thread(client, scene.host, "job-hunt/leads")
-        for name, arguments in (("create_topic", {"path": "job-hunt/new"}),
-                                ("set_topic", {"conversation_id": moving, "topic": "job-hunt/boards"})):
+        for name, arguments in (
+            ("create_topic", {"path": "job-hunt/new"}),
+            ("set_topic", {"conversation_id": moving, "topic": "job-hunt/boards"}),
+        ):
             for extra in ({}, {"grant_token": None}):
                 result = await tool(client, scene.host, name, {**arguments, "token": held.token, **extra})
                 assert result == todays_refusal(name), (name, extra, result)
@@ -120,6 +143,7 @@ def test_a_valid_key_opens_no_other_tool(build_scene):
 
 # 2. The five refusals ---------------------------------------------------------------------------------------
 
+
 def test_a_key_without_a_binding_token_is_refused_and_names_no_grant(build_scene):
     """Refusal 1. The key proves which grant, not who: alone it opens nothing, and writes no event."""
     # Mutant 3: any key passing.
@@ -129,8 +153,10 @@ def test_a_key_without_a_binding_token_is_refused_and_names_no_grant(build_scene
         await stage(client, scene.host)
         held = await scene.grantee(client, "lane-a", "job-hunt", inherit=True)
         moving = await thread(client, scene.host, "job-hunt/leads")
-        for name, arguments in (("create_topic", {"path": "job-hunt/new"}),
-                                ("set_topic", {"conversation_id": moving, "topic": "job-hunt/boards"})):
+        for name, arguments in (
+            ("create_topic", {"path": "job-hunt/new"}),
+            ("set_topic", {"conversation_id": moving, "topic": "job-hunt/boards"}),
+        ):
             result = await tool(client, scene.host, name, {**arguments, "grant_token": held.key})
             refused(result, "forbidden", NEEDS_BINDING)
             assert held.key not in json.dumps(result)
@@ -149,8 +175,12 @@ def test_a_key_with_an_unknown_binding_token_is_refused_and_writes_no_event(buil
     async def scenario(client):
         await stage(client, scene.host)
         held = await scene.grantee(client, "lane-a", "job-hunt", inherit=True)
-        result = await tool(client, scene.host, "create_topic", {
-            "path": "job-hunt/new", "token": secrets.token_urlsafe(32), "grant_token": held.key})
+        result = await tool(
+            client,
+            scene.host,
+            "create_topic",
+            {"path": "job-hunt/new", "token": secrets.token_urlsafe(32), "grant_token": held.key},
+        )
         assert result.get("error") == "forbidden", result
         assert result.get("detail") in (NEEDS_BINDING, BINDING_GONE), result
         assert held.key not in json.dumps(result)
@@ -171,8 +201,10 @@ def test_an_unknown_key_is_refused_and_names_no_grant(build_scene):
         moving = await thread(client, scene.host, "job-hunt/leads")
         nearly = held.key[:-1] + ("A" if held.key[-1] != "A" else "B")
         for key in (new_key(), nearly):
-            for name, arguments in (("create_topic", {"path": "job-hunt/new"}),
-                                    ("set_topic", {"conversation_id": moving, "topic": "job-hunt/boards"})):
+            for name, arguments in (
+                ("create_topic", {"path": "job-hunt/new"}),
+                ("set_topic", {"conversation_id": moving, "topic": "job-hunt/boards"}),
+            ):
                 result = await tool(client, scene.host, name, {**arguments, "token": held.token, "grant_token": key})
                 refused(result, "forbidden", "unknown topic grant key")
         assert "job-hunt/new" not in scene.topic_paths()
@@ -195,17 +227,23 @@ def test_another_aliases_key_is_refused_and_recorded_against_the_grant_it_belong
         moving = await thread(client, scene.host, "job-hunt/leads")
         borrowed = {"token": other.token, "grant_token": owner_of_key.key}
         said = "this topic grant key is not for this alias"
-        refused(await tool(client, scene.host, "create_topic", {"path": "job-hunt/new", **borrowed}),
-                "forbidden", said)
-        refused(await tool(client, scene.host, "set_topic", {
-            "conversation_id": moving, "topic": "job-hunt/boards", **borrowed}), "forbidden", said)
+        refused(await tool(client, scene.host, "create_topic", {"path": "job-hunt/new", **borrowed}), "forbidden", said)
+        refused(
+            await tool(
+                client, scene.host, "set_topic", {"conversation_id": moving, "topic": "job-hunt/boards", **borrowed}
+            ),
+            "forbidden",
+            said,
+        )
         assert "job-hunt/new" not in scene.topic_paths()
         assert scene.thread_topic(moving) == "job-hunt/leads"
         events = scene.events("refused_use")
         assert [row["grant_id"] for row in events] == [owner_of_key.grant_id] * 2
         assert {row["actor"] for row in events} == {other.actor}
         assert [json.loads(row["detail"]) for row in events] == [
-            {"tool": "create_topic", "reason": "other_alias"}, {"tool": "set_topic", "reason": "other_alias"}]
+            {"tool": "create_topic", "reason": "other_alias"},
+            {"tool": "set_topic", "reason": "other_alias"},
+        ]
 
     play(scene.host, scenario)
 
@@ -267,8 +305,11 @@ def test_a_grant_works_until_the_instant_it_expires(build_scene):
         scene.clock.advance(days=7, seconds=-1)
         succeeded(await held.call(client, "create_topic", path="job-hunt/last"))
         scene.clock.advance(seconds=1)
-        refused(await held.call(client, "create_topic", path="job-hunt/after"), "forbidden",
-                f"topic grant {held.grant_id} is expired")
+        refused(
+            await held.call(client, "create_topic", path="job-hunt/after"),
+            "forbidden",
+            f"topic grant {held.grant_id} is expired",
+        )
 
     play(scene.host, scenario)
 
@@ -321,6 +362,7 @@ def test_the_presented_key_is_never_replaced_by_another_grant_the_alias_holds(bu
 
 # 3. The key stays out of everything --------------------------------------------------------------------------
 
+
 def test_the_key_is_in_no_event_audit_line_refusal_row_or_log(build_scene, caplog):
     """After a mix of successes and every refusal, neither key appears in any response, event, audit line,
     table cell or log record. Only its digest is stored."""
@@ -336,10 +378,18 @@ def test_the_key_is_in_no_event_audit_line_refusal_row_or_log(build_scene, caplo
         replies = [
             await first.call(client, "create_topic", path="job-hunt/fine"),
             await tool(client, scene.host, "create_topic", {"path": "job-hunt/x1", "grant_token": first.key}),
-            await tool(client, scene.host, "create_topic", {"path": "job-hunt/x2", "token": first.token,
-                                                            "grant_token": new_key()}),
-            await tool(client, scene.host, "create_topic", {"path": "job-hunt/x3", "token": second.token,
-                                                            "grant_token": first.key}),
+            await tool(
+                client,
+                scene.host,
+                "create_topic",
+                {"path": "job-hunt/x2", "token": first.token, "grant_token": new_key()},
+            ),
+            await tool(
+                client,
+                scene.host,
+                "create_topic",
+                {"path": "job-hunt/x3", "token": second.token, "grant_token": first.key},
+            ),
             await first.call(client, "create_topic", path="resume/not-covered"),
             await first.call(client, "set_topic", conversation_id=moving, topic="resume"),
         ]
@@ -378,13 +428,18 @@ def test_a_value_that_contains_the_key_never_reaches_the_audit_line_or_a_refusal
         assert replies[0].get("created") is True, replies[0]
         assert held.key not in json.dumps(replies[1:]), "a refusal echoed the key"
         assert held.key not in scene.audit_text()
-        assert [line["tool"] for line in scene.audit()[-4:]] == ["create_topic", "set_topic", "create_topic",
-                                                                  "set_topic"]
+        assert [line["tool"] for line in scene.audit()[-4:]] == [
+            "create_topic",
+            "set_topic",
+            "create_topic",
+            "set_topic",
+        ]
 
     play(scene.host, scenario)
 
 
 # 4. The audit line names the grant ------------------------------------------------------------------------------
+
 
 def test_a_grant_authorized_call_audits_its_grant_id_and_the_topic_it_resolved(build_scene):
     """The line of a successful call gains `grant_id`, beside the alias fields and topic fields it already has."""
@@ -412,6 +467,7 @@ def test_a_grant_authorized_call_audits_its_grant_id_and_the_topic_it_resolved(b
 
 # 5. A grant applies to a guest and to nobody else ------------------------------------------------------------
 
+
 def test_a_core_credential_ignores_a_grant_token_and_a_refused_one_keeps_its_own_refusal(build_scene):
     """GUARD. A core role's call runs on its flags alone: a valid key or a junk one changes nothing, no grant is
     consulted, none is named in the history or audit line, and a role without the flag keeps its own refusal."""
@@ -423,16 +479,26 @@ def test_a_core_credential_ignores_a_grant_token_and_a_refused_one_keeps_its_own
         held = await scene.grantee(client, "lane-a", "job-hunt", ("topic.create_sub",))
         for key in (held.key, new_key()):
             path = "root-" + secrets.token_hex(3)
-            made = succeeded(await tool(client, scene.host, "create_topic", {
-                "path": path, "members": ["planner"], "grant_token": key}, role="planner"))
+            made = succeeded(
+                await tool(
+                    client,
+                    scene.host,
+                    "create_topic",
+                    {"path": path, "members": ["planner"], "grant_token": key},
+                    role="planner",
+                )
+            )
             assert (made["created"], made["members"]) == (True, ["planner"])
             assert scene.audit()[-1].get("grant_id") is None
         assert {row["grant_id"] for row in scene.changes("create_topic")} == {None}
         assert {row["actor"] for row in scene.changes("create_topic")} == {"planner"}
-        refusal = await tool(client, scene.host, "create_topic", {
-            "path": "job-hunt/by-worker", "grant_token": held.key}, role="worker")
-        assert refusal == {"error": "forbidden",
-                           "detail": "worker may not create or change topics (roles.worker.can_create_topics)"}
+        refusal = await tool(
+            client, scene.host, "create_topic", {"path": "job-hunt/by-worker", "grant_token": held.key}, role="worker"
+        )
+        assert refusal == {
+            "error": "forbidden",
+            "detail": "worker may not create or change topics (roles.worker.can_create_topics)",
+        }
         assert scene.events("refused_use") == []
 
     play(scene.host, scenario)
@@ -448,14 +514,21 @@ def test_an_alias_enrolled_as_a_core_role_runs_as_that_role_and_its_grant_token_
     async def scenario(client):
         await stage(client, scene.host)
         assert owner(scene.host, "alias", "arm-enrol", "steward") == 0
-        enrolled = await tool(client, scene.host, "claim_alias",
-                              {"name": "steward", "passphrase": PASSPHRASE}, role="steward")
+        enrolled = await tool(
+            client, scene.host, "claim_alias", {"name": "steward", "passphrase": PASSPHRASE}, role="steward"
+        )
         assert enrolled.get("effective_role") == "steward", enrolled
-        proof = (await tool(client, scene.host, "claim_alias", {"name": "steward", "passphrase": PASSPHRASE}))
+        proof = await tool(client, scene.host, "claim_alias", {"name": "steward", "passphrase": PASSPHRASE})
         assert proof.get("effective_role") == "steward", proof
         key = scene.grant("steward", "job-hunt", ("topic.create_sub",))["grant_key"]
-        made = succeeded(await tool(client, scene.host, "create_topic", {
-            "path": "root-level", "members": ["planner"], "token": proof["binding_token"], "grant_token": key}))
+        made = succeeded(
+            await tool(
+                client,
+                scene.host,
+                "create_topic",
+                {"path": "root-level", "members": ["planner"], "token": proof["binding_token"], "grant_token": key},
+            )
+        )
         assert (made["created"], made["members"]) == (True, ["planner"])
         row = only(scene.changes("create_topic")[-1:], "history row")
         assert row["actor"] == f"steward via alias {proof['alias_id']}" and row["grant_id"] is None
@@ -466,6 +539,7 @@ def test_an_alias_enrolled_as_a_core_role_runs_as_that_role_and_its_grant_token_
 
 
 # 6. The tool surface ------------------------------------------------------------------------------------------
+
 
 def test_the_tool_list_has_no_tool_to_propose_list_or_renounce_a_topic_grant(build_scene):
     """GUARD. Grants are proposed, authorized and revoked by the owner on the host; no tool, for a core role or
@@ -500,8 +574,10 @@ def test_create_topic_and_set_topic_declare_an_optional_grant_token(build_scene)
     """`grant_token` is in both schemas as optional text with a description of the topic grant key, and the
     schemas gain nothing else."""
     scene = build_scene()
-    before = {"create_topic": {"path", "title", "description", "members", "request_id", "token"},
-              "set_topic": {"conversation_id", "topic", "token"}}
+    before = {
+        "create_topic": {"path", "title", "description", "members", "request_id", "token"},
+        "set_topic": {"conversation_id", "topic", "token"},
+    }
     required = {"create_topic": ["path"], "set_topic": ["conversation_id", "topic"]}
 
     async def scenario(client):
@@ -526,8 +602,9 @@ def test_rename_topic_declares_an_optional_list_of_grant_ids_to_acknowledge(buil
         for role in ("planner", "guest"):
             shown = {one["name"]: one["inputSchema"] for one in await listed_tools(client, scene.host, role)}
             schema = shown["rename_topic"]
-            assert set(schema["properties"]) == {"path", "new_path", "token", "acknowledge_topic_grants"}, \
-                sorted(schema["properties"])
+            assert set(schema["properties"]) == {"path", "new_path", "token", "acknowledge_topic_grants"}, sorted(
+                schema["properties"]
+            )
             assert schema.get("required", []) == ["path", "new_path"]
             spec = schema["properties"]["acknowledge_topic_grants"]
             kinds = {entry.get("type") for entry in spec.get("anyOf", [])}

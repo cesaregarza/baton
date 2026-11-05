@@ -8,6 +8,7 @@ credential claims it). The alias is then mapped to the role: a proof for it, on 
 call run as the role (`resolve_binding`'s `effective_role`). An owner's rekey arm (`arm_rekey`) lets the next
 claim with a new passphrase replace the alias's verifier and end its proofs.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -75,10 +76,15 @@ def exists(conn: Connection, name: str) -> bool:
 def _admit(conn: Connection, limits: Aliases, credential: str, name: str, now: float) -> None:
     with conn.transaction():
         conn.execute("DELETE FROM alias_claims WHERE at <= ?", (now - CLAIM_WINDOW,))
-        counts = conn.execute("SELECT COUNT(*), COALESCE(SUM(credential = ?), 0), COALESCE(SUM(name = ?), 0)"
-                              " FROM alias_claims", (credential, skeleton(name))).fetchone()
-        caps = (limits.max_claims_per_hour, limits.max_claims_per_credential_per_hour,
-                limits.max_claims_per_alias_per_hour)
+        counts = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(credential = ?), 0), COALESCE(SUM(name = ?), 0) FROM alias_claims",
+            (credential, skeleton(name)),
+        ).fetchone()
+        caps = (
+            limits.max_claims_per_hour,
+            limits.max_claims_per_credential_per_hour,
+            limits.max_claims_per_alias_per_hour,
+        )
         if any(count >= cap for count, cap in zip(counts, caps, strict=True)):
             raise LimitExceeded("alias claims are over their hourly limit", "alias_claims")
         conn.execute("INSERT INTO alias_claims VALUES (?, ?, ?)", (credential, skeleton(name), now))
@@ -92,12 +98,16 @@ def alias_code(alias_id: str) -> str:
 def _identity(row: Row, mapped_role: str | None) -> dict:
     """An alias's identity; the caller reads `mapped_role` in the same query or transaction as `row`."""
     code = alias_code(row["id"])
-    return {"alias_id": row["id"], "alias": row["name"], "badge": "guest", "code": code,
-            "effective_role": mapped_role or "guest"}
+    return {
+        "alias_id": row["id"],
+        "alias": row["name"],
+        "badge": "guest",
+        "code": code,
+        "effective_role": mapped_role or "guest",
+    }
 
 
-def claim(conn: Connection, config: Config, principal: AccessToken | None, name: str,
-          passphrase: str) -> dict:
+def claim(conn: Connection, config: Config, principal: AccessToken | None, name: str, passphrase: str) -> dict:
     """Validate, then renew on the current passphrase, else reset on a live rekey arm, else refuse.
 
     A name nobody holds is created: by a guest unless it is reserved, or by a fixed role enrolling itself. Only a
@@ -122,8 +132,12 @@ def claim(conn: Connection, config: Config, principal: AccessToken | None, name:
             row = _create(conn, config, role, name, passphrase, now)
         elif not auth.check_passphrase(passphrase, row["verifier"]):
             raise Forbidden("alias is taken; passphrase did not match")
-        elif role != "guest" and not conn.execute("SELECT 1 FROM core_enrolment WHERE role = ? AND alias_id = ?",
-                                                  (role, row["id"])).fetchone():
+        elif (
+            role != "guest"
+            and not conn.execute(
+                "SELECT 1 FROM core_enrolment WHERE role = ? AND alias_id = ?", (role, row["id"])
+            ).fetchone()
+        ):
             raise Forbidden("a fixed-role credential renews only its own enrolled alias")
         else:
             _replace_oldest_at_cap(conn, config.aliases, row["id"], now)
@@ -137,17 +151,23 @@ def _replace_oldest_at_cap(conn: Connection, limits: Aliases, alias_id: str, now
     proved the passphrase and, for a fixed role, its enrolment reaches here, so no one without them can push a
     binding out. The replaced token's holder is not told: its next call is refused, like an expired token's.
     """
-    live = conn.execute("SELECT COUNT(*) FROM alias_bindings WHERE alias_id = ? AND expires_at > ?",
-                        (alias_id, now)).fetchone()[0]
+    live = conn.execute(
+        "SELECT COUNT(*) FROM alias_bindings WHERE alias_id = ? AND expires_at > ?", (alias_id, now)
+    ).fetchone()[0]
     if live < limits.max_bindings_per_alias:
         return
-    conn.execute("DELETE FROM alias_bindings WHERE digest = (SELECT digest FROM alias_bindings"
-                 " WHERE alias_id = ? AND expires_at > ? ORDER BY issued LIMIT 1)", (alias_id, now))
+    conn.execute(
+        "DELETE FROM alias_bindings WHERE digest = (SELECT digest FROM alias_bindings"
+        " WHERE alias_id = ? AND expires_at > ? ORDER BY issued LIMIT 1)",
+        (alias_id, now),
+    )
 
 
 def _check_lifetimes(limits: Aliases) -> None:
-    for label, value, high in (("binding lifetime", limits.binding_ttl_seconds, 86400),
-                               ("mapped binding lifetime", limits.mapped_binding_ttl_seconds, 604800)):
+    for label, value, high in (
+        ("binding lifetime", limits.binding_ttl_seconds, 86400),
+        ("mapped binding lifetime", limits.mapped_binding_ttl_seconds, 604800),
+    ):
         if type(value) is not int or not 1 <= value <= high:
             raise InvalidRequest(f"{label} must be a whole number from 1 to {high} seconds")
 
@@ -157,8 +177,11 @@ def _reset_arm(conn: Connection, name: str, passphrase: str) -> str | None:
 
     The scrypt check runs before admission only while an owner's arm is live.
     """
-    row = conn.execute("SELECT r.id, a.verifier FROM aliases a JOIN alias_arms r ON r.kind = 'rekey'"
-                       " AND r.target = a.name WHERE a.name = ? AND r.expires_at > ?", (name, time.time())).fetchone()
+    row = conn.execute(
+        "SELECT r.id, a.verifier FROM aliases a JOIN alias_arms r ON r.kind = 'rekey'"
+        " AND r.target = a.name WHERE a.name = ? AND r.expires_at > ?",
+        (name, time.time()),
+    ).fetchone()
     return row["id"] if row is not None and not auth.check_passphrase(passphrase, row["verifier"]) else None
 
 
@@ -182,19 +205,23 @@ def _bind(conn: Connection, config: Config, row: Row, now: float) -> dict:
     """Issue a fresh proof; a mapped alias's lasts the mapped lifetime, a guest's the guest one."""
     mapped = conn.execute("SELECT role FROM alias_roles WHERE alias_id = ?", (row["id"],)).fetchone()
     identity = _identity(row, mapped["role"] if mapped else None)
-    lifetime = (config.aliases.binding_ttl_seconds if identity["effective_role"] == "guest"
-                else config.aliases.mapped_binding_ttl_seconds)
+    lifetime = (
+        config.aliases.binding_ttl_seconds
+        if identity["effective_role"] == "guest"
+        else config.aliases.mapped_binding_ttl_seconds
+    )
     conn.execute("DELETE FROM alias_bindings WHERE expires_at <= ?", (now,))
     proof = secrets.token_urlsafe(32)
     # One past the alias's newest binding, so its lowest number is always its oldest.
-    conn.execute("INSERT INTO alias_bindings (digest, alias_id, expires_at, issued) VALUES (?, ?, ?,"
-                 " (SELECT COALESCE(MAX(issued), 0) + 1 FROM alias_bindings WHERE alias_id = ?))",
-                 (auth.token_digest(proof), row["id"], now + lifetime, row["id"]))
+    conn.execute(
+        "INSERT INTO alias_bindings (digest, alias_id, expires_at, issued) VALUES (?, ?, ?,"
+        " (SELECT COALESCE(MAX(issued), 0) + 1 FROM alias_bindings WHERE alias_id = ?))",
+        (auth.token_digest(proof), row["id"], now + lifetime, row["id"]),
+    )
     return {**identity, "binding_token": proof, "expires_at": now + lifetime}
 
 
-def _create(conn: Connection, config: Config, role: str, name: str, passphrase: str,
-            now: float) -> Row:
+def _create(conn: Connection, config: Config, role: str, name: str, passphrase: str, now: float) -> Row:
     """A new guest alias, or a fixed role's one enrolment, which also maps the alias to the role."""
     if role == "guest":
         if _reserved(config, name):
@@ -204,8 +231,10 @@ def _create(conn: Connection, config: Config, role: str, name: str, passphrase: 
     if conn.execute("SELECT 1 FROM aliases WHERE skeleton = ?", (skeleton(name),)).fetchone():
         raise Forbidden("alias name conflicts with an existing alias")
     alias_id = secrets.token_urlsafe(24)
-    conn.execute("INSERT INTO aliases VALUES (?, ?, ?, ?, ?)",
-                 (alias_id, name, skeleton(name), auth.hash_passphrase(passphrase), now))
+    conn.execute(
+        "INSERT INTO aliases VALUES (?, ?, ?, ?, ?)",
+        (alias_id, name, skeleton(name), auth.hash_passphrase(passphrase), now),
+    )
     if role != "guest":
         conn.execute("INSERT INTO core_enrolment VALUES (?, ?, ?, NULL)", (role, alias_id, now))
         conn.execute("INSERT INTO alias_roles VALUES (?, ?)", (role, alias_id))
@@ -247,8 +276,10 @@ def map_alias(conn: Connection, name: str, role: str) -> dict:
             raise Forbidden(f"no alias {name!r}")
         if not conn.execute("SELECT 1 FROM core_enrolment WHERE role = ?", (role,)).fetchone():
             raise Forbidden(f"{role!r} has not enrolled, so nothing can be mapped to it")
-        affected = [row["id"], *(found["alias_id"] for found in conn.execute(
-            "SELECT alias_id FROM alias_roles WHERE role = ?", (role,)))]
+        affected = [
+            row["id"],
+            *(found["alias_id"] for found in conn.execute("SELECT alias_id FROM alias_roles WHERE role = ?", (role,))),
+        ]
         _end_proofs(conn, affected)
         conn.execute("DELETE FROM alias_roles WHERE role = ? OR alias_id = ?", (role, row["id"]))
         conn.execute("INSERT INTO alias_roles VALUES (?, ?)", (role, row["id"]))
@@ -259,8 +290,9 @@ def unmap_alias(conn: Connection, name: str) -> dict:
     """Owner: end alias `name`'s mapping. It keeps renewing, as a guest alias."""
     name = normalize(name)
     with conn.transaction():
-        row = conn.execute("SELECT r.role, r.alias_id FROM alias_roles r JOIN aliases a ON a.id = r.alias_id"
-                           " WHERE a.name = ?", (name,)).fetchone()
+        row = conn.execute(
+            "SELECT r.role, r.alias_id FROM alias_roles r JOIN aliases a ON a.id = r.alias_id WHERE a.name = ?", (name,)
+        ).fetchone()
         if row is None:
             raise Forbidden(f"alias {name!r} is not mapped")
         _end_proofs(conn, [row["alias_id"]])
@@ -279,8 +311,9 @@ def _end_proofs(conn: Connection, alias_ids: list[str]) -> None:
 def _arm(conn: Connection, kind: str, target: str) -> dict:
     """Write an arm, replacing any earlier one for the same target; the new id keeps the two apart."""
     expires_at = time.time() + ARM_SECONDS
-    conn.execute("INSERT OR REPLACE INTO alias_arms VALUES (?, ?, ?, ?)",
-                 (secrets.token_urlsafe(16), kind, target, expires_at))
+    conn.execute(
+        "INSERT OR REPLACE INTO alias_arms VALUES (?, ?, ?, ?)", (secrets.token_urlsafe(16), kind, target, expires_at)
+    )
     return {"armed": kind, "target": target, "expires_at": expires_at}
 
 
@@ -295,9 +328,11 @@ def resolve_binding(conn: Connection, proof: str | None) -> dict:
     One query reads the proof, the alias and its mapping, so an owner's map or unmap can't land between them.
     """
     validate_proof(proof)
-    row = conn.execute("SELECT a.*, r.role AS mapped_role FROM alias_bindings b JOIN aliases a ON a.id = b.alias_id"
-                       " LEFT JOIN alias_roles r ON r.alias_id = a.id WHERE b.digest = ? AND b.expires_at > ?",
-                       (auth.token_digest(proof), time.time())).fetchone()
+    row = conn.execute(
+        "SELECT a.*, r.role AS mapped_role FROM alias_bindings b JOIN aliases a ON a.id = b.alias_id"
+        " LEFT JOIN alias_roles r ON r.alias_id = a.id WHERE b.digest = ? AND b.expires_at > ?",
+        (auth.token_digest(proof), time.time()),
+    ).fetchone()
     if row is None:
         raise Forbidden("alias binding is missing, invalid or expired")
     return _identity(row, row["mapped_role"])
@@ -309,8 +344,10 @@ def admit_post(conn: Connection, config: Config, principal: AccessToken, identit
     now = time.time()
     with conn.transaction():
         conn.execute("DELETE FROM alias_posts WHERE at <= ?", (now - CLAIM_WINDOW,))
-        counts = conn.execute("SELECT COALESCE(SUM(alias_id = ?), 0), COALESCE(SUM(credential = ?), 0)"
-                              " FROM alias_posts", (identity["alias_id"], credential)).fetchone()
+        counts = conn.execute(
+            "SELECT COALESCE(SUM(alias_id = ?), 0), COALESCE(SUM(credential = ?), 0) FROM alias_posts",
+            (identity["alias_id"], credential),
+        ).fetchone()
         caps = (config.aliases.max_posts_per_alias_per_hour, config.aliases.max_posts_per_credential_per_hour)
         for count, cap, limit in zip(counts, caps, ("posts_per_alias", "posts_per_credential"), strict=True):
             if count >= cap:
@@ -324,15 +361,19 @@ def bind_events(conn: Connection, authority: dict, identity: dict | None) -> dic
     if identity is None or identity["effective_role"] == "guest":
         raise Forbidden("bind_events needs the token of an alias mapped to a role")
     with conn.transaction():
-        if not conn.execute("SELECT 1 FROM alias_roles WHERE alias_id = ? AND role = ?",
-                            (identity["alias_id"], identity["effective_role"])).fetchone():
+        if not conn.execute(
+            "SELECT 1 FROM alias_roles WHERE alias_id = ? AND role = ?",
+            (identity["alias_id"], identity["effective_role"]),
+        ).fetchone():
             raise Forbidden("this alias is no longer mapped to that role; claim it again")
         row = conn.execute("SELECT alias_id FROM events_targets WHERE grant_id = ?", (grant,)).fetchone()
         if row is not None and row["alias_id"] != identity["alias_id"]:
             raise Forbidden("this grant's events are bound to another alias; unbind them first")
         if row is None:
-            conn.execute("INSERT INTO events_targets VALUES (?, ?, ?, ?)",
-                         (grant, identity["alias_id"], json.dumps(authority, sort_keys=True), time.time()))
+            conn.execute(
+                "INSERT INTO events_targets VALUES (?, ?, ?, ?)",
+                (grant, identity["alias_id"], json.dumps(authority, sort_keys=True), time.time()),
+            )
     return {"bound": True, "alias": identity["alias"], "code": identity["code"], "grant_id": grant}
 
 
@@ -358,14 +399,22 @@ def unbind_grant(conn: Connection, grant: str) -> dict:
 
 def mapped_grants(conn: Connection, role: str) -> set[str]:
     """The grants whose events target is an alias currently mapped to `role`."""
-    return {row[0] for row in conn.execute("SELECT t.grant_id FROM events_targets t JOIN alias_roles r"
-                                           " ON r.alias_id = t.alias_id WHERE r.role = ?", (role,))}
+    return {
+        row[0]
+        for row in conn.execute(
+            "SELECT t.grant_id FROM events_targets t JOIN alias_roles r ON r.alias_id = t.alias_id WHERE r.role = ?",
+            (role,),
+        )
+    }
 
 
 def sweep_events_targets(conn: Connection, config: Config) -> int:
     """Drop targets whose grant has ended. Cleanup only: delivery already checks each grant's liveness."""
-    ended = [row["grant_id"] for row in conn.execute("SELECT grant_id, authority FROM events_targets")
-             if not auth.authority_live(config, json.loads(row["authority"]))]
+    ended = [
+        row["grant_id"]
+        for row in conn.execute("SELECT grant_id, authority FROM events_targets")
+        if not auth.authority_live(config, json.loads(row["authority"]))
+    ]
     with conn.transaction():
         for grant in ended:
             conn.execute("DELETE FROM events_targets WHERE grant_id = ?", (grant,))

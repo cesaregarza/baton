@@ -54,9 +54,11 @@ def readable(config: Config, role: str) -> tuple[str, dict[str, Any]]:
 def get_message(conn: Connection, config: Config, role: str, message_id: str) -> dict[str, Any]:
     """One message the caller may read. Missing and not permitted give the same refusal."""
     condition, values = readable(config, role)
-    row = conn.execute(f"SELECT m.* FROM messages m WHERE m.id = :message_id AND {condition}"
-                       " ORDER BY m.recipient = :reader DESC LIMIT 1",
-                       {**values, "message_id": str(message_id)}).fetchone()
+    row = conn.execute(
+        f"SELECT m.* FROM messages m WHERE m.id = :message_id AND {condition}"
+        " ORDER BY m.recipient = :reader DESC LIMIT 1",
+        {**values, "message_id": str(message_id)},
+    ).fetchone()
     if row is None:
         raise UnknownMessage(f"there is no message {message_id} that you can read")
     [shown] = messages.as_page_for(conn, role, [row], config=config)
@@ -65,10 +67,21 @@ def get_message(conn: Connection, config: Config, role: str, message_id: str) ->
     return shown
 
 
-def search(conn: Connection, config: Config, role: str, query: str, *, conversation_id: str | None = None,
-           topic: str | None = None, kinds: list[str] | None = None, limit: int = 20,
-           before: str | None = None, producer: str | None = None, query_vector: list[float] | None = None,
-           model: str | None = None) -> dict[str, Any]:
+def search(
+    conn: Connection,
+    config: Config,
+    role: str,
+    query: str,
+    *,
+    conversation_id: str | None = None,
+    topic: str | None = None,
+    kinds: list[str] | None = None,
+    limit: int = 20,
+    before: str | None = None,
+    producer: str | None = None,
+    query_vector: list[float] | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
     """Messages, and derived artifacts when `kinds` asks for them, matching every word of `query` that the
     caller may read, best first: one hit per message, and per artifact version.
 
@@ -102,8 +115,9 @@ def search(conn: Connection, config: Config, role: str, query: str, *, conversat
         ranked += _message_hits(conn, config, role, terms, mode, pool, conversation_id, topic, before)
     wanted = [kind for kind in kinds if kind != "message"]
     if wanted:
-        ranked += _artifact_hits(conn, config, role, terms, mode, pool, wanted, conversation_id, topic, before,
-                                 producer)
+        ranked += _artifact_hits(
+            conn, config, role, terms, mode, pool, wanted, conversation_id, topic, before, producer
+        )
     if mode == "fts5":
         ranked.sort(key=lambda pair: pair[0])  # bm25: lower is better
     else:
@@ -125,12 +139,18 @@ def _query_profiles(conn: Connection, config: Config, query_vector: Any, model: 
         raise InvalidRequest("query vectors need [search] embeddings = true")
     if not isinstance(model, str) or not model:
         raise InvalidRequest("a query vector names its model")
-    if not isinstance(query_vector, list) or not query_vector or not all(
-            isinstance(x, int | float) and not isinstance(x, bool) and derived.fits_float32(x) for x in query_vector):
+    if (
+        not isinstance(query_vector, list)
+        or not query_vector
+        or not all(
+            isinstance(x, int | float) and not isinstance(x, bool) and derived.fits_float32(x) for x in query_vector
+        )
+    ):
         raise InvalidRequest("query_vector is a list of finite numbers that each fit a float32")
     profiles, producers = {}, {}
     for generation, producer, profile in conn.execute(
-            "SELECT id, producer, profile FROM generations WHERE active = 1 ORDER BY producer, id"):
+        "SELECT id, producer, profile FROM generations WHERE active = 1 ORDER BY producer, id"
+    ):
         embedding = json.loads(profile).get("embedding")
         if embedding and embedding["model"] == model:
             profiles[generation], producers[generation] = embedding, producer
@@ -139,22 +159,27 @@ def _query_profiles(conn: Connection, config: Config, query_vector: Any, model: 
     # Activation keeps one signature per model; should a database hold two anyway, refuse rather than score.
     signatures = {json.dumps(derived.signature(embedding), sort_keys=True) for embedding in profiles.values()}
     if len(signatures) > 1:
-        held = "; ".join(f"{producers[generation]}'s {generation}: {derived.signature(embedding)}"
-                         for generation, embedding in profiles.items())
-        raise InvalidRequest(f"{model} has more than one active embedding signature ({held}), so a query vector "
-                             "can't be scored")
+        held = "; ".join(
+            f"{producers[generation]}'s {generation}: {derived.signature(embedding)}"
+            for generation, embedding in profiles.items()
+        )
+        raise InvalidRequest(
+            f"{model} has more than one active embedding signature ({held}), so a query vector can't be scored"
+        )
     for generation, embedding in profiles.items():
         if embedding["dim"] != len(query_vector):
-            raise InvalidRequest(f"{producers[generation]}'s active generation {generation} embeds {model} in "
-                                 f"{embedding['dim']} dimensions, and the query has {len(query_vector)}")
+            raise InvalidRequest(
+                f"{producers[generation]}'s active generation {generation} embeds {model} in "
+                f"{embedding['dim']} dimensions, and the query has {len(query_vector)}"
+            )
     return profiles
 
 
-def _rerank(conn: Connection, hits: list[dict], query_vector: list[float], model: str,
-            profiles: dict[str, dict]) -> list[dict]:
+def _rerank(
+    conn: Connection, hits: list[dict], query_vector: list[float], model: str, profiles: dict[str, dict]
+) -> list[dict]:
     """Keyword matches with a vector first, most similar first; then the rest, in keyword order."""
-    candidates = [("artifact", hit["version_id"]) if hit["derived"] else ("message", hit["message_id"])
-                  for hit in hits]
+    candidates = [("artifact", hit["version_id"]) if hit["derived"] else ("message", hit["message_id"]) for hit in hits]
     scores = _vector_scores(conn, candidates, query_vector, model, profiles)
     for hit, key in zip(hits, candidates, strict=True):
         hit["similarity"] = scores.get(key)
@@ -167,8 +192,13 @@ def _rerank(conn: Connection, hits: list[dict], query_vector: list[float], model
     return sorted(hits, key=sort_key)
 
 
-def _vector_scores(conn: Connection, candidates: list[tuple[str, str]], query_vector: list[float],
-                   model: str, profiles: dict[str, dict]) -> dict[tuple[str, str], float]:
+def _vector_scores(
+    conn: Connection,
+    candidates: list[tuple[str, str]],
+    query_vector: list[float],
+    model: str,
+    profiles: dict[str, dict],
+) -> dict[tuple[str, str], float]:
     """Best similarity across allowed generations, reading only the authorized keyword candidates."""
     generation_marks = ", ".join("?" for _ in profiles)
     # Reserve bindings for the generations, item kind and model; each remaining binding holds one item id.
@@ -177,12 +207,13 @@ def _vector_scores(conn: Connection, candidates: list[tuple[str, str]], query_ve
     for item_kind in ("message", "artifact"):
         item_ids = [item_id for kind, item_id in candidates if kind == item_kind]
         for start in range(0, len(item_ids), batch_size):
-            batch = item_ids[start:start + batch_size]
+            batch = item_ids[start : start + batch_size]
             item_marks = ", ".join("?" for _ in batch)
             rows = conn.execute(
                 "SELECT item_id, generation, dim, data FROM vectors WHERE item_kind = ? AND model = ?"
                 f" AND generation IN ({generation_marks}) AND item_id IN ({item_marks})",
-                (item_kind, model, *profiles, *batch))
+                (item_kind, model, *profiles, *batch),
+            )
             for item_id, generation, dim, data in rows:
                 vector = list(struct.unpack(f"<{dim}f", data))
                 score = _similarity(query_vector, vector, profiles[generation])
@@ -201,8 +232,17 @@ def _similarity(a: list[float], b: list[float], embedding: dict) -> float:
     return product / norms if norms else 0.0
 
 
-def _message_hits(conn: Connection, config: Config, role: str, terms: list[str], mode: str, limit: int,
-                  conversation_id: str | None, topic: str | None, before: str | None) -> list[tuple[Any, dict]]:
+def _message_hits(
+    conn: Connection,
+    config: Config,
+    role: str,
+    terms: list[str],
+    mode: str,
+    limit: int,
+    conversation_id: str | None,
+    topic: str | None,
+    before: str | None,
+) -> list[tuple[Any, dict]]:
     condition, values = readable(config, role)
     filters, extra = _filters(conversation_id, topic, before)
     values |= extra
@@ -219,25 +259,48 @@ def _message_hits(conn: Connection, config: Config, role: str, terms: list[str],
             " SELECT message_id, conversation_id, conversation_seq, seq, sender, alias_id, alias, alias_code, at,"
             " snippet, MIN(score) AS best"
             " FROM matched GROUP BY message_id ORDER BY best, at DESC LIMIT :limit",
-            {**values, "limit": limit}).fetchall()
+            {**values, "limit": limit},
+        ).fetchall()
     else:
         likes = _likes(terms, "m.text", values)
         rows = conn.execute(
             "SELECT m.id AS message_id, m.conversation_id, m.conversation_seq, m.seq, m.sender,"
             " m.alias_id, m.alias, m.alias_code, MAX(m.at) AS at,"
             f" m.text AS text, 0 AS best FROM messages m WHERE {likes} AND {condition}{filters}"
-            " GROUP BY m.id ORDER BY at DESC LIMIT :limit", {**values, "limit": limit}).fetchall()
-    return [(row["best"], {**messages.attribution(row),
-        "message_id": row["message_id"], "conversation_id": row["conversation_id"],
-        "seq": row["conversation_seq"] if row["conversation_id"] is not None else row["seq"],
-        "from_role": row["sender"], "at": row["at"],
-        "snippet": row["snippet"] if mode == "fts5" else _snippet(row["text"], terms), "derived": False,
-    }) for row in rows]
+            " GROUP BY m.id ORDER BY at DESC LIMIT :limit",
+            {**values, "limit": limit},
+        ).fetchall()
+    return [
+        (
+            row["best"],
+            {
+                **messages.attribution(row),
+                "message_id": row["message_id"],
+                "conversation_id": row["conversation_id"],
+                "seq": row["conversation_seq"] if row["conversation_id"] is not None else row["seq"],
+                "from_role": row["sender"],
+                "at": row["at"],
+                "snippet": row["snippet"] if mode == "fts5" else _snippet(row["text"], terms),
+                "derived": False,
+            },
+        )
+        for row in rows
+    ]
 
 
-def _artifact_hits(conn: Connection, config: Config, role: str, terms: list[str], mode: str, limit: int,
-                   kinds: list[str], conversation_id: str | None, topic: str | None, before: str | None,
-                   producer: str | None) -> list[tuple[Any, dict]]:
+def _artifact_hits(
+    conn: Connection,
+    config: Config,
+    role: str,
+    terms: list[str],
+    mode: str,
+    limit: int,
+    kinds: list[str],
+    conversation_id: str | None,
+    topic: str | None,
+    before: str | None,
+    producer: str | None,
+) -> list[tuple[Any, dict]]:
     """Artifact versions served to `role`, filtered in SQL before they are ranked or limited."""
     condition, values = served(config, role)
     filters, extra = _artifact_filters(kinds, conversation_id, topic, before, producer)
@@ -252,20 +315,31 @@ def _artifact_hits(conn: Connection, config: Config, role: str, terms: list[str]
             " JOIN conversations c ON c.id = v.conversation_id"
             f" WHERE artifacts_fts MATCH :match AND {condition}{filters})"
             " SELECT * FROM matched ORDER BY score, created_at DESC LIMIT :limit",
-            {**values, "limit": limit}).fetchall()
+            {**values, "limit": limit},
+        ).fetchall()
     else:
         likes = _likes(terms, "v.body", values)
         rows = conn.execute(
             f"SELECT v.*, c.last_seq, {FIRST_INPUT}, 0 AS score FROM artifact_versions v JOIN conversations c ON c.id ="
             f" v.conversation_id WHERE {likes} AND {condition}{filters} ORDER BY v.created_at DESC LIMIT :limit",
-            {**values, "limit": limit}).fetchall()
-    return [(row["score"], {**_labels(row), "at": row["created_at"],
-                            "snippet": row["snippet"] if mode == "fts5" else _snippet(row["body"], terms)})
-            for row in rows]
+            {**values, "limit": limit},
+        ).fetchall()
+    return [
+        (
+            row["score"],
+            {
+                **_labels(row),
+                "at": row["created_at"],
+                "snippet": row["snippet"] if mode == "fts5" else _snippet(row["body"], terms),
+            },
+        )
+        for row in rows
+    ]
 
 
-def read_artifacts(conn: Connection, config: Config, role: str, conversation_id: str,
-                   producer: str | None = None) -> dict[str, Any]:
+def read_artifacts(
+    conn: Connection, config: Config, role: str, conversation_id: str, producer: str | None = None
+) -> dict[str, Any]:
     """A conversation's artifacts that `role` may read: each kind's latest valid version from each producer's
     active generation, if `role` can read every message it was made from. `producer` only filters."""
     if producer is not None and not isinstance(producer, str):
@@ -275,7 +349,8 @@ def read_artifacts(conn: Connection, config: Config, role: str, conversation_id:
     rows = conn.execute(
         f"SELECT v.*, c.last_seq, {FIRST_INPUT} FROM artifact_versions v"
         f" JOIN conversations c ON c.id = v.conversation_id WHERE {condition}{filters} ORDER BY v.kind, v.producer",
-        {**values, **extra}).fetchall()
+        {**values, **extra},
+    ).fetchall()
     return {"artifacts": [_artifact(row) for row in rows]}
 
 
@@ -287,15 +362,18 @@ def served(config: Config, role: str) -> tuple[str, dict[str, Any]]:
     messages it was made from wouldn't.
     """
     condition, values = readable(config, role)
-    return ("(v.state = 'valid' AND v.generation IN (SELECT id FROM generations WHERE active = 1)"
-            " AND v.version = (SELECT MAX(o.version) FROM artifact_versions o WHERE o.producer = v.producer"
-            " AND o.scope_id = v.scope_id AND o.generation = v.generation AND o.conversation_id = v.conversation_id"
-            " AND o.kind = v.kind)"
-            " AND EXISTS (SELECT 1 FROM artifact_inputs i WHERE i.version_id = v.id)"
-            " AND NOT EXISTS (SELECT 1 FROM artifact_inputs i WHERE i.version_id = v.id AND"
-            " (SELECT COUNT(DISTINCT m.conversation_seq) FROM messages m WHERE m.conversation_id = i.conversation_id"
-            f" AND m.conversation_seq BETWEEN i.from_seq AND i.to_seq AND {condition})"
-            " < i.to_seq - i.from_seq + 1))", values)
+    return (
+        "(v.state = 'valid' AND v.generation IN (SELECT id FROM generations WHERE active = 1)"
+        " AND v.version = (SELECT MAX(o.version) FROM artifact_versions o WHERE o.producer = v.producer"
+        " AND o.scope_id = v.scope_id AND o.generation = v.generation AND o.conversation_id = v.conversation_id"
+        " AND o.kind = v.kind)"
+        " AND EXISTS (SELECT 1 FROM artifact_inputs i WHERE i.version_id = v.id)"
+        " AND NOT EXISTS (SELECT 1 FROM artifact_inputs i WHERE i.version_id = v.id AND"
+        " (SELECT COUNT(DISTINCT m.conversation_seq) FROM messages m WHERE m.conversation_id = i.conversation_id"
+        f" AND m.conversation_seq BETWEEN i.from_seq AND i.to_seq AND {condition})"
+        " < i.to_seq - i.from_seq + 1))",
+        values,
+    )
 
 
 def _artifact(row: Row) -> dict[str, Any]:
@@ -305,10 +383,18 @@ def _artifact(row: Row) -> dict[str, Any]:
 def _labels(row: Row) -> dict[str, Any]:
     """What every served artifact says about itself, in reads and in search alike."""
     labels = {
-        "version_id": row["id"], "conversation_id": row["conversation_id"], "kind": row["kind"],
-        "producer": row["producer"], "scope_id": row["scope_id"], "generation": row["generation"],
-        "version": row["version"], "state": _state(row), "covered_through_seq": row["covered_through_seq"],
-        "source_revision": row["source_revision"], "derived": True, "authoritative": False,
+        "version_id": row["id"],
+        "conversation_id": row["conversation_id"],
+        "kind": row["kind"],
+        "producer": row["producer"],
+        "scope_id": row["scope_id"],
+        "generation": row["generation"],
+        "version": row["version"],
+        "state": _state(row),
+        "covered_through_seq": row["covered_through_seq"],
+        "source_revision": row["source_revision"],
+        "derived": True,
+        "authoritative": False,
     }
     if row["kind"] == derived.RECENT:  # a window over the latest messages, never coverage of the whole
         labels |= {"window": "recent", "from_seq": row["first_input"], "to_seq": row["covered_through_seq"]}
@@ -319,8 +405,9 @@ def _state(row: Row) -> str:
     return "behind" if row["covered_through_seq"] < row["last_seq"] else "valid"
 
 
-def _artifact_filters(kinds: list[str], conversation_id: str | None, topic: str | None, before: str | None,
-                      producer: str | None) -> tuple[str, dict[str, Any]]:
+def _artifact_filters(
+    kinds: list[str], conversation_id: str | None, topic: str | None, before: str | None, producer: str | None
+) -> tuple[str, dict[str, Any]]:
     values: dict[str, Any] = {f"kind{index}": kind for index, kind in enumerate(kinds)}
     sql = f" AND v.kind IN ({', '.join(f':kind{index}' for index in range(len(kinds)))})"
     if conversation_id is not None:
@@ -368,8 +455,11 @@ def _topic_filter(alias: str, topic: str | None) -> tuple[str, dict[str, Any]]:
     if topic is None:
         return "", {}
     checked = check_topic(topic)
-    return (f" AND {alias}.conversation_id IN (SELECT id FROM conversations WHERE topic = :topic"
-            " OR topic LIKE :topic || '/%')", {"topic": checked})
+    return (
+        f" AND {alias}.conversation_id IN (SELECT id FROM conversations WHERE topic = :topic"
+        " OR topic LIKE :topic || '/%')",
+        {"topic": checked},
+    )
 
 
 def _snippet(text: str, terms: list[str]) -> str:

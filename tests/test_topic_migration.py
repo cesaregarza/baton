@@ -34,30 +34,45 @@ def v14_database(config: Config, threads: list[tuple[str, str | None, list[str]]
     raw.executescript(V14_SCHEMA)
     with raw:
         for index, (conversation_id, topic, participants) in enumerate(threads, 1):
-            raw.execute("INSERT INTO conversations (id, request_id, request_digest, title, created_by,"
-                        " created_at, topic) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (conversation_id, f"req-{index}", f"digest-{index}", f"Thread {index}",
-                         participants[0], "2026-10-01T00:00:00+00:00", topic))
-            raw.executemany("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
-                            [(conversation_id, role, "2026-10-01T00:00:00+00:00") for role in participants])
+            raw.execute(
+                "INSERT INTO conversations (id, request_id, request_digest, title, created_by,"
+                " created_at, topic) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    conversation_id,
+                    f"req-{index}",
+                    f"digest-{index}",
+                    f"Thread {index}",
+                    participants[0],
+                    "2026-10-01T00:00:00+00:00",
+                    topic,
+                ),
+            )
+            raw.executemany(
+                "INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
+                [(conversation_id, role, "2026-10-01T00:00:00+00:00") for role in participants],
+            )
     raw.close()
     os.chmod(config.db_path, 0o600)
 
 
 def topics_in(db: sqlite3.Connection) -> dict[str, dict]:
-    return {row["path"]: {"title": row["title"], "created_by": row["created_by"],
-                          "members": json.loads(row["members"])}
-            for row in db.execute("SELECT * FROM topics")}
+    return {
+        row["path"]: {"title": row["title"], "created_by": row["created_by"], "members": json.loads(row["members"])}
+        for row in db.execute("SELECT * FROM topics")
+    }
 
 
 def test_the_upgrade_discovers_every_stored_label_and_its_missing_parents(tmp_path: Path) -> None:
     config = topic_config(tmp_path)
-    v14_database(config, [
-        ("conv_1", "baton", ["orchestrator", "reviewer"]),
-        ("conv_2", "baton/development", ["orchestrator", "reviewer"]),
-        ("conv_3", "knowledge-exchange/help", ["orchestrator", "assistant"]),  # parent never stored
-        ("conv_4", None, ["orchestrator", "reviewer"]),                        # untopiced, left alone
-    ])
+    v14_database(
+        config,
+        [
+            ("conv_1", "baton", ["orchestrator", "reviewer"]),
+            ("conv_2", "baton/development", ["orchestrator", "reviewer"]),
+            ("conv_3", "knowledge-exchange/help", ["orchestrator", "assistant"]),  # parent never stored
+            ("conv_4", None, ["orchestrator", "reviewer"]),  # untopiced, left alone
+        ],
+    )
     db = connect(config.db_path)
     try:
         assert db.execute("SELECT version FROM schema_version").fetchone()[0] == store.SCHEMA_VERSION
@@ -73,11 +88,14 @@ def test_the_upgrade_discovers_every_stored_label_and_its_missing_parents(tmp_pa
 def test_members_come_from_direct_threads_only(tmp_path: Path) -> None:
     """A parent does not inherit its subtopic's members, and an implicit parent starts empty."""
     config = topic_config(tmp_path)
-    v14_database(config, [
-        ("conv_1", "baton", ["orchestrator", "reviewer"]),
-        ("conv_2", "baton/development", ["orchestrator", "assistant"]),
-        ("conv_3", "knowledge-exchange/help", ["orchestrator", "assistant"]),
-    ])
+    v14_database(
+        config,
+        [
+            ("conv_1", "baton", ["orchestrator", "reviewer"]),
+            ("conv_2", "baton/development", ["orchestrator", "assistant"]),
+            ("conv_3", "knowledge-exchange/help", ["orchestrator", "assistant"]),
+        ],
+    )
     db = connect(config.db_path)
     try:
         found = topics_in(db)
@@ -136,8 +154,17 @@ def test_a_membership_above_the_maximum_is_kept_and_refused_at_admission(tmp_pat
     db = connect(config.db_path)
     try:
         assert len(topics_in(db)["baton"]["members"]) == 3
-        detail = refused("invalid_request", conversations.create, db, config, actor="guest", title="Too many",
-                         participants=None, topic="baton", identity=ALIAS)
+        detail = refused(
+            "invalid_request",
+            conversations.create,
+            db,
+            config,
+            actor="guest",
+            title="Too many",
+            participants=None,
+            topic="baton",
+            identity=ALIAS,
+        )
         assert "members" in detail
     finally:
         db.close()

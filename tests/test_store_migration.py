@@ -25,17 +25,19 @@ def v2_database(config: Config, request_id: str) -> None:
     config.data_dir.mkdir(mode=0o700)
     raw = sqlite3.connect(config.db_path)
     raw.executescript(V2_SCHEMA)
-    digest = events.request_digest("send", {"sender": "reviewer", "recipient": "assistant", "text": "from v2",
-                                            "job_id": None})
+    digest = events.request_digest(
+        "send", {"sender": "reviewer", "recipient": "assistant", "text": "from v2", "job_id": None}
+    )
     stamp = events.now()
     with raw:
         raw.execute("INSERT INTO mailboxes VALUES ('assistant', 1, 0)")
-        raw.execute("INSERT INTO messages VALUES ('msg_old', NULL, 'reviewer', 'assistant', 1, 'from v2', ?)",
-                    (stamp,))
+        raw.execute("INSERT INTO messages VALUES ('msg_old', NULL, 'reviewer', 'assistant', 1, 'from v2', ?)", (stamp,))
         raw.execute("INSERT INTO message_requests VALUES (?, ?, 'msg_old', 1, ?)", (request_id, digest, stamp))
-        raw.execute("INSERT INTO events (job_id, seq, at, actor, audience, kind, summary, data) VALUES"
-                    " (NULL, 1, ?, 'reviewer', 'assistant', 'message', 'message 1 from reviewer', ?)",
-                    (stamp, json.dumps({"message_id": "msg_old", "seq": 1})))
+        raw.execute(
+            "INSERT INTO events (job_id, seq, at, actor, audience, kind, summary, data) VALUES"
+            " (NULL, 1, ?, 'reviewer', 'assistant', 'message', 'message 1 from reviewer', ?)",
+            (stamp, json.dumps({"message_id": "msg_old", "seq": 1})),
+        )
     raw.close()
     os.chmod(config.db_path, 0o600)
 
@@ -52,13 +54,19 @@ def test_a_version_2_database_is_migrated_and_keeps_its_messages(tmp_path: Path)
     assert messages.send(db, sender="reviewer", recipient="assistant", text="after")["seq"] == 2
 
     [old, new] = inbox.take(db, "assistant")["events"]
-    assert (old["message"]["text"], old["message"]["from_role"], old["message"]["conversation_id"]) == \
-        ("from v2", "reviewer", None)
+    assert (old["message"]["text"], old["message"]["from_role"], old["message"]["conversation_id"]) == (
+        "from v2",
+        "reviewer",
+        None,
+    )
     assert new["message"]["text"] == "after"
-    conversation_id = conversations.create(db, config, actor="orchestrator", title="t",
-                                           participants=GROUP)["conversation_id"]
-    assert conversations.send(db, config, sender="reviewer", conversation_id=conversation_id,
-                              text="group")["seqs"] == {"orchestrator": 1, "assistant": 3}
+    conversation_id = conversations.create(db, config, actor="orchestrator", title="t", participants=GROUP)[
+        "conversation_id"
+    ]
+    assert conversations.send(db, config, sender="reviewer", conversation_id=conversation_id, text="group")["seqs"] == {
+        "orchestrator": 1,
+        "assistant": 3,
+    }
     db.close()
     connect(config.db_path).close()  # a second open of a migrated database changes nothing
 
@@ -68,8 +76,9 @@ def test_a_database_from_a_newer_schema_is_refused_untouched(tmp_path: Path) -> 
     config.data_dir.mkdir(mode=0o700)
     raw = sqlite3.connect(config.db_path)
     newer = store.SCHEMA_VERSION + 1  # newer than this baton knows, whatever its version
-    raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL);"
-                      f" INSERT INTO schema_version VALUES ({newer});")
+    raw.executescript(
+        f"CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES ({newer});"
+    )
     raw.close()
     os.chmod(config.db_path, 0o600)
     with pytest.raises(SchemaMismatch, match=f"version {newer}"):

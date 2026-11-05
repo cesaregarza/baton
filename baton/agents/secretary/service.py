@@ -20,10 +20,18 @@ class Secretary:
     state_path: Path
     policy_path: Path
 
-    async def decide(self, *, budget_seconds: float, since: int | None = None, floor: int | None = None,
-                     trigger: str | None = None, hourly: bool = False,
-                     clock: Callable[[], float] = time.monotonic) -> dict:
+    async def decide(
+        self,
+        *,
+        budget_seconds: float,
+        since: int | None = None,
+        floor: int | None = None,
+        trigger: str | None = None,
+        hourly: bool = False,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> dict:
         from .attention.decide import DecisionRun
+
         return await DecisionRun(self, budget_seconds, since, floor, trigger, hourly, clock).run()
 
     async def acknowledge(self, decision_id: str) -> int:
@@ -40,12 +48,17 @@ class Secretary:
 def _pending(secretary: Secretary, decision_id: str) -> dict | None:
     from .attention.state import AttentionLog
     from .inbox.window import InboxWindow
+
     policy = load_policy(secretary.config, secretary.policy_path)
     log = AttentionLog(secretary.state_path, secretary.config.data_dir, policy.principal)
     result = log.get(decision_id)
     delivered, _ = log.positions()
-    if (result is None or not result["brief"] or result["covered_through"] <= delivered
-            or result["policy_digest"] != policy.digest):
+    if (
+        result is None
+        or not result["brief"]
+        or result["covered_through"] <= delivered
+        or result["policy_digest"] != policy.digest
+    ):
         return None
     current = InboxWindow.read(secretary.config, policy, result["since"], through=result["through_pos"])
     log.bind(current.epoch, result["floor"])
@@ -55,6 +68,7 @@ def _pending(secretary: Secretary, decision_id: str) -> dict | None:
 def _acknowledge(secretary: Secretary, decision_id: str) -> int:
     from .attention.state import AttentionLog
     from .inbox.window import InboxWindow
+
     policy = load_policy(secretary.config, secretary.policy_path)
     log = AttentionLog(secretary.state_path, secretary.config.data_dir, policy.principal)
     result = log.get(decision_id)
@@ -71,6 +85,7 @@ def show(config: Config, state_path: Path, policy_path: Path, *, source_key: str
     policy = load_policy(config, policy_path)
     from .attention.state import AttentionLog
     from .inbox.window import InboxWindow
+
     log = AttentionLog(state_path, config.data_dir, policy.principal)
     visible, stale = [], 0
     for result in log.recent():
@@ -81,5 +96,10 @@ def show(config: Config, state_path: Path, policy_path: Path, *, source_key: str
         elif source_key is None or source_key in result["sources"]:
             visible.append(result)
     since, floor = log.positions()
-    return {"principal": policy.principal, "since": since, "floor": floor,
-            "assessments": visible, "stale_assessments": stale}
+    return {
+        "principal": policy.principal,
+        "since": since,
+        "floor": floor,
+        "assessments": visible,
+        "stale_assessments": stale,
+    }

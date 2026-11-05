@@ -76,14 +76,17 @@ def test_1_a_reply_is_as_retry_safe_as_any_other_message(db, config) -> None:
     conversation_id = start(db, config)
     parent = say(db, config, "orchestrator", conversation_id, "which release?")
     request_id = rid("one-reply")
-    first = say(db, config, "reviewer", conversation_id, "the next one", reply_to=parent["message_id"],
-                request_id=request_id)
-    again = say(db, config, "reviewer", conversation_id, "the next one", reply_to=parent["message_id"],
-                request_id=request_id)
+    first = say(
+        db, config, "reviewer", conversation_id, "the next one", reply_to=parent["message_id"], request_id=request_id
+    )
+    again = say(
+        db, config, "reviewer", conversation_id, "the next one", reply_to=parent["message_id"], request_id=request_id
+    )
     assert (again["created"], again["message_id"], again["seqs"]) == (False, first["message_id"], first["seqs"])
     assert len(mailbox(db, "assistant")) == 2
-    refused("idempotency_conflict", say, db, config, "reviewer", conversation_id, "the next one",
-            request_id=request_id)  # the same text, no longer a reply
+    refused(
+        "idempotency_conflict", say, db, config, "reviewer", conversation_id, "the next one", request_id=request_id
+    )  # the same text, no longer a reply
 
 
 # 2 -------------------------------------------------------------------------------------------------------
@@ -91,8 +94,14 @@ def test_1_a_reply_is_as_retry_safe_as_any_other_message(db, config) -> None:
 
 def test_2_a_reply_to_a_message_outside_the_conversation_is_refused_and_stores_nothing(db, config) -> None:
     conversation_id = start(db, config)
-    elsewhere = conversations.create(db, config, actor="orchestrator", title="another thread",
-                                     participants=["orchestrator", "reviewer"], request_id=rid("elsewhere"))
+    elsewhere = conversations.create(
+        db,
+        config,
+        actor="orchestrator",
+        title="another thread",
+        participants=["orchestrator", "reviewer"],
+        request_id=rid("elsewhere"),
+    )
     other = say(db, config, "orchestrator", elsewhere["conversation_id"], "not in this thread")
     direct = messages.send(db, sender="orchestrator", recipient="reviewer", text="not in any thread")
     say(db, config, "orchestrator", conversation_id, "in this thread")
@@ -100,8 +109,7 @@ def test_2_a_reply_to_a_message_outside_the_conversation_is_refused_and_stores_n
     before = (count(db, "messages"), count(db, "events"), count(db, "message_requests"))
 
     for parent in (other["message_id"], direct["message_id"], "msg_nonexistent"):
-        detail = refused("invalid_request", say, db, config, "reviewer", conversation_id, "answering",
-                         reply_to=parent)
+        detail = refused("invalid_request", say, db, config, "reviewer", conversation_id, "answering", reply_to=parent)
         assert detail.startswith("reply_to"), detail
     assert (count(db, "messages"), count(db, "events"), count(db, "message_requests")) == before
     assert woken(config) == []
@@ -114,12 +122,15 @@ def test_2_a_reply_to_a_message_from_before_the_sender_joined_is_refused(db, con
     woken(config)
     before = (count(db, "messages"), count(db, "events"), count(db, "message_requests"))
 
-    refused("invalid_request", say, db, config, "assistant", conversation_id, "answering",
-            reply_to=early["message_id"])
+    refused("invalid_request", say, db, config, "assistant", conversation_id, "answering", reply_to=early["message_id"])
     assert (count(db, "messages"), count(db, "events"), count(db, "message_requests")) == before
     assert woken(config) == []
-    assert say(db, config, "reviewer", conversation_id, "the reviewer was there for it",
-               reply_to=early["message_id"])["created"] is True
+    assert (
+        say(db, config, "reviewer", conversation_id, "the reviewer was there for it", reply_to=early["message_id"])[
+            "created"
+        ]
+        is True
+    )
 
 
 def test_2_a_reply_to_a_parent_with_no_copy_left_is_refused(db, config) -> None:
@@ -127,16 +138,24 @@ def test_2_a_reply_to_a_parent_with_no_copy_left_is_refused(db, config) -> None:
     parent = say(db, config, "orchestrator", conversation_id, HIDDEN)
     db.execute("DELETE FROM messages WHERE recipient = 'assistant' AND seq = 1")
 
-    refused("invalid_request", say, db, config, "assistant", conversation_id, "answering",
-            reply_to=parent["message_id"])
+    refused(
+        "invalid_request", say, db, config, "assistant", conversation_id, "answering", reply_to=parent["message_id"]
+    )
     assert say(db, config, "reviewer", conversation_id, "still here", reply_to=parent["message_id"])["created"]
 
 
 def test_2_a_direct_send_has_no_thread_to_reply_into(db, config) -> None:
     conversation_id = start(db, config)
     parent = say(db, config, "orchestrator", conversation_id, "in a conversation")
-    detail = refused("invalid_request", messages.send, db, sender="reviewer", recipient="assistant",
-                     text="answering", reply_to=parent["message_id"])
+    detail = refused(
+        "invalid_request",
+        messages.send,
+        db,
+        sender="reviewer",
+        recipient="assistant",
+        text="answering",
+        reply_to=parent["message_id"],
+    )
     assert "reply_to" in detail and "conversation" in detail
     assert count(db, "messages") == 2  # only the parent's two copies
 
@@ -156,9 +175,9 @@ def test_3_history_returns_replies_with_their_parent_in_order_and_moves_no_bookm
 
     for role in GROUP:
         page = conversations.history(db, role, conversation_id)
-        assert [(m["seq"], m["text"], None if m["reply_to"] is None else m["reply_to"]["seq"])
-                for m in page["messages"]] == [(1, "q1", None), (2, "q2", None), (3, "a1", 1), (4, "a2", 2),
-                                               (5, "a3", 1)]
+        assert [
+            (m["seq"], m["text"], None if m["reply_to"] is None else m["reply_to"]["seq"]) for m in page["messages"]
+        ] == [(1, "q1", None), (2, "q2", None), (3, "a1", 1), (4, "a2", 2), (5, "a3", 1)]
     assert bookmarks(db) == before
 
     assert [m["text"] for m in messages.read(db, "orchestrator")["messages"]] == ["q2", "a1", "a2"]
@@ -232,12 +251,20 @@ def test_9_a_role_that_was_there_for_the_parent_still_sees_it_after_a_round_trip
 
 def test_a_parent_named_from_another_conversation_reads_as_unavailable(db, config) -> None:
     conversation_id = start(db, config)
-    elsewhere = conversations.create(db, config, actor="orchestrator", title="another thread",
-                                     participants=GROUP, request_id=rid("elsewhere-visible"))["conversation_id"]
+    elsewhere = conversations.create(
+        db,
+        config,
+        actor="orchestrator",
+        title="another thread",
+        participants=GROUP,
+        request_id=rid("elsewhere-visible"),
+    )["conversation_id"]
     parent = say(db, config, "orchestrator", elsewhere, HIDDEN)
     say(db, config, "orchestrator", conversation_id, "answering")
-    db.execute("UPDATE messages SET reply_to = ? WHERE conversation_id = ? AND text = 'answering'",
-               (parent["message_id"], conversation_id))
+    db.execute(
+        "UPDATE messages SET reply_to = ? WHERE conversation_id = ? AND text = 'answering'",
+        (parent["message_id"], conversation_id),
+    )
 
     page = conversations.history(db, "assistant", conversation_id)
     assert answers(one(page, "answering")) == {"message_id": parent["message_id"], "seq": None}

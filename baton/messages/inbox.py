@@ -39,16 +39,21 @@ class Inbox:
         with conn.transaction():
             last_seq, read_seq = mailbox.positions(conn, recipient)
             start = read_seq if after_seq is None else after_seq
-            rows = conn.execute("SELECT * FROM messages WHERE recipient = ? AND seq > ? ORDER BY seq LIMIT ?",
-                                (recipient, start, limit)).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM messages WHERE recipient = ? AND seq > ? ORDER BY seq LIMIT ?", (recipient, start, limit)
+            ).fetchall()
             oldest = conn.execute("SELECT MIN(seq) FROM messages WHERE recipient = ?", (recipient,)).fetchone()[0]
             page = rendering.as_page_for(conn, recipient, rows, config=self.config)
             if page:
                 mailbox.mark_read(conn, recipient, page[-1]["seq"])
             unread = last_seq - mailbox.positions(conn, recipient)[1]
         truncated = start + 1 < (oldest if oldest is not None else last_seq + 1)
-        return {"messages": page, "next_seq": page[-1]["seq"] if page else start, "unread": unread,
-                "truncated": truncated}
+        return {
+            "messages": page,
+            "next_seq": page[-1]["seq"] if page else start,
+            "unread": unread,
+            "truncated": truncated,
+        }
 
     def wait(self, *, timeout_seconds: float | None = None, poll_seconds: float = 0.5) -> dict[str, Any]:
         """Wait until an event is addressed to this role, then hand it over once."""
@@ -64,8 +69,10 @@ class Inbox:
         conn, role, config = self.connection, self.role, self.config
         name = f"wait:{role}"
         with conn.transaction():
-            rows = conn.execute("SELECT * FROM events WHERE audience = ? AND pos > ? ORDER BY pos LIMIT ?",
-                                (role, events.cursor(conn, name), MAX_EVENTS)).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM events WHERE audience = ? AND pos > ? ORDER BY pos LIMIT ?",
+                (role, events.cursor(conn, name), MAX_EVENTS),
+            ).fetchall()
             page: list[dict[str, Any]] = []
             size, full = 0, len(rows) == MAX_EVENTS
             read_seq = mailbox.read_seq(conn, role)
@@ -75,8 +82,9 @@ class Inbox:
                     events.set_cursor(conn, name, row["pos"])  # already delivered by read_messages
                     continue
                 if event["kind"] == "message":
-                    found = conn.execute("SELECT * FROM messages WHERE recipient = ? AND seq = ?",
-                                         (role, event["data"]["seq"])).fetchone()
+                    found = conn.execute(
+                        "SELECT * FROM messages WHERE recipient = ? AND seq = ?", (role, event["data"]["seq"])
+                    ).fetchone()
                     event["message"] = rendering.as_page_for(conn, role, [found], config=config)[0] if found else None
                 size += 2 * len(json.dumps(event))
                 if page and size > limits.MAX_PAGE_BYTES:
@@ -89,8 +97,9 @@ class Inbox:
         return {"events": page, "more": full}
 
 
-def wait(conn: Connection, role: str, *, timeout_seconds: float | None = None,
-         poll_seconds: float = 0.5, config: Any = None) -> dict[str, Any]:
+def wait(
+    conn: Connection, role: str, *, timeout_seconds: float | None = None, poll_seconds: float = 0.5, config: Any = None
+) -> dict[str, Any]:
     """Compatibility entrypoint for the role's blocking inbox read."""
     return Inbox(conn, role, config).wait(timeout_seconds=timeout_seconds, poll_seconds=poll_seconds)
 
@@ -100,7 +109,8 @@ def take(conn: Connection, role: str, *, config: Any = None) -> dict[str, Any]:
     return Inbox(conn, role, config).take()
 
 
-def read(conn: Connection, recipient: str, after_seq: int | None = None, limit: int = 50,
-         config: Any = None) -> dict[str, Any]:
+def read(
+    conn: Connection, recipient: str, after_seq: int | None = None, limit: int = 50, config: Any = None
+) -> dict[str, Any]:
     """Compatibility entrypoint for the recipient's sequenced inbox page."""
     return Inbox(connection=conn, role=recipient, config=config).read(after_seq=after_seq, limit=limit)

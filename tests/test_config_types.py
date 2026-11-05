@@ -45,14 +45,17 @@ def test_allow_loopback_redirects_must_be_a_boolean(value: Any) -> None:
 
 @pytest.mark.parametrize("value", ["8765", True, 0, -1, 65536, 8765.5])
 def test_listen_port_must_be_a_port_number(value: Any) -> None:
-    refused({**config(), "host": {"public_url": "https://baton.example.test", "listen_port": value}},
-            "host.listen_port")
+    refused(
+        {**config(), "host": {"public_url": "https://baton.example.test", "listen_port": value}}, "host.listen_port"
+    )
 
 
 @pytest.mark.parametrize("value", ["10", True, 0, -1, 10**6])
 def test_wake_timeout_must_be_a_bounded_number(value: Any) -> None:
-    refused(config(roles={"planner": {"wake": {"command": ["true"], "timeout_seconds": value}}}),
-            "roles.planner.wake.timeout_seconds")
+    refused(
+        config(roles={"planner": {"wake": {"command": ["true"], "timeout_seconds": value}}}),
+        "roles.planner.wake.timeout_seconds",
+    )
 
 
 def test_valid_booleans_and_numbers_behave_as_before() -> None:
@@ -63,10 +66,20 @@ def test_valid_booleans_and_numbers_behave_as_before() -> None:
     assert not parse(config(auth=oauth(enabled=True, allow_loopback_redirects=False))).oauth.allow_loopback_redirects
     assert parse(config(auth=oauth(enabled=True, allow_loopback_redirects=True))).oauth.allow_loopback_redirects
     assert parse(config()).listen_port == 8765
-    assert parse({**config(), "host": {"public_url": "https://baton.example.test", "listen_port": 9000}}).listen_port \
+    assert (
+        parse({**config(), "host": {"public_url": "https://baton.example.test", "listen_port": 9000}}).listen_port
         == 9000
+    )
     assert parse(config(roles={"planner": {"wake": {"command": ["true"]}}})).roles["planner"].wake.timeout_seconds == 10
-    assert parse(config(roles={"planner": {"wake": {"command": ["true"], "timeout_seconds": 2.5}}})).roles[
-        "planner"].wake.timeout_seconds == 2.5
-    assert parse(config(roles={"planner": {"wake": {"command": ["true"], "timeout_seconds": 3}}})).roles[
-        "planner"].wake.timeout_seconds == 3
+    assert (
+        parse(config(roles={"planner": {"wake": {"command": ["true"], "timeout_seconds": 2.5}}}))
+        .roles["planner"]
+        .wake.timeout_seconds
+        == 2.5
+    )
+    assert (
+        parse(config(roles={"planner": {"wake": {"command": ["true"], "timeout_seconds": 3}}}))
+        .roles["planner"]
+        .wake.timeout_seconds
+        == 3
+    )

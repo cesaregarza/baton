@@ -38,6 +38,7 @@ def run(config: Config, args: argparse.Namespace, action: str) -> dict[str, Any]
 
     if action == "acknowledge":
         import asyncio
+
         service = secretary.Secretary(config, args.state, args.policy)
         return {"since": asyncio.run(service.acknowledge(args.decision_id))}
     if action == "read":

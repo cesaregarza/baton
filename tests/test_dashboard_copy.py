@@ -43,8 +43,13 @@ def varied_thread(config: Config) -> str:
     cid = open_thread(config, "Release plan")
     first = say(config, cid, "orchestrator", "plan is drafted\nand a second line")
     say(config, cid, "reviewer", "looks good", reply_to=first)
-    say(config, cid, "orchestrator", "the build says:", relayed=[
-        {"source": "ci", "at": "2026-10-29T18:02:00+00:00", "text": "all passed\nin 41 seconds"}])
+    say(
+        config,
+        cid,
+        "orchestrator",
+        "the build says:",
+        relayed=[{"source": "ci", "at": "2026-10-29T18:02:00+00:00", "text": "all passed\nin 41 seconds"}],
+    )
     say(config, cid, "reviewer", "one more thing", reply_to=first)
     return cid
 
@@ -70,8 +75,15 @@ class Shown(HTMLParser):
         kind = (tag, classes[0] if classes else "")
         owner = self._lis[-1] if self._lis else {}
         if kind == ("li", "message"):
-            entry = {"seq": int(str(given["id"])[2:]), "parent": owner.get("seq"), "at": "", "marker": "",
-                     "words": "", "sender": "", "quotes": []}
+            entry = {
+                "seq": int(str(given["id"])[2:]),
+                "parent": owner.get("seq"),
+                "at": "",
+                "marker": "",
+                "words": "",
+                "sender": "",
+                "quotes": [],
+            }
             self.messages.append(entry)
             self._lis.append(entry)
         elif kind == ("li", "notice"):
@@ -161,8 +173,16 @@ def test_the_thread_page_alone_may_run_a_script_and_fetch_from_its_own_origin(tm
     assert thread.pop("script-src", None) == "'self'" and thread.pop("connect-src", None) == "'self'"
     assert thread == standard, "everything else about the policy is the standard one"
     assert "script-src" not in standard and standard["default-src"] == "'none'"
-    for target in ("/", "/needs", "/style.css", "/copy.js", f"/c/{cid}/text", f"/c/{cid}?after_seq=nope", "/c/missing",
-                   "/missing"):
+    for target in (
+        "/",
+        "/needs",
+        "/style.css",
+        "/copy.js",
+        f"/c/{cid}/text",
+        f"/c/{cid}?after_seq=nope",
+        "/c/missing",
+        "/missing",
+    ):
         response = get(config, target)
         assert response.headers["Content-Security-Policy"] == dashboard.HEADERS["Content-Security-Policy"], target
 
@@ -189,8 +209,11 @@ def test_the_copied_text_matches_the_visible_thread(tmp_path) -> None:
     cid = varied_thread(config)
     shown = Shown(text(get(config, f"/c/{cid}"))).messages
     assert [entry["seq"] for entry in shown if entry["parent"] is None] == [1, 3], "the page nests the replies"
-    expected = HEADER.format(title="Release plan", cid=cid) \
-        + "\n\n".join(worded(entry) for entry in sorted(shown, key=lambda entry: entry["seq"])) + "\n"
+    expected = (
+        HEADER.format(title="Release plan", cid=cid)
+        + "\n\n".join(worded(entry) for entry in sorted(shown, key=lambda entry: entry["seq"]))
+        + "\n"
+    )
     assert copy_of(config, cid) == expected
     assert "\n\n#2 · " in expected and " · reviewer · in reply to #1\nlooks good\n" in expected
     assert "relayed from ci at 2026-10-29T18:02:00+00:00:\nall passed\nin 41 seconds\n" in expected
@@ -210,8 +233,9 @@ def test_a_host_notice_is_copied_in_the_words_the_page_gives_it_at_its_place_in_
     notices = Shown(text(get(config, f"/c/{cid}"))).notices
     words = [notice["words"].rstrip(" ·") for notice in notices]
     assert words == ["assistant was added by orchestrator", "assistant was removed by orchestrator"]
-    lines = [f"#{seq} · {notice['at']} · notice: {line}" for seq, notice, line in zip((2, 3), notices, words,
-                                                                                      strict=True)]
+    lines = [
+        f"#{seq} · {notice['at']} · notice: {line}" for seq, notice, line in zip((2, 3), notices, words, strict=True)
+    ]
     copied = copy_of(config, cid)
     assert all(line in copied.split("\n") for line in lines)
     in_order(copied, ["before the notices", lines[0], lines[1], "after the notices"])
@@ -224,17 +248,23 @@ def test_a_topic_move_notice_has_the_same_words_in_the_page_and_copy(tmp_path) -
     conn = connect(config.db_path)
     try:
         with transaction(conn):
-            conversations._fan_out(conn, cid, MINE, sender=None, text=words,
-                                   notice={"event": "topic_moved", "from": "alpha", "to": "beta",
-                                           "by": "orchestrator"})
+            conversations._fan_out(
+                conn,
+                cid,
+                MINE,
+                sender=None,
+                text=words,
+                notice={"event": "topic_moved", "from": "alpha", "to": "beta", "by": "orchestrator"},
+            )
     finally:
         conn.close()
     page = text(get(config, f"/c/{cid}"))
     [notice] = Shown(page).notices
     assert notice["words"].rstrip(" ·") == words
     assert PAYLOAD not in page, "the page must escape the notice's words"
-    assert copy_of(config, cid) == (HEADER.format(title="Moved thread", cid=cid)
-                                   + f"#1 · {notice['at']} · notice: {words}\n")
+    assert copy_of(config, cid) == (
+        HEADER.format(title="Moved thread", cid=cid) + f"#1 · {notice['at']} · notice: {words}\n"
+    )
 
 
 def test_a_thread_with_nothing_in_it_says_so_as_the_page_does(tmp_path) -> None:
@@ -253,8 +283,9 @@ def test_a_thread_longer_than_a_page_is_copied_whole_from_any_of_its_pages(tmp_p
     conn = connect(config.db_path)
     try:
         for number in range(1, count + 1):
-            conversations.send(conn, config, sender="reviewer", conversation_id=cid,
-                               text=f"note {number:03d} " + "x" * size)
+            conversations.send(
+                conn, config, sender="reviewer", conversation_id=cid, text=f"note {number:03d} " + "x" * size
+            )
     finally:
         conn.close()
     first = text(get(config, f"/c/{cid}"))
@@ -279,8 +310,9 @@ def test_messages_no_longer_kept_are_named_where_they_were_and_once(tmp_path) ->
     page = text(get(config, f"/c/{cid}"))
     assert "Not kept any more on this page: messages #2–#3, #5" in page and has_copy_button(page, cid)
     copied = copy_of(config, cid)
-    in_order(copied, ["first note", "Messages #2–#3 are no longer kept.", "fourth note",
-                      "Message #5 is no longer kept."])
+    in_order(
+        copied, ["first note", "Messages #2–#3 are no longer kept.", "fourth note", "Message #5 is no longer kept."]
+    )
     assert copied.count("no longer kept") == 2
     assert "second note" not in copied and "fifth note" not in copied
 
@@ -294,8 +326,7 @@ def test_a_copy_keeps_the_gap_when_no_messages_remain(tmp_path) -> None:
         conn.execute("DELETE FROM messages WHERE conversation_id = ?", (cid,))
     finally:
         conn.close()
-    assert copy_of(config, cid) == (HEADER.format(title="Expired thread", cid=cid)
-                                   + "Message #1 is no longer kept.\n")
+    assert copy_of(config, cid) == (HEADER.format(title="Expired thread", cid=cid) + "Message #1 is no longer kept.\n")
 
 
 # 3. What the viewer cannot see is never copied ------------------------------------------------------------
@@ -332,15 +363,24 @@ def test_a_message_the_viewer_cannot_see_is_never_in_the_copy(tmp_path) -> None:
 def test_html_and_script_in_a_message_are_copied_as_text_and_never_run(tmp_path) -> None:
     config = page_config(tmp_path)
     cid = open_thread(config, f"title {PAYLOAD}")
-    say(config, cid, "orchestrator", f"text {PAYLOAD}",
-        relayed=[{"source": f"source {PAYLOAD}", "at": "2026-10-29T08:00:00+00:00", "text": f"relayed {PAYLOAD}"}])
+    say(
+        config,
+        cid,
+        "orchestrator",
+        f"text {PAYLOAD}",
+        relayed=[{"source": f"source {PAYLOAD}", "at": "2026-10-29T08:00:00+00:00", "text": f"relayed {PAYLOAD}"}],
+    )
     page = text(get(config, f"/c/{cid}"))
     assert page.count("<script") == 1 and COPY_SCRIPT in page and "<img" not in page
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
     response = get(config, f"/c/{cid}/text")
     copied = text(response)
-    for words in (f"Thread: title {PAYLOAD}\n", f"\ntext {PAYLOAD}\n", f"relayed from source {PAYLOAD} at ",
-                  f":\nrelayed {PAYLOAD}\n"):
+    for words in (
+        f"Thread: title {PAYLOAD}\n",
+        f"\ntext {PAYLOAD}\n",
+        f"relayed from source {PAYLOAD} at ",
+        f":\nrelayed {PAYLOAD}\n",
+    ):
         assert words in copied, words
     assert response.headers["Content-Type"] == "text/plain; charset=utf-8"  # a browser shows it, never runs it
     assert response.headers["X-Content-Type-Options"] == "nosniff"

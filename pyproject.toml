@@ -20,7 +20,8 @@ baton = "baton.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8",
-    "ruff>=0.14",
+    "ruff==0.17.3",
+    "ty==0.0.97",
 ]
 
 [build-system]
@@ -32,10 +33,38 @@ module-name = "baton"
 module-root = ""
 
 [tool.ruff]
+required-version = "==0.17.3"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
+select = ["E", "F", "I", "B", "UP", "RUF100", "C901", "PLR0912", "PLR0915"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.pylint]
+max-branches = 12
+max-statements = 50
+
+[tool.ruff.lint.per-file-ignores]
+# Scenario tests keep their setup, actions, and assertions together.
+"tests/**/*.py" = ["C901", "PLR0912", "PLR0915"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.ty]
+# Existing findings stay visible here; CI rejects diagnostics outside this baseline.
+baseline = "ty-baseline.json"
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["baton"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

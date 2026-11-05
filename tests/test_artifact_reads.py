@@ -21,20 +21,29 @@ from baton.database import store
 from baton.database.store import connect
 from baton.errors import BatonError
 
-ROLES = {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
-         "reviewer": {}, "assistant": {}, "outsider": {}, "late": {},
-         "viewer": {"can_view_all_conversations": True}}
+ROLES = {
+    "orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
+    "reviewer": {},
+    "assistant": {},
+    "outsider": {},
+    "late": {},
+    "viewer": {"can_view_all_conversations": True},
+}
 
 
 def reads_config(tmp_path: Path, *, search_on: bool = True, rolling: int = 0, **indexer: Any) -> Config:
     search_table: dict[str, Any] = {"enabled": search_on}
     if rolling:
         search_table["rolling_window_messages"] = rolling
-    return config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": ROLES, "conversations": {"enabled": True}, "search": search_table,
-        "indexer": {"producers": ["alpha", "beta"], **indexer},
-    })
+    return config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": ROLES,
+            "conversations": {"enabled": True},
+            "search": search_table,
+            "indexer": {"producers": ["alpha", "beta"], **indexer},
+        }
+    )
 
 
 @pytest.fixture
@@ -56,13 +65,19 @@ def refused(code: str, operation, *args, **kwargs) -> BatonError:
     return raised.value
 
 
-def publish(db, config, conversation_id: str, kinds=("summary",), producer: str = "alpha", request_id: str = "r-1",
-            body: str | None = None) -> dict[str, Any]:
+def publish(
+    db,
+    config,
+    conversation_id: str,
+    kinds=("summary",),
+    producer: str = "alpha",
+    request_id: str = "r-1",
+    body: str | None = None,
+) -> dict[str, Any]:
     manifest = begin(db, config, conversation_id, kinds, producer)
     read_all(db, config, manifest, producer)
     overrides = {"body": body} if body is not None else {}
-    return commit(db, config, manifest, artifacts_for(manifest, **overrides), request_id=request_id,
-                  producer=producer)
+    return commit(db, config, manifest, artifacts_for(manifest, **overrides), request_id=request_id, producer=producer)
 
 
 def shown(db, config, role: str, conversation_id: str, producer: str | None = None) -> list[tuple[str, str, int]]:
@@ -91,13 +106,18 @@ def test_every_artifact_says_it_is_derived_and_how_current_it_is(db, config) -> 
     [first, _] = search.read_artifacts(db, config, "assistant", conversation_id)["artifacts"]
     assert (first["derived"], first["authoritative"], first["scope_id"]) == (True, False, "all")
     assert (first["kind"], first["state"], first["covered_through_seq"], first["version"]) == (
-        "decisions", "valid", 2, 1)
+        "decisions",
+        "valid",
+        2,
+        1,
+    )
     assert first["body"] == "decisions of the release plan" and first["citations"] == []
     assert first["source_revision"] == db.execute("SELECT revision FROM conversations").fetchone()[0]
     assert first["generation"].startswith("gen_") and first["version_id"].startswith("art_")
     say(db, config, conversation_id, "one more")
-    assert {a["state"] for a in search.read_artifacts(db, config, "assistant", conversation_id)["artifacts"]} \
-        == {"behind"}  # still valid and served, and says it doesn't cover the newest message
+    assert {a["state"] for a in search.read_artifacts(db, config, "assistant", conversation_id)["artifacts"]} == {
+        "behind"
+    }  # still valid and served, and says it doesn't cover the newest message
 
 
 def test_2_an_invalid_latest_version_is_served_nowhere(db, config) -> None:
@@ -119,6 +139,7 @@ def test_3_artifact_visibility_matches_raw_reads_for_every_role(db, config) -> N
     conversations.remove(db, config, actor="orchestrator", conversation_id=conversation_id, participant="reviewer")
     assert [row[0] for row in db.execute("SELECT state FROM artifact_versions")] == ["valid"]  # nothing flipped
     for role in ROLES:
+
         def can_read(message_id: str, role: str = role) -> bool:
             try:
                 search.get_message(db, config, role, message_id)
@@ -179,8 +200,12 @@ def test_search_returns_messages_and_artifacts_each_labelled(db, config) -> None
     message_hits = [hit for hit in hits if not hit["derived"]]
     artifact = [hit for hit in hits if hit["derived"]]
     assert len(message_hits) == 1 and len(artifact) == 1
-    assert (artifact[0]["kind"], artifact[0]["authoritative"], artifact[0]["producer"], artifact[0]["state"]) \
-        == ("summary", False, "alpha", "valid")
+    assert (artifact[0]["kind"], artifact[0]["authoritative"], artifact[0]["producer"], artifact[0]["state"]) == (
+        "summary",
+        False,
+        "alpha",
+        "valid",
+    )
     assert artifact[0]["conversation_id"] == conversation_id and "walrus" in artifact[0]["snippet"]
     assert search.search(db, config, "assistant", "walrus")["hits"] == message_hits  # messages by default
 
@@ -228,23 +253,34 @@ def test_20_a_recent_summary_is_labelled_with_its_bounds_and_covers_nothing_else
     read_all(db, config, manifest)
     commit(db, config, manifest)
     [recent] = search.read_artifacts(db, config, "assistant", conversation_id)["artifacts"]
-    assert (recent["kind"], recent["window"], recent["from_seq"], recent["covered_through_seq"]) \
-        == ("summary_recent", "recent", 4, 6)
+    assert (recent["kind"], recent["window"], recent["from_seq"], recent["covered_through_seq"]) == (
+        "summary_recent",
+        "recent",
+        4,
+        6,
+    )
     pairs = {(p["conversation_id"], p["kind"]): p for p in derived.dirty(db, config, "alpha")["pairs"]}
     assert pairs[(conversation_id, "summary")]["covered_through_seq"] == 0  # the full summary is untouched
     assert (conversation_id, "summary_recent") not in pairs
     say(db, config, conversation_id, "note 7")
     later = begin(db, config, conversation_id, kinds=("summary_recent",))
-    assert later["window"] == {"from_seq": 5, "to_seq": 7} and later["kinds"]["summary_recent"]["prior_version_id"] \
-        is None
+    assert (
+        later["window"] == {"from_seq": 5, "to_seq": 7} and later["kinds"]["summary_recent"]["prior_version_id"] is None
+    )
     db.close()
 
 
 def test_the_rolling_window_is_off_by_default_and_bounded(tmp_path: Path, db, config) -> None:
     conversation_id, _ = converse(db, config, 2)
     refused("invalid_request", begin, db, config, conversation_id, kinds=("summary_recent",))
-    refused("invalid_request", begin, db, reads_config(tmp_path, rolling=3), conversation_id,
-            kinds=("summary_recent", "summary"))  # a recent window is its own batch
+    refused(
+        "invalid_request",
+        begin,
+        db,
+        reads_config(tmp_path, rolling=3),
+        conversation_id,
+        kinds=("summary_recent", "summary"),
+    )  # a recent window is its own batch
     with pytest.raises(ConfigError, match="rolling_window_messages"):
         reads_config(tmp_path, rolling=11, max_manifest_items=10)
 
@@ -254,6 +290,7 @@ def test_the_rolling_window_is_off_by_default_and_bounded(tmp_path: Path, db, co
 
 def test_read_artifacts_is_a_read_only_tool_present_with_search(tmp_path: Path, config) -> None:
     from baton import app
+
     assert [(name, read_only) for name, _, read_only in app.ARTIFACT_TOOLS] == [("read_artifacts", True)]
     assert reads_config(tmp_path, search_on=False).search.enabled is False
     db = connect(config.db_path)
@@ -331,6 +368,7 @@ def test_a_recent_summary_names_both_ends_of_its_window_everywhere(tmp_path: Pat
 
 def test_the_kinds_help_names_the_recent_window(capsys) -> None:
     from baton import cli
+
     with pytest.raises(SystemExit):
         cli.main(["index", "begin-batch", "--help"])
     assert "summary_recent" in capsys.readouterr().out
@@ -358,6 +396,7 @@ def test_the_before_help_says_which_time_each_kind_is_compared_by() -> None:
     import inspect
 
     from baton import app
+
     annotation = inspect.signature(app.Tools.search).parameters["before"].annotation
     description = " ".join(str(getattr(meta, "description", "")) for meta in getattr(annotation, "__metadata__", ()))
     assert "sent" in description and "written" in description, description

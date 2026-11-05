@@ -139,14 +139,29 @@ def register_with_secret(host) -> dict[str, Any]:
 
 def authorize_status(host, client_id: str) -> int:
     challenge = hashlib.sha256(b"a synthetic code verifier for the tests").hexdigest()
-    return httpx.get(host.base + "/authorize", params={
-        "response_type": "code", "client_id": client_id, "redirect_uri": REDIRECT, "code_challenge": challenge,
-        "code_challenge_method": "S256", "state": "s1", "resource": host.mcp_url}).status_code
+    return httpx.get(
+        host.base + "/authorize",
+        params={
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": REDIRECT,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": "s1",
+            "resource": host.mcp_url,
+        },
+    ).status_code
 
 
 def refresh(host, tokens: dict[str, Any]) -> httpx.Response:
-    return httpx.post(host.base + "/token", data={"grant_type": "refresh_token", "client_id": tokens["client_id"],
-                                                  "refresh_token": tokens["refresh_token"]})
+    return httpx.post(
+        host.base + "/token",
+        data={
+            "grant_type": "refresh_token",
+            "client_id": tokens["client_id"],
+            "refresh_token": tokens["refresh_token"],
+        },
+    )
 
 
 def mcp_status(host, access_token: str) -> int:
@@ -250,8 +265,10 @@ def test_the_ended_record_takes_ended_tokens_but_never_an_unused_registration(st
     assert register(host).status_code == 201  # the write that moves what is due
 
     archived = {(line["table"], line["key"]) for line in ended_record(host)}
-    assert archived == {("access", auth.token_digest(tokens["access_token"])),
-                        ("refresh", auth.token_digest(tokens["refresh_token"]))}, "the ended tokens, and nothing else"
+    assert archived == {
+        ("access", auth.token_digest(tokens["access_token"])),
+        ("refresh", auth.token_digest(tokens["refresh_token"])),
+    }, "the ended tokens, and nothing else"
     assert all(line["entry"]["ended"] == "revoked" for line in ended_record(host)), "marked as they ended"
     assert idle["client_id"] not in oauth_state(host)["clients"], "the unused registration is deleted"
     assert idle["client_secret"] not in ended_path(host).read_text()
@@ -319,8 +336,10 @@ def test_ended_oauth_entries_move_to_the_ended_record_after_thirty_days(start_ho
         assert register(host).status_code == 201
 
     moved = {(line["table"], line["key"]): line["entry"] for line in ended_record(host)}
-    assert set(moved) == {("access", auth.token_digest(tokens["access_token"])),
-                          ("refresh", auth.token_digest(tokens["refresh_token"]))}
+    assert set(moved) == {
+        ("access", auth.token_digest(tokens["access_token"])),
+        ("refresh", auth.token_digest(tokens["refresh_token"])),
+    }
     assert len(ended_record(host)) == 2, "each entry is written once"
     assert all(entry["ended"] == "revoked" for entry in moved.values())
     assert oauth_state(host)["access"] == {} and oauth_state(host)["refresh"] == {}
@@ -400,8 +419,9 @@ def reasons(host, table: str) -> list[str | None]:
 
 
 def ending(host, table: str, column: str, value: str) -> list[str | None]:
-    return [row[0] for row in table_rows(host.config.db_path,
-                                         f"SELECT end_reason FROM {table} WHERE {column} = ?", value)]
+    return [
+        row[0] for row in table_rows(host.config.db_path, f"SELECT end_reason FROM {table} WHERE {column} = ?", value)
+    ]
 
 
 def digest(raw: str) -> str:
@@ -442,8 +462,12 @@ def test_login_forms_over_the_live_cap_are_refused(room, monkeypatch) -> None:
     assert over.status == 429, "a fourth form within five minutes is refused"
     assert b"Too many login forms are open" in over.body and b'name="pre"' not in over.body
     assert over.cookies == [] and seat_count(host, "seat_prelogin") == 3
-    wrong = post(host.config, "/seat/login", {"token": "not the token", "pre": hidden(unused.body, "pre")},
-                 cookies={PRE_COOKIE: cookie_value(unused, PRE_COOKIE)})
+    wrong = post(
+        host.config,
+        "/seat/login",
+        {"token": "not the token", "pre": hidden(unused.body, "pre")},
+        cookies={PRE_COOKIE: cookie_value(unused, PRE_COOKIE)},
+    )
     assert (wrong.status, b'name="pre"' in wrong.body, seat_count(host, "seat_prelogin")) == (429, False, 3)
 
     later(monkeypatch, seat.PRE_TTL + 1)
@@ -464,8 +488,12 @@ def test_the_pause_notice_stands_alone_at_the_login_form_cap(room, monkeypatch) 
         return response.body
 
     def wrong_token(form):
-        return post(host.config, "/seat/login", {"token": "not the token", "pre": hidden(form.body, "pre")},
-                    cookies={PRE_COOKIE: cookie_value(form, PRE_COOKIE)})
+        return post(
+            host.config,
+            "/seat/login",
+            {"token": "not the token", "pre": hidden(form.body, "pre")},
+            cookies={PRE_COOKIE: cookie_value(form, PRE_COOKIE)},
+        )
 
     plain = refused(get(host.config, "/seat/login"))
     assert cap in plain and plain.count(b'class="notice-box"') == 1
@@ -490,8 +518,12 @@ def test_guard_a_used_or_expired_form_cannot_log_in(room, monkeypatch) -> None:
     assert (again.status, cookie_value(again, SESSION_COOKIE)) == (403, None)
     stale = get(host.config, "/seat/login")
     later(monkeypatch, seat.PRE_TTL + 1)
-    late = post(host.config, "/seat/login", {"token": host.seat_token, "pre": hidden(stale.body, "pre")},
-                cookies={PRE_COOKIE: cookie_value(stale, PRE_COOKIE)})
+    late = post(
+        host.config,
+        "/seat/login",
+        {"token": host.seat_token, "pre": hidden(stale.body, "pre")},
+        cookies={PRE_COOKIE: cookie_value(stale, PRE_COOKIE)},
+    )
     assert (late.status, cookie_value(late, SESSION_COOKIE)) == (403, None)
 
 
@@ -657,8 +689,10 @@ def state_file(config) -> dict[str, Any]:
 def receipts_found(config) -> list[dict[str, Any]]:
     """Every delivery receipt stored: in the state file, where they were, and in their table."""
     stored = table_rows(config.db_path, "SELECT at, wake_id, subscription, owner, outcome FROM events_receipts")
-    return [*state_file(config).get("receipts", []),
-            *(dict(zip(("at", "wake_id", "subscription", "owner", "outcome"), row, strict=True)) for row in stored)]
+    return [
+        *state_file(config).get("receipts", []),
+        *(dict(zip(("at", "wake_id", "subscription", "owner", "outcome"), row, strict=True)) for row in stored),
+    ]
 
 
 def outcomes_found(config) -> tuple[dict[str, dict[str, str]], dict[str, float]]:
@@ -667,7 +701,8 @@ def outcomes_found(config) -> tuple[dict[str, dict[str, str]], dict[str, float]]
     outcomes = {wake_id: dict(entry["destinations"]) for wake_id, entry in in_file.items()}
     occurred = {wake_id: entry["at"] for wake_id, entry in in_file.items()}
     for wake_id, subscription, outcome in table_rows(
-            config.db_path, "SELECT wake_id, subscription, outcome FROM events_outcomes"):
+        config.db_path, "SELECT wake_id, subscription, outcome FROM events_outcomes"
+    ):
         outcomes.setdefault(wake_id, {})[subscription] = outcome
     occurred.update(table_rows(config.db_path, "SELECT wake_id, at FROM events_occurrences"))
     return outcomes, occurred
@@ -696,8 +731,10 @@ def test_wake_outcomes_are_kept_after_the_core_wake_finishes(events_host, receiv
     send(host, "worker", "hello")
     dispatch(host)
     wake_id = json.loads(receiver.events()[0]["body"])["eventId"]
-    statuses = {wakes.wake_id(role, key): status for role, key, status in
-                table_rows(host.config.db_path, "SELECT role, key, status FROM wakes")}
+    statuses = {
+        wakes.wake_id(role, key): status
+        for role, key, status in table_rows(host.config.db_path, "SELECT role, key, status FROM wakes")
+    }
     assert statuses[wake_id] == "delivered"
 
     assert "result" in subscribe(host, "worker", receiver.url(), secret)  # a refresh runs a state pass
@@ -709,9 +746,13 @@ def test_wake_outcomes_are_kept_after_the_core_wake_finishes(events_host, receiv
 
 def test_receipts_and_outcomes_left_in_the_state_file_move_to_their_tables(offline) -> None:
     recent = time.time() - 60
-    legacy = {"subscriptions": {}, "outcomes": {"wake_left": {"at": recent - 30, "destinations": {"sub_x": "gone"}}},
-              "receipts": [{"at": recent, "wake_id": "wake_left", "subscription": "sub_x", "owner": "role:worker",
-                            "outcome": "gone"}]}
+    legacy = {
+        "subscriptions": {},
+        "outcomes": {"wake_left": {"at": recent - 30, "destinations": {"sub_x": "gone"}}},
+        "receipts": [
+            {"at": recent, "wake_id": "wake_left", "subscription": "sub_x", "owner": "role:worker", "outcome": "gone"}
+        ],
+    }
     with datadir.opened(offline.config.data_dir) as dir_fd:
         datadir.replace_file(dir_fd, integration.STATE_FILE, json.dumps(legacy).encode())
     assert [r["wake_id"] for r in integration.status(offline.config)["receipts"]] == ["wake_left"]
@@ -720,21 +761,26 @@ def test_receipts_and_outcomes_left_in_the_state_file_move_to_their_tables(offli
         with offline._state():
             pass
 
-    assert table_rows(offline.config.db_path, "SELECT wake_id, subscription, owner, outcome, at FROM events_receipts"
-                      ) == [("wake_left", "sub_x", "role:worker", "gone", recent)]
+    assert table_rows(
+        offline.config.db_path, "SELECT wake_id, subscription, owner, outcome, at FROM events_receipts"
+    ) == [("wake_left", "sub_x", "role:worker", "gone", recent)]
     assert table_rows(offline.config.db_path, "SELECT wake_id, subscription, outcome FROM events_outcomes") == [
-        ("wake_left", "sub_x", "gone")]
+        ("wake_left", "sub_x", "gone")
+    ]
     assert table_rows(offline.config.db_path, "SELECT wake_id, at FROM events_occurrences") == [
-        ("wake_left", recent - 30)]
+        ("wake_left", recent - 30)
+    ]
     assert set(state_file(offline.config)) == {"subscriptions"}, "the state file no longer holds them"
     assert [r["wake_id"] for r in integration.status(offline.config)["receipts"]] == ["wake_left"]
 
 
 # The indexing writer -------------------------------------------------------------------------------------------
 
-WRITER_SCANS = (("FROM batches WHERE producer = ", "open_batches_by_producer"),
-                ("FROM commit_requests WHERE producer = 'alpha' AND committed_at > ", "commits_by_producer_time"),
-                ("FROM batches WHERE generation = generations.id", "open_batches_by_generation"))
+WRITER_SCANS = (
+    ("FROM batches WHERE producer = ", "open_batches_by_producer"),
+    ("FROM commit_requests WHERE producer = 'alpha' AND committed_at > ", "commits_by_producer_time"),
+    ("FROM batches WHERE generation = generations.id", "open_batches_by_generation"),
+)
 
 
 def test_the_writer_scans_use_their_indexes(tmp_path: Path) -> None:
@@ -745,8 +791,9 @@ def test_the_writer_scans_use_their_indexes(tmp_path: Path) -> None:
     db.set_trace_callback(issued.append)
     manifest = begin(db, config, conversation_id)
     read_all(db, config, manifest)
-    derived.commit_batch(db, config, "alpha", manifest["batch_id"],
-                         {"request_id": "r-1", "artifacts": artifacts_for(manifest)})
+    derived.commit_batch(
+        db, config, "alpha", manifest["batch_id"], {"request_id": "r-1", "artifacts": artifacts_for(manifest)}
+    )
     db.set_trace_callback(None)
 
     for fragment, index in WRITER_SCANS:
@@ -764,8 +811,9 @@ def batch_state(db: sqlite3.Connection, batch_id: str) -> str:
 def closed(db, config, manifest: dict[str, Any]) -> str | None:
     """The refusal a commit into this batch meets, or None if it was accepted."""
     try:
-        derived.commit_batch(db, config, "alpha", manifest["batch_id"],
-                             {"request_id": "r-late", "artifacts": artifacts_for(manifest)})
+        derived.commit_batch(
+            db, config, "alpha", manifest["batch_id"], {"request_id": "r-late", "artifacts": artifacts_for(manifest)}
+        )
     except BatonError as error:
         return error.code
     return None
@@ -801,9 +849,15 @@ def test_retiring_or_dropping_a_generation_rewrites_no_expired_batch(tmp_path: P
 
 SEAT_TABLES = ("seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests")
 NEW_TABLES = {"alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes", "events_receipts"}
-NEW_INDEXES = {"open_batches_by_producer", "open_batches_by_generation", "commits_by_producer_time",
-               "seat_prelogin_by_expiry", "seat_receipts_by_session", "seat_requests_by_session",
-               "events_receipts_by_time"}
+NEW_INDEXES = {
+    "open_batches_by_producer",
+    "open_batches_by_generation",
+    "commits_by_producer_time",
+    "seat_prelogin_by_expiry",
+    "seat_receipts_by_session",
+    "seat_requests_by_session",
+    "events_receipts_by_time",
+}
 
 
 def test_a_v18_database_upgrades_with_its_seat_rows_live(tmp_path: Path) -> None:
@@ -811,8 +865,10 @@ def test_a_v18_database_upgrades_with_its_seat_rows_live(tmp_path: Path) -> None
     config.data_dir.mkdir(mode=0o700)
     raw = sqlite3.connect(config.db_path)
     raw.executescript((FIXTURES / "schema_v18.sql").read_text())
-    before = {table: raw.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
-              for table in (*SEAT_TABLES, "generations", "batches", "commit_requests")}
+    before = {
+        table: raw.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+        for table in (*SEAT_TABLES, "generations", "batches", "commit_requests")
+    }
     raw.close()
     os.chmod(config.db_path, 0o600)
 

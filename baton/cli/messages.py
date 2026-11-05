@@ -20,25 +20,36 @@ def add_commands(commands: Any) -> None:
     target.add_argument("--conversation", dest="conversation_id", help="every other participant of a conversation")
     message.add_argument("--text", help="the message; omit to read it from stdin")
     message.add_argument("--job", dest="job_id", help="the job it is about")
-    message.add_argument("--relayed-json", help="words passed on from someone else: a JSON list of "
-                         "{source, at, text}, kept apart from --text")
+    message.add_argument(
+        "--relayed-json",
+        help="words passed on from someone else: a JSON list of {source, at, text}, kept apart from --text",
+    )
     message.add_argument("--reply-to", help="in a conversation: the message_id this one answers")
     message.add_argument("--attention", help="in a conversation: comma-separated participants to ask to look")
-    message.add_argument("--needs-decision", action="store_true",
-                         help="in a conversation: ask for a decision. Attention only, never an approval")
+    message.add_argument(
+        "--needs-decision",
+        action="store_true",
+        help="in a conversation: ask for a decision. Attention only, never an approval",
+    )
     message.add_argument("--request-id", help="reuse a printed request_id to retry safely")
     message.set_defaults(handler=send)
 
     read = with_role(commands.add_parser("read", help="read messages sent to your role"))
     read.add_argument("--after-seq", type=int, help="default: only messages not yet delivered")
     read.add_argument("--limit", type=int, default=50)
-    read.set_defaults(handler=lambda config, args: db(config, lambda conn:
-        Agent(conn, config, args.role).inbox.read(args.after_seq, args.limit)))
+    read.set_defaults(
+        handler=lambda config, args: db(
+            config, lambda conn: Agent(conn, config, args.role).inbox.read(args.after_seq, args.limit)
+        )
+    )
 
     wait = with_role(commands.add_parser("wait", help="block until messages or job changes reach your role"))
     wait.add_argument("--timeout", type=float, help="seconds; default: wait indefinitely")
-    wait.set_defaults(handler=lambda config, args: db(config, lambda conn:
-        Agent(conn, config, args.role).inbox.wait(timeout_seconds=args.timeout)))
+    wait.set_defaults(
+        handler=lambda config, args: db(
+            config, lambda conn: Agent(conn, config, args.role).inbox.wait(timeout_seconds=args.timeout)
+        )
+    )
 
 
 def attention(args: argparse.Namespace) -> list[str] | None:
@@ -69,5 +80,9 @@ def send(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     if args.to is not None:
         config.require_role(args.to)
     message_args = message_arguments(args)
-    return db(config, lambda conn: Agent(conn, config, args.role).send(
-        to=args.to, conversation_id=args.conversation_id, **message_args))
+    return db(
+        config,
+        lambda conn: Agent(conn, config, args.role).send(
+            to=args.to, conversation_id=args.conversation_id, **message_args
+        ),
+    )

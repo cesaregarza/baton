@@ -34,9 +34,22 @@ from baton.auth import hash_passphrase, new_token
 from baton.config import Config
 from baton.database.store import connect
 
-CONVERSATION_TOOLS = {"create_conversation", "list_conversations", "read_history", "add_participant",
-                      "remove_participant", "set_topic", "create_topic", "update_topic", "rename_topic",
-                      "list_topics", "get_topic", "edit_reference", "read_reference", "reference_history"}
+CONVERSATION_TOOLS = {
+    "create_conversation",
+    "list_conversations",
+    "read_history",
+    "add_participant",
+    "remove_participant",
+    "set_topic",
+    "create_topic",
+    "update_topic",
+    "rename_topic",
+    "list_topics",
+    "get_topic",
+    "edit_reference",
+    "read_reference",
+    "reference_history",
+}
 
 
 class GroupHost:
@@ -56,11 +69,12 @@ def group_host(tmp_path: Path) -> Iterator[GroupHost]:
     port = free_port()
     token, digest = new_token()
     path = tmp_path / "baton.toml"
-    path.write_text(textwrap.dedent(f"""
+    path.write_text(
+        textwrap.dedent(f"""
         [host]
         public_url = "http://127.0.0.1:{port}"
         listen_port = {port}
-        data_dir = "{tmp_path / 'data'}"
+        data_dir = "{tmp_path / "data"}"
 
         [roles.orchestrator]
         description = "Local orchestrator"
@@ -87,7 +101,8 @@ def group_host(tmp_path: Path) -> Iterator[GroupHost]:
         passphrase_hash = "{hash_passphrase(PASSPHRASE)}"
         roles = ["reviewer", "assistant"]
         redirect_uris = ["{REDIRECT}"]
-    """))
+    """)
+    )
     config = config_module.load(path)
     server = uvicorn.Server(uvicorn.Config(create_app(config), host="127.0.0.1", port=port, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
@@ -99,20 +114,41 @@ def group_host(tmp_path: Path) -> Iterator[GroupHost]:
 
 def grant(host: GroupHost, role: str) -> str:
     """Register a client, approve it on the consent page as `role`, and return its access token."""
-    client_id = httpx.post(host.base + "/register", json={
-        "redirect_uris": [REDIRECT], "client_name": f"Example {role} client",
-        "token_endpoint_auth_method": "none"}).json()["client_id"]
+    client_id = httpx.post(
+        host.base + "/register",
+        json={
+            "redirect_uris": [REDIRECT],
+            "client_name": f"Example {role} client",
+            "token_endpoint_auth_method": "none",
+        },
+    ).json()["client_id"]
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-    started = httpx.get(host.base + "/authorize", params={
-        "response_type": "code", "client_id": client_id, "redirect_uri": REDIRECT, "code_challenge": challenge,
-        "code_challenge_method": "S256", "state": "s1", "resource": host.mcp_url})
+    started = httpx.get(
+        host.base + "/authorize",
+        params={
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": REDIRECT,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": "s1",
+            "resource": host.mcp_url,
+        },
+    )
     login_id = parse_qs(urlparse(started.headers["location"]).query)["id"][0]
     approved = httpx.post(host.base + "/login", data={"id": login_id, "passphrase": PASSPHRASE, "role": role})
     code = parse_qs(urlparse(approved.headers["location"]).query)["code"][0]
-    tokens = httpx.post(host.base + "/token", data={
-        "grant_type": "authorization_code", "code": code, "client_id": client_id, "redirect_uri": REDIRECT,
-        "code_verifier": verifier}).json()
+    tokens = httpx.post(
+        host.base + "/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": client_id,
+            "redirect_uri": REDIRECT,
+            "code_verifier": verifier,
+        },
+    ).json()
     return tokens["access_token"]
 
 
@@ -136,8 +172,9 @@ def test_12_two_oauth_clients_and_a_cli_agent_hold_one_conversation(group_host, 
     host = group_host
     reviewer_token, assistant_token = grant(host, "reviewer"), grant(host, "assistant")
     assert reviewer_token != assistant_token
-    code, made = cli_as(host, capsys, "conversation", "new", "--title", "Release plan",
-                        "--with", "orchestrator,reviewer,assistant")
+    code, made = cli_as(
+        host, capsys, "conversation", "new", "--title", "Release plan", "--with", "orchestrator,reviewer,assistant"
+    )
     assert code == 0 and made["created"] is True
     conversation_id = made["conversation_id"]
 
@@ -150,25 +187,38 @@ def test_12_two_oauth_clients_and_a_cli_agent_hold_one_conversation(group_host, 
             assert listed["next_cursor"] is None
 
             assert cli_as(host, capsys, "message", "--conversation", conversation_id, "--text", "1 from cli")[0] == 0
-            sent = payload(await reviewer.call_tool("send_message", {"conversation_id": conversation_id,
-                                                                     "text": "2 from reviewer"}))
+            sent = payload(
+                await reviewer.call_tool(
+                    "send_message", {"conversation_id": conversation_id, "text": "2 from reviewer"}
+                )
+            )
             assert set(sent["seqs"]) == {"orchestrator", "assistant"}
-            payload(await assistant.call_tool("send_message", {"conversation_id": conversation_id,
-                                                               "text": "3 from assistant"}))
+            payload(
+                await assistant.call_tool(
+                    "send_message", {"conversation_id": conversation_id, "text": "3 from assistant"}
+                )
+            )
 
-            seen = {"reviewer": payload(await reviewer.call_tool("read_messages", {})),
-                    "assistant": payload(await assistant.call_tool("wait", {"timeout_seconds": 5}))}
+            seen = {
+                "reviewer": payload(await reviewer.call_tool("read_messages", {})),
+                "assistant": payload(await assistant.call_tool("wait", {"timeout_seconds": 5})),
+            }
             history = payload(await reviewer.call_tool("read_history", {"conversation_id": conversation_id}))
-            assert texts(history) == [("orchestrator", "1 from cli"), ("reviewer", "2 from reviewer"),
-                                      ("assistant", "3 from assistant")]  # its own message too, in order
+            assert texts(history) == [
+                ("orchestrator", "1 from cli"),
+                ("reviewer", "2 from reviewer"),
+                ("assistant", "3 from assistant"),
+            ]  # its own message too, in order
             assert payload(await reviewer.call_tool("read_messages", {}))["messages"] == []  # history marked nothing
             return seen
 
     seen = anyio.run(run)
     _, cli_page = cli_as(host, capsys, "read")
     assert texts(seen["reviewer"]) == [("orchestrator", "1 from cli"), ("assistant", "3 from assistant")]
-    assert [(e["message"]["from_role"], e["message"]["text"]) for e in seen["assistant"]["events"]] == \
-        [("orchestrator", "1 from cli"), ("reviewer", "2 from reviewer")]
+    assert [(e["message"]["from_role"], e["message"]["text"]) for e in seen["assistant"]["events"]] == [
+        ("orchestrator", "1 from cli"),
+        ("reviewer", "2 from reviewer"),
+    ]
     assert texts(cli_page) == [("reviewer", "2 from reviewer"), ("assistant", "3 from assistant")]
     for page in (seen["reviewer"], cli_page):
         assert {m["conversation_id"] for m in page["messages"]} == {conversation_id}
@@ -180,17 +230,19 @@ def test_12_two_oauth_clients_and_a_cli_agent_hold_one_conversation(group_host, 
 def test_4_a_client_cannot_set_from_role(group_host, capsys) -> None:
     host = group_host
     assistant_token = grant(host, "assistant")
-    conversation_id = cli_as(host, capsys, "conversation", "new", "--title", "t",
-                             "--with", "orchestrator,reviewer,assistant")[1]["conversation_id"]
+    conversation_id = cli_as(
+        host, capsys, "conversation", "new", "--title", "t", "--with", "orchestrator,reviewer,assistant"
+    )[1]["conversation_id"]
 
     async def run() -> None:
         async with client(host, assistant_token) as assistant:
             schema = {t.name: t for t in (await assistant.list_tools()).tools}["send_message"].input_schema
             assert not {"role", "from_role", "sender"} & set(schema["properties"])
             for arguments in ({"conversation_id": conversation_id}, {"to": "reviewer"}):
-                result = await assistant.call_tool("send_message", {**arguments, "text": "spoof",
-                                                                    "from_role": "orchestrator",
-                                                                    "sender": "orchestrator"})
+                result = await assistant.call_tool(
+                    "send_message",
+                    {**arguments, "text": "spoof", "from_role": "orchestrator", "sender": "orchestrator"},
+                )
                 if not result.is_error:  # ignored rather than refused: either way it must not take effect
                     assert "error" not in payload(result)
 
@@ -208,22 +260,34 @@ def test_4_a_client_cannot_set_from_role(group_host, capsys) -> None:
 def test_refusals_over_mcp_carry_the_stable_codes_and_the_audit_names_the_conversation(group_host, capsys) -> None:
     host = group_host
     reviewer_token = grant(host, "reviewer")
-    conversation_id = cli_as(host, capsys, "conversation", "new", "--title", "t",
-                             "--with", "orchestrator,reviewer,assistant")[1]["conversation_id"]
+    conversation_id = cli_as(
+        host, capsys, "conversation", "new", "--title", "t", "--with", "orchestrator,reviewer,assistant"
+    )[1]["conversation_id"]
 
     async def run() -> None:
         async with client(host, reviewer_token) as reviewer, client(host, host.tokens["outsider"]) as outsider:
-            forbidden = payload(await reviewer.call_tool("create_conversation", {
-                "title": "t", "participants": ["reviewer", "assistant"]}))
+            forbidden = payload(
+                await reviewer.call_tool(
+                    "create_conversation", {"title": "t", "participants": ["reviewer", "assistant"]}
+                )
+            )
             assert forbidden["error"] == "forbidden"
-            managed = payload(await reviewer.call_tool("add_participant", {"conversation_id": conversation_id,
-                                                                           "participant": "outsider"}))
+            managed = payload(
+                await reviewer.call_tool(
+                    "add_participant", {"conversation_id": conversation_id, "participant": "outsider"}
+                )
+            )
             assert managed["error"] == "forbidden"
-            for tool, arguments in (("send_message", {"conversation_id": conversation_id, "text": "hi"}),
-                                    ("read_history", {"conversation_id": conversation_id})):
+            for tool, arguments in (
+                ("send_message", {"conversation_id": conversation_id, "text": "hi"}),
+                ("read_history", {"conversation_id": conversation_id}),
+            ):
                 assert payload(await outsider.call_tool(tool, arguments))["error"] == "not_a_participant"
-            both = payload(await reviewer.call_tool("send_message", {"to": "assistant", "text": "x",
-                                                                     "conversation_id": conversation_id}))
+            both = payload(
+                await reviewer.call_tool(
+                    "send_message", {"to": "assistant", "text": "x", "conversation_id": conversation_id}
+                )
+            )
             neither = payload(await reviewer.call_tool("send_message", {"text": "x"}))
             assert both["error"] == neither["error"] == "invalid_request"
 

@@ -35,8 +35,10 @@ def token() -> str:
         return os.environ[TOKEN_ENV]
     command = os.environ.get(TOKEN_COMMAND_ENV)
     if not command:
-        raise ConfigError(f"remote mode needs a token: set ${TOKEN_ENV}, or ${TOKEN_COMMAND_ENV} to a command "
-                          "that prints it (for example an OS keychain lookup)")
+        raise ConfigError(
+            f"remote mode needs a token: set ${TOKEN_ENV}, or ${TOKEN_COMMAND_ENV} to a command "
+            "that prints it (for example an OS keychain lookup)"
+        )
     try:
         found = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=30, check=True)
     except (OSError, subprocess.SubprocessError) as error:
@@ -65,8 +67,9 @@ def call(host: str, bearer: str, tool: str, arguments: dict[str, Any]) -> Any:
         statuses.append(response.status_code)
 
     async def run() -> Any:
-        http = httpx2.AsyncClient(headers={"Authorization": f"Bearer {bearer}"}, timeout=60,
-                                  event_hooks={"response": [record]})
+        http = httpx2.AsyncClient(
+            headers={"Authorization": f"Bearer {bearer}"}, timeout=60, event_hooks={"response": [record]}
+        )
         async with Client(streamable_http_client(mcp_url(host), http_client=http)) as client:
             return await client.call_tool(tool, arguments)
 

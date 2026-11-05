@@ -21,24 +21,38 @@ FAKE = Path(__file__).parent / "fixtures" / "secretary_fake_model.py"
 
 
 class Model:
-    def __init__(self, world, tmp_path: Path, *, plan: dict | None = None, timeout: float = 5.0,
-                 engine: bool = False) -> None:
+    def __init__(
+        self, world, tmp_path: Path, *, plan: dict | None = None, timeout: float = 5.0, engine: bool = False
+    ) -> None:
         self.world = world
         self.plan_path = tmp_path / "model-plan.json"
         self.log_path = tmp_path / "model-requests.jsonl"
         self.engine_log_path = tmp_path / "engine-requests.jsonl"
         self.set_plan(plan or {})
         self.command = [sys.executable, "-I", "-S", str(FAKE), str(self.plan_path), str(self.log_path)]
-        self.engine_command = [sys.executable, "-I", "-S", str(FAKE), str(self.plan_path),
-                               str(self.engine_log_path), "engine"]
+        self.engine_command = [
+            sys.executable,
+            "-I",
+            "-S",
+            str(FAKE),
+            str(self.plan_path),
+            str(self.engine_log_path),
+            "engine",
+        ]
         self.configure(timeout=timeout, engine=engine)
 
     def configure(self, *, timeout: float = 5.0, engine: bool = False) -> None:
-        value = {"version": 2, "principal": "planner", "model": {"provider": "command",
-                 "command": self.command, "timeout_seconds": timeout}}
+        value = {
+            "version": 2,
+            "principal": "planner",
+            "model": {"provider": "command", "command": self.command, "timeout_seconds": timeout},
+        }
         if engine:
-            value["decision_engine"] = {"provider": "command", "command": self.engine_command,
-                                         "timeout_seconds": timeout}
+            value["decision_engine"] = {
+                "provider": "command",
+                "command": self.engine_command,
+                "timeout_seconds": timeout,
+            }
         self.world.policy_path.write_text(json.dumps(value))
 
     def set_timeout(self, timeout: float) -> None:
@@ -63,13 +77,17 @@ class Model:
 
 
 def _decide(world, **options) -> dict:
-    return asyncio.run(Secretary(world.config, world.state_path, world.policy_path).decide(
-        budget_seconds=options.pop("budget_seconds", 5), **options))
+    return asyncio.run(
+        Secretary(world.config, world.state_path, world.policy_path).decide(
+            budget_seconds=options.pop("budget_seconds", 5), **options
+        )
+    )
 
 
 def _positions(world) -> tuple[int, int]:
     # The state starts with acknowledged positions at zero; this test reads them from the private state store.
     from baton.agents.secretary.attention.state import AttentionLog
+
     log = AttentionLog(world.state_path, world.config.data_dir, "planner")
     return log.positions()
 
@@ -106,8 +124,12 @@ def test_acknowledgment_advances_coverage_only_after_delivery_and_next_call_excl
         assert _decide(world)["cached"] is True
         assert _positions(world) == (0, 0)
 
-        assert asyncio.run(Secretary(world.config, world.state_path, world.policy_path).acknowledge(
-            pending["decision_id"])) == pending["through_pos"]
+        assert (
+            asyncio.run(
+                Secretary(world.config, world.state_path, world.policy_path).acknowledge(pending["decision_id"])
+            )
+            == pending["through_pos"]
+        )
         assert _positions(world) == (pending["through_pos"], pending["floor"])
         second = messages.send(world.baton, sender="worker", recipient="planner", text="Second incoming note")
         after = _decide(world)
@@ -195,14 +217,35 @@ def test_responses_http_wire_uses_strict_schema_and_skips_reasoning_output(tmp_p
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
-            seen.append({"path": self.path, "headers": dict(self.headers),
-                         "body": json.loads(self.rfile.read(int(self.headers["Content-Length"])))})
-            output = {"status": "completed", "output": [
-                {"type": "reasoning", "summary": []},
-                {"type": "message", "content": [{"type": "output_text", "text": json.dumps({
-                    "decision": "wake", "reason": "Needs a look", "summary": "The note arrived.",
-                    "sources": [f"message:{message_id[0]}"]})}]}
-            ]}
+            seen.append(
+                {
+                    "path": self.path,
+                    "headers": dict(self.headers),
+                    "body": json.loads(self.rfile.read(int(self.headers["Content-Length"]))),
+                }
+            )
+            output = {
+                "status": "completed",
+                "output": [
+                    {"type": "reasoning", "summary": []},
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": json.dumps(
+                                    {
+                                        "decision": "wake",
+                                        "reason": "Needs a look",
+                                        "summary": "The note arrived.",
+                                        "sources": [f"message:{message_id[0]}"],
+                                    }
+                                ),
+                            }
+                        ],
+                    },
+                ],
+            }
             payload = json.dumps(output).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -221,9 +264,20 @@ def test_responses_http_wire_uses_strict_schema_and_skips_reasoning_output(tmp_p
         thread.start()
         try:
             monkeypatch.setenv("SECRETARY_TEST_KEY", "synthetic-key")
-            world.policy_path.write_text(json.dumps({"version": 2, "principal": "planner", "model": {
-                "provider": "openai", "base_url": f"http://127.0.0.1:{server.server_port}/v1",
-                "api_key_env": "SECRETARY_TEST_KEY", "cache_mode": cache_mode}}))
+            world.policy_path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "principal": "planner",
+                        "model": {
+                            "provider": "openai",
+                            "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+                            "api_key_env": "SECRETARY_TEST_KEY",
+                            "cache_mode": cache_mode,
+                        },
+                    }
+                )
+            )
             result = _decide(world)
         finally:
             server.shutdown()
@@ -250,8 +304,9 @@ def test_revoking_visibility_during_inference_discards_the_summary(tmp_path) -> 
         say(world, room, "worker", "A private progress report")
 
         async def run():
-            task = asyncio.create_task(Secretary(world.config, world.state_path, world.policy_path).decide(
-                budget_seconds=5))
+            task = asyncio.create_task(
+                Secretary(world.config, world.state_path, world.policy_path).decide(budget_seconds=5)
+            )
             async with asyncio.timeout(3):
                 while not model.log_path.exists():
                     await asyncio.sleep(0.01)
@@ -291,10 +346,16 @@ def test_cancelling_model_reaps_child_and_retry_keeps_the_same_pending_window(tm
 
 def test_hourly_digest_uses_the_model_and_inspection_does_not_infer_again(tmp_path) -> None:
     with make_world(tmp_path) as world:
-        model = Model(world, tmp_path, plan={"steps": [
-            {"decision": "hold", "summary": "", "sources": []},
-            {"decision": "hold", "summary": "The worker has started the requested review."},
-        ]})
+        model = Model(
+            world,
+            tmp_path,
+            plan={
+                "steps": [
+                    {"decision": "hold", "summary": "", "sources": []},
+                    {"decision": "hold", "summary": "The worker has started the requested review."},
+                ]
+            },
+        )
         messages.send(world.baton, sender="worker", recipient="planner", text="Starting the review")
         assert _decide(world)["decision"] == "hold"
         digest = _decide(world, hourly=True)
@@ -309,6 +370,7 @@ def test_hourly_digest_uses_the_model_and_inspection_does_not_infer_again(tmp_pa
 
 def test_context_overflow_is_explicit_and_does_not_infer_from_a_truncated_window(tmp_path) -> None:
     from baton.agents.secretary.inbox.window import InboxTooLarge
+
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path)
         for index in range(2):
@@ -325,6 +387,7 @@ def test_context_overflow_is_explicit_and_does_not_infer_from_a_truncated_window
 
 def test_old_policy_is_rejected_before_model_or_state_access(tmp_path) -> None:
     from baton.config import ConfigError
+
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path)
         messages.send(world.baton, sender="worker", recipient="planner", text="A new request")
@@ -340,6 +403,7 @@ def test_obsolete_state_is_rejected_without_conversion_or_inference(tmp_path) ->
     import sqlite3
 
     from baton.config import ConfigError
+
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path)
         with sqlite3.connect(world.state_path) as old:

@@ -32,30 +32,47 @@ PAYLOAD = '<script>alert(1)</script><img src=x onerror="alert(2)">'
 COPY_SCRIPT = '<script src="/copy.js" defer></script>'
 
 
-def view_config(tmp_path: Path, *, view_all: bool = False, dashboard_table: dict[str, Any] | None = None,
-                conversations_enabled: bool = True, port: int = 8766) -> Config:
+def view_config(
+    tmp_path: Path,
+    *,
+    view_all: bool = False,
+    dashboard_table: dict[str, Any] | None = None,
+    conversations_enabled: bool = True,
+    port: int = 8766,
+) -> Config:
     """Five generic roles; `operator` is the dashboard's viewer, and sees every thread only with the flag."""
-    table = {"enabled": True, "viewer_role": "operator", "listen_port": port} if dashboard_table is None \
+    table = (
+        {"enabled": True, "viewer_role": "operator", "listen_port": port}
+        if dashboard_table is None
         else dashboard_table
-    return config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True, **WAKE},
-                  "reviewer": WAKE, "assistant": WAKE, "outsider": WAKE,
-                  "operator": {"can_view_all_conversations": view_all, "display_only": True},
-                  "person": {"human": True, "can_create_conversations": True}},
-        "conversations": {"enabled": conversations_enabled},
-        "dashboard": table,
-    })
+    )
+    return config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": {
+                "orchestrator": {"can_create_conversations": True, "can_manage_participants": True, **WAKE},
+                "reviewer": WAKE,
+                "assistant": WAKE,
+                "outsider": WAKE,
+                "operator": {"can_view_all_conversations": view_all, "display_only": True},
+                "person": {"human": True, "can_create_conversations": True},
+            },
+            "conversations": {"enabled": conversations_enabled},
+            "dashboard": table,
+        }
+    )
 
 
 def seeded(config: Config) -> tuple[str, str]:
     """One conversation the viewer is in and one it isn't, each with a message."""
     conn = connect(config.db_path)
     try:
-        mine = conversations.create(conn, config, actor="orchestrator", title="Release plan",
-                                    participants=GROUP)["conversation_id"]
-        theirs = conversations.create(conn, config, actor="orchestrator", title="Private side thread",
-                                      participants=OTHERS)["conversation_id"]
+        mine = conversations.create(conn, config, actor="orchestrator", title="Release plan", participants=GROUP)[
+            "conversation_id"
+        ]
+        theirs = conversations.create(
+            conn, config, actor="orchestrator", title="Private side thread", participants=OTHERS
+        )["conversation_id"]
         conversations.send(conn, config, sender="orchestrator", conversation_id=mine, text="plan is drafted")
         conversations.send(conn, config, sender="assistant", conversation_id=theirs, text="side thread words")
     finally:
@@ -86,8 +103,9 @@ def snapshot(config: Config) -> dict[str, list[tuple[Any, ...]]]:
 
 
 def test_the_dashboard_is_off_by_default_and_serves_nothing(tmp_path) -> None:
-    plain = config_module.parse({"host": {"public_url": "http://127.0.0.1:8765",
-                                          "data_dir": str(tmp_path / "data")}, "roles": {"worker": {}}})
+    plain = config_module.parse(
+        {"host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")}, "roles": {"worker": {}}}
+    )
     assert plain.dashboard.enabled is False
     assert dashboard.server(plain) is None
     switched_off = view_config(tmp_path, dashboard_table={"enabled": False, "viewer_role": "operator"})
@@ -113,9 +131,13 @@ def test_serve_starts_the_dashboard_only_when_enabled(tmp_path, monkeypatch) -> 
     app_module.serve(view_config(tmp_path / "on", port=seen["port"]))
     assert seen["status"] == 200
     seen["port"] = free_port()
-    app_module.serve(view_config(tmp_path / "off", port=seen["port"],
-                                 dashboard_table={"enabled": False, "viewer_role": "operator",
-                                                  "listen_port": seen["port"]}))
+    app_module.serve(
+        view_config(
+            tmp_path / "off",
+            port=seen["port"],
+            dashboard_table={"enabled": False, "viewer_role": "operator", "listen_port": seen["port"]},
+        )
+    )
     assert seen["status"] == "ConnectionRefusedError"
 
 
@@ -129,19 +151,22 @@ def test_it_binds_to_loopback_by_default_and_refuses_any_other_address(tmp_path)
         server.server_close()
     for address in ("0.0.0.0", "::", "192.0.2.10", "example.test"):
         with pytest.raises(ConfigError, match="dashboard.listen_host"):
-            view_config(tmp_path, dashboard_table={"enabled": True, "viewer_role": "operator",
-                                                   "listen_host": address})
+            view_config(tmp_path, dashboard_table={"enabled": True, "viewer_role": "operator", "listen_host": address})
 
 
-@pytest.mark.parametrize(("table", "conversations_enabled", "field"), [
-    ({"enabled": True}, True, "dashboard.viewer_role"),
-    ({"enabled": True, "viewer_role": "nobody"}, True, "dashboard.viewer_role"),
-    ({"enabled": True, "viewer_role": "operator"}, False, "conversations.enabled"),
-    ({"enabled": "true", "viewer_role": "operator"}, True, "dashboard.enabled"),
-    ({"enabled": True, "viewer_role": "operator", "listen_port": 0}, True, "dashboard.listen_port"),
-])
-def test_an_enabled_dashboard_needs_a_configured_viewer_and_conversations(tmp_path, table, conversations_enabled,
-                                                                          field) -> None:
+@pytest.mark.parametrize(
+    ("table", "conversations_enabled", "field"),
+    [
+        ({"enabled": True}, True, "dashboard.viewer_role"),
+        ({"enabled": True, "viewer_role": "nobody"}, True, "dashboard.viewer_role"),
+        ({"enabled": True, "viewer_role": "operator"}, False, "conversations.enabled"),
+        ({"enabled": "true", "viewer_role": "operator"}, True, "dashboard.enabled"),
+        ({"enabled": True, "viewer_role": "operator", "listen_port": 0}, True, "dashboard.listen_port"),
+    ],
+)
+def test_an_enabled_dashboard_needs_a_configured_viewer_and_conversations(
+    tmp_path, table, conversations_enabled, field
+) -> None:
     with pytest.raises(ConfigError, match=re.escape(field)):
         view_config(tmp_path, dashboard_table=table, conversations_enabled=conversations_enabled)
 
@@ -149,10 +174,12 @@ def test_an_enabled_dashboard_needs_a_configured_viewer_and_conversations(tmp_pa
 def test_the_view_all_flag_is_a_strict_boolean_and_off_by_default(tmp_path) -> None:
     assert view_config(tmp_path).roles["operator"].can_view_all_conversations is False
     with pytest.raises(ConfigError, match="roles.operator.can_view_all_conversations"):
-        config_module.parse({
-            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-            "roles": {"operator": {"can_view_all_conversations": "yes"}},
-        })
+        config_module.parse(
+            {
+                "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+                "roles": {"operator": {"can_view_all_conversations": "yes"}},
+            }
+        )
 
 
 # Visibility ----------------------------------------------------------------------------------------------
@@ -184,8 +211,9 @@ def test_a_viewer_sees_its_own_conversation_from_its_join_point_like_read_histor
     config = view_config(tmp_path)
     conn = connect(config.db_path)
     try:
-        cid = conversations.create(conn, config, actor="orchestrator", title="Joined late",
-                                   participants=["orchestrator", "reviewer"])["conversation_id"]
+        cid = conversations.create(
+            conn, config, actor="orchestrator", title="Joined late", participants=["orchestrator", "reviewer"]
+        )["conversation_id"]
         conversations.send(conn, config, sender="reviewer", conversation_id=cid, text="before the viewer joined")
         conversations.add(conn, config, cid, "operator", actor="orchestrator")
         conversations.send(conn, config, sender="reviewer", conversation_id=cid, text="after the viewer joined")
@@ -244,11 +272,17 @@ def test_message_text_title_and_relayed_words_render_inert(tmp_path) -> None:
     config = view_config(tmp_path)
     conn = connect(config.db_path)
     try:
-        cid = conversations.create(conn, config, actor="orchestrator", title=f"title {PAYLOAD}",
-                                   participants=GROUP)["conversation_id"]
-        conversations.send(conn, config, sender="orchestrator", conversation_id=cid, text=f"text {PAYLOAD}",
-                           relayed=[{"source": f"source {PAYLOAD}", "at": "2026-10-29T08:00:00+00:00",
-                                     "text": f"relayed {PAYLOAD}"}])
+        cid = conversations.create(conn, config, actor="orchestrator", title=f"title {PAYLOAD}", participants=GROUP)[
+            "conversation_id"
+        ]
+        conversations.send(
+            conn,
+            config,
+            sender="orchestrator",
+            conversation_id=cid,
+            text=f"text {PAYLOAD}",
+            relayed=[{"source": f"source {PAYLOAD}", "at": "2026-10-29T08:00:00+00:00", "text": f"relayed {PAYLOAD}"}],
+        )
     finally:
         conn.close()
     for target in ("/", f"/c/{cid}"):
@@ -298,11 +332,17 @@ def test_relayed_entries_and_participant_notices_render_apart_from_the_senders_t
     config = view_config(tmp_path)
     conn = connect(config.db_path)
     try:
-        cid = conversations.create(conn, config, actor="orchestrator", title="Relay check",
-                                   participants=GROUP)["conversation_id"]
-        conversations.send(conn, config, sender="orchestrator", conversation_id=cid, text="my own words",
-                           relayed=[{"source": "a person", "at": "2026-10-29T08:00:00+00:00",
-                                     "text": "their exact words"}])
+        cid = conversations.create(conn, config, actor="orchestrator", title="Relay check", participants=GROUP)[
+            "conversation_id"
+        ]
+        conversations.send(
+            conn,
+            config,
+            sender="orchestrator",
+            conversation_id=cid,
+            text="my own words",
+            relayed=[{"source": "a person", "at": "2026-10-29T08:00:00+00:00", "text": "their exact words"}],
+        )
         conversations.add(conn, config, cid, "assistant", actor="orchestrator")
     finally:
         conn.close()
@@ -350,11 +390,13 @@ def test_a_byte_limited_page_still_links_onward_and_the_links_reach_every_messag
     config = view_config(tmp_path)
     conn = connect(config.db_path)
     try:
-        cid = conversations.create(conn, config, actor="orchestrator", title="Large messages",
-                                   participants=GROUP)["conversation_id"]
+        cid = conversations.create(conn, config, actor="orchestrator", title="Large messages", participants=GROUP)[
+            "conversation_id"
+        ]
         for number in range(1, 7):
-            conversations.send(conn, config, sender="orchestrator", conversation_id=cid,
-                               text=f"message {number} " + "x" * 60_000)
+            conversations.send(
+                conn, config, sender="orchestrator", conversation_id=cid, text=f"message {number} " + "x" * 60_000
+            )
     finally:
         conn.close()
     seen: list[int] = []
@@ -376,8 +418,9 @@ def test_the_last_page_has_no_onward_link(tmp_path) -> None:
     assert "Later messages" not in text(get(config, f"/c/{mine}"))
 
 
-@pytest.mark.parametrize("value", ["%C2%B2", "9223372036854775808", "-1", "", "abc", "1e3", "%201", "0x10",
-                                   "%EF%BC%91"])
+@pytest.mark.parametrize(
+    "value", ["%C2%B2", "9223372036854775808", "-1", "", "abc", "1e3", "%201", "0x10", "%EF%BC%91"]
+)
 def test_after_seq_must_be_an_ascii_decimal_within_64_bits(tmp_path, value) -> None:
     config = view_config(tmp_path)
     mine, _ = seeded(config)
@@ -403,16 +446,23 @@ def thread(config: Config) -> tuple[str, dict[str, str]]:
     """A parent with a reply, a reply to that reply, and a separate top-level message."""
     conn = connect(config.db_path)
     try:
-        cid = conversations.create(conn, config, actor="orchestrator", title="Threads",
-                                   participants=GROUP)["conversation_id"]
-        ids = {"parent": conversations.send(conn, config, sender="orchestrator", conversation_id=cid,
-                                            text="parent words")["message_id"]}
-        ids["reply"] = conversations.send(conn, config, sender="reviewer", conversation_id=cid, text="reply words",
-                                          reply_to=ids["parent"])["message_id"]
-        ids["nested"] = conversations.send(conn, config, sender="orchestrator", conversation_id=cid,
-                                           text="reply to the reply", reply_to=ids["reply"])["message_id"]
-        ids["other"] = conversations.send(conn, config, sender="reviewer", conversation_id=cid,
-                                          text="a new topic")["message_id"]
+        cid = conversations.create(conn, config, actor="orchestrator", title="Threads", participants=GROUP)[
+            "conversation_id"
+        ]
+        ids = {
+            "parent": conversations.send(conn, config, sender="orchestrator", conversation_id=cid, text="parent words")[
+                "message_id"
+            ]
+        }
+        ids["reply"] = conversations.send(
+            conn, config, sender="reviewer", conversation_id=cid, text="reply words", reply_to=ids["parent"]
+        )["message_id"]
+        ids["nested"] = conversations.send(
+            conn, config, sender="orchestrator", conversation_id=cid, text="reply to the reply", reply_to=ids["reply"]
+        )["message_id"]
+        ids["other"] = conversations.send(conn, config, sender="reviewer", conversation_id=cid, text="a new topic")[
+            "message_id"
+        ]
     finally:
         conn.close()
     return cid, ids
@@ -425,7 +475,7 @@ def item(body: str, words: str) -> str:
     for tag in re.finditer(r"<(/?)li\b[^>]*>", body[start:]):
         depth += -1 if tag.group(1) else 1
         if depth == 0:
-            return body[start:start + tag.end()]
+            return body[start : start + tag.end()]
     raise AssertionError("unclosed list item")
 
 
@@ -446,13 +496,16 @@ def test_a_reply_whose_parent_the_viewer_cannot_see_shows_parent_unavailable_and
     config = view_config(tmp_path)
     conn = connect(config.db_path)
     try:
-        cid = conversations.create(conn, config, actor="orchestrator", title="Joined later",
-                                   participants=["orchestrator", "reviewer"])["conversation_id"]
-        hidden = conversations.send(conn, config, sender="reviewer", conversation_id=cid,
-                                    text="hidden parent words")["message_id"]
+        cid = conversations.create(
+            conn, config, actor="orchestrator", title="Joined later", participants=["orchestrator", "reviewer"]
+        )["conversation_id"]
+        hidden = conversations.send(conn, config, sender="reviewer", conversation_id=cid, text="hidden parent words")[
+            "message_id"
+        ]
         conversations.add(conn, config, cid, "operator", actor="orchestrator")
-        conversations.send(conn, config, sender="orchestrator", conversation_id=cid, text="answering it",
-                           reply_to=hidden)
+        conversations.send(
+            conn, config, sender="orchestrator", conversation_id=cid, text="answering it", reply_to=hidden
+        )
     finally:
         conn.close()
     body = text(get(config, f"/c/{cid}"))
@@ -474,14 +527,16 @@ def test_the_badge_follows_the_stored_author_kind_and_a_notice_shows_none(tmp_pa
     config = view_config(tmp_path)
     conn = connect(config.db_path)
     try:
-        cid = conversations.create(conn, config, actor="person", title="Mixed authors",
-                                   participants=["person", "orchestrator", "operator"])["conversation_id"]
+        cid = conversations.create(
+            conn, config, actor="person", title="Mixed authors", participants=["person", "orchestrator", "operator"]
+        )["conversation_id"]
         conversations.send(conn, config, sender="person", conversation_id=cid, text="written by a person")
         conversations.send(conn, config, sender="orchestrator", conversation_id=cid, text="written by an agent")
         conversations.add(conn, config, cid, "reviewer", actor="orchestrator")
     finally:
         conn.close()
     body = text(get(config, f"/c/{cid}"))
+
     def entry(words: str) -> str:
         return re.search(r'<li class="message"[^>]*>(?:(?!</li>).)*?' + words + r".*?</li>", body, re.S).group(0)
 
@@ -496,15 +551,17 @@ def test_a_reply_whose_parent_is_on_an_earlier_page_names_it(tmp_path) -> None:
     config = view_config(tmp_path)
     conn = connect(config.db_path)
     try:
-        cid = conversations.create(conn, config, actor="orchestrator", title="Long thread",
-                                   participants=GROUP)["conversation_id"]
-        first = conversations.send(conn, config, sender="orchestrator", conversation_id=cid,
-                                   text="first " + "x" * 60_000)["message_id"]
+        cid = conversations.create(conn, config, actor="orchestrator", title="Long thread", participants=GROUP)[
+            "conversation_id"
+        ]
+        first = conversations.send(
+            conn, config, sender="orchestrator", conversation_id=cid, text="first " + "x" * 60_000
+        )["message_id"]
         for number in range(2, 6):
-            conversations.send(conn, config, sender="orchestrator", conversation_id=cid,
-                               text=f"filler {number} " + "x" * 60_000)
-        conversations.send(conn, config, sender="reviewer", conversation_id=cid, text="late answer",
-                           reply_to=first)
+            conversations.send(
+                conn, config, sender="orchestrator", conversation_id=cid, text=f"filler {number} " + "x" * 60_000
+            )
+        conversations.send(conn, config, sender="reviewer", conversation_id=cid, text="late answer", reply_to=first)
     finally:
         conn.close()
     first_page = text(get(config, f"/c/{cid}"))

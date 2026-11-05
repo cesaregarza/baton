@@ -18,8 +18,10 @@ PROFILES = {"generation-a": EMBEDDING, "generation-b": EMBEDDING}
 @pytest.fixture
 def db():
     conn = memory()
-    conn.execute("CREATE TABLE vectors (generation TEXT, item_kind TEXT, item_id TEXT, model TEXT,"
-                 " dim INTEGER, data BLOB, PRIMARY KEY (generation, item_kind, item_id))")
+    conn.execute(
+        "CREATE TABLE vectors (generation TEXT, item_kind TEXT, item_id TEXT, model TEXT,"
+        " dim INTEGER, data BLOB, PRIMARY KEY (generation, item_kind, item_id))"
+    )
     yield conn
     conn.close()
 
@@ -29,8 +31,10 @@ def candidate(kind: str, item_id: str) -> dict:
 
 
 def vector(db, kind: str, item_id: str, score: float, *, generation: str = "generation-a", model: str = "toy"):
-    db.execute("INSERT INTO vectors VALUES (?, ?, ?, ?, 3, ?)",
-               (generation, kind, item_id, model, struct.pack("<3f", score, 0.0, 0.0)))
+    db.execute(
+        "INSERT INTO vectors VALUES (?, ?, ?, ?, 3, ?)",
+        (generation, kind, item_id, model, struct.pack("<3f", score, 0.0, 0.0)),
+    )
 
 
 @pytest.mark.parametrize("variable_limit", [None, 8])
@@ -68,8 +72,7 @@ def test_ranking_keeps_best_generation_scores_and_keyword_order_for_ties(db):
     negative_second = candidate("message", "negative-second")
     zero_second = candidate("message", "zero-second")
     missing_second = candidate("artifact", "missing-second")
-    hits = [missing_first, negative_first, message, zero_first, artifact, negative_second, zero_second,
-            missing_second]
+    hits = [missing_first, negative_first, message, zero_first, artifact, negative_second, zero_second, missing_second]
     vector(db, "message", "negative-first", -2.0)
     vector(db, "message", "negative-second", -2.0)
     vector(db, "message", "zero-first", 0.0)
@@ -82,8 +85,16 @@ def test_ranking_keeps_best_generation_scores_and_keyword_order_for_ties(db):
     vector(db, "artifact", "missing-second", 100.0, model="other-model")
     vector(db, "message", "outside-the-keyword-pool", 100.0)
     ranked = search._rerank(db, hits, [1.0, 0.0, 0.0], "toy", PROFILES)
-    assert ranked == [message, artifact, zero_first, zero_second, negative_first, negative_second,
-                      missing_first, missing_second]
+    assert ranked == [
+        message,
+        artifact,
+        zero_first,
+        zero_second,
+        negative_first,
+        negative_second,
+        missing_first,
+        missing_second,
+    ]
     assert [hit["similarity"] for hit in ranked] == [3.0, 2.0, 0.0, 0.0, -2.0, -2.0, None, None]
 
 

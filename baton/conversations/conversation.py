@@ -12,7 +12,7 @@ from typing import Any
 
 from baton import board_read, changes, events, messages, topics
 from baton.agents.permissions import Capability, Permissions
-from baton.config import Config
+from baton.config import Config, Conversations
 from baton.conversations import access, delivery, queries, retention
 from baton.database import Connection
 from baton.errors import (
@@ -130,6 +130,25 @@ class Conversation:
                 ),
             },
         )
+        return Conversation._create_transaction(
+            conn, config, settings, actor, title, participants, topic, request_id, identity, seen, guest, digest
+        )
+
+    @staticmethod
+    def _create_transaction(
+        conn: Connection,
+        config: Config,
+        settings: Conversations,
+        actor: str,
+        title: str,
+        participants: list[str] | None,
+        topic: str | None,
+        request_id: str,
+        identity: dict[str, str] | None,
+        seen: dict[str, Any] | None,
+        guest: bool,
+        digest: str,
+    ) -> dict[str, Any]:
         refusal = None
         with conn.transaction():
             existing = events.replayed(conn, "conversations", request_id, digest)

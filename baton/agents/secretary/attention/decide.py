@@ -67,14 +67,30 @@ class DecisionRun:
             self.since, self.floor = await database.call(log.positions)
         window = await database.call(InboxWindow.read, config, policy, self.since)
         await database.call(log.bind, window.epoch, self.floor)
-        context = {"principal": policy.principal, "mode": "digest" if self.hourly else "alert",
-                   "trigger": self.trigger, "since": self.since, "floor": self.floor,
-                   "through_pos": window.through, "instructions": policy.instructions, "knowledge": policy.knowledge,
-                   "summary_bytes": policy.summary_bytes, "events": window.events,
-                   "reply_context": window.reply_context}
-        key = fingerprint({"policy": policy.digest, "context": context, "epoch": window.epoch,
-                           "prompt": INSTRUCTIONS, "schema": RESPONSE_SCHEMA,
-                           "harness": HARNESS_VERSION, "tools": DECISION_TOOL if policy.decision_engine else None})
+        context = {
+            "principal": policy.principal,
+            "mode": "digest" if self.hourly else "alert",
+            "trigger": self.trigger,
+            "since": self.since,
+            "floor": self.floor,
+            "through_pos": window.through,
+            "instructions": policy.instructions,
+            "knowledge": policy.knowledge,
+            "summary_bytes": policy.summary_bytes,
+            "events": window.events,
+            "reply_context": window.reply_context,
+        }
+        key = fingerprint(
+            {
+                "policy": policy.digest,
+                "context": context,
+                "epoch": window.epoch,
+                "prompt": INSTRUCTIONS,
+                "schema": RESPONSE_SCHEMA,
+                "harness": HARNESS_VERSION,
+                "tools": DECISION_TOOL if policy.decision_engine else None,
+            }
+        )
         cached = await database.call(log.get, key)
         if cached is not None:
             return {**cached, "cached": True}
@@ -83,27 +99,47 @@ class DecisionRun:
             assessment = Assessment("keep", "No pending visible events.", "", [])
         else:
             answer = await harness.assess(context, self._remaining())
-            assessment = Assessment.parse(answer, offered=window.source_keys,
-                                          summary_bytes=policy.summary_bytes, digest=self.hourly)
+            assessment = Assessment.parse(
+                answer, offered=window.source_keys, summary_bytes=policy.summary_bytes, digest=self.hourly
+            )
         # Recheck the same sources after inference: permission changes or edits invalidate the generated summary.
         current = await database.call(InboxWindow.read, config, policy, self.since, through=window.through)
         if current.digest != window.digest:
             raise SecretaryUnavailable(
-                "inbox visibility or content changed during inference; retry with current context")
-        result = {"principal": policy.principal, "mode": context["mode"], "trigger": self.trigger,
-                  "since": self.since, "floor": self.floor, "through_pos": window.through,
-                  "covered_through": window.through if assessment.summary else self.since,
-                  "decision": assessment.decision, "reason": assessment.reason,
-                  "brief": assessment.summary, "sources": assessment.sources,
-                  "source_refs": [{"source_key": e["source_key"], "pos": e["pos"],
-                                   "message_id": e["message"]["id"] if e["message"] else None,
-                                   "conversation_id": e["message"]["conversation_id"] if e["message"] else None,
-                                   "job_id": e["job_id"]} for e in [*window.events, *window.reply_context]
-                                  if e["source_key"] in assessment.sources],
-                  "decision_id": key, "window_digest": window.digest, "policy_digest": policy.digest,
-                  "engine_status": harness.tools.status, "harness": harness.metrics, "cached": False,
-                  "model": {k: policy.model[k] for k in ("provider", "model") if k in policy.model},
-                  "scanned_at": _now()}
+                "inbox visibility or content changed during inference; retry with current context"
+            )
+        result = {
+            "principal": policy.principal,
+            "mode": context["mode"],
+            "trigger": self.trigger,
+            "since": self.since,
+            "floor": self.floor,
+            "through_pos": window.through,
+            "covered_through": window.through if assessment.summary else self.since,
+            "decision": assessment.decision,
+            "reason": assessment.reason,
+            "brief": assessment.summary,
+            "sources": assessment.sources,
+            "source_refs": [
+                {
+                    "source_key": e["source_key"],
+                    "pos": e["pos"],
+                    "message_id": e["message"]["id"] if e["message"] else None,
+                    "conversation_id": e["message"]["conversation_id"] if e["message"] else None,
+                    "job_id": e["job_id"],
+                }
+                for e in [*window.events, *window.reply_context]
+                if e["source_key"] in assessment.sources
+            ],
+            "decision_id": key,
+            "window_digest": window.digest,
+            "policy_digest": policy.digest,
+            "engine_status": harness.tools.status,
+            "harness": harness.metrics,
+            "cached": False,
+            "model": {k: policy.model[k] for k in ("provider", "model") if k in policy.model},
+            "scanned_at": _now(),
+        }
         return await database.call(log.remember, result)
 
     def _remaining(self) -> float:
@@ -124,14 +160,25 @@ class DecisionRun:
             raise InvalidRequest("the trigger must be message:SEQ, job:JOB_ID:SEQ or conversation")
 
 
-def decide(config: Config, state_path: Path, policy_path: Path, *, budget_seconds: float,
-           since: int | None = None, floor: int | None = None, trigger: str | None = None,
-           hourly: bool = False, clock: Callable[[], float] = time.monotonic) -> dict:
+def decide(
+    config: Config,
+    state_path: Path,
+    policy_path: Path,
+    *,
+    budget_seconds: float,
+    since: int | None = None,
+    floor: int | None = None,
+    trigger: str | None = None,
+    hourly: bool = False,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict:
     """Synchronous CLI boundary. Async hosts await Secretary.decide directly."""
     secretary = Secretary(config, state_path, policy_path)
-    return asyncio.run(secretary.decide(budget_seconds=budget_seconds, since=since, floor=floor,
-                                       trigger=trigger, hourly=hourly, clock=clock))
-
+    return asyncio.run(
+        secretary.decide(
+            budget_seconds=budget_seconds, since=since, floor=floor, trigger=trigger, hourly=hourly, clock=clock
+        )
+    )
 
 
 def _now() -> str:
@@ -140,8 +187,9 @@ def _now() -> str:
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """decide's own options, shared by `baton secretary decide` and `python -m baton.secretary_decide`."""
-    parser.add_argument("--budget-seconds", type=float, required=True,
-                        help="maximum time for inbox triage and summary generation")
+    parser.add_argument(
+        "--budget-seconds", type=float, required=True, help="maximum time for inbox triage and summary generation"
+    )
     parser.add_argument("--since", type=int, help="the covered_through of the last delivered brief (with --floor)")
     parser.add_argument("--floor", type=int, help="the activation position: nothing at or before it wakes")
     parser.add_argument("--trigger", help="the wake decided for: message:SEQ, job:JOB_ID:SEQ or conversation")
@@ -149,8 +197,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def options(args: argparse.Namespace) -> dict:
-    return {"budget_seconds": args.budget_seconds, "since": args.since, "floor": args.floor,
-            "trigger": args.trigger, "hourly": args.hourly}
+    return {
+        "budget_seconds": args.budget_seconds,
+        "since": args.since,
+        "floor": args.floor,
+        "trigger": args.trigger,
+        "hourly": args.hourly,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,8 +212,9 @@ def main(argv: list[str] | None = None) -> int:
     The `baton` command imports every interface first: about 3 s on a Raspberry Pi 4, against 0.3 s for this
     module, and a wake callback has only a few seconds for the secretary.
     """
-    parser = argparse.ArgumentParser(prog="python -m baton.secretary_decide",
-                                     description="decide wake, hold or keep for one Baton wake")
+    parser = argparse.ArgumentParser(
+        prog="python -m baton.secretary_decide", description="decide wake, hold or keep for one Baton wake"
+    )
     parser.add_argument("--config", help="config file (default: $BATON_CONFIG or ~/.config/baton/baton.toml)")
     parser.add_argument("--state", type=Path, required=True, help="private SQLite state file")
     parser.add_argument("--policy", type=Path, required=True, help="versioned secretary model policy")

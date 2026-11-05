@@ -46,8 +46,9 @@ def _form(host, room, cookies, query: str = "") -> dict[str, str]:
 
 def test_a_send_is_stored_once_as_the_person_and_redirects_to_it(room) -> None:
     host, cid, cookies = room
-    response = post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": "Ship it."},
-                    cookies=cookies)
+    response = post(
+        host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": "Ship it."}, cookies=cookies
+    )
     [(message_id, conversation_id, text, kind)] = stored_by_seat(host)
     assert (conversation_id, text, kind) == (cid, "Ship it.", "human")
     assert response.status == 303
@@ -165,7 +166,8 @@ def test_an_expired_session_is_refused_and_ended(room, monkeypatch, limit: str) 
         monkeypatch.setattr(seat, "_now", lambda: start + host.config.seat.idle_seconds + 1)
     assert get(host.config, "/seat/", cookies=cookies).status == 303
     assert sqlite3.connect(host.config.db_path).execute("SELECT end_reason FROM seat_sessions").fetchall() == [
-        ("lapsed",)], "kept, and ended by state"
+        ("lapsed",)
+    ], "kept, and ended by state"
 
 
 def test_no_token_session_csrf_or_text_reaches_a_log_record(room, caplog) -> None:
@@ -174,6 +176,11 @@ def test_no_token_session_csrf_or_text_reaches_a_log_record(room, caplog) -> Non
     fields = _form(host, cid, cookies) | {"text": "a private sentence"}
     post(host.config, f"/seat/c/{cid}/send", fields, cookies=cookies)
     log_in(host.config, "baton_wrong-token-value")
-    for secret in (host.seat_token, cookies[SESSION_COOKIE], fields["csrf"], "a private sentence",
-                   "baton_wrong-token-value"):
+    for secret in (
+        host.seat_token,
+        cookies[SESSION_COOKIE],
+        fields["csrf"],
+        "a private sentence",
+        "baton_wrong-token-value",
+    ):
         assert secret not in caplog.text

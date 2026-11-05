@@ -39,8 +39,10 @@ def main(argv: list[str] | None = None) -> int:
             if config.require_role(args.role).display_only:
                 raise ConfigError(f"{args.role} is display_only: it only displays, so nothing acts as it")
             if config.require_role(args.role).human:
-                raise ConfigError(f"{args.role} is a human role: it acts only with its own token, through "
-                                  f"`baton --host URL` with ${remote.TOKEN_ENV}, never with --as")
+                raise ConfigError(
+                    f"{args.role} is a human role: it acts only with its own token, through "
+                    f"`baton --host URL` with ${remote.TOKEN_ENV}, never with --as"
+                )
         if args.command == "serve":
             from baton.app import serve  # the MCP SDK is slow to import for one-shot commands
 
@@ -61,11 +63,15 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="baton", description="A small MCP host for agent messages and jobs.")
-    parser.add_argument("--config", help=f"config file (default: ${config_module.CONFIG_ENV} or "
-                                         f"{config_module.DEFAULT_CONFIG})")
-    parser.add_argument("--host", default=os.environ.get(remote.HOST_ENV),
-                        help=f"act through this host's URL with the token in ${remote.TOKEN_ENV} or the command in "
-                             f"${remote.TOKEN_COMMAND_ENV}, instead of a local database (default: ${remote.HOST_ENV})")
+    parser.add_argument(
+        "--config", help=f"config file (default: ${config_module.CONFIG_ENV} or {config_module.DEFAULT_CONFIG})"
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get(remote.HOST_ENV),
+        help=f"act through this host's URL with the token in ${remote.TOKEN_ENV} or the command in "
+        f"${remote.TOKEN_COMMAND_ENV}, instead of a local database (default: ${remote.HOST_ENV})",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("serve", help="run the MCP server and the wake dispatcher")
     messages.add_commands(commands)
@@ -75,5 +81,6 @@ def _parser() -> argparse.ArgumentParser:
     index.add_commands(commands)
     secretary.add_commands(commands)
     commands.add_parser("wakes", help="show recent wakes and how they ended").set_defaults(
-        handler=lambda config, args: db(config, wakes.recent))
+        handler=lambda config, args: db(config, wakes.recent)
+    )
     return parser

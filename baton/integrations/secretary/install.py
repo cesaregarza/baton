@@ -42,34 +42,55 @@ def install(
         raise ValueError(f"destination is not empty: {destination}")
 
     instance_path = destination / "integration.json"
-    command = shlex.join((str(python), "-m", "baton.integrations.secretary", "--instance",
-                          str(instance_path), "hook"))
+    command = shlex.join((str(python), "-m", "baton.integrations.secretary", "--instance", str(instance_path), "hook"))
     command_hook = {"type": "command", "command": command, "timeout": 10}
-    hooks = {"hooks": {event: [{"hooks": [command_hook]}]
-                       for event in ("SessionStart", "Stop")}}
+    hooks = {"hooks": {event: [{"hooks": [command_hook]}] for event in ("SessionStart", "Stop")}}
     if product == "claude-code":
         hooks["hooks"]["FileChanged"] = [{"hooks": [{**command_hook, "asyncRewake": True}]}]
     digest = hashlib.sha256(str(destination).encode()).hexdigest()[:8]
     unit_name = f"secretary-{digest}.service"
     unit_path = destination / unit_name
     run_args = (str(python), "-m", "baton.integrations.secretary", "--instance", str(instance_path), "run")
-    unit = "\n".join((
-        "[Unit]", "Description=Baton secretary integration", "", "[Service]",
-        f"ExecStart={_systemd_command(run_args)}", f"WorkingDirectory={_systemd_arg(str(project), quote=False)}",
-        f"EnvironmentFile=-{_systemd_arg(str(destination / 'environment'), quote=False)}",
-        "Restart=on-failure", "RestartSec=5", "UMask=0077", "", "[Install]", "WantedBy=default.target", "",
-    ))
-    instance = IntegrationConfig(product=product, project=project, config=config, policy=policy,
-                                 state=destination / "attention.sqlite",
-                                 codex=str(codex_path) if codex_path is not None else None).as_dict()
+    unit = "\n".join(
+        (
+            "[Unit]",
+            "Description=Baton secretary integration",
+            "",
+            "[Service]",
+            f"ExecStart={_systemd_command(run_args)}",
+            f"WorkingDirectory={_systemd_arg(str(project), quote=False)}",
+            f"EnvironmentFile=-{_systemd_arg(str(destination / 'environment'), quote=False)}",
+            "Restart=on-failure",
+            "RestartSec=5",
+            "UMask=0077",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        )
+    )
+    instance = IntegrationConfig(
+        product=product,
+        project=project,
+        config=config,
+        policy=policy,
+        state=destination / "attention.sqlite",
+        codex=str(codex_path) if codex_path is not None else None,
+    ).as_dict()
     _write_private(instance_path, json.dumps(instance, indent=2, sort_keys=True) + "\n")
     _write_private(destination / "hooks.json", json.dumps(hooks, indent=2, sort_keys=True) + "\n")
     if product == "claude-code":
         _write_private(destination / "pending.json", "{}\n")
     _write_private(unit_path, unit)
-    return {"destination": destination, "instance": instance_path, "hooks": destination / "hooks.json",
-            "unit": unit_path, "unit_name": unit_name, "hook_events": tuple(hooks["hooks"]),
-            "pending": destination / "pending.json" if product == "claude-code" else None}
+    return {
+        "destination": destination,
+        "instance": instance_path,
+        "hooks": destination / "hooks.json",
+        "unit": unit_path,
+        "unit_name": unit_name,
+        "hook_events": tuple(hooks["hooks"]),
+        "pending": destination / "pending.json" if product == "claude-code" else None,
+    }
 
 
 def merge_hooks(existing: dict[str, Any], fragment: dict[str, Any]) -> dict[str, Any]:

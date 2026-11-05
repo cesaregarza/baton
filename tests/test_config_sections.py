@@ -14,25 +14,28 @@ BASE = {"host": {"public_url": "https://baton.example.test"}, "roles": {"planner
 SENSITIVE = "private-section-value"
 
 
-@pytest.mark.parametrize(("section", "value", "detail"), [
-    ("host", f'"{SENSITIVE}"', "host must be a table"),
-    ("roles", "[]", "roles must be a table"),
-    ("auth", "false", "auth must be a table"),
-    ("integrations", "[false]", "integrations must be a table"),
-    ("indexer", "[]", "indexer must be a table"),
-    ("conversations", "true", "conversations must be a table"),
-    ("dashboard", "false", "dashboard must be a table"),
-    ("seat", "false", "seat must be a table"),
-    ("search", "false", "search must be a table"),
-    ("jobs", "1", "jobs must be a table"),
-    ("roles", f'{{planner = "{SENSITIVE}"}}', "roles.planner must be a table"),
-    ("roles", "{planner = {wake = false}}", "roles.planner.wake must be a table"),
-    ("auth", f'{{oauth = "{SENSITIVE}"}}', "auth.oauth must be a table"),
-    ("auth", "{tokens = 42}", "auth.tokens must be an array of tables"),
-    ("auth", f'{{tokens = ["{SENSITIVE}"]}}', "auth.tokens[0] must be a table"),
-    ("jobs", f'{{states = "{SENSITIVE}"}}', "jobs.states must be a table"),
-    ("jobs", f'{{states = {{open = "{SENSITIVE}"}}}}', "jobs.states.open must be a table"),
-])
+@pytest.mark.parametrize(
+    ("section", "value", "detail"),
+    [
+        ("host", f'"{SENSITIVE}"', "host must be a table"),
+        ("roles", "[]", "roles must be a table"),
+        ("auth", "false", "auth must be a table"),
+        ("integrations", "[false]", "integrations must be a table"),
+        ("indexer", "[]", "indexer must be a table"),
+        ("conversations", "true", "conversations must be a table"),
+        ("dashboard", "false", "dashboard must be a table"),
+        ("seat", "false", "seat must be a table"),
+        ("search", "false", "search must be a table"),
+        ("jobs", "1", "jobs must be a table"),
+        ("roles", f'{{planner = "{SENSITIVE}"}}', "roles.planner must be a table"),
+        ("roles", "{planner = {wake = false}}", "roles.planner.wake must be a table"),
+        ("auth", f'{{oauth = "{SENSITIVE}"}}', "auth.oauth must be a table"),
+        ("auth", "{tokens = 42}", "auth.tokens must be an array of tables"),
+        ("auth", f'{{tokens = ["{SENSITIVE}"]}}', "auth.tokens[0] must be a table"),
+        ("jobs", f'{{states = "{SENSITIVE}"}}', "jobs.states must be a table"),
+        ("jobs", f'{{states = {{open = "{SENSITIVE}"}}}}', "jobs.states.open must be a table"),
+    ],
+)
 def test_malformed_toml_sections_produce_config_json(tmp_path, monkeypatch, capsys, section, value, detail):
     fields = {"host": '{public_url = "https://baton.example.test"}', "roles": "{planner = {}}"}
     fields[section] = value
@@ -75,21 +78,31 @@ def test_token_generators_remain_accepted():
 
 
 def test_disabled_features_still_ignore_their_other_settings():
-    parsed = config.parse({**BASE,
-        "dashboard": {"enabled": False, "viewer_role": [], "attention_role": {}},
-        "seat": {"enabled": False, "role": [], "origin": False, "timezone": {}},
-        "auth": {"oauth": {"enabled": False, "roles": False, "redirect_uris": 42, "passphrase_hash_env": []}},
-    })
+    parsed = config.parse(
+        {
+            **BASE,
+            "dashboard": {"enabled": False, "viewer_role": [], "attention_role": {}},
+            "seat": {"enabled": False, "role": [], "origin": False, "timezone": {}},
+            "auth": {"oauth": {"enabled": False, "roles": False, "redirect_uris": 42, "passphrase_hash_env": []}},
+        }
+    )
     assert not parsed.dashboard.enabled and not parsed.seat.enabled and not parsed.oauth.enabled
 
 
 @pytest.mark.parametrize("mapping", [UserDict, MappingProxyType])
 def test_standard_mapping_sections_remain_accepted(mapping):
-    raw = {**BASE, "roles": {"planner": {"wake": {}}},
-           "auth": {"tokens": [{"role": "planner", "sha256": "0" * 64}], "oauth": {"enabled": False}},
-           "search": {}, "indexer": {}, "integrations": {}, "conversations": {},
-           "dashboard": {"enabled": False}, "seat": {"enabled": False},
-           "jobs": {"states": {"open": {}}}}
+    raw = {
+        **BASE,
+        "roles": {"planner": {"wake": {}}},
+        "auth": {"tokens": [{"role": "planner", "sha256": "0" * 64}], "oauth": {"enabled": False}},
+        "search": {},
+        "indexer": {},
+        "integrations": {},
+        "conversations": {},
+        "dashboard": {"enabled": False},
+        "seat": {"enabled": False},
+        "jobs": {"states": {"open": {}}},
+    }
 
     def wrap(value):
         if isinstance(value, dict):
@@ -101,17 +114,22 @@ def test_standard_mapping_sections_remain_accepted(mapping):
     assert config.parse(wrap(raw)) == config.parse(raw)
 
 
-@pytest.mark.parametrize(("changes", "message"), [
-    ({"indexer": {"messaging_role": "planner"}, "host": False}, "indexer.messaging_role is not supported yet"),
-    ({"host": {"public_url": "not-a-url"}, "roles": []}, "host.public_url must be the http"),
-    ({"roles": {"Bad Name": False}}, "role name 'Bad Name' must match"),
-    ({"auth": {"tokens": [{"role": "unknown"}, False]}}, r"auth.tokens\[0\] names unknown role"),
-    ({"search": {"enabled": "false"}, "indexer": []}, "search.enabled must be a boolean"),
-    ({"host": {**BASE["host"], "listen_port": 0}, "auth": {"oauth": False}}, "host.listen_port must be"),
-    ({"auth": {"oauth": {"enabled": True}}, "jobs": "bad"}, "auth.oauth needs passphrase_hash"),
-    ({"jobs": {"states": {"open": {"waiting_on": "unknown"}, "done": False}}},
-     "jobs.states.open.waiting_on names unknown role"),
-])
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"indexer": {"messaging_role": "planner"}, "host": False}, "indexer.messaging_role is not supported yet"),
+        ({"host": {"public_url": "not-a-url"}, "roles": []}, "host.public_url must be the http"),
+        ({"roles": {"Bad Name": False}}, "role name 'Bad Name' must match"),
+        ({"auth": {"tokens": [{"role": "unknown"}, False]}}, r"auth.tokens\[0\] names unknown role"),
+        ({"search": {"enabled": "false"}, "indexer": []}, "search.enabled must be a boolean"),
+        ({"host": {**BASE["host"], "listen_port": 0}, "auth": {"oauth": False}}, "host.listen_port must be"),
+        ({"auth": {"oauth": {"enabled": True}}, "jobs": "bad"}, "auth.oauth needs passphrase_hash"),
+        (
+            {"jobs": {"states": {"open": {"waiting_on": "unknown"}, "done": False}}},
+            "jobs.states.open.waiting_on names unknown role",
+        ),
+    ],
+)
 def test_existing_earlier_refusals_keep_their_priority(changes, message):
     with pytest.raises(config.ConfigError, match=message):
         config.parse({**BASE, **changes})

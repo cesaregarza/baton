@@ -10,8 +10,10 @@ from typing import Any
 from baton.cli.common import db
 from baton.config import Config, ConfigError
 
-GRANT_KEY_NOTE = ("Give the key to the agent only through the owner's own chat with it, never in a Baton thread. "
-                  "The agent presents it as grant_token, beside its binding token.")
+GRANT_KEY_NOTE = (
+    "Give the key to the agent only through the owner's own chat with it, never in a Baton thread. "
+    "The agent presents it as grant_token, beside its binding token."
+)
 
 
 def add_commands(commands: Any) -> None:
@@ -25,9 +27,11 @@ def add_commands(commands: Any) -> None:
     revoke.set_defaults(handler=lambda config, args: revoke_token(config, args.name))
 
     seat_commands = commands.add_parser("seat", help="the browser seat").add_subparsers(
-        dest="seat_command", required=True)
+        dest="seat_command", required=True
+    )
     seat_commands.add_parser("logout-all", help="end every browser seat session at once").set_defaults(
-        handler=seat_logout_all)
+        handler=seat_logout_all
+    )
 
     add_alias_commands(commands)
     add_topic_grant_commands(commands)
@@ -39,44 +43,61 @@ def add_commands(commands: Any) -> None:
 def add_alias_commands(commands: Any) -> None:
     """Owner commands for enrolled aliases and their events targets."""
     alias = commands.add_parser("alias", help="owner commands for enrolled aliases").add_subparsers(
-        dest="alias_command", required=True)
+        dest="alias_command", required=True
+    )
     enrol = alias.add_parser("arm-enrol", help="let a role's own credential enrol it once, within 15 minutes")
     enrol.add_argument("enrol_role", metavar="role")
-    enrol.set_defaults(handler=lambda config, args: aliases(config, lambda module, conn: module.arm_enrol(
-        conn, config, args.enrol_role)))
-    rekey = alias.add_parser("arm-rekey", help="let the next claim with a new passphrase reset an alias, "
-                             "within 15 minutes")
+    enrol.set_defaults(
+        handler=lambda config, args: aliases(
+            config, lambda module, conn: module.arm_enrol(conn, config, args.enrol_role)
+        )
+    )
+    rekey = alias.add_parser(
+        "arm-rekey", help="let the next claim with a new passphrase reset an alias, within 15 minutes"
+    )
     rekey.add_argument("name")
     rekey.set_defaults(handler=arm_rekey)
     mapping = alias.add_parser("map", help="make an alias act as an enrolled role; ends both sides' old proofs")
     mapping.add_argument("name")
     mapping.add_argument("map_role", metavar="role")
-    mapping.set_defaults(handler=lambda config, args: aliases(config, lambda module, conn: module.map_alias(
-        conn, args.name, args.map_role)))
+    mapping.set_defaults(
+        handler=lambda config, args: aliases(
+            config, lambda module, conn: module.map_alias(conn, args.name, args.map_role)
+        )
+    )
     unmap = alias.add_parser("unmap", help="end an alias's mapping and its proofs; it renews as a guest alias")
     unmap.add_argument("name")
-    unmap.set_defaults(handler=lambda config, args: aliases(config, lambda module, conn: module.unmap_alias(
-        conn, args.name)))
+    unmap.set_defaults(
+        handler=lambda config, args: aliases(config, lambda module, conn: module.unmap_alias(conn, args.name))
+    )
 
     events = commands.add_parser("events", help="owner commands for event subscriptions").add_subparsers(
-        dest="events_command", required=True)
-    events.add_parser("status", help="subscriptions and recent delivery receipts, without URLs or secrets"
-                      ).set_defaults(handler=events_status)
+        dest="events_command", required=True
+    )
+    events.add_parser(
+        "status", help="subscriptions and recent delivery receipts, without URLs or secrets"
+    ).set_defaults(handler=events_status)
     unbind = events.add_parser("unbind", help="drop an OAuth grant's events target, when its alias's token is lost")
     unbind.add_argument("grant")
-    unbind.set_defaults(handler=lambda config, args: aliases(config, lambda module, conn: module.unbind_grant(
-        conn, args.grant)))
+    unbind.set_defaults(
+        handler=lambda config, args: aliases(config, lambda module, conn: module.unbind_grant(conn, args.grant))
+    )
 
 
 def add_topic_grant_commands(commands: Any) -> None:
     """Owner topic grant records; only `authorize` mints a key."""
     grant = commands.add_parser("topic-grant", help="owner commands for topic grants").add_subparsers(
-        dest="topic_grant_command", required=True)
+        dest="topic_grant_command", required=True
+    )
     propose = grant.add_parser("propose", help="propose a grant for an alias on a topic; it grants nothing yet")
     propose.add_argument("alias")
     propose.add_argument("topic")
-    propose.add_argument("--capability", action="append", required=True,
-                         help="reference.edit, thread.organise or topic.create_sub; repeat for more")
+    propose.add_argument(
+        "--capability",
+        action="append",
+        required=True,
+        help="reference.edit, thread.organise or topic.create_sub; repeat for more",
+    )
     propose.add_argument("--inherit", action="store_true", help="also cover the topic's direct subtopics")
     propose.add_argument("--days", type=int, required=True, help="how long the grant lasts once authorized: 1-30")
     propose.set_defaults(handler=topic_grant_propose)
@@ -114,8 +135,10 @@ def arm_rekey(config: Config, args: argparse.Namespace) -> dict[str, Any]:
 def topic_grant_propose(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     from baton.topics import grants as topic_grants
 
-    return db(config, lambda conn: topic_grants.propose(conn, args.alias, args.topic, args.capability,
-                                                        args.inherit, args.days))
+    return db(
+        config,
+        lambda conn: topic_grants.propose(conn, args.alias, args.topic, args.capability, args.inherit, args.days),
+    )
 
 
 def topic_grant_authorize(config: Config, args: argparse.Namespace) -> dict[str, Any]:
@@ -149,12 +172,17 @@ def new_token(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     if config.require_role(args.token_role).display_only:
         raise ConfigError(f"{args.token_role} is display_only: a role that only displays never holds a credential")
     if any(entry.name == args.name for entry in config.tokens):
-        raise ConfigError(f"a token named {args.name!r} is already configured; token names must be unique, so "
-                          "pick another name (or revoke and remove the old one first)")
+        raise ConfigError(
+            f"a token named {args.name!r} is already configured; token names must be unique, so "
+            "pick another name (or revoke and remove the old one first)"
+        )
     token_value, digest = create_token()
     entry = f'[[auth.tokens]]\nname = "{args.name}"\nrole = "{args.token_role}"\nsha256 = "{digest}"'
-    return {"token": token_value, "config_entry": entry,
-            "note": "Give the token to the client; put only config_entry in the config. It is not shown again."}
+    return {
+        "token": token_value,
+        "config_entry": entry,
+        "note": "Give the token to the client; put only config_entry in the config. It is not shown again.",
+    }
 
 
 def hash_passphrase() -> int:

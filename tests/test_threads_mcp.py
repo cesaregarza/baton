@@ -27,12 +27,14 @@ def one(page: dict[str, Any], text: str) -> dict[str, Any]:
 
 # A fixture is always registered under its own name, so the parameter has to shadow the import it came from.
 def test_a_reply_over_mcp_carries_its_attention_and_resolves_its_parent_per_reader(
-        group_host,  # noqa: F811
-        capsys) -> None:
+    group_host,  # noqa: F811
+    capsys,
+) -> None:
     host = group_host
     reviewer_token, assistant_token = grant(host, "reviewer"), grant(host, "assistant")
-    code, made = cli_as(host, capsys, "conversation", "new", "--title", "Release plan",
-                        "--with", "orchestrator,reviewer,assistant")
+    code, made = cli_as(
+        host, capsys, "conversation", "new", "--title", "Release plan", "--with", "orchestrator,reviewer,assistant"
+    )
     assert code == 0
     conversation_id = made["conversation_id"]
 
@@ -42,52 +44,94 @@ def test_a_reply_over_mcp_carries_its_attention_and_resolves_its_parent_per_read
             assert CONVERSATION_ARGUMENTS <= set(schema["properties"])
             assert not {"role", "from_role", "sender"} & set(schema["properties"])
 
-            question = payload(await reviewer.call_tool("send_message", {
-                "conversation_id": conversation_id, "text": "which release?"}))
-            answered = payload(await assistant.call_tool("send_message", {
-                "conversation_id": conversation_id, "text": "the next one",
-                "reply_to": question["message_id"], "attention": ["reviewer"], "needs_decision": True}))
+            question = payload(
+                await reviewer.call_tool("send_message", {"conversation_id": conversation_id, "text": "which release?"})
+            )
+            answered = payload(
+                await assistant.call_tool(
+                    "send_message",
+                    {
+                        "conversation_id": conversation_id,
+                        "text": "the next one",
+                        "reply_to": question["message_id"],
+                        "attention": ["reviewer"],
+                        "needs_decision": True,
+                    },
+                )
+            )
             assert set(answered["seqs"]) == {"orchestrator", "reviewer"}
 
             # The three arguments belong to a conversation; a direct send has no thread to reply into.
-            refused = payload(await assistant.call_tool("send_message", {
-                "to": "reviewer", "text": "x", "reply_to": question["message_id"]}))
+            refused = payload(
+                await assistant.call_tool(
+                    "send_message", {"to": "reviewer", "text": "x", "reply_to": question["message_id"]}
+                )
+            )
             # An empty one is still a field the caller supplied, so it is refused like any other.
-            empty = [payload(await assistant.call_tool("send_message", {"to": "reviewer", "text": "x", **field}))
-                     for field in ({"attention": []}, {"reply_to": ""})]
+            empty = [
+                payload(await assistant.call_tool("send_message", {"to": "reviewer", "text": "x", **field}))
+                for field in ({"attention": []}, {"reply_to": ""})
+            ]
             assert [page["error"] for page in empty] == ["invalid_request", "invalid_request"], empty
-            outside = payload(await assistant.call_tool("send_message", {
-                "conversation_id": conversation_id, "text": "x", "attention": ["outsider"]}))
-            unseen = payload(await assistant.call_tool("send_message", {
-                "conversation_id": conversation_id, "text": "x", "reply_to": "msg_nonexistent"}))
+            outside = payload(
+                await assistant.call_tool(
+                    "send_message", {"conversation_id": conversation_id, "text": "x", "attention": ["outsider"]}
+                )
+            )
+            unseen = payload(
+                await assistant.call_tool(
+                    "send_message", {"conversation_id": conversation_id, "text": "x", "reply_to": "msg_nonexistent"}
+                )
+            )
             assert refused["error"] == unseen["error"] == "invalid_request"
             assert outside["error"] == "not_a_participant"
 
-            return {"question": question, "answered": answered,
-                    "read": payload(await reviewer.call_tool("read_messages", {})),
-                    "history": payload(await reviewer.call_tool("read_history",
-                                                                {"conversation_id": conversation_id}))}
+            return {
+                "question": question,
+                "answered": answered,
+                "read": payload(await reviewer.call_tool("read_messages", {})),
+                "history": payload(await reviewer.call_tool("read_history", {"conversation_id": conversation_id})),
+            }
 
     seen = anyio.run(run)
     reference = {"message_id": seen["question"]["message_id"], "seq": 1}
     delivered = one(seen["read"], "the next one")
-    assert (delivered["reply_to"], delivered["attention"], delivered["needs_decision"]) == \
-        (reference, ["reviewer"], True)
+    assert (delivered["reply_to"], delivered["attention"], delivered["needs_decision"]) == (
+        reference,
+        ["reviewer"],
+        True,
+    )
     assert texts(seen["history"]) == [("reviewer", "which release?"), ("assistant", "the next one")]
     assert one(seen["history"], "the next one")["reply_to"] == reference
     assert one(seen["history"], "which release?")["reply_to"] is None
 
     # The CLI carries them too, and the audit names the parent without any message text.
-    code, from_cli = cli_as(host, capsys, "message", "--conversation", conversation_id, "--text", "from the cli",
-                            "--reply-to", seen["answered"]["message_id"], "--attention", "reviewer,assistant",
-                            "--needs-decision")
+    code, from_cli = cli_as(
+        host,
+        capsys,
+        "message",
+        "--conversation",
+        conversation_id,
+        "--text",
+        "from the cli",
+        "--reply-to",
+        seen["answered"]["message_id"],
+        "--attention",
+        "reviewer,assistant",
+        "--needs-decision",
+    )
     assert code == 0 and set(from_cli["seqs"]) == {"reviewer", "assistant"}
     conn = connect(host.config.db_path)
     try:
-        [row] = conn.execute("SELECT reply_to, attention, needs_decision FROM messages WHERE text = 'from the cli'"
-                             " AND recipient = 'reviewer'").fetchall()
-        assert (row["reply_to"], json.loads(row["attention"]), row["needs_decision"]) == \
-            (seen["answered"]["message_id"], ["reviewer", "assistant"], 1)
+        [row] = conn.execute(
+            "SELECT reply_to, attention, needs_decision FROM messages WHERE text = 'from the cli'"
+            " AND recipient = 'reviewer'"
+        ).fetchall()
+        assert (row["reply_to"], json.loads(row["attention"]), row["needs_decision"]) == (
+            seen["answered"]["message_id"],
+            ["reviewer", "assistant"],
+            1,
+        )
     finally:
         conn.close()
     audit = [json.loads(line) for line in host.config.audit_path.read_text().splitlines()]

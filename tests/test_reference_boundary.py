@@ -98,12 +98,13 @@ def what_it_raised(call):
     that shows it."""
     try:
         call()
-    except Exception as error:  # noqa: BLE001 -- the test says which one it must be
+    except Exception as error:
         return error
     raise AssertionError("nothing was raised")
 
 
 # 1. Whole numbers ---------------------------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("existing", [False, True], ids=["new", "at-revision-1"])
 @pytest.mark.parametrize("wrong", EXPECTED, ids=repr)
@@ -167,8 +168,7 @@ def test_a_call_with_a_binding_token_is_refused_a_mistyped_number_as_it_is_an_ou
     guest_calls = {
         "edit_reference": (edit_arguments(BOARDS, NAME, "text", 2), {"expected_revision": [-1, *EXPECTED]}),
         "read_reference": ({"topic": BOARDS, "name": NAME}, {"revision": [0, True, "1", 1.0]}),
-        "reference_history": ({"topic": BOARDS, "name": NAME}, {"limit": [0, *LIMIT],
-                                                                 "after_revision": [-1, *CURSOR]}),
+        "reference_history": ({"topic": BOARDS, "name": NAME}, {"limit": [0, *LIMIT], "after_revision": [-1, *CURSOR]}),
     }
 
     async def scenario(client):
@@ -188,9 +188,11 @@ def test_a_call_with_a_binding_token_is_refused_a_mistyped_number_as_it_is_an_ou
 
 # 2. A request id with no UTF-8 form -------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("caller,spent", [("core role", 0), ("grantee", 1)])
 def test_a_request_id_with_no_utf8_form_is_refused_before_the_transaction_and_the_call_is_audited(
-        build_scene, monkeypatch, caller, spent):
+    build_scene, monkeypatch, caller, spent
+):
     """A request id that is a lone surrogate, sent as a JSON escape, is answered with the refusal any malformed request
     id gets, not the SDK's execution error. The edit runs no statement and writes nothing. It leaves exactly one audit
     line, which is valid UTF-8, parses as JSON, names the tool and the outcome, and holds the request id as sent. A
@@ -207,7 +209,7 @@ def test_a_request_id_with_no_utf8_form_is_refused_before_the_transaction_and_th
             answer = await grantee_edit(client, held, BOARDS, NAME, "text", 0, request_id="\ud800")
         assert answer == MALFORMED_ID
         assert scene.tables() == tables and staging.texts() == []
-        written = audit_lines(scene)[len(lines):]
+        written = audit_lines(scene)[len(lines) :]
         assert len(written) == 1, written
         line = json.loads(written[0])
         assert (line["tool"], line["outcome"], line["request_id"]) == ("edit_reference", "invalid_request", "\ud800")
@@ -217,8 +219,7 @@ def test_a_request_id_with_no_utf8_form_is_refused_before_the_transaction_and_th
 
 
 @pytest.mark.parametrize("bad", ["\ud800", "\udfff", "id-\udc00-id"], ids=["high", "low", "inside"])
-def test_the_module_refuses_a_request_id_with_no_utf8_form_before_it_opens_a_transaction(
-        build_scene, monkeypatch, bad):
+def test_the_module_refuses_a_request_id_with_no_utf8_form_before_it_opens_a_transaction(build_scene, monkeypatch, bad):
     """Called directly, past the guard and the SDK, the edit itself raises the refusal any malformed request id gets,
     runs no statement and writes nothing: the guard's audit line depends on the refusal being raised, not on the SDK."""
     scene = build_scene()
@@ -227,8 +228,18 @@ def test_the_module_refuses_a_request_id_with_no_utf8_form_before_it_opens_a_tra
         await support.stage(client, scene.host)
         tables = scene.tables()
         staging = Staging(monkeypatch)
-        raised = what_it_raised(lambda: direct(scene, "edit_reference", "planner", topic=BOARDS, name=NAME,
-                                               body="text", expected_revision=0, request_id=bad))
+        raised = what_it_raised(
+            lambda: direct(
+                scene,
+                "edit_reference",
+                "planner",
+                topic=BOARDS,
+                name=NAME,
+                body="text",
+                expected_revision=0,
+                request_id=bad,
+            )
+        )
         assert isinstance(raised, InvalidRequest) and str(raised) == F13, repr(raised)
         assert scene.tables() == tables and staging.texts() == []
 
@@ -255,12 +266,17 @@ def test_a_request_id_is_refused_for_having_no_utf8_form_and_never_for_its_lette
 
 # 3. A grant key with no UTF-8 form --------------------------------------------------------------------------
 
+
 def rows_of_every_table(scene):
     """Every row of every ordinary table but the hourly post counter, which a test counts apart."""
     with scene.db() as conn:
-        names = [row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-            " AND name NOT LIKE '%\\_fts%' ESCAPE '\\' AND name != 'alias_posts' ORDER BY name")]
+        names = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                " AND name NOT LIKE '%\\_fts%' ESCAPE '\\' AND name != 'alias_posts' ORDER BY name"
+            )
+        ]
         return {name: sorted(repr(tuple(row)) for row in conn.execute(f"SELECT * FROM {name}")) for name in names}
 
 
@@ -270,17 +286,19 @@ async def left_behind(client, scene, call):
     tables, lines = rows_of_every_table(scene), audit_lines(scene)
     events, posts = len(scene.events()), scene.posts_counted()
     answer = await call()
-    written = [json.loads(line) for line in audit_lines(scene)[len(lines):]]
-    return {"answer": answer,
-            "audit lines": [{key: value for key, value in line.items() if key != "at"} for line in written],
-            "grant events": len(scene.events()) - events, "hourly posts": scene.posts_counted() - posts,
-            "a table changed": rows_of_every_table(scene) != tables}
+    written = [json.loads(line) for line in audit_lines(scene)[len(lines) :]]
+    return {
+        "answer": answer,
+        "audit lines": [{key: value for key, value in line.items() if key != "at"} for line in written],
+        "grant events": len(scene.events()) - events,
+        "hourly posts": scene.posts_counted() - posts,
+        "a table changed": rows_of_every_table(scene) != tables,
+    }
 
 
 @pytest.mark.parametrize("tool_name", ["edit_reference", "create_topic", "set_topic"])
 @pytest.mark.parametrize("shape", ["bare", "in a key shape"])
-def test_a_grant_key_with_no_utf8_form_gets_what_any_key_that_opens_nothing_gets(
-        build_scene, caplog, tool_name, shape):
+def test_a_grant_key_with_no_utf8_form_gets_what_any_key_that_opens_nothing_gets(build_scene, caplog, tool_name, shape):
     """A grantee that presents a lone surrogate as its grant key, sent as a JSON escape, is answered, audited and
     counted exactly as one that presents an ASCII key of the wrong format: the same refusal, the same one audit line,
     no grant event, the same hourly posts (one for an edit, none for the topic tools) and no table changed. The three
@@ -309,14 +327,20 @@ def test_a_grant_key_with_no_utf8_form_gets_what_any_key_that_opens_nothing_gets
         assert (wrong["grant events"], wrong["a table changed"]) == (0, False), wrong
         assert wrong["hourly posts"] == (1 if tool_name == "edit_reference" else 0), wrong
         got = {}
-        for what, key in (("a lone surrogate", lone), ("a key-shaped string no grant has", support.new_key()),
-                          ("letters outside ASCII", "caf\xe9-\U0001f600")):
+        for what, key in (
+            ("a lone surrogate", lone),
+            ("a key-shaped string no grant has", support.new_key()),
+            ("letters outside ASCII", "caf\xe9-\U0001f600"),
+        ):
             got[what] = await present(key)
             for field in wrong:
                 assert got[what][field] == wrong[field], (what, field, got[what][field], wrong[field])
         answer = got["a lone surrogate"]["answer"]
-        seen = {"the answer": json.dumps(answer) + repr(answer), "the audit file": "\n".join(audit_lines(scene)),
-                "the log": caplog.text}
+        seen = {
+            "the answer": json.dumps(answer) + repr(answer),
+            "the audit file": "\n".join(audit_lines(scene)),
+            "the log": caplog.text,
+        }
         for where, text in seen.items():
             for form in (lone, json.dumps(lone)[1:-1], *(pieces if shape != "bare" else ())):
                 assert form not in text, (where, form)
@@ -351,6 +375,7 @@ def test_the_grant_check_refuses_a_key_with_no_utf8_form_before_it_hashes_it_or_
 
 
 # 4. Arguments taken as sent ---------------------------------------------------------------------------------
+
 
 def refused_as_text(result, argument):
     """`refused_as_mistyped`, and for a string the schema saw as one: its error says `input_type=str`. Read as the JSON
@@ -414,10 +439,17 @@ def test_a_request_id_that_reads_as_json_is_kept_as_sent_and_its_retry_replays(b
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize("argument,existing", [("expected_revision", False), ("expected_revision", True),
-                                               ("revision", True), ("after_revision", True), ("limit", True)],
-                         ids=["expected_revision-new", "expected_revision-at-revision-1", "revision", "after_revision",
-                              "limit"])
+@pytest.mark.parametrize(
+    "argument,existing",
+    [
+        ("expected_revision", False),
+        ("expected_revision", True),
+        ("revision", True),
+        ("after_revision", True),
+        ("limit", True),
+    ],
+    ids=["expected_revision-new", "expected_revision-at-revision-1", "revision", "after_revision", "limit"],
+)
 def test_the_string_null_is_refused_by_the_schema_as_a_string_for_a_whole_number(build_scene, argument, existing):
     """The string "null" is a string like any other for `expected_revision` (when creating and on an existing
     reference), `revision`, `after_revision` and `limit`: the schema refuses it as one, and nothing is written. The SDK
@@ -498,26 +530,34 @@ def test_the_string_null_as_a_token_or_a_grant_key_is_refused_like_any_other(bui
     read tools declare no `grant_token`, so for them that case is a PIN: any key is dropped there."""
     scene = build_scene()
     other = {"token": "not-a-token", "grant_token": "not-a-grant-key"}[argument]
-    refusals = {("the shared guest login", "token"): BINDING_GONE, ("a core credential", "token"):
-                "a binding token is accepted only on a guest credential"}
+    refusals = {
+        ("the shared guest login", "token"): BINDING_GONE,
+        ("a core credential", "token"): "a binding token is accepted only on a guest credential",
+    }
 
     async def scenario(client):
         held = await board(client, scene)
         await write_revisions(client, scene, BOARDS, NAME, 1)
-        arguments = (edit_arguments(BOARDS, NAME, "text", 0) if tool_name == "edit_reference"
-                     else {"topic": BOARDS, "name": NAME})  # an edit that is stale when it gets that far writes nothing
+        arguments = (
+            edit_arguments(BOARDS, NAME, "text", 0)
+            if tool_name == "edit_reference"
+            else {"topic": BOARDS, "name": NAME}
+        )  # an edit that is stale when it gets that far writes nothing
         planner = Core(scene.host, "planner")
         if argument == "token":
             callers = {"the shared guest login": (Anonymous(scene.host), {}), "a core credential": (planner, {})}
             if tool_name == "edit_reference":
-                callers["the shared guest login, with a real grant key"] = (Anonymous(scene.host),
-                                                                             {"grant_token": held.key})
+                callers["the shared guest login, with a real grant key"] = (
+                    Anonymous(scene.host),
+                    {"grant_token": held.key},
+                )
         else:
             callers = {"a guest with a binding": (Bound.of(held), {}), "a core credential": (planner, {})}
 
         async def present(who, extra, value):
-            return await left_behind(client, scene, lambda: who.call(client, tool_name, **arguments, **extra,
-                                                                      **{argument: value}))
+            return await left_behind(
+                client, scene, lambda: who.call(client, tool_name, **arguments, **extra, **{argument: value})
+            )
 
         for name, (who, extra) in callers.items():
             asked, wrong = await present(who, extra, "null"), await present(who, extra, other)

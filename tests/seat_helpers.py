@@ -39,15 +39,26 @@ class SeatHost:
         return self.config
 
 
-def seat_config_text(tmp_path: Path, seat_digest: str, agent_digest: str, *, seat_token_name: str = "operator-phone",
-                     seat_token_role: str = "operator", operator_extra: str = "human = true\n",
-                     viewer_extra: str = "display_only = true\n", seat_extra: str = "",
-                     seat_role: str = "operator", include_seat_token: bool = True,
-                     seat_origin: str = SEAT_ORIGIN, max_per_hour: int = 1000) -> str:
-    return textwrap.dedent(f"""
+def seat_config_text(
+    tmp_path: Path,
+    seat_digest: str,
+    agent_digest: str,
+    *,
+    seat_token_name: str = "operator-phone",
+    seat_token_role: str = "operator",
+    operator_extra: str = "human = true\n",
+    viewer_extra: str = "display_only = true\n",
+    seat_extra: str = "",
+    seat_role: str = "operator",
+    include_seat_token: bool = True,
+    seat_origin: str = SEAT_ORIGIN,
+    max_per_hour: int = 1000,
+) -> str:
+    return (
+        textwrap.dedent(f"""
         [host]
         public_url = "http://127.0.0.1:8765"
-        data_dir = "{tmp_path / 'data'}"
+        data_dir = "{tmp_path / "data"}"
 
         [roles.orchestrator]
         can_create_conversations = true
@@ -55,10 +66,14 @@ def seat_config_text(tmp_path: Path, seat_digest: str, agent_digest: str, *, sea
         [roles.reviewer]
         [roles.operator]
         display_name = "Alex Rivera"
-    """) + operator_extra + textwrap.dedent("""
+    """)
+        + operator_extra
+        + textwrap.dedent("""
         [roles.viewer]
         can_view_all_conversations = true
-    """) + viewer_extra + textwrap.dedent(f"""
+    """)
+        + viewer_extra
+        + textwrap.dedent(f"""
         [conversations]
         enabled = true
         max_messages_per_hour = {max_per_hour}
@@ -71,17 +86,25 @@ def seat_config_text(tmp_path: Path, seat_digest: str, agent_digest: str, *, sea
         enabled = true
         role = "{seat_role}"
         origin = "{seat_origin}"
-    """) + seat_extra + (textwrap.dedent(f"""
+    """)
+        + seat_extra
+        + (
+            textwrap.dedent(f"""
         [[auth.tokens]]
         name = "{seat_token_name}"
         role = "{seat_token_role}"
         sha256 = "{seat_digest}"
-    """) if include_seat_token else "") + textwrap.dedent(f"""
+    """)
+            if include_seat_token
+            else ""
+        )
+        + textwrap.dedent(f"""
         [[auth.tokens]]
         name = "orchestrator-token"
         role = "orchestrator"
         sha256 = "{agent_digest}"
     """)
+    )
 
 
 def make_seat_host(tmp_path: Path, **overrides) -> SeatHost:
@@ -112,9 +135,16 @@ def hidden(body: bytes, field: str) -> str:
     return match.group(1)
 
 
-def post(config: Config, target: str, fields: list[tuple[str, str]] | dict[str, str], *,
-         cookies: dict[str, str] | None = None, origin: str | None = SEAT_ORIGIN,
-         extra: list[tuple[str, str]] = (), content_type: str = FORM):
+def post(
+    config: Config,
+    target: str,
+    fields: list[tuple[str, str]] | dict[str, str],
+    *,
+    cookies: dict[str, str] | None = None,
+    origin: str | None = SEAT_ORIGIN,
+    extra: list[tuple[str, str]] = (),
+    content_type: str = FORM,
+):
     from baton import seat
 
     body = urlencode(list(fields.items()) if isinstance(fields, dict) else fields).encode()
@@ -139,11 +169,14 @@ def log_in(config: Config, token: str):
     """GET the login form, then POST the token with its pre-login value. Returns the POST's response and cookies."""
     form = get(config, "/seat/login")
     pre = cookie_value(form, PRE_COOKIE)
-    response = post(config, "/seat/login", {"token": token, "pre": hidden(form.body, "pre")},
-                    cookies={PRE_COOKIE: pre} if pre else None)
+    response = post(
+        config,
+        "/seat/login",
+        {"token": token, "pre": hidden(form.body, "pre")},
+        cookies={PRE_COOKIE: pre} if pre else None,
+    )
     session = cookie_value(response, SESSION_COOKIE)
     return response, ({SESSION_COOKIE: session} if session else {})
-
 
 
 def conversation(host: SeatHost, participants: tuple[str, ...] = ("orchestrator", "operator"), title: str = "Example"):
@@ -152,8 +185,9 @@ def conversation(host: SeatHost, participants: tuple[str, ...] = ("orchestrator"
 
     conn = connect(host.config.db_path)
     try:
-        return conversations.create(conn, host.config, actor="orchestrator", title=title,
-                                    participants=list(participants))["conversation_id"]
+        return conversations.create(
+            conn, host.config, actor="orchestrator", title=title, participants=list(participants)
+        )["conversation_id"]
     finally:
         conn.close()
 
@@ -182,5 +216,7 @@ def stored_by_seat(host: SeatHost) -> list[tuple]:
     import sqlite3
 
     conn = sqlite3.connect(host.config.db_path)
-    return conn.execute("SELECT DISTINCT id, conversation_id, text, author_kind FROM messages"
-                        " WHERE sender = 'operator' ORDER BY conversation_seq").fetchall()
+    return conn.execute(
+        "SELECT DISTINCT id, conversation_id, text, author_kind FROM messages"
+        " WHERE sender = 'operator' ORDER BY conversation_seq"
+    ).fetchall()

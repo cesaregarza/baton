@@ -778,8 +778,11 @@ def test_selected_guest_reply_form_keeps_alias_and_code(posting_host, kind):
             posting_host,
             "send_message",
             # A fixed role's own post carries no token: a token on a fixed-role credential is refused.
-            {"conversation_id": conv, "text": "selected reply target",
-             **({"token": bound["binding_token"]} if kind == "guest" else {})},
+            {
+                "conversation_id": conv,
+                "text": "selected reply target",
+                **({"token": bound["binding_token"]} if kind == "guest" else {}),
+            },
             role="guest" if kind == "guest" else "planner",
         )
         conn = store.connect(posting_host.config.db_path)

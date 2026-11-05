@@ -50,8 +50,9 @@ def _form(host, cid, cookies, text: str) -> dict[str, str]:
 def _row(host, request_id: str) -> tuple:
     db = sqlite3.connect(host.config.db_path)
     try:
-        return db.execute("SELECT sent_at IS NOT NULL, holders FROM seat_requests WHERE request_id = ?",
-                          (request_id,)).fetchone()
+        return db.execute(
+            "SELECT sent_at IS NOT NULL, holders FROM seat_requests WHERE request_id = ?", (request_id,)
+        ).fetchone()
     finally:
         db.close()
 
@@ -78,10 +79,17 @@ def _crash_mid_send(host, cid, cookies, text: str) -> dict[str, str]:
     """A form whose send takes its place and then ends its process inside the store step. Returns the form."""
     cut = _form(host, cid, cookies, text)
     child = subprocess.run(
-        [sys.executable, "-c", CHILD, json.dumps({"config": str(host.path), "target": f"/seat/c/{cid}/send",
-                                                  "fields": cut, "cookies": cookies})],
+        [
+            sys.executable,
+            "-c",
+            CHILD,
+            json.dumps({"config": str(host.path), "target": f"/seat/c/{cid}/send", "fields": cut, "cookies": cookies}),
+        ],
         env={**os.environ, "PYTHONPATH": os.pathsep.join([str(TESTS.parent), str(TESTS)])},
-        capture_output=True, text=True, timeout=60)
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     assert child.returncode == CRASH, child.stderr
     return cut
 
@@ -89,8 +97,9 @@ def _crash_mid_send(host, cid, cookies, text: str) -> dict[str, str]:
 def _on_port(host, port: int):
     """The host's config again with the seat on `port`: a second config over the same database."""
     second = host.path.with_name("second.toml")
-    second.write_text(host.path.read_text().replace(f"listen_port = {host.config.seat.listen_port}",
-                                                    f"listen_port = {port}"))
+    second.write_text(
+        host.path.read_text().replace(f"listen_port = {host.config.seat.listen_port}", f"listen_port = {port}")
+    )
     return config_module.load(second)
 
 
@@ -130,7 +139,7 @@ def test_a_send_cut_off_by_the_process_exiting_frees_its_place_when_the_seat_sta
     assert [row[2] for row in stored_by_seat(host)] == ["sent before the crash"]
     assert _counted(host) == 2
 
-    bound = seat.server(host.config)   # the seat starting again, as the host does at startup
+    bound = seat.server(host.config)  # the seat starting again, as the host does at startup
     try:
         assert _row(host, cut["request_id"]) == (0, 0), "the cut-off send still holds a place in the quota"
         assert _row(host, done["request_id"]) == (1, 0), "a stored send must stay counted"
@@ -159,7 +168,7 @@ def _leave_before_core_sends(monkeypatch, host, cid: str) -> None:
 
 def test_a_retried_form_does_not_report_success_to_someone_who_left_meanwhile(tmp_path, monkeypatch) -> None:
     host = make_seat_host(tmp_path)
-    cid = conversation(host, ("orchestrator", "reviewer", "operator"))   # two stay after the seat's role leaves
+    cid = conversation(host, ("orchestrator", "reviewer", "operator"))  # two stay after the seat's role leaves
     _, cookies = log_in(host.config, host.seat_token)
     form = _form(host, cid, cookies, "sent while still a member")
     assert post(host.config, f"/seat/c/{cid}/send", form, cookies=cookies).status == 303
@@ -181,8 +190,11 @@ def test_a_new_form_from_someone_who_left_meanwhile_is_refused_and_stores_nothin
     assert stored_by_seat(host) == []
     conn = connect(host.config.db_path)
     try:
-        assert tuple(conn.execute("SELECT sent_at, holders FROM seat_requests WHERE request_id = ?",
-                                  (form["request_id"],)).fetchone()) == (None, 0), "a refused send must free its place"
+        assert tuple(
+            conn.execute(
+                "SELECT sent_at, holders FROM seat_requests WHERE request_id = ?", (form["request_id"],)
+            ).fetchone()
+        ) == (None, 0), "a refused send must free its place"
     finally:
         conn.close()
 
@@ -206,8 +218,9 @@ def test_a_second_startup_on_another_port_is_refused_and_a_live_send_counts_once
         seen["still"] = _row(host, form["request_id"])
 
     try:
-        form, sent = _send_meanwhile(monkeypatch, host, cid, cookies, "sent as a second host starts",
-                                     a_second_host_starts)
+        form, sent = _send_meanwhile(
+            monkeypatch, host, cid, cookies, "sent as a second host starts", a_second_host_starts
+        )
     finally:
         for bound in (running, seen.get("server")):
             if bound is not None:
@@ -215,7 +228,11 @@ def test_a_second_startup_on_another_port_is_refused_and_a_live_send_counts_once
     assert sent.status == 303 and seen["held"] == (1, 1), "the send was not in flight with its place held"
     stored = [row[2] for row in stored_by_seat(host)]
     assert (seen["still"], _row(host, form["request_id"]), _counted(host), stored) == (
-        (1, 1), (1, 0), 1, ["sent as a second host starts"]), "the second startup freed a live send's place"
+        (1, 1),
+        (1, 0),
+        1,
+        ["sent as a second host starts"],
+    ), "the second startup freed a live send's place"
     refusal = seen["refusal"]
     assert refusal is not None and refusal.code == "seat_already_running", "the second startup was not refused by name"
 
@@ -305,7 +322,7 @@ def test_a_startup_whose_recovery_fails_gives_back_its_port_and_its_lock(tmp_pat
     bound, refusal = _start(host.config)
     try:
         assert refusal is None and bound is not None, "the failed startup kept the lock"
-        assert "database is locked" in str(failed.value)   # also keeps `failed` in use until here
+        assert "database is locked" in str(failed.value)  # also keeps `failed` in use until here
     finally:
         if bound is not None:
             bound.server_close()
@@ -334,7 +351,7 @@ def test_a_member_removed_after_core_replays_a_retry_is_told_they_left(tmp_path,
     earlier send is stored and stays counted), instead of redirecting to a message the role can no longer open.
     """
     host = make_seat_host(tmp_path)
-    cid = conversation(host, ("orchestrator", "reviewer", "operator"))   # two stay after the seat's role leaves
+    cid = conversation(host, ("orchestrator", "reviewer", "operator"))  # two stay after the seat's role leaves
     _, cookies = log_in(host.config, host.seat_token)
     form = _form(host, cid, cookies, "sent while still a member")
     assert post(host.config, f"/seat/c/{cid}/send", form, cookies=cookies).status == 303

@@ -9,10 +9,14 @@ from ..connections.model import ToolCall
 from ..connections.transport import ModelUnavailable
 
 DECISION_TOOL = {
-    "type": "function", "name": "decide_attention", "strict": True,
-    "description": ("Ask an independent decision model to choose wake, hold, or keep for the complete pending "
-                    "window. Returns a typed decision only, with no explanation or text. Use when an "
-                    "independent judgment would help; you still write the summary and final assessment."),
+    "type": "function",
+    "name": "decide_attention",
+    "strict": True,
+    "description": (
+        "Ask an independent decision model to choose wake, hold, or keep for the complete pending "
+        "window. Returns a typed decision only, with no explanation or text. Use when an "
+        "independent judgment would help; you still write the summary and final assessment."
+    ),
     "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 }
 

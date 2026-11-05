@@ -90,6 +90,7 @@ def without_posts(counts):
 
 # 1. The design's worked cases ---------------------------------------------------------------------------------
 
+
 def test_a_grantees_edit_writes_the_next_revision_with_its_alias_its_grant_and_a_digest(build_scene):
     """Case 2. Four revisions by a core role, then job-search edits with expected_revision 4: revision 5, based on 4,
     created. The response and the stored row say who wrote it and under which grant."""
@@ -114,7 +115,11 @@ def test_a_grantees_edit_writes_the_next_revision_with_its_alias_its_grant_and_a
         row = rows[4]
         assert (row["body"], row["base_revision"], row["at"], row["request_id"]) == (body_of(5), 4, made["at"], rid)
         assert (row["author_role"], row["author_alias_id"], row["author_alias_name"], row["author_alias_code"]) == (
-            "guest", held.alias_id, held.name, held.code)
+            "guest",
+            held.alias_id,
+            held.name,
+            held.code,
+        )
         assert row["grant_id"] == held.grant_id
         assert re.fullmatch("[0-9a-f]{64}", row["request_digest"]), row["request_digest"]
         doc = only(scene.docs(), "document")
@@ -174,8 +179,9 @@ def test_a_grantee_cannot_edit_a_sibling_lookalike_or_an_unrelated_topic(build_s
         held = await board(client, scene)
         for path in ("job-hunting", "resume"):
             tables, events = scene.tables(), len(scene.refused_uses())
-            refused(await grantee_edit(client, held, path, NAME, "text", 0), "forbidden",
-                    not_covered(held.grant_id, path))
+            refused(
+                await grantee_edit(client, held, path, NAME, "text", 0), "forbidden", not_covered(held.grant_id, path)
+            )
             assert scene.tables() == tables
             found = scene.refused_uses()
             assert len(found) == events + 1
@@ -196,8 +202,9 @@ def test_a_topic_with_no_row_is_unknown_to_a_core_role_and_denied_to_a_grantee(b
         held = await board(client, scene)
         for path in ("job-hunt/ghost", "ghost"):
             events = len(scene.refused_uses())
-            refused(await grantee_edit(client, held, path, NAME, "text", 0), "forbidden",
-                    not_covered(held.grant_id, path))
+            refused(
+                await grantee_edit(client, held, path, NAME, "text", 0), "forbidden", not_covered(held.grant_id, path)
+            )
             found = scene.refused_uses()
             assert len(found) == events + 1
             assert json.loads(found[-1]["detail"]) == {"tool": "edit_reference", "reason": "not_covered"}
@@ -218,8 +225,11 @@ def test_a_grant_on_one_subtopic_covers_neither_its_ancestor_nor_its_sibling(bui
         narrow = await scene.grantee(client, "job-search", BOARDS, ("reference.edit",), inherit=False)
         succeeded(await grantee_edit(client, narrow, BOARDS, NAME, "on the topic itself", 0))
         for path in (ROOT, LEADS):
-            refused(await grantee_edit(client, narrow, path, NAME, "beside it", 0), "forbidden",
-                    not_covered(narrow.grant_id, path))
+            refused(
+                await grantee_edit(client, narrow, path, NAME, "beside it", 0),
+                "forbidden",
+                not_covered(narrow.grant_id, path),
+            )
         assert [row["revision"] for row in scene.revisions(BOARDS, NAME)] == [1]
         assert scene.docs()[0]["topic_id"] == scene.topic_id(BOARDS) and len(scene.docs()) == 1
 
@@ -236,13 +246,19 @@ def test_inherit_decides_whether_a_grant_reaches_the_topics_under_its_own(build_
         await support.stage(client, scene.host)
         flat = await scene.grantee(client, "job-search", ROOT, ("reference.edit",), inherit=False)
         succeeded(await grantee_edit(client, flat, ROOT, NAME, "on the root", 0))
-        refused(await grantee_edit(client, flat, BOARDS, NAME, "under it", 0), "forbidden",
-                not_covered(flat.grant_id, BOARDS))
+        refused(
+            await grantee_edit(client, flat, BOARDS, NAME, "under it", 0),
+            "forbidden",
+            not_covered(flat.grant_id, BOARDS),
+        )
         inheriting = await scene.grantee(client, "lead-scout", ROOT, ("reference.edit",), inherit=True)
         succeeded(await grantee_edit(client, inheriting, BOARDS, NAME, "under it", 0))
         succeeded(await grantee_edit(client, inheriting, ROOT, "second-list", "on the root", 0))
-        refused(await grantee_edit(client, inheriting, "job-hunting", NAME, "lookalike", 0), "forbidden",
-                not_covered(inheriting.grant_id, "job-hunting"))
+        refused(
+            await grantee_edit(client, inheriting, "job-hunting", NAME, "lookalike", 0),
+            "forbidden",
+            not_covered(inheriting.grant_id, "job-hunting"),
+        )
 
     play(scene.host, scenario)
 
@@ -260,10 +276,16 @@ def test_a_binding_without_the_key_the_wrong_key_and_another_aliases_key_are_eac
         claimed = await claim_again(client, scene)
         attempt = edit_arguments(BOARDS, NAME, "text", 0, token=claimed["binding_token"])
         assert await tool(client, scene.host, "edit_reference", attempt) == {"error": "forbidden", "detail": F2}
-        refused(await tool(client, scene.host, "edit_reference", {**attempt, "grant_token": support.new_key()}),
-                "forbidden", "unknown topic grant key")
-        refused(await tool(client, scene.host, "edit_reference", {**attempt, "grant_token": other.key}),
-                "forbidden", "this topic grant key is not for this alias")
+        refused(
+            await tool(client, scene.host, "edit_reference", {**attempt, "grant_token": support.new_key()}),
+            "forbidden",
+            "unknown topic grant key",
+        )
+        refused(
+            await tool(client, scene.host, "edit_reference", {**attempt, "grant_token": other.key}),
+            "forbidden",
+            "this topic grant key is not for this alias",
+        )
         assert scene.revisions() == [] and scene.docs() == []
         found = scene.refused_uses()
         assert [(row["grant_id"], row["actor"]) for row in found] == [(other.grant_id, held.actor)]
@@ -289,8 +311,14 @@ def test_a_renewed_binding_works_with_the_same_key_the_next_day(build_scene, mon
         refused(expired, "forbidden", "alias binding is missing, invalid or expired")
         renewed = await claim_again(client, scene)
         assert renewed["binding_token"] and renewed["binding_token"] != held.token
-        made = succeeded(await tool(client, scene.host, "edit_reference", edit_arguments(
-            BOARDS, NAME, body_of(2), 1, token=renewed["binding_token"], grant_token=held.key)))
+        made = succeeded(
+            await tool(
+                client,
+                scene.host,
+                "edit_reference",
+                edit_arguments(BOARDS, NAME, body_of(2), 1, token=renewed["binding_token"], grant_token=held.key),
+            )
+        )
         assert made["revision"] == 2 and made["grant_id"] == held.grant_id
 
     play(scene.host, scenario)
@@ -308,8 +336,11 @@ def test_a_grant_that_is_no_longer_active_is_refused_with_its_state_and_reading_
         succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0))
         bring_to_state(scene, held, state)
         tables = scene.tables()
-        refused(await grantee_edit(client, held, BOARDS, NAME, body_of(2), 1), "forbidden",
-                f"topic grant {held.grant_id} is {state}")
+        refused(
+            await grantee_edit(client, held, BOARDS, NAME, body_of(2), 1),
+            "forbidden",
+            f"topic grant {held.grant_id} is {state}",
+        )
         assert scene.tables() == tables
         found = only(scene.refused_uses(), "refused_use event")
         assert (found["grant_id"], found["actor"]) == (held.grant_id, held.actor)
@@ -329,8 +360,11 @@ def test_a_grant_works_until_the_instant_it_expires(build_scene):
         scene.clock.advance(days=7, seconds=-1)
         succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0))
         scene.clock.advance(seconds=1)
-        refused(await grantee_edit(client, held, BOARDS, NAME, body_of(2), 1), "forbidden",
-                f"topic grant {held.grant_id} is expired")
+        refused(
+            await grantee_edit(client, held, BOARDS, NAME, body_of(2), 1),
+            "forbidden",
+            f"topic grant {held.grant_id} is expired",
+        )
 
     play(scene.host, scenario)
 
@@ -373,9 +407,16 @@ def test_after_a_revoke_a_new_claim_gives_a_guest_with_no_authority_and_a_new_gr
         assert new["id"] != held.grant_id and new["grant_key"] != held.key
         made = succeeded(await tool(client, scene.host, "edit_reference", {**old_key, "grant_token": new["grant_key"]}))
         assert (made["revision"], made["grant_id"]) == (2, new["id"])
-        refused(await tool(client, scene.host, "edit_reference", edit_arguments(
-            BOARDS, NAME, body_of(3), 2, token=again["binding_token"], grant_token=held.key)),
-            "forbidden", revoked(held.grant_id))
+        refused(
+            await tool(
+                client,
+                scene.host,
+                "edit_reference",
+                edit_arguments(BOARDS, NAME, body_of(3), 2, token=again["binding_token"], grant_token=held.key),
+            ),
+            "forbidden",
+            revoked(held.grant_id),
+        )
 
     play(scene.host, scenario)
 
@@ -393,8 +434,11 @@ def test_a_grant_without_reference_edit_is_refused_and_the_refusal_names_the_cap
 
     async def scenario(client):
         held = await board(client, scene, listed)
-        refused(await grantee_edit(client, held, BOARDS, NAME, "text", 0), "forbidden",
-                not_covered(held.grant_id, BOARDS, "reference.edit"))
+        refused(
+            await grantee_edit(client, held, BOARDS, NAME, "text", 0),
+            "forbidden",
+            not_covered(held.grant_id, BOARDS, "reference.edit"),
+        )
         assert scene.docs() == []
         assert json.loads(only(scene.refused_uses(), "event")["detail"])["reason"] == "not_covered"
 
@@ -424,8 +468,9 @@ def test_the_presented_keys_own_grant_decides_and_never_another_the_alias_holds(
         await support.stage(client, scene.host)
         narrow = await scene.grantee(client, "job-search", BOARDS, ("reference.edit",), inherit=False)
         wide = scene.another_grant(narrow, ROOT, ("reference.edit",), inherit=True)
-        refused(await grantee_edit(client, narrow, LEADS, NAME, "text", 0), "forbidden",
-                not_covered(narrow.grant_id, LEADS))
+        refused(
+            await grantee_edit(client, narrow, LEADS, NAME, "text", 0), "forbidden", not_covered(narrow.grant_id, LEADS)
+        )
         assert scene.docs() == []
         made = succeeded(await grantee_edit(client, wide, LEADS, NAME, "text", 0))
         assert made["grant_id"] == wide.grant_id
@@ -435,6 +480,7 @@ def test_the_presented_keys_own_grant_decides_and_never_another_the_alias_holds(
 
 
 # 3. A core role ----------------------------------------------------------------------------------------------
+
 
 def test_a_core_role_with_the_flag_edits_with_no_key_and_its_row_names_the_role_and_no_grant(build_scene):
     """R8. The planner holds `can_create_topics`: no key, no alias. The response and the row carry the role, the alias
@@ -447,10 +493,19 @@ def test_a_core_role_with_the_flag_edits_with_no_key_and_its_row_names_the_role_
         made = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0))
         assert set(made) == EDIT_KEYS
         assert (made["author"], made["grant_id"], made["revision"], made["created"]) == (
-            {"role": "planner"}, None, 1, True)
+            {"role": "planner"},
+            None,
+            1,
+            True,
+        )
         row = only(scene.revisions(BOARDS, NAME), "revision")
-        assert (row["author_role"], row["author_alias_id"], row["author_alias_name"], row["author_alias_code"],
-                row["grant_id"]) == ("planner", None, None, None, None)
+        assert (
+            row["author_role"],
+            row["author_alias_id"],
+            row["author_alias_name"],
+            row["author_alias_code"],
+            row["grant_id"],
+        ) == ("planner", None, None, None, None)
         assert scene.refused_uses() == []
 
     play(scene.host, scenario)
@@ -480,8 +535,11 @@ def test_a_core_role_without_the_flag_is_refused_whatever_it_presents(build_scen
     async def scenario(client):
         held = await board(client, scene)
         for extra in ({}, {"grant_token": held.key}, {"grant_token": support.new_key()}):
-            refused(await core_edit(client, scene, BOARDS, NAME, "text", 0, role="worker", **extra), "forbidden",
-                    f1("worker"))
+            refused(
+                await core_edit(client, scene, BOARDS, NAME, "text", 0, role="worker", **extra),
+                "forbidden",
+                f1("worker"),
+            )
         assert scene.docs() == [] and scene.revisions() == [] and scene.refused_uses() == []
 
     play(scene.host, scenario)
@@ -496,19 +554,29 @@ def test_an_alias_mapped_to_a_core_role_runs_as_that_role_with_the_alias_recorde
     async def scenario(client):
         held = await board(client, scene, ("thread.organise",))
         assert owner(scene.host, "alias", "arm-enrol", "steward") == 0
-        enrolled = await tool(client, scene.host, "claim_alias", {"name": "steward", "passphrase": support.PASSPHRASE},
-                              role="steward")
+        enrolled = await tool(
+            client, scene.host, "claim_alias", {"name": "steward", "passphrase": support.PASSPHRASE}, role="steward"
+        )
         assert enrolled.get("effective_role") == "steward", enrolled
         proof = await tool(client, scene.host, "claim_alias", {"name": "steward", "passphrase": support.PASSPHRASE})
         assert proof.get("effective_role") == "steward", proof
         arguments = edit_arguments(BOARDS, NAME, body_of(1), 0, token=proof["binding_token"], grant_token=held.key)
         made = succeeded(await tool(client, scene.host, "edit_reference", arguments))
-        assert made["author"] == {"role": "steward", "alias_id": proof["alias_id"], "alias": "steward",
-                                  "code": proof["code"]}
+        assert made["author"] == {
+            "role": "steward",
+            "alias_id": proof["alias_id"],
+            "alias": "steward",
+            "code": proof["code"],
+        }
         assert made["grant_id"] is None
         row = only(scene.revisions(BOARDS, NAME), "revision")
-        assert (row["author_role"], row["author_alias_id"], row["author_alias_name"], row["author_alias_code"],
-                row["grant_id"]) == ("steward", proof["alias_id"], "steward", proof["code"], None)
+        assert (
+            row["author_role"],
+            row["author_alias_id"],
+            row["author_alias_name"],
+            row["author_alias_code"],
+            row["grant_id"],
+        ) == ("steward", proof["alias_id"], "steward", proof["code"], None)
         assert scene.refused_uses() == []
 
     play(scene.host, scenario)
@@ -531,6 +599,7 @@ def test_a_core_roles_stale_edit_is_refused_the_same_way(build_scene):
 
 # 4. The compare-and-swap ---------------------------------------------------------------------------------------
 
+
 def test_the_compare_and_swap_accepts_only_the_revision_the_document_is_at(build_scene):
     """R11. A missing document is at 0. Creating takes 0; 3 on a missing document, 0 on an existing one, one above the
     current and one below it are all stale, with the current number, and write nothing, not even a document.
@@ -540,9 +609,13 @@ def test_the_compare_and_swap_accepts_only_the_revision_the_document_is_at(build
 
     async def scenario(client):
         await support.stage(client, scene.host)
+
         def stale_for(result, current, expected):
-            assert result == {"error": "stale_revision", "detail": f5(NAME, BOARDS, current, expected),
-                              "current_revision": current}, result
+            assert result == {
+                "error": "stale_revision",
+                "detail": f5(NAME, BOARDS, current, expected),
+                "current_revision": current,
+            }, result
 
         stale_for(await core_edit(client, scene, BOARDS, NAME, "text", 3), 0, 3)
         assert scene.docs() == [] and scene.revisions() == [], "a stale edit creates no document"
@@ -600,6 +673,7 @@ def test_a_missing_expected_revision_is_refused_by_the_schema(build_scene):
 
 # 5. Documents are independent --------------------------------------------------------------------------------
 
+
 def test_the_same_name_in_two_topics_and_two_names_in_one_topic_keep_separate_revisions(build_scene):
     """A document is a topic and a name. `job-board` in `boards` and in `leads` are two documents, and so are two
     names in one topic: each counts its revisions from 1 and reads its own text."""
@@ -614,8 +688,11 @@ def test_the_same_name_in_two_topics_and_two_names_in_one_topic_keep_separate_re
         assert (in_leads["revision"], other_name["revision"]) == (1, 1)
         assert len(scene.docs()) == 3
         assert [row["revision"] for row in scene.revisions(BOARDS, NAME)] == [1, 2, 3]
-        for path, name, text, current in ((BOARDS, NAME, body_of(3), 3), (LEADS, NAME, "the leads copy", 1),
-                                          (BOARDS, "lead-list", "another document", 1)):
+        for path, name, text, current in (
+            (BOARDS, NAME, body_of(3), 3),
+            (LEADS, NAME, "the leads copy", 1),
+            (BOARDS, "lead-list", "another document", 1),
+        ):
             read = succeeded(await read_reference(client, Core(scene.host, "worker"), path, name))
             assert (read["body"], read["revision"], read["current_revision"]) == (text, current, current)
         assert succeeded(await core_edit(client, scene, LEADS, NAME, "second", 1))["revision"] == 2
@@ -625,6 +702,7 @@ def test_the_same_name_in_two_topics_and_two_names_in_one_topic_keep_separate_re
 
 
 # 6. Undo and no-ops -----------------------------------------------------------------------------------------
+
 
 def test_an_undo_is_a_new_revision_with_the_old_text_and_changes_no_earlier_row(build_scene, monkeypatch):
     """R13. Revisions 1-5, then revision 3's text written as revision 6 on expected_revision 5. Rows 1-5 are as they
@@ -652,9 +730,26 @@ def test_an_undo_is_a_new_revision_with_the_old_text_and_changes_no_earlier_row(
         assert (current["body"], current["revision"], current["base_revision"]) == (body_of(3), 6, 5)
         listed = succeeded(await reference_history(client, reader, BOARDS, NAME))
         assert [(entry["revision"], entry["base_revision"]) for entry in listed["revisions"]] == [
-            (1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (6, 5)]
-        assert set(current) == {"topic", "topic_id", "name", "revision", "current_revision", "body", "size",
-                                "base_revision", "at", "author", "grant_id"}, "no marker links the restore to 3"
+            (1, 0),
+            (2, 1),
+            (3, 2),
+            (4, 3),
+            (5, 4),
+            (6, 5),
+        ]
+        assert set(current) == {
+            "topic",
+            "topic_id",
+            "name",
+            "revision",
+            "current_revision",
+            "body",
+            "size",
+            "base_revision",
+            "at",
+            "author",
+            "grant_id",
+        }, "no marker links the restore to 3"
         assert staging.writes_to_reference_tables_other_than_inserts() == []
 
     play(scene.host, scenario)
@@ -677,6 +772,7 @@ def test_an_edit_that_changes_nothing_still_writes_a_revision(build_scene):
 
 # 7. The guard, for a guest ----------------------------------------------------------------------------------
 
+
 def test_a_guest_without_a_key_is_refused_by_the_guard_in_todays_words(build_scene):
     """R8, F2. A guest with no binding, with a binding and no key, and with a binding and a null key is refused as every
     guest is for a tool it may not call, and nothing is written, not even a counter row."""
@@ -687,7 +783,9 @@ def test_a_guest_without_a_key_is_refused_by_the_guard_in_todays_words(build_sce
         arguments = edit_arguments(BOARDS, NAME, "text", 0)
         for extra in ({}, {"token": held.token}, {"token": held.token, "grant_token": None}):
             assert await tool(client, scene.host, "edit_reference", {**arguments, **extra}) == {
-                "error": "forbidden", "detail": F2}
+                "error": "forbidden",
+                "detail": F2,
+            }
         assert scene.docs() == [] and scene.revisions() == [] and scene.posts_counted() == 0
         assert scene.refused_uses() == []
 
@@ -702,8 +800,9 @@ def test_a_key_without_a_binding_token_is_refused_in_refusal_ones_words_and_name
 
     async def scenario(client):
         held = await board(client, scene)
-        result = await tool(client, scene.host, "edit_reference", edit_arguments(
-            BOARDS, NAME, "text", 0, grant_token=held.key))
+        result = await tool(
+            client, scene.host, "edit_reference", edit_arguments(BOARDS, NAME, "text", 0, grant_token=held.key)
+        )
         refused(result, "forbidden", NEEDS_BINDING)
         assert held.key not in json.dumps(result)
         assert scene.posts_counted() == 0 and scene.refused_uses() == [] and scene.docs() == []
@@ -722,8 +821,9 @@ def test_the_body_called_for_a_guest_with_no_key_grants_nothing(build_scene):
         inputs = as_the_guard_calls(scene, held)
         inputs["call"] = {**inputs["call"], "grant_key": None}
         with pytest.raises(BatonError) as raised:
-            direct(scene, "edit_reference", "guest", topic=BOARDS, name=NAME, body="text", expected_revision=0,
-                   **inputs)
+            direct(
+                scene, "edit_reference", "guest", topic=BOARDS, name=NAME, body="text", expected_revision=0, **inputs
+            )
         assert raised.value.code == "forbidden", str(raised.value)
         assert scene.docs() == [] and scene.revisions() == []
 

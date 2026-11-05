@@ -19,7 +19,7 @@ from mcp.types import CallToolResult, TextContent
 from baton import aliases, auth, datadir, messages, topics
 from baton.agents.permissions import Permissions
 from baton.app.reference_tools import LiteralArguments
-from baton.app.tool_policy import BY_NAME
+from baton.app.tool_policy import BY_NAME, ToolPolicy
 from baton.config import Config
 from baton.database.store import connect
 from baton.errors import BatonError, Forbidden, InvalidRequest
@@ -32,6 +32,10 @@ from .catalog import (
 )
 
 HOURLY_LIMITS = {auth.SCOPE_READ: 1200, auth.SCOPE_WRITE: 300}
+
+
+def _has_scope(principal: Any, call: dict[str, Any], scope: str) -> bool:
+    return principal is not None and call["credential_role"] is not None and scope in principal.scopes
 
 
 class Guard:
@@ -47,60 +51,10 @@ class Guard:
     def wrap(self, name: str, scope: str, body: Callable[..., Any]) -> Callable[..., Any]:
         policy = BY_NAME[name]
         passes_context = "call" in inspect.signature(body).parameters
+
         @functools.wraps(body)
         def guarded(**kwargs: Any) -> Any:
-            proof = kwargs.pop("token", None)
-            principal = get_access_token()
-            call = _call_context(principal)
-            # The key is out of the arguments from here on, so nothing that copies them can copy it.
-            call["grant_key"] = kwargs.pop("grant_token", None)
-
-            def refuse(code: str, detail: str, extra: dict[str, Any] | None = None) -> Any:
-                for secret in (proof, call["grant_key"]):
-                    if isinstance(secret, str) and secret:
-                        detail = detail.replace(secret, "[redacted]")
-                refusal = {**self._refuse(name, call, kwargs, code, detail, proof), **(extra or {})}
-                if policy.error_result:
-                    return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))],
-                                           is_error=True)
-                return refusal
-
-            if principal is None or call["credential_role"] is None or scope not in principal.scopes:
-                return refuse("insufficient_scope", f"{name} needs {scope}")
-            try:
-                if proof is not None:
-                    self._resolve(call, proof)
-                refusal = self._capability(name, call, kwargs)
-                if refusal is not None:
-                    return refuse("forbidden", refusal)
-                if call["identity"] is not None and policy.identity == "bound":
-                    kwargs["identity"] = call["identity"]
-                if call["role"] == "guest" and policy.identity == "guest":
-                    # Both carry the alias through to the body, which attributes the row to it. Only a
-                    # post spends the hourly post quota; a thread has its own caps, counted where it is
-                    # created so that a refusal and its alert commit together.
-                    if policy.post_quota:
-                        self._admit_post(principal, call)
-                    elif call["identity"] is None:
-                        raise Forbidden("alias binding is missing, invalid or expired")
-                    kwargs["identity"] = call["identity"]
-                if (call["role"] == "guest" and policy.identity == "bound" and policy.post_quota
-                        and call["identity"] is not None):
-                    # An edit spends the alias's hourly post quota, whether it is then refused or not. Without a
-                    # binding it spends none: the grant check refuses it, in its own words.
-                    self._admit_post(principal, call)
-            except BatonError as error:
-                return refuse(error.code, str(error), error.extra)
-            if not self._within_limit(call["role"], name, HOURLY_LIMITS[scope]):
-                return refuse("rate_limited", f"{name} is over its hourly limit")
-            if passes_context:
-                kwargs["call"] = call
-            try:
-                result = body(call["role"], **kwargs)
-            except BatonError as error:
-                return refuse(error.code, str(error), error.extra)
-            self._audit(name, call, kwargs, "ok", proof)
-            return result
+            return self._guarded_call(name, scope, body, policy, passes_context, kwargs)
 
         # The role is bound from the credential, so it is not part of the tool's schema; `token` is everyone's.
         guarded.__signature__ = _tool_signature(name, body)  # type: ignore[attr-defined]
@@ -108,6 +62,84 @@ class Guard:
             guarded.__doc__ = (body.__doc__ or "") + CORE_PROOF_NOTE
         self._validators[name] = func_metadata(guarded, structured_output=False).validate_arguments
         return guarded
+
+    def _guarded_call(
+        self,
+        name: str,
+        scope: str,
+        body: Callable[..., Any],
+        policy: ToolPolicy,
+        passes_context: bool,
+        kwargs: dict[str, Any],
+    ) -> Any:
+        proof = kwargs.pop("token", None)
+        principal = get_access_token()
+        call = _call_context(principal)
+        # The key is out of the arguments from here on, so nothing that copies them can copy it.
+        call["grant_key"] = kwargs.pop("grant_token", None)
+
+        def refuse(code: str, detail: str, extra: dict[str, Any] | None = None) -> Any:
+            for secret in (proof, call["grant_key"]):
+                if isinstance(secret, str) and secret:
+                    detail = detail.replace(secret, "[redacted]")
+            refusal = {**self._refuse(name, call, kwargs, code, detail, proof), **(extra or {})}
+            if policy.error_result:
+                return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))], is_error=True)
+            return refusal
+
+        if not _has_scope(principal, call, scope):
+            return refuse("insufficient_scope", f"{name} needs {scope}")
+        try:
+            refusal = self._bind_and_check(name, policy, principal, call, kwargs, proof)
+        except BatonError as error:
+            return refuse(error.code, str(error), error.extra)
+        if refusal is not None:
+            return refuse("forbidden", refusal)
+        if not self._within_limit(call["role"], name, HOURLY_LIMITS[scope]):
+            return refuse("rate_limited", f"{name} is over its hourly limit")
+        if passes_context:
+            kwargs["call"] = call
+        try:
+            result = body(call["role"], **kwargs)
+        except BatonError as error:
+            return refuse(error.code, str(error), error.extra)
+        self._audit(name, call, kwargs, "ok", proof)
+        return result
+
+    def _bind_and_check(
+        self,
+        name: str,
+        policy: ToolPolicy,
+        principal: Any,
+        call: dict[str, Any],
+        kwargs: dict[str, Any],
+        proof: object,
+    ) -> str | None:
+        if proof is not None:
+            self._resolve(call, proof)
+        refusal = self._capability(name, call, kwargs)
+        if refusal is not None:
+            return refusal
+        self._bind_identity(policy, principal, call, kwargs)
+        return None
+
+    def _bind_identity(self, policy: ToolPolicy, principal: Any, call: dict[str, Any], kwargs: dict[str, Any]) -> None:
+        if call["identity"] is not None and policy.identity == "bound":
+            kwargs["identity"] = call["identity"]
+        if call["role"] == "guest" and policy.identity == "guest":
+            if policy.post_quota:
+                self._admit_post(principal, call)
+            elif call["identity"] is None:
+                raise Forbidden("alias binding is missing, invalid or expired")
+            kwargs["identity"] = call["identity"]
+        if (
+            call["role"] == "guest"
+            and policy.identity == "bound"
+            and policy.post_quota
+            and call["identity"] is not None
+        ):
+            # A bound edit spends quota even if a later grant check refuses it.
+            self._admit_post(principal, call)
 
     def take_literally(self, tool: Tool) -> None:
         """Make `tool` read its arguments as sent, and check the calls that carry a token by that same metadata."""
@@ -161,8 +193,13 @@ class Guard:
         if getattr(ctx, "method", None) != "tools/call" or not named:
             return await call_next(ctx)
         name = str(params.get("name", ""))
-        refusal = self._refuse(name, _call_context(get_access_token()), arguments, "forbidden_field",
-                               f"{named[0]} is not accepted: a message's author is always your credential's role")
+        refusal = self._refuse(
+            name,
+            _call_context(get_access_token()),
+            arguments,
+            "forbidden_field",
+            f"{named[0]} is not accepted: a message's author is always your credential's role",
+        )
         return CallToolResult(content=[TextContent(type="text", text=json.dumps(refusal))], is_error=True)
 
     async def refuse_claim_validation(self, ctx: Any, call_next: Any) -> Any:
@@ -195,14 +232,16 @@ class Guard:
             return await call_next(ctx)
         name, arguments = str(params.get("name", "")), params.get("arguments")
         call = _call_context(get_access_token())
-        present = isinstance(arguments, dict) and (arguments.get("token") is not None
-                                                   or arguments.get("grant_token") is not None)
+        present = isinstance(arguments, dict) and (
+            arguments.get("token") is not None or arguments.get("grant_token") is not None
+        )
         if not present and not (call["credential_role"] == "guest" and name == "send_message"):
             return await call_next(ctx)
         try:
             # Past this check the arguments are a dict: either a token or key was present in one, or it's a post.
-            if name == "send_message" and (not isinstance(arguments, dict)
-                                           or not isinstance(arguments.get("text"), str)):
+            if name == "send_message" and (
+                not isinstance(arguments, dict) or not isinstance(arguments.get("text"), str)
+            ):
                 raise InvalidRequest("send_message requires text")
             if arguments.get("token") is not None or (call["credential_role"] == "guest" and name == "send_message"):
                 aliases.validate_proof(arguments.get("token"))
@@ -230,19 +269,27 @@ class Guard:
             calls.append(now)
             return True
 
-    def _refuse(self, name: str, call: dict[str, Any], kwargs: dict[str, Any], code: str, detail: str,
-                proof: object = None) -> dict:
+    def _refuse(
+        self, name: str, call: dict[str, Any], kwargs: dict[str, Any], code: str, detail: str, proof: object = None
+    ) -> dict:
         self._audit(name, call, kwargs, code, proof)
         return {"error": code, "detail": detail}
 
-    def _audit(self, name: str, call: dict[str, Any], kwargs: dict[str, Any], outcome: str,
-               proof: object = None) -> None:
+    def _audit(
+        self, name: str, call: dict[str, Any], kwargs: dict[str, Any], outcome: str, proof: object = None
+    ) -> None:
         """One line: the credential, the role the call ran as, any alias by id and code, and the ids it named."""
         role, identity = call["role"], call["identity"]
         proof = kwargs.get("token") if proof is None else proof  # a refusal before Guard sees the raw arguments
-        ids = ({key: kwargs[key] for key in AUDITED_IDS if kwargs.get(key) is not None
-                and not (key == "topic" and name in topics.AUDIT_TOOLS)}  # the topic tools' fields come below
-               if name != "claim_alias" and not (name == "send_message" and role == "guest") else {})
+        ids = (
+            {
+                key: kwargs[key]
+                for key in AUDITED_IDS
+                if kwargs.get(key) is not None and not (key == "topic" and name in topics.AUDIT_TOOLS)
+            }  # the topic tools' fields come below
+            if name != "claim_alias" and not (name == "send_message" and role == "guest")
+            else {}
+        )
         ids.update(topics.audit_fields(name, kwargs, outcome, call.get("topic", {})))
         # Neither the binding token nor the grant key may reach the line, whichever argument carried it, topic
         # fields included.
@@ -250,13 +297,21 @@ class Guard:
         for secret in (proof, call.get("grant_key") or kwargs.get("grant_token")):
             if isinstance(secret, str) and secret:
                 ids = {key: value for key, value in ids.items() if secret not in json.dumps(value)}
-        line = {"at": datetime.now(UTC).isoformat(), "role": role, "credential_role": call["credential_role"],
-                "credential_id": call["credential_id"], "tool": name, **ids, "outcome": outcome,
-                **({"alias_id": identity["alias_id"], "alias_code": identity["code"]} if identity else {})}
+        line = {
+            "at": datetime.now(UTC).isoformat(),
+            "role": role,
+            "credential_role": call["credential_role"],
+            "credential_id": call["credential_id"],
+            "tool": name,
+            **ids,
+            "outcome": outcome,
+            **({"alias_id": identity["alias_id"], "alias_code": identity["code"]} if identity else {}),
+        }
         directory = self._audit_path.parent
         with self._lock, datadir.opened(directory) as dir_fd:
-            fd = datadir.open_file(dir_fd, self._audit_path.name, os.O_WRONLY | os.O_APPEND | os.O_CREAT,
-                                   directory=directory)
+            fd = datadir.open_file(
+                dir_fd, self._audit_path.name, os.O_WRONLY | os.O_APPEND | os.O_CREAT, directory=directory
+            )
             try:
                 os.write(fd, (json.dumps(line) + "\n").encode())
             finally:
@@ -267,14 +322,21 @@ def _call_context(principal: Any) -> dict[str, Any]:
     """The credential's role and id (a bearer entry's name or an OAuth grant, never the token), before any proof."""
     role = auth.role_of(principal)
     authority = auth.credential_authority(principal) if principal is not None else {}
-    return {"credential_role": role, "credential_id": authority.get("name") or authority.get("grant"),
-            "authority": authority, "role": role, "identity": None, "grant_key": None}
+    return {
+        "credential_role": role,
+        "credential_id": authority.get("name") or authority.get("grant"),
+        "authority": authority,
+        "role": role,
+        "identity": None,
+        "grant_key": None,
+    }
 
 
 def _tool_signature(name: str, body: Callable[..., Any]) -> inspect.Signature:
     signature = inspect.signature(body)
     parameters = [p for p in signature.parameters.values() if p.name not in {"role", "identity", "call"}]
     if name != "claim_alias":
-        parameters.append(inspect.Parameter("token", inspect.Parameter.KEYWORD_ONLY, default=None,
-                                            annotation=TOKEN_ARGUMENT))
+        parameters.append(
+            inspect.Parameter("token", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=TOKEN_ARGUMENT)
+        )
     return signature.replace(parameters=parameters)

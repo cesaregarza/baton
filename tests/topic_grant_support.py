@@ -34,13 +34,45 @@ START = datetime(2026, 11, 3, 12, 0, 0, tzinfo=UTC)
 CAPABILITIES = ("reference.edit", "thread.organise", "topic.create_sub")
 # A root, a subtopic of it, a root whose name merely starts with the first one's, and a subtopic of that.
 ROOT, CHILD, LOOKALIKE, LOOKALIKE_CHILD = "job-hunt", "job-hunt/x", "job-hunting", "job-hunting/x"
-GRANT_COLUMNS = {"id", "alias_id", "topic_id", "capabilities", "inherit", "expires_at", "proposed_by", "proposed_at",
-                 "proposal_expires_at", "nonce", "digest", "authorized_by", "authorized_at", "authorized_digest",
-                 "proof_digest", "revoked_at", "revoked_by", "revoke_reason", "alias_name_seen", "alias_code_seen",
-                 "topic_path_seen"}
-PROPOSAL_COLUMNS = ("id", "alias_id", "topic_id", "capabilities", "inherit", "expires_at", "proposed_by",
-                    "proposed_at", "proposal_expires_at", "nonce", "digest", "alias_name_seen", "alias_code_seen",
-                    "topic_path_seen")
+GRANT_COLUMNS = {
+    "id",
+    "alias_id",
+    "topic_id",
+    "capabilities",
+    "inherit",
+    "expires_at",
+    "proposed_by",
+    "proposed_at",
+    "proposal_expires_at",
+    "nonce",
+    "digest",
+    "authorized_by",
+    "authorized_at",
+    "authorized_digest",
+    "proof_digest",
+    "revoked_at",
+    "revoked_by",
+    "revoke_reason",
+    "alias_name_seen",
+    "alias_code_seen",
+    "topic_path_seen",
+}
+PROPOSAL_COLUMNS = (
+    "id",
+    "alias_id",
+    "topic_id",
+    "capabilities",
+    "inherit",
+    "expires_at",
+    "proposed_by",
+    "proposed_at",
+    "proposal_expires_at",
+    "nonce",
+    "digest",
+    "alias_name_seen",
+    "alias_code_seen",
+    "topic_path_seen",
+)
 AUTHORIZATION_COLUMNS = ("authorized_by", "authorized_at", "authorized_digest", "proof_digest")
 
 
@@ -69,11 +101,19 @@ def alias_code(alias_id: str) -> str:
 
 def canonical_digest(row: sqlite3.Row | dict[str, Any]) -> str:
     """The digest the spec defines, from a grant row's own columns."""
-    obj = {"alias_id": row["alias_id"], "alias_name": row["alias_name_seen"], "alias_code": row["alias_code_seen"],
-           "topic_id": row["topic_id"], "topic_path": row["topic_path_seen"],
-           "capabilities": json.loads(row["capabilities"]), "inherit": row["inherit"],
-           "expires_at": row["expires_at"], "proposed_by": row["proposed_by"], "proposed_at": row["proposed_at"],
-           "nonce": row["nonce"]}
+    obj = {
+        "alias_id": row["alias_id"],
+        "alias_name": row["alias_name_seen"],
+        "alias_code": row["alias_code_seen"],
+        "topic_id": row["topic_id"],
+        "topic_path": row["topic_path_seen"],
+        "capabilities": json.loads(row["capabilities"]),
+        "inherit": row["inherit"],
+        "expires_at": row["expires_at"],
+        "proposed_by": row["proposed_by"],
+        "proposed_at": row["proposed_at"],
+        "nonce": row["nonce"],
+    }
     text = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     return hashlib.sha256(text).hexdigest()
 
@@ -81,8 +121,10 @@ def canonical_digest(row: sqlite3.Row | dict[str, Any]) -> str:
 def every_cell(db: sqlite3.Connection) -> list[str]:
     """Every value in every ordinary table, as text: for proving a secret is stored nowhere."""
     cells = []
-    for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-                              " AND name NOT LIKE '%\\_fts%' ESCAPE '\\'").fetchall():
+    for (name,) in db.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        " AND name NOT LIKE '%\\_fts%' ESCAPE '\\'"
+    ).fetchall():
         for row in db.execute(f"SELECT * FROM {name}"):
             cells.extend(str(value) for value in tuple(row) if value is not None)
     return cells
@@ -117,8 +159,14 @@ class World:
     def topic_id(self, path: str) -> str:
         return self.db.execute("SELECT id FROM topics WHERE path = ?", (path,)).fetchone()["id"]
 
-    def propose(self, alias: str = "lane-a", topic: str = ROOT, capabilities: Any = ("reference.edit",),
-                inherit: bool = False, days: int = 7) -> dict[str, Any]:
+    def propose(
+        self,
+        alias: str = "lane-a",
+        topic: str = ROOT,
+        capabilities: Any = ("reference.edit",),
+        inherit: bool = False,
+        days: int = 7,
+    ) -> dict[str, Any]:
         return self.tg.propose(self.db, alias, topic, list(capabilities), inherit, days)
 
     def authorize(self, proposed: dict[str, Any]) -> dict[str, Any]:

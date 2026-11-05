@@ -27,11 +27,29 @@ An alias enrolled as a role is different: pass its binding_token as `token` on a
 that role, with its mailbox, waits and permissions. whoami shows the role a call runs as."""
 
 
-TOKEN_ARGUMENT = Annotated[str | None, Field(description=(
-    "A binding_token from claim_alias, for a shared guest login only. An enrolled alias's token makes this call "
-    "run as its mapped role; any other alias's token posts as that alias. Omitted and null are the same; an "
-    "empty, malformed, unknown or expired token is refused."))]
-CORE_PROOF_NOTE = ("\n\nOn a shared guest login this tool needs a core proof: token=<the binding_token of an alias "
-                   "enrolled as a role>.")
-AUDITED_IDS = ("to", "conversation_id", "participant", "topic", "job_id", "reply_to", "request_id",
-               "to_state", "expected_revision")
+TOKEN_ARGUMENT = Annotated[
+    str | None,
+    Field(
+        description=(
+            "A binding_token from claim_alias, for a shared guest login only. "
+            "An enrolled alias's token makes this call "
+            "run as its mapped role; any other alias's token posts as that alias. Omitted and null are the same; an "
+            "empty, malformed, unknown or expired token is refused."
+        )
+    ),
+]
+CORE_PROOF_NOTE = (
+    "\n\nOn a shared guest login this tool needs a core proof: token=<the binding_token of an alias "
+    "enrolled as a role>."
+)
+AUDITED_IDS = (
+    "to",
+    "conversation_id",
+    "participant",
+    "topic",
+    "job_id",
+    "reply_to",
+    "request_id",
+    "to_state",
+    "expected_revision",
+)

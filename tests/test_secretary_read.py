@@ -29,8 +29,9 @@ NEW_KIND = "synthetic.notice"  # a kind of delivery no secretary code names
 def _read(world, capsys, *args: str) -> tuple[int, dict]:
     """`baton secretary --policy FILE read ...` with no --state: its exit code and the JSON it printed."""
     try:
-        code = cli.main(["--config", str(world.config_path), "secretary", "--policy", str(world.policy_path),
-                         "read", *args])
+        code = cli.main(
+            ["--config", str(world.config_path), "secretary", "--policy", str(world.policy_path), "read", *args]
+        )
     except SystemExit as stopped:  # argparse refuses an unknown action or option
         code = stopped.code
     out = capsys.readouterr().out
@@ -57,12 +58,27 @@ def _kinds(page: dict, part: str) -> list[tuple[str, int]]:
     return [(entry["kind"], entry["pos"]) for entry in page.get(part, [])]
 
 
-def _append(world, kind: str, *, actor: str = "worker", audience: str | None = "planner", job_id: str | None = None,
-            data: dict | None = None) -> int:
+def _append(
+    world,
+    kind: str,
+    *,
+    actor: str = "worker",
+    audience: str | None = "planner",
+    job_id: str | None = None,
+    data: dict | None = None,
+) -> int:
     """An event of any kind, appended as a future producer would: nothing in the secretary is told about it."""
     with transaction(world.baton):
-        events.append(world.baton, job_id=job_id, seq=0 if job_id is None else None, actor=actor, audience=audience,
-                      kind=kind, summary=f"{kind} for {audience}", data=data or {})
+        events.append(
+            world.baton,
+            job_id=job_id,
+            seq=0 if job_id is None else None,
+            actor=actor,
+            audience=audience,
+            kind=kind,
+            summary=f"{kind} for {audience}",
+            data=data or {},
+        )
     return world.baton.execute("SELECT MAX(pos) FROM events").fetchone()[0]
 
 
@@ -72,8 +88,9 @@ def _last_pos(world) -> int:
 
 def _stream_end(world, principal: str = "planner") -> int:
     """The last event in the principal's stream: one it received or sent."""
-    return world.baton.execute("SELECT MAX(pos) FROM events WHERE audience=? OR actor=?",
-                               (principal, principal)).fetchone()[0]
+    return world.baton.execute(
+        "SELECT MAX(pos) FROM events WHERE audience=? OR actor=?", (principal, principal)
+    ).fetchone()[0]
 
 
 def test_after_a_position_lists_each_message_the_principal_sees_once_with_its_text(tmp_path, capsys) -> None:
@@ -82,18 +99,32 @@ def test_after_a_position_lists_each_message_the_principal_sees_once_with_its_te
         direct = messages.send(world.baton, sender="worker", recipient="planner", text="Direct words")
         asked = say(world, room, "planner", "Please check", attention=["worker"])  # one copy per other participant
         reply = say(world, room, "worker", "Reply words", reply_to=asked["message_id"], relayed=RELAYED)
-        guest = say(world, room, "guest", "Guest words", identity={"alias_id": ALIAS_ID, "alias": "lane-a",
-                                                                     "code": "ab12"})
+        guest = say(
+            world, room, "guest", "Guest words", identity={"alias_id": ALIAS_ID, "alias": "lane-a", "code": "ab12"}
+        )
         code, page = _read(world, capsys, "--after", "0")
         assert code == 0 and page["principal"] == "planner" and page["after"] == 0
         assert _ids(page) == [direct["message_id"], asked["message_id"], reply["message_id"], guest["message_id"]]
         first, own, answered, guested = _messages(page)
-        assert (first["sender"], first["to"], first["conversation_id"], first["text"], first["relayed"],
-                first["reply_to"]) == ("worker", "planner", None, "Direct words", [], None)
-        assert (own["sender"], own["to"], own["conversation_id"], own["attention"]) == ("planner", None, room,
-                                                                                       ["worker"])
-        assert (answered["reply_to"], answered["text"], answered["relayed"]) == (asked["message_id"], "Reply words",
-                                                                                 RELAYED)
+        assert (
+            first["sender"],
+            first["to"],
+            first["conversation_id"],
+            first["text"],
+            first["relayed"],
+            first["reply_to"],
+        ) == ("worker", "planner", None, "Direct words", [], None)
+        assert (own["sender"], own["to"], own["conversation_id"], own["attention"]) == (
+            "planner",
+            None,
+            room,
+            ["worker"],
+        )
+        assert (answered["reply_to"], answered["text"], answered["relayed"]) == (
+            asked["message_id"],
+            "Reply words",
+            RELAYED,
+        )
         assert guested["sender"] == f"guest:{ALIAS_ID}" and guested["alias"] == {"name": "lane-a", "code": "ab12"}
         assert all(message["at"] and type(message["pos"]) is int for message in _messages(page))
         assert [message["pos"] for message in _messages(page)] == sorted(m["pos"] for m in _messages(page))
@@ -105,15 +136,25 @@ def test_after_a_position_lists_each_message_the_principal_sees_once_with_its_te
 def test_visibility_matches_the_principals_visible_messages_and_others_never_appear(tmp_path, capsys) -> None:
     with make_world(tmp_path) as world:
         room, left = conversation(world), conversation(world)
-        seen = [messages.send(world.baton, sender="worker", recipient="planner", text="To the principal"),
-                messages.send(world.baton, sender="planner", recipient="worker", text="From the principal"),
-                say(world, room, "reviewer", "In a shared room")]
+        seen = [
+            messages.send(world.baton, sender="worker", recipient="planner", text="To the principal"),
+            messages.send(world.baton, sender="planner", recipient="worker", text="From the principal"),
+            say(world, room, "reviewer", "In a shared room"),
+        ]
         with transaction(world.baton):
             notice = messages.new_message_id()
-            messages.store_copy(world.baton, message_id=notice, sender=None, recipient="planner", text="Host notice",
-                                notice={"kind": "limit"})
-        hidden = [messages.send(world.baton, sender="worker", recipient="reviewer", text=f"Between them: {SECRET}"),
-                  say(world, left, "worker", f"Before it left: {SECRET}")]
+            messages.store_copy(
+                world.baton,
+                message_id=notice,
+                sender=None,
+                recipient="planner",
+                text="Host notice",
+                notice={"kind": "limit"},
+            )
+        hidden = [
+            messages.send(world.baton, sender="worker", recipient="reviewer", text=f"Between them: {SECRET}"),
+            say(world, left, "worker", f"Before it left: {SECRET}"),
+        ]
         conversations.remove(world.baton, world.config, left, "planner", actor="planner")
         hidden.append(say(world, left, "reviewer", f"After it left: {SECRET}"))
         code, page = _read(world, capsys, "--after", "0")
@@ -138,7 +179,11 @@ def test_reads_by_id_return_what_the_principal_can_see_and_list_the_rest_missing
         assert page["missing"] == [theirs["message_id"], absent] and page["not_read"] == []
         message = page["messages"][0]
         assert (message["pos"], message["text"], message["relayed"], message["conversation_id"]) == (
-            None, "Visible words", RELAYED, room)
+            None,
+            "Visible words",
+            RELAYED,
+            room,
+        )
         assert SECRET not in json.dumps(page)
 
 
@@ -158,8 +203,11 @@ def test_a_page_is_bounded_by_count_and_bytes_and_the_next_one_starts_where_it_s
                 break
         assert [message for page in pages for message in _ids(page)] == order  # nothing repeated, nothing skipped
         assert [len(_entries(page)) for page in pages] == [2, 1, 1, 1]  # the count bound, then the byte bound
-        assert pages[0]["through_pos"] == max(event["pos"] for event in world.baton.execute(
-            "SELECT pos, data FROM events WHERE kind='message'") if json.loads(event["data"])["message_id"] == order[1])
+        assert pages[0]["through_pos"] == max(
+            event["pos"]
+            for event in world.baton.execute("SELECT pos, data FROM events WHERE kind='message'")
+            if json.loads(event["data"])["message_id"] == order[1]
+        )
         code, alone = _read(world, capsys, "--after", str(pages[1]["through_pos"]), "--max-bytes", "1024")
         assert code == 0 and len(_entries(alone)) == 1 and alone["more"] is True  # one message larger than the bound
         code, by_id = _read(world, capsys, "--ids", ",".join(order[2:]), "--max-bytes", "4000")
@@ -190,30 +238,75 @@ def test_the_module_entry_prints_the_same_page_as_the_subcommand(tmp_path, capsy
         messages.send(world.baton, sender="worker", recipient="planner", text="Same words")
         code, from_cli = _read(world, capsys, "--after", "0", "--limit", "5")
         root = Path(baton.__file__).resolve().parents[1]
-        run = subprocess.run([sys.executable, "-m", "baton.secretary_read", "--config", str(world.config_path),
-                              "--policy", str(world.policy_path), "--after", "0", "--limit", "5"],
-                             capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(root)}, check=False)
+        run = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "baton.secretary_read",
+                "--config",
+                str(world.config_path),
+                "--policy",
+                str(world.policy_path),
+                "--after",
+                "0",
+                "--limit",
+                "5",
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(root)},
+            check=False,
+        )
         assert (code, run.returncode) == (0, 0) and json.loads(run.stdout) == from_cli
-        refused = subprocess.run([sys.executable, "-m", "baton.secretary_read", "--config", str(world.config_path),
-                                  "--policy", str(world.policy_path), "--after", "0", "--limit", "0"],
-                                 capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(root)},
-                                 check=False)
+        refused = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "baton.secretary_read",
+                "--config",
+                str(world.config_path),
+                "--policy",
+                str(world.policy_path),
+                "--after",
+                "0",
+                "--limit",
+                "0",
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(root)},
+            check=False,
+        )
         assert refused.returncode == 1 and json.loads(refused.stdout)["error"] == "invalid_request"
 
 
-@pytest.mark.parametrize("args", [
-    [],                                                  # neither a position nor ids
-    ["--after", "0", "--ids", "msg_" + "1" * 16],        # both
-    ["--after", "-1"],
-    ["--after", "0", "--limit", "0"],
-    ["--after", "0", "--limit", "101"],
-    ["--after", "0", "--max-bytes", "1023"],
-    ["--after", "0", "--max-bytes", str(1024 * 1024 + 1)],
-    ["--ids", "not-a-message-id"],
-    ["--ids", "msg_" + "1" * 16 + ",msg_" + "1" * 16],    # the same id twice
-    ["--ids", ",".join(f"msg_{number:016x}" for number in range(101))],
-], ids=["neither", "both", "negative", "limit-0", "limit-101", "bytes-low", "bytes-high", "bad-id", "repeat",
-        "too-many-ids"])
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],  # neither a position nor ids
+        ["--after", "0", "--ids", "msg_" + "1" * 16],  # both
+        ["--after", "-1"],
+        ["--after", "0", "--limit", "0"],
+        ["--after", "0", "--limit", "101"],
+        ["--after", "0", "--max-bytes", "1023"],
+        ["--after", "0", "--max-bytes", str(1024 * 1024 + 1)],
+        ["--ids", "not-a-message-id"],
+        ["--ids", "msg_" + "1" * 16 + ",msg_" + "1" * 16],  # the same id twice
+        ["--ids", ",".join(f"msg_{number:016x}" for number in range(101))],
+    ],
+    ids=[
+        "neither",
+        "both",
+        "negative",
+        "limit-0",
+        "limit-101",
+        "bytes-low",
+        "bytes-high",
+        "bad-id",
+        "repeat",
+        "too-many-ids",
+    ],
+)
 def test_a_read_outside_its_bounds_is_refused_before_anything_is_read(tmp_path, capsys, args) -> None:
     with make_world(tmp_path) as world:
         code, out = _read(world, capsys, *args)
@@ -226,13 +319,11 @@ def test_stateful_secretary_actions_require_their_state(tmp_path, capsys) -> Non
         assert (code, page.get("deliveries"), page.get("context")) == (0, [], [])
         for action in (["show"], ["decide", "--budget-seconds", "5"], ["acknowledge", "dec_0000000000000000"]):
             with pytest.raises(SystemExit) as absent:
-                cli.main(["--config", str(world.config_path), "secretary", "--policy", str(world.policy_path),
-                          *action])
+                cli.main(["--config", str(world.config_path), "secretary", "--policy", str(world.policy_path), *action])
             assert absent.value.code == 2
 
 
-def test_every_kind_delivered_to_the_principal_is_read_as_a_delivery_with_or_without_its_ids(tmp_path,
-                                                                                           capsys) -> None:
+def test_every_kind_delivered_to_the_principal_is_read_as_a_delivery_with_or_without_its_ids(tmp_path, capsys) -> None:
     with make_world(tmp_path) as world:
         made = jobs.create(world.baton, world.config.jobs, request_id="job-kinds", actor="worker", title="Task")
         loose = _append(world, NEW_KIND, data={"note": "metadata only"})  # neither a message nor a job id
@@ -240,11 +331,20 @@ def test_every_kind_delivered_to_the_principal_is_read_as_a_delivery_with_or_wit
         sent = messages.send(world.baton, sender="worker", recipient="planner", text="Direct words")
         code, page = _read(world, capsys, "--after", "0")
         assert code == 0 and page.get("context") == []
-        assert _kinds(page, "deliveries") == [("job.created", loose - 1), (NEW_KIND, loose), ("job.synthetic", on_job),
-                                              ("message", _last_pos(world))]
+        assert _kinds(page, "deliveries") == [
+            ("job.created", loose - 1),
+            (NEW_KIND, loose),
+            ("job.synthetic", on_job),
+            ("message", _last_pos(world)),
+        ]
         created, notice, synthetic, message = page["deliveries"]
         assert (notice["actor"], notice["audience"], notice["job_id"], notice["message"], notice["data"]) == (
-            "worker", "planner", None, None, {"note": "metadata only"})
+            "worker",
+            "planner",
+            None,
+            None,
+            {"note": "metadata only"},
+        )
         assert (synthetic["job_id"], synthetic["message"], created["job_id"]) == (made["job_id"], None, made["job_id"])
         assert notice["summary"] == f"{NEW_KIND} for planner" and notice["at"]
         assert message["message"]["id"] == sent["message_id"] and message["message"]["text"] == "Direct words"
@@ -313,6 +413,7 @@ def test_read_refuses_to_migrate_an_old_source_database(tmp_path) -> None:
     from dataclasses import replace
 
     from baton.agents.secretary.inbox import read as secretary_read
+
     with make_world(tmp_path) as world:
         old_dir = tmp_path / "old-schema"
         old_dir.mkdir(mode=0o700)

@@ -64,8 +64,9 @@ def test_a_dot_dot_after_a_symlink_cannot_redirect_the_database(tmp_path: Path, 
     assert sorted(p.name for p in permissive.iterdir()) == ["baton.db"]
 
 
-def test_a_parent_swapped_for_a_writable_one_mid_check_gets_nothing_created_in_it(tmp_path: Path, capsys,
-                                                                                  monkeypatch) -> None:
+def test_a_parent_swapped_for_a_writable_one_mid_check_gets_nothing_created_in_it(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     parent = private_dir(tmp_path / "parent")
     make_config(tmp_path, data_dir=parent / "data")
     real_mkdir = os.mkdir
