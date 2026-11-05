@@ -19,13 +19,15 @@ from baton.config import Config, ConfigError
 from baton.errors import BatonError, InvalidRequest
 
 from .assessment import Assessment
+from .harness import SecretaryHarness
 from .inbox import InboxWindow
-from .model import DecisionEngine, ModelUnavailable, SecretaryModel
+from .model import ModelUnavailable
 from .policy import Policy, fingerprint, load_policy
-from .prompt import INSTRUCTIONS, RESPONSE_SCHEMA
+from .prompt import HARNESS_VERSION, INSTRUCTIONS, RESPONSE_SCHEMA
 from .runtime import DatabaseWorker
 from .service import Secretary
 from .state import AttentionLog
+from .tools import DECISION_TOOL
 
 MAX_BUDGET_SECONDS = 60.0
 TRIGGER = re.compile(r"message:[1-9][0-9]{0,17}|job:job_[0-9a-f]{16}:[1-9][0-9]{0,17}|conversation")
@@ -68,28 +70,20 @@ class DecisionRun:
         await database.call(log.bind, window.epoch, self.floor)
         context = {"principal": policy.principal, "mode": "digest" if self.hourly else "alert",
                    "trigger": self.trigger, "since": self.since, "floor": self.floor,
-                   "through_pos": window.through, "instructions": policy.instructions,
+                   "through_pos": window.through, "instructions": policy.instructions, "knowledge": policy.knowledge,
                    "summary_bytes": policy.summary_bytes, "events": window.events,
                    "reply_context": window.reply_context}
         key = fingerprint({"policy": policy.digest, "context": context, "epoch": window.epoch,
-                           "prompt": INSTRUCTIONS, "schema": RESPONSE_SCHEMA})
+                           "prompt": INSTRUCTIONS, "schema": RESPONSE_SCHEMA,
+                           "harness": HARNESS_VERSION, "tools": DECISION_TOOL if policy.decision_engine else None})
         cached = await database.call(log.get, key)
         if cached is not None:
             return {**cached, "cached": True}
-        engine_status = "not_configured"
-        context["engine_advice"] = None
+        harness = SecretaryHarness(policy)
         if not window.events:
             assessment = Assessment("keep", "No pending visible events.", "", [])
         else:
-            if policy.decision_engine:
-                try:
-                    context["engine_advice"] = await DecisionEngine(policy.decision_engine).advise(
-                        context, min(policy.decision_engine["timeout_seconds"], self._remaining() / 4))
-                    engine_status = "available"
-                except ModelUnavailable:
-                    engine_status = "unavailable"
-            answer = await SecretaryModel(policy.model).assess(
-                context, min(policy.model["timeout_seconds"], self._remaining()))
+            answer = await harness.assess(context, self._remaining())
             assessment = Assessment.parse(answer, offered=window.source_keys,
                                           summary_bytes=policy.summary_bytes, digest=self.hourly)
         # Recheck the same sources after inference: permission changes or edits invalidate the generated summary.
@@ -108,7 +102,7 @@ class DecisionRun:
                                    "job_id": e["job_id"]} for e in [*window.events, *window.reply_context]
                                   if e["source_key"] in assessment.sources],
                   "decision_id": key, "window_digest": window.digest, "policy_digest": policy.digest,
-                  "engine_status": engine_status, "cached": False,
+                  "engine_status": harness.tools.status, "harness": harness.metrics, "cached": False,
                   "model": {k: policy.model[k] for k in ("provider", "model") if k in policy.model},
                   "scanned_at": _now()}
         return await database.call(log.remember, result)

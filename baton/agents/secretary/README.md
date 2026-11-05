@@ -1,103 +1,134 @@
 # Baton secretary (policy version 2)
 
-The secretary is a lightweight model-driven attention layer for one agent, the **principal**. The host wakes it
-when Baton reports activity. It reads the principal's pending, currently visible messages and events together,
-then asks a model whether the more expensive principal needs attention now. A wake result includes a narrative
-summary and source references. The host delivers it; the principal can then decide which threads to open.
-The secretary itself never sends that notification or advances the principal's Baton inbox.
+The secretary is a lightweight model harness for one Baton agent, the **principal**. When visible activity arrives,
+it reads the complete pending window and asks a model to assess whether the principal needs attention. A wake
+includes a grounded summary and source references for the host to deliver. The secretary never sends that
+notification itself or advances the principal's inbox.
 
-For a persistent worker and Codex or Claude Code hooks, use the
-[secretary integration skills](../../../integrations/secretary/README.md). The integration owns process
-supervision and delivery; this package owns model triage and acknowledged coverage.
+## How an assessment works
 
-The model is the interpreter. It weighs meaning and actionability across the whole pending window; there is no
-deterministic rule-word fallback. An optional decision engine can provide extra advice to the model. If that
-advisory command fails, the model still assesses the inbox without it. Policy version 2 is the only supported
-policy format; older policies are unsupported and require a current policy and a new state file.
+1. Baton builds the authorized pending window, including visible reply parents and context about the principal's
+   own sends. Empty windows skip inference.
+2. The harness sends four ordered prompt layers: stable secretary system instructions, operator-authored contextual
+   knowledge, principal-specific instructions and summary limit, then the current event window. The first three
+   layers are intended to remain stable across assessments; layered caching puts explicit breakpoints on them
+   and keeps the provider's implicit window/tool-result boundary for reuse within an assessment.
+   Implicit mode omits explicit breakpoints for compatible endpoints or older
+   models. Cache hits are not guaranteed: model support, minimum prompt size, cache expiry, and provider reporting
+   affect them. The harness does not add padding to chase a cache hit.
+3. The model interprets the whole window and either returns the strict assessment (`wake`, `hold`, or `keep`, reason,
+   summary, and source keys) or optionally calls `decide_attention` when an independent typed opinion would help.
+4. The optional tool sends the full authorized context to a configured decision engine and returns only its typed
+   decision. The model remains responsible for its own grounded explanation and summary. An unavailable engine
+   returns an error to the model; it never fabricates a `wake` verdict. The model may also finish without calling it.
+5. The harness appends each model response and matching tool result to the conversation, under one overall callback
+   deadline chosen by the host (at most 60 seconds) and a default limit of two tool calls (configurable up to eight).
+   Successful engine verdicts are reused within that assessment. The response is validated and source visibility
+   rechecked before delivery.
+   Delivery coverage advances only after the host confirms the brief was delivered.
 
-## What happens on an alert
+The model weighs semantic relevance and actionability across the pending window; there is no deterministic
+keyword fallback. `wake` means attention is useful now, `hold` means useful later, and `keep` means no attention is
+needed now. On alerts, hold and keep have empty summaries. Wakes and digests include a concise narrative that
+covers material updates, identifies who needs what, and cites relevant supplied sources.
 
-1. Read all pending visible events, deduplicating recipient copies of the same message. Include visible reply
-   parents as context even when they precede the last delivered summary.
-2. If configured, ask the decision engine for advisory signals about that window.
-3. Give the lightweight model the messages, reply context, operator preferences, and engine advice. The model
-   interprets the conversation and chooses an attention decision; Baton does not derive it from words or scores.
-4. In the same inference, the model writes a summary when it chooses to wake the principal, or when asked for a
-   scheduled digest. It covers the material information across the pending messages, grouping related updates.
-5. Validate the response format, size, and cited IDs, and recheck source visibility. Return the assessment to
-   the host. Save delivery coverage only after the host confirms delivery.
+## Setup
 
-| Model decision | Meaning on an alert |
-| --- | --- |
-| `wake` | Interrupt the principal with the generated summary and source references. |
-| `hold` | Useful information can wait; retain it for another alert or a scheduled digest. |
-| `keep` | No attention is needed now; keep the underlying messages available in Baton. |
-
-For example, the window may contain “Migration finished” from the worker followed by “Health checks regressed;
-can you approve a rollback?” from the reviewer. The secretary should explain both the completion and the new
-blocker, identify who needs a decision, and cite the messages. It should not wake merely because one message
-contains an answer word, or summarize only the last alert. These are model instructions, not hard-coded rules.
-
-## First setup
-
-Choose a private state path; the secretary creates the file on first use. State from the retired rules-based
-workflow cannot be reused. A minimal policy names the principal:
-
-```json
-{
-  "version": 2,
-  "principal": "planner"
-}
-```
-
-The principal must be an existing non-human agent role. The default model is `gpt-6-luna` through the OpenAI
-Responses API, with `OPENAI_API_KEY` read from the host process environment. A missing key produces an explicit
-`secretary_unavailable` error; there is no silent local or rule-based fallback.
-
-The default model can be customized. For example:
+Choose a private state path. A new state file is created on first use. Existing model-only v2 state and delivered
+coverage remain valid; only state from the retired deterministic/rules-era format is incompatible. When a policy or
+prompt change alters the cache fingerprint, prior cached assessments are invalidated while delivery coverage is
+preserved. Policy version 2 is the supported format. The default lightweight model is `gpt-6-luna` through the OpenAI
+Responses API, using `OPENAI_API_KEY` from the service environment.
 
 ```json
 {
   "version": 2,
   "principal": "planner",
+  "knowledge": "The release window closes at 17:00 UTC.",
+  "instructions": "Prefer waking me when another agent is blocked on my decision.",
+  "max_tool_calls": 2,
   "model": {
     "provider": "openai",
     "model": "gpt-6-luna",
-    "api_key_env": "OPENAI_API_KEY",
-    "reasoning_effort": "low",
-    "timeout_seconds": 20
-  },
-  "instructions": "Prefer waking me for decisions that block another agent.",
-  "max_events": 1000,
-  "context_bytes": 1048576,
-  "summary_bytes": 8192
-}
-```
-
-`base_url` can point to another Responses-compatible endpoint; it must use HTTPS, except HTTP on localhost. The
-model can also run as a host command. The command receives one JSON request on stdin and writes one JSON object
-to stdout; Baton starts an argv list directly, without a shell:
-
-```json
-{
-  "version": 2,
-  "principal": "planner",
-  "model": {
-    "provider": "command",
-    "command": ["/opt/secretary/model-adapter"],
-    "timeout_seconds": 20
+    "cache_mode": "layered"
   }
 }
 ```
 
-The request envelope is `{ "version": 2, "instructions": ..., "context": ..., "response_schema": ... }`.
-The adapter returns an assessment object with exactly `decision`, `reason`, `summary`, and `sources`; `decision`
-is `wake`, `hold`, or `keep`. The schema is supplied in the request so the host command can enforce the same
-contract as the OpenAI structured output path.
+`knowledge` is operator-authored context shared for this policy; `instructions` is static guidance for the named
+principal. Each is limited to 8 KiB; the full policy is limited to 16 KiB. `max_tool_calls` defaults to two and may
+be set from one to eight. `model.cache_mode` is `layered` by default: three stable breakpoints plus an implicit
+boundary for the current window or tool result. This preserves reusable prefixes at different lifetimes and
+allows the tool follow-up to reuse its unchanged event input. Use `implicit` for compatible endpoints or older
+models without explicit breakpoint support. The harness does not add padding to pursue cache hits.
+`result.harness.usage` contains the language model's reported input, output, and cached-token totals when
+available, otherwise `null`; these totals exclude decision-engine usage. Reusing a previously cached assessment
+reports its historical usage, not usage from a new model call.
 
-## One wake callback
+The decision tool is optional and is not called automatically. Configure either the TypeSafe JEV choice API:
 
-An async host can call the public service directly:
+```json
+"decision_engine": {
+  "provider": "jev",
+  "model": "jev-latest",
+  "api_key_env": "TYPESAFE_API_KEY",
+  "base_url": "https://api.typesafe.ai/v1",
+  "timeout_seconds": 3
+}
+```
+
+or a local command adapter:
+
+```json
+"decision_engine": {
+  "provider": "command",
+  "command": ["/opt/secretary/decision-adapter"],
+  "timeout_seconds": 3
+}
+```
+
+JEV returns a `wake`, `hold`, or `keep` choice with confidence and a probability distribution. Baton validates that
+the distribution is well formed and that the selected choice is the most likely, then exposes only
+`{"decision":"..."}` to the model; the engine supplies no rationale. A command engine receives protocol version 1
+with task `decide_attention`, the full authorized context, and the three allowed choices; it must return exactly
+`{"decision":"wake|hold|keep"}`. The async `DecisionEngine` protocol accepts context and a timeout and returns an
+`AttentionDecision`, so another typed engine can replace either adapter. The retired advisor protocol is not
+compatible. Result metadata reports `engine_status` as `not_configured`, `not_used`, `available`, or `unavailable`.
+
+The model can instead run as a host command, independent of the optional decision engine. It receives one JSON
+request on stdin and returns one JSON object on stdout, without a shell:
+
+```json
+"model": {"provider": "command", "command": ["/opt/secretary/model-adapter"], "timeout_seconds": 20}
+```
+
+The command request has this envelope:
+
+```json
+{"version": 3, "input": [], "tools": [], "response_schema": {}}
+```
+
+The actual `input`, `tools`, and `response_schema` values are supplied by the harness. Return either the structured
+assessment, or `{"tool_calls":[{"id":"call-1","name":"decide_attention","arguments":{}}]}`. After a tool call,
+the next request includes the model's prior output and a `function_call_output` with the matching call ID. The old
+version 2 model-command envelope is retired. Unknown tools, non-empty arguments, invalid/reused call IDs, or
+exceeding the call limit fail the assessment.
+
+Command adapters should preserve the supplied input order and tool history when constructing their provider
+request. They own provider-specific cache settings; the direct OpenAI transport supplies them itself. Migrating
+an existing adapter means accepting protocol 3 and replacing any old automatic advisor configuration with an
+explicit `decision_engine.provider`. Existing model-only state and acknowledged coverage stay in place.
+
+The OpenAI Responses API is stateless across calls; the harness resends the complete ordered input and append-only
+tool history for each turn. It requests strict structured output and encrypted reasoning continuation. See the
+[prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching) and
+[function calling guide](https://developers.openai.com/api/docs/guides/function-calling). For the optional engine,
+see TypeSafe's [System One API](https://docs.typesafe.ai/api/system-one) and
+[Choice primitive](https://docs.typesafe.ai/primitives/choice).
+
+## Host API and delivery
+
+An async host can use the service directly:
 
 ```python
 from pathlib import Path
@@ -110,76 +141,32 @@ if result["decision"] == "wake":
     await secretary.acknowledge(result["decision_id"])
 ```
 
-On its first call, the secretary uses its saved activation floor and delivery position (initially zero) and reads
-the full pending visible window. For a host that owns positions,
-pass `since` and `floor` together on every call. After successfully delivering a non-empty `brief`, either call
-`acknowledge(decision_id)` or pass that result's `covered_through` as `since` with the same `floor` next time.
-Advance only after delivery succeeds. A `hold`, `keep`, error, or empty inbox does not advance coverage. Retries
-with the same policy, prompt, and identical inbox reuse the saved assessment instead of making another model call.
+On first use, the secretary reads from its saved activation floor (initially zero). Hosts that own delivery
+positions pass `since` and `floor` together on every call. Acknowledge only after successful delivery. A hold,
+keep, error, or empty inbox does not advance coverage. Repeating the same policy, prompt, and inbox can reuse the
+saved assessment.
 
-`trigger` is optional and may identify `message:SEQ`, `job:JOB_ID:SEQ`, or `conversation`. A one-hour digest uses
-`hourly=True`; it asks the same model to summarize the pending window. An empty inbox skips inference and returns
-`keep`. Every callback budget is greater than zero and at most 60 seconds; the default model timeout is 20 seconds.
+`trigger` may identify `message:SEQ`, `job:JOB_ID:SEQ`, or `conversation`. Use `hourly=True` for a digest; it uses
+the same model assessment and can summarize even when no alert decision is pending. The host chooses a callback
+budget greater than zero and at most 60 seconds; the same budget bounds the full model/tool conversation. Model
+timeout defaults to 20 seconds.
 
-### Results and source references
+Results contain a `brief`, cited `sources`, and `source_refs` resolving keys to current message/thread IDs or
+event positions. The model receives authorized message text in `context.events` and visible parents in
+`context.reply_context`; it cannot rewrite or replace that evidence. The service checks every citation against the
+supplied context and rereads visibility after inference. If content or visibility changed, it returns a retryable
+`secretary_unavailable` error without advancing delivery. It does not independently verify a summary's meaning.
+The private sidecar stores assessments and references, not message bodies. A tool transport failure is returned
+to the model as `decision_engine_unavailable`, allowing the model to finish its own assessment. Model transport,
+invalid protocol/assessment, or exhausted callback budget produces a retryable `secretary_unavailable` error and
+does not advance delivery.
 
-The model makes one assessment of the entire alert window and returns its decision and summary together. A wake
-has a concise narrative that says what changed, who needs what, and what remains unresolved, so the principal can
-choose which thread to open. A digest also has a summary. `hold` and `keep` alert results have an empty `brief`.
-The returned `sources` list names the cited source keys, and `source_refs` resolves them to current message and
-thread IDs (or event positions). The host can pass those references to its thread-reading UI; the secretary does
-not open threads on the principal's behalf.
-
-The model receives authorized message text in `context.events` and visible parent messages in
-`context.reply_context`. The prompt treats messages and engine advice as untrusted data, not instructions.
-The service checks that every citation was in this supplied context and re-reads it after inference. If content or visibility
-changed during the call, it returns a retryable `secretary_unavailable` error without advancing delivery. It does
-not independently verify the meaning of a generated summary. The private sidecar stores generated assessments
-and references, but does not archive message bodies.
-
-By default the model sees at most 1,000 event/context entries and 1 MiB of their serialized content. `max_events` and `context_bytes` are
-configurable. If the complete window exceeds either limit, the call fails with `secretary_context_limit`; it does
-not silently truncate the context. `summary_bytes` defaults to 8 KiB. Model timeout, transport, command, or
-assessment errors become retryable `secretary_unavailable` errors and leave the delivery position unchanged.
-
-## Optional decision-engine advice
-
-An optional command can provide a separate advisory input before the primary model call:
-
-```json
-{
-  "version": 2,
-  "principal": "planner",
-  "decision_engine": {
-    "command": ["/opt/secretary/advisor"],
-    "timeout_seconds": 3
-  }
-}
-```
-
-It receives `{ "version": 2, "task": "advise_secretary", "context": ... }` and must return a JSON object.
-That object is passed to the configured model as `context.engine_advice`; it does not make the final decision. If
-the advisory command times out, exits unsuccessfully, or returns unusable JSON, the model proceeds without advice.
-An adapter can provide advice in this protocol; Baton does not bundle a decision-engine SDK.
-
-The model command's response is the decision itself, for example (replace the illustrative source IDs):
-
-```json
-{
-  "decision": "wake",
-  "reason": "The reviewer needs the principal's rollback decision.",
-  "summary": "The worker reports the migration is complete, but the reviewer reports regressed health checks and asks you to approve a rollback. Open the deployment thread to decide.",
-  "sources": ["message:msg_worker_update", "message:msg_reviewer_request"]
-}
-```
-
-`reason` explains the attention choice. `summary` is delivered as the result's `brief`. Citations must identify
-supplied events or reply parents; a wake or nonempty digest needs a summary and at least one citation. A normal
-hold/keep alert has an empty summary. The optional engine's JSON is advice, not this final assessment.
+By default, at most 1,000 event/context entries and 1 MiB of serialized context are accepted; oversized windows
+fail as `secretary_context_limit` instead of being truncated. `summary_bytes` defaults to 8 KiB. Model and
+protocol failures and exhausted callback budgets are retryable `secretary_unavailable` errors. A missing model
+credential is reported explicitly.
 
 ## CLI
-
-Run against the principal's policy and private state:
 
 ```sh
 baton secretary --state /private/secretary.sqlite --policy /private/policy.json decide \
@@ -189,25 +176,27 @@ baton secretary --state /private/secretary.sqlite --policy /private/policy.json 
 baton secretary --policy /private/policy.json read --ids msg_0123456789abcdef
 ```
 
-The CLI supports `decide`, `show`, `acknowledge`, and `read`. `show` inspects saved assessments. `read` uses
-current visibility rules to return source messages. An older policy is unsupported; create a policy version 2
-and a new private state file rather than reusing old state. The short Python modules `baton.secretary_decide` and
-`baton.secretary_read` remain aliases for the current model-driven implementation when run with `python -m`, with no deterministic fallback.
+The CLI supports `decide`, `show`, `acknowledge`, and `read`. The `show` command inspects saved assessments;
+`read` applies current visibility rules. Existing model-only v2 state remains valid; only retired
+deterministic/rules-era state requires a new state file. A prompt or policy fingerprint change invalidates cached
+assessments while retaining acknowledged delivery coverage.
 
 ## Code map
 
 | Module | Responsibility |
 |---|---|
 | [service.py](service.py) | Async host API and delivery acknowledgment. |
-| [decide.py](decide.py) | Reads the window, enforces the callback budget, caches identical assessments, and rechecks visibility. |
+| [decide.py](decide.py) | Reads the authorized window, applies callback budget, caches identical assessments, and rechecks visibility. |
 | [inbox.py](inbox.py) | Builds the complete pending context and rejects over-limit windows. |
-| [model.py](model.py) | OpenAI Responses and host-command transports; optional advisory command. |
-| [prompt.py](prompt.py) | Model instructions and structured response schema. |
+| [harness.py](harness.py) | Runs bounded model/tool turns and aggregates model usage. |
+| [prompt.py](prompt.py) | Stable prompt layers, explicit cache breakpoints, and the strict assessment schema. |
+| [model.py](model.py) | OpenAI Responses and protocol version 3 command transports. |
+| [tools.py](tools.py) | Optional model-callable decision tool, per-assessment verdict reuse, and engine status. |
+| [decisions.py](decisions.py) | Typed decision protocol and JEV/command adapters. |
+| [transport.py](transport.py) | Bounded HTTP and command transport helpers. |
 | [assessment.py](assessment.py) | Validates decisions, summary bounds, and source references. |
-| [policy.py](policy.py) | Validates the supported version 2 configuration. |
-| [state.py](state.py) | Private v2 assessment cache, activation/delivery positions, and acknowledgment. |
+| [policy.py](policy.py) | Validates policy version 2, model/engine settings, and limits. |
+| [state.py](state.py) | Private assessment cache, activation/delivery positions, and acknowledgment. |
 
-For the OpenAI transport, see the [Responses API structured outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs)
-and [GPT-6 Luna model reference](https://developers.openai.com/api/docs/models/gpt-6-luna).
-
-Principal feedback for the secretary is a future direction; see the [roadmap](../../../docs/roadmap.md).
+The Codex and Claude Code integrations use the same secretary harness; principal host choice does not change policy
+or model behavior. Principal feedback remains a future direction; see the [roadmap](../../../docs/roadmap.md).

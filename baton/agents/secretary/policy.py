@@ -27,6 +27,8 @@ class Policy:
     model: dict
     decision_engine: dict | None
     instructions: str
+    knowledge: str
+    max_tool_calls: int
     max_events: int
     context_bytes: int
     summary_bytes: int
@@ -46,26 +48,21 @@ def load_policy(config: Config, path: Path) -> Policy:
         raise ConfigError("secretary policy must name version 2")
     if raw["version"] != POLICY_VERSION:
         raise ConfigError("unsupported secretary policy version; use version 2 with a model configuration")
-    fields = {"version", "principal", "model", "decision_engine", "instructions", "max_events",
-              "context_bytes", "summary_bytes"}
+    fields = {"version", "principal", "model", "decision_engine", "instructions", "knowledge", "max_tool_calls",
+              "max_events", "context_bytes", "summary_bytes"}
     if "principal" not in raw or raw.keys() - fields:
         raise ConfigError("secretary policy fields are invalid")
     principal = raw["principal"]
     role = config.roles.get(principal) if isinstance(principal, str) else None
     if role is None or principal == "guest" or role.human or role.display_only:
         raise ConfigError("secretary principal must be an existing non-human, non-display agent role")
-    instructions = raw.get("instructions", "")
-    if not isinstance(instructions, str) or len(instructions.encode()) > 8192:
-        raise ConfigError("secretary instructions must be text of at most 8192 bytes")
+    instructions = _text(raw.get("instructions", ""), "instructions")
+    knowledge = _text(raw.get("knowledge", ""), "knowledge")
     model = _model(raw.get("model", {}))
-    engine = raw.get("decision_engine")
-    if engine is not None:
-        if not isinstance(engine, dict) or engine.keys() - {"command", "timeout_seconds"}:
-            raise ConfigError("decision_engine needs command and optional timeout_seconds")
-        engine = {"command": _command(engine.get("command")),
-                  "timeout_seconds": _timeout(engine.get("timeout_seconds", 3))}
+    engine = _engine(raw.get("decision_engine"))
     normalized = {"version": POLICY_VERSION, "principal": principal, "model": model,
-                  "decision_engine": engine, "instructions": instructions,
+                  "decision_engine": engine, "instructions": instructions, "knowledge": knowledge,
+                  "max_tool_calls": _integer(raw.get("max_tool_calls", 2), "max_tool_calls", 1, 8),
                   "max_events": _integer(raw.get("max_events", 1000), "max_events", 1, 10000),
                   "context_bytes": _integer(raw.get("context_bytes", 1024 * 1024), "context_bytes", 1024, 8388608),
                   "summary_bytes": _integer(raw.get("summary_bytes", 8192), "summary_bytes", 256, 65536)}
@@ -84,18 +81,25 @@ def _model(value: object) -> dict:
         return {"provider": provider, "command": _command(value.get("command")),
                 "timeout_seconds": _timeout(value.get("timeout_seconds", 20))}
     if provider != "openai" or value.keys() - common - {
-            "model", "base_url", "api_key_env", "reasoning_effort", "max_output_tokens"}:
+            "model", "base_url", "api_key_env", "reasoning_effort", "max_output_tokens", "cache_mode"}:
         raise ConfigError("model provider or fields are invalid")
     settings = {"provider": "openai", "model": "gpt-6-luna", "base_url": "https://api.openai.com/v1",
                 "api_key_env": "OPENAI_API_KEY", "reasoning_effort": "low", "max_output_tokens": 4096,
-                "timeout_seconds": 20, **value}
-    if not isinstance(settings["model"], str) or not 1 <= len(settings["model"]) <= 200:
-        raise ConfigError("model.model must be a nonempty model ID")
-    if not isinstance(settings["api_key_env"], str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*",
-                                                                      settings["api_key_env"]):
-        raise ConfigError("model.api_key_env must name an environment variable")
+                "timeout_seconds": 20, "cache_mode": "layered", **value}
+    if settings["cache_mode"] not in ("implicit", "layered"):
+        raise ConfigError("model.cache_mode must be implicit or layered")
     if settings["reasoning_effort"] not in ("none", "low", "medium", "high", "xhigh", "max"):
         raise ConfigError("model.reasoning_effort is invalid")
+    settings["max_output_tokens"] = _integer(settings["max_output_tokens"], "max_output_tokens", 256, 32768)
+    return _http_settings(settings, "model")
+
+
+def _http_settings(settings: dict, label: str) -> dict:
+    if not isinstance(settings["model"], str) or not 1 <= len(settings["model"]) <= 200:
+        raise ConfigError(f"{label}.model must be a nonempty model ID")
+    if not isinstance(settings["api_key_env"], str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*",
+                                                                      settings["api_key_env"]):
+        raise ConfigError(f"{label}.api_key_env must name an environment variable")
     try:
         url = urlsplit(settings["base_url"])
         valid = url.scheme in ("http", "https") and url.hostname and not (
@@ -105,11 +109,33 @@ def _model(value: object) -> dict:
     except (AttributeError, TypeError, ValueError):
         valid = False
     if not valid:
-        raise ConfigError("model.base_url must be HTTPS, or HTTP on localhost, without credentials/query/fragment")
+        raise ConfigError(f"{label}.base_url must be HTTPS, or HTTP on localhost, without credentials/query/fragment")
     settings["base_url"] = settings["base_url"].rstrip("/")
     settings["timeout_seconds"] = _timeout(settings["timeout_seconds"])
-    settings["max_output_tokens"] = _integer(settings["max_output_tokens"], "max_output_tokens", 256, 32768)
     return settings
+
+
+def _engine(value: object) -> dict | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError("decision_engine must be an object")
+    provider = value.get("provider")
+    if provider == "command":
+        if value.keys() - {"provider", "command", "timeout_seconds"}:
+            raise ConfigError("command decision_engine fields are invalid")
+        return {"provider": provider, "command": _command(value.get("command")),
+                "timeout_seconds": _timeout(value.get("timeout_seconds", 3))}
+    if provider != "jev" or value.keys() - {"provider", "model", "base_url", "api_key_env", "timeout_seconds"}:
+        raise ConfigError("decision_engine must name provider jev or command; automatic advice is retired")
+    return _http_settings({"provider": "jev", "model": "jev-latest", "base_url": "https://api.typesafe.ai/v1",
+                           "api_key_env": "TYPESAFE_API_KEY", "timeout_seconds": 3, **value}, "decision_engine")
+
+
+def _text(value: object, field: str) -> str:
+    if not isinstance(value, str) or len(value.encode()) > 8192:
+        raise ConfigError(f"secretary {field} must be text of at most 8192 bytes")
+    return value
 
 
 def _command(value: object) -> list[str]:

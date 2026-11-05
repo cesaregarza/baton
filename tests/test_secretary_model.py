@@ -26,15 +26,19 @@ class Model:
         self.world = world
         self.plan_path = tmp_path / "model-plan.json"
         self.log_path = tmp_path / "model-requests.jsonl"
+        self.engine_log_path = tmp_path / "engine-requests.jsonl"
         self.set_plan(plan or {})
         self.command = [sys.executable, "-I", "-S", str(FAKE), str(self.plan_path), str(self.log_path)]
+        self.engine_command = [sys.executable, "-I", "-S", str(FAKE), str(self.plan_path),
+                               str(self.engine_log_path), "engine"]
         self.configure(timeout=timeout, engine=engine)
 
     def configure(self, *, timeout: float = 5.0, engine: bool = False) -> None:
         value = {"version": 2, "principal": "planner", "model": {"provider": "command",
                  "command": self.command, "timeout_seconds": timeout}}
         if engine:
-            value["decision_engine"] = {"command": self.command, "timeout_seconds": timeout}
+            value["decision_engine"] = {"provider": "command", "command": self.engine_command,
+                                         "timeout_seconds": timeout}
         self.world.policy_path.write_text(json.dumps(value))
 
     def set_timeout(self, timeout: float) -> None:
@@ -50,6 +54,12 @@ class Model:
         if not self.log_path.exists():
             return []
         return [json.loads(line) for line in self.log_path.read_text().splitlines()]
+
+    @property
+    def engine_requests(self) -> list[dict]:
+        if not self.engine_log_path.exists():
+            return []
+        return [json.loads(line) for line in self.engine_log_path.read_text().splitlines()]
 
 
 def _decide(world, **options) -> dict:
@@ -78,7 +88,7 @@ def test_command_model_assesses_grouped_conversation_once_caches_and_reads_baton
         message_sources = {f"message:{first['message_id']}", f"message:{second['message_id']}"}
         assert message_sources <= set(event_sources) & set(result["sources"])
         assert result["decision"] == "wake" and result["brief"]
-        assert request["version"] == 2 and request["context"]["mode"] == "alert"
+        assert request["version"] == 3 and request["context"]["mode"] == "alert"
         assert request["response_schema"]["additionalProperties"] is False
         assert table_hashes(world.baton) == before
 
@@ -165,22 +175,22 @@ def test_unknown_source_reference_is_rejected_without_saving_assessment(tmp_path
         assert result["decision"] == "wake" and len(model.requests) == 2
 
 
-@pytest.mark.parametrize(("step", "status", "advice"), [
-    ({"advice": {"hint": "consider the ownership change"}}, "available", {"hint": "consider the ownership change"}),
-    ({"exit": 3}, "unavailable", None),
-])
-def test_optional_engine_is_advisory_and_model_always_assesses(step, status, advice, tmp_path) -> None:
+def test_configured_decision_tool_is_discretionary_and_needs_no_key_when_skipped(tmp_path, monkeypatch) -> None:
     with make_world(tmp_path) as world:
-        model = Model(world, tmp_path, plan={"steps": [step, {}]}, engine=True)
+        model = Model(world, tmp_path)
+        monkeypatch.delenv("SECRETARY_UNUSED_JEV_KEY", raising=False)
+        policy = json.loads(world.policy_path.read_text())
+        policy["decision_engine"] = {"provider": "jev", "api_key_env": "SECRETARY_UNUSED_JEV_KEY"}
+        world.policy_path.write_text(json.dumps(policy))
         messages.send(world.baton, sender="worker", recipient="planner", text="A real incoming note")
         result = _decide(world)
-        requests = model.requests
-        assert requests[0]["task"] == "advise_secretary"
-        assert requests[1]["version"] == 2 and requests[1]["context"]["engine_advice"] == advice
-        assert (result["engine_status"], result["decision"]) == (status, "wake")
+        assert len(model.requests) == 1 and model.requests[0]["version"] == 3
+        assert model.engine_requests == []
+        assert result["engine_status"] == "not_used" and result["decision"] == "wake"
 
 
-def test_responses_http_wire_uses_strict_schema_and_skips_reasoning_output(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("cache_mode", ["layered", "implicit"])
+def test_responses_http_wire_uses_strict_schema_and_skips_reasoning_output(tmp_path, monkeypatch, cache_mode) -> None:
     seen: list[dict] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -213,7 +223,7 @@ def test_responses_http_wire_uses_strict_schema_and_skips_reasoning_output(tmp_p
             monkeypatch.setenv("SECRETARY_TEST_KEY", "synthetic-key")
             world.policy_path.write_text(json.dumps({"version": 2, "principal": "planner", "model": {
                 "provider": "openai", "base_url": f"http://127.0.0.1:{server.server_port}/v1",
-                "api_key_env": "SECRETARY_TEST_KEY"}}))
+                "api_key_env": "SECRETARY_TEST_KEY", "cache_mode": cache_mode}}))
             result = _decide(world)
         finally:
             server.shutdown()
@@ -227,6 +237,10 @@ def test_responses_http_wire_uses_strict_schema_and_skips_reasoning_output(tmp_p
         assert body["text"]["format"]["type"] == "json_schema"
         assert body["text"]["format"]["strict"] is True
         assert body["text"]["format"]["schema"]["additionalProperties"] is False
+        assert len(body["input"]) == 4
+        for message in body["input"][:3]:
+            assert ("prompt_cache_breakpoint" in message["content"][0]) == (cache_mode == "layered")
+        assert ("prompt_cache_options" in body) == (cache_mode == "layered")
 
 
 def test_revoking_visibility_during_inference_discards_the_summary(tmp_path) -> None:

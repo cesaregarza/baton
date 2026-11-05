@@ -9,7 +9,7 @@ These project skills explain how a local secretary instance can deliver decision
 
 - Install and run on the same host and as the same user as the local Baton data and model authentication. Remote mode is unsupported.
 - The runner uses POSIX file locks (Linux/macOS). The supplied systemd unit is for Linux; use another supervisor on macOS.
-- Use an existing secretary v2 policy and Baton configuration. The current default policy uses OpenAI `gpt-6-luna` and `OPENAI_API_KEY`; an existing external v2 policy may use its configured provider adapter. This integration does not provide a CLI model adapter.
+- Use a secretary v2 policy and Baton configuration. The default model uses OpenAI `gpt-6-luna` and `OPENAI_API_KEY`; the model may instead use a host command. An optional decision engine is separately configured as JEV or a command. This integration does not provide a CLI model adapter.
 - Set `summary_bytes` explicitly to 4000 (maximum 6000) for hook output limits.
 - The worker polls the read-only visible-event feed every two seconds, performs inference at startup or when visible events arrive, and does not infer on empty timer polls.
 - Run only one worker per instance. The generated user unit uses `Restart=on-failure`; standalone `run` may be managed by another supervisor.
@@ -55,11 +55,12 @@ Policy guidance remains static configuration; principal feedback is [planned](..
 
 Link and start the generated unit, substituting its exact generated name:
 
-Supply model credentials to the service separately: a user service does not inherit your interactive shell's
+Supply credentials to the service separately: a user service does not inherit your interactive shell's
 environment. The generated unit optionally reads `environment` in the private instance directory. Create that
-file with mode 0600 using your usual secret provisioning method (for direct OpenAI, it contains
-`OPENAI_API_KEY=...`); never commit it. A command model also needs its executable and authentication available
-in the service environment. The installer copies no credentials. Restart the service after changing its policy.
+file with mode 0600 using your usual secret provisioning method. For the default OpenAI model use
+`OPENAI_API_KEY=...`; for a JEV decision engine use `TYPESAFE_API_KEY=...` (or the configured `api_key_env`).
+Command adapters need their executable and any authentication available in the service environment. The installer
+copies no credentials. Restart the service after changing its policy.
 
 ```sh
 systemctl --user link /absolute/private/secretary-instance/secretary-XXXXXXXX.service
@@ -111,4 +112,7 @@ The skills in this directory guide installation. The installed Python runtime is
 [`baton/integrations/secretary`](../../baton/integrations/secretary): `install.py` creates artifacts,
 `instance.py` owns configuration and session receipts, `worker.py` watches the inbox and requests notifications,
 and `hooks.py` delivers checked summaries to the bound session. `__main__.py` exposes these operations.
-This runner is started separately; it is not enabled with a `[integrations.secretary]` Baton server table.
+Assessment prompting, the bounded model/tool harness, optional typed decision engine, and model transports live in
+[`baton/agents/secretary`](../../baton/agents/secretary/README.md). Both Codex and Claude Code integrations use
+that same assessment path. This runner is started separately; it is not enabled with a
+`[integrations.secretary]` Baton server table.

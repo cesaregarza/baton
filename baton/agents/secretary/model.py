@@ -1,172 +1,122 @@
-"""Bounded transports for secretary assessment and optional engine advice."""
+"""One model turn over the harness's ordered prompt and append-only tool history."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
 
-import httpx
-
-from .command import Command
-from .prompt import INSTRUCTIONS, RESPONSE_SCHEMA
-
-_MAX_RESPONSE_BYTES = 1024 * 1024
-_MAX_COMMAND_BYTES = 64 * 1024
+from .prompt import RESPONSE_SCHEMA
+from .transport import ModelUnavailable, command_json, json_object, post_json
 
 
-class ModelUnavailable(Exception):
-    """The configured model transport did not return a usable response."""
+@dataclass(frozen=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict
+
+    @classmethod
+    def parse(cls, value: object) -> ToolCall:
+        if not isinstance(value, dict) or value.keys() != {"id", "name", "arguments"}:
+            raise ModelUnavailable("invalid tool call shape")
+        if not all(isinstance(value[key], str) and 0 < len(value[key]) <= 200 for key in ("id", "name")):
+            raise ModelUnavailable("invalid tool call identity")
+        if not isinstance(value["arguments"], dict):
+            raise ModelUnavailable("tool arguments must be an object")
+        return cls(**value)
+
+    def item(self) -> dict:
+        return {"type": "function_call", "call_id": self.id, "name": self.name,
+                "arguments": json.dumps(self.arguments, sort_keys=True, separators=(",", ":"))}
+
+
+@dataclass(frozen=True)
+class ModelTurn:
+    answer: dict | None
+    calls: list[ToolCall] = field(default_factory=list)
+    items: list[dict] = field(default_factory=list)
+    usage: dict | None = None
+
+    @classmethod
+    def command(cls, value: dict) -> ModelTurn:
+        if "tool_calls" not in value:
+            return cls(answer=value)
+        if value.keys() != {"tool_calls"} or not isinstance(value["tool_calls"], list) or not value["tool_calls"]:
+            raise ModelUnavailable("invalid command tool response")
+        calls = [ToolCall.parse(call) for call in value["tool_calls"]]
+        return cls(None, calls, [call.item() for call in calls])
+
+    @classmethod
+    def responses(cls, value: dict) -> ModelTurn:
+        if value.get("status") != "completed" or value.get("refusal"):
+            raise ModelUnavailable("model response is incomplete or refused")
+        output = value.get("output")
+        if not isinstance(output, list):
+            raise ModelUnavailable("model response has no output")
+        texts, calls = [], []
+        for item in output:
+            if not isinstance(item, dict):
+                raise ModelUnavailable("model output item is invalid")
+            match item.get("type"):
+                case "reasoning":
+                    pass  # Preserve the encrypted reasoning item for stateless continuation.
+                case "function_call":
+                    calls.append(ToolCall.parse({"id": item.get("call_id"), "name": item.get("name"),
+                                                 "arguments": json_object(item.get("arguments", ""))}))
+                case "message":
+                    content = item.get("content")
+                    if not isinstance(content, list):
+                        raise ModelUnavailable("model message has invalid content")
+                    for part in content:
+                        if not isinstance(part, dict) or part.get("type") != "output_text" \
+                                or not isinstance(part.get("text"), str):
+                            raise ModelUnavailable("model message was refused or invalid")
+                        texts.append(part["text"])
+                case _:
+                    raise ModelUnavailable("model returned an unsupported output item")
+        if not calls and len(texts) != 1:
+            raise ModelUnavailable("model must return tool calls or one structured assessment")
+        # A tool turn may include a preamble. Preserve it in history; only a call-free turn is final.
+        return cls(None if calls else json_object(texts[0]), calls, output, _usage(value.get("usage")))
+
+
+def _usage(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    details = value.get("input_tokens_details")
+    counts = {"input_tokens": value.get("input_tokens"), "output_tokens": value.get("output_tokens"),
+              "cached_tokens": details.get("cached_tokens") if isinstance(details, dict) else None}
+    return counts if all(type(n) is int and n >= 0 for n in counts.values()) else None
 
 
 @dataclass
 class SecretaryModel:
-    """Assess the complete secretary context with one configured model call."""
-
     settings: dict
 
-    async def assess(self, context: dict, timeout: float) -> dict:
-        provider = self.settings.get("provider")
-        if provider == "command":
-            request = {
-                "version": 2,
-                "instructions": INSTRUCTIONS,
-                "context": context,
-                "response_schema": RESPONSE_SCHEMA,
-            }
-            return await _command_json(self.settings, request, timeout, _MAX_COMMAND_BYTES)
-        if provider != "openai":
-            raise ModelUnavailable("model provider is unavailable")
+    @property
+    def layered_cache(self) -> bool:
+        return self.settings["provider"] == "openai" and self.settings.get("cache_mode", "layered") == "layered"
 
-        key_name = self.settings.get("api_key_env", "OPENAI_API_KEY")
-        api_key = os.environ.get(key_name)
+    async def turn(self, messages: list[dict], tools: list[dict], timeout: float) -> ModelTurn:
+        if self.settings["provider"] == "command":
+            value = await command_json(self.settings, {"version": 3, "input": messages, "tools": tools,
+                                                       "response_schema": RESPONSE_SCHEMA}, timeout)
+            return ModelTurn.command(value)
+        api_key = os.environ.get(self.settings["api_key_env"])
         if not api_key:
             raise ModelUnavailable("model credential is unavailable")
-
         body = {
-            "model": self.settings.get("model", "gpt-6-luna"),
-            "store": False,
-            "instructions": INSTRUCTIONS,
-            "input": json.dumps(context, ensure_ascii=False, separators=(",", ":")),
-            "reasoning": {"effort": self.settings.get("reasoning_effort", "low")},
-            "max_output_tokens": self.settings.get("max_output_tokens", 4096),
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "secretary_triage",
-                    "strict": True,
-                    "schema": RESPONSE_SCHEMA,
-                }
-            },
+            "model": self.settings["model"], "store": False, "input": messages,
+            "tools": tools, "parallel_tool_calls": False,
+            "include": ["reasoning.encrypted_content"],
+            "reasoning": {"effort": self.settings["reasoning_effort"]},
+            "max_output_tokens": self.settings["max_output_tokens"],
+            "text": {"format": {"type": "json_schema", "name": "secretary_triage", "strict": True,
+                                "schema": RESPONSE_SCHEMA}},
         }
-        url = self.settings.get("base_url", "https://api.openai.com/v1").rstrip("/") + "/responses"
-        try:
-            async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
-                async with client.stream(
-                    "POST",
-                    url,
-                    json=body,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                ) as response:
-                    if not 200 <= response.status_code < 300:
-                        raise ModelUnavailable("model request failed")
-                    raw = await _read_limited(response, _MAX_RESPONSE_BYTES)
-        except asyncio.CancelledError:
-            raise
-        except ModelUnavailable:
-            raise
-        except Exception:
-            raise ModelUnavailable("model request failed") from None
-
-        try:
-            result = json.loads(raw)
-        except (UnicodeDecodeError, ValueError):
-            raise ModelUnavailable("model returned invalid JSON") from None
-        return _response_object(result)
-
-
-@dataclass
-class DecisionEngine:
-    """Ask a configured command for advisory context for the secretary."""
-
-    settings: dict
-
-    async def advise(self, context: dict, timeout: float) -> dict:
-        request = {"version": 2, "task": "advise_secretary", "context": context}
-        return await _command_json(self.settings, request, timeout, _MAX_COMMAND_BYTES)
-
-
-async def _command_json(settings: dict, request: dict, timeout: float, max_bytes: int) -> dict:
-    argv = settings.get("command")
-    if not isinstance(argv, list) or not argv or not all(isinstance(part, str) for part in argv):
-        raise ModelUnavailable("model command is unavailable")
-    payload = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    try:
-        code, output = await Command(argv, max_output=max_bytes).run(payload, timeout)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        raise ModelUnavailable("model command failed") from None
-    if code != 0:
-        raise ModelUnavailable("model command failed")
-    try:
-        result = json.loads(output)
-    except (UnicodeDecodeError, ValueError):
-        raise ModelUnavailable("model command returned invalid JSON") from None
-    if not isinstance(result, dict):
-        raise ModelUnavailable("model command response is not an object")
-    return result
-
-
-async def _read_limited(response: httpx.Response, limit: int) -> bytes:
-    chunks: list[bytes] = []
-    size = 0
-    async for chunk in response.aiter_bytes():
-        size += len(chunk)
-        if size > limit:
-            raise ModelUnavailable("model response exceeds its size limit")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def _response_object(value: Any) -> dict:
-    if not isinstance(value, dict):
-        raise ModelUnavailable("model response is not an object")
-    if value.get("status") != "completed":
-        raise ModelUnavailable("model response is incomplete")
-    if value.get("refusal"):
-        raise ModelUnavailable("model refused the request")
-
-    texts: list[str] = []
-    output = value.get("output")
-    if not isinstance(output, list):
-        raise ModelUnavailable("model response has no output")
-    for item in output:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "refusal":
-            raise ModelUnavailable("model refused the request")
-        if item.get("type") != "message":
-            continue
-        content = item.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            if part.get("type") == "refusal":
-                raise ModelUnavailable("model refused the request")
-            if part.get("type") == "output_text" and isinstance(part.get("text"), str):
-                texts.append(part["text"])
-
-    if len(texts) != 1:
-        raise ModelUnavailable("model response did not contain one structured result")
-    try:
-        result = json.loads(texts[0])
-    except ValueError:
-        raise ModelUnavailable("model returned invalid JSON") from None
-    if not isinstance(result, dict):
-        raise ModelUnavailable("model result is not an object")
-    return result
+        if self.layered_cache:
+            # Three stable breakpoints plus the implicit window/tool-result boundary (four writes maximum).
+            body["prompt_cache_options"] = {"mode": "implicit"}
+        result = await post_json(self.settings["base_url"] + "/responses", api_key, body, timeout)
+        return ModelTurn.responses(result)

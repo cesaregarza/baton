@@ -40,9 +40,11 @@ Use this skill when setting up or operating a Baton secretary instance that pres
 
 ## Delivery and acknowledgement
 
-Supply model credentials through the service environment or the optional mode-0600 `environment` file in the
-instance directory. A user service does not inherit your shell's `OPENAI_API_KEY`. The v2 policy can use the
-direct OpenAI transport or an existing host-command adapter. Restart the worker after changing its policy.
+Supply credentials through the service environment or the optional mode-0600 `environment` file in the
+instance directory. A user service does not inherit your shell environment. The default OpenAI model uses
+`OPENAI_API_KEY`; a JEV decision engine uses `TYPESAFE_API_KEY` or its configured credential variable. Model and
+decision engine can each use a command adapter. Both use the same secretary harness regardless of whether the
+principal runs in Codex or Claude Code. Restart the worker after changing its policy.
 
 - The worker polls the read-only visible-event feed every two seconds. It performs inference at startup and when new visible events arrive; an empty poll does not trigger an inference.
 - A Codex assessment sends one `codex queue --thread <bound-id> --message ... --resume` request. A successful command means the message was queued, not that a model read or acted on it. Resuming an idle thread can warn or fail; check the target session.
@@ -70,3 +72,4 @@ Verify with a synthetic config and inspect `status`, hook visibility, and delive
 
 - [Codex hooks](https://learn.chatgpt.com/docs/hooks)
 - [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)
+- [Secretary harness and policy](../../../baton/agents/secretary/README.md)
