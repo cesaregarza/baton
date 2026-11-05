@@ -11,7 +11,7 @@ from conftest import make_config
 
 from baton import jobs, messages, wakes
 from baton.config import Wake
-from baton.store import connect
+from baton.database.store import connect
 
 
 class Recorder:

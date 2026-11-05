@@ -29,7 +29,7 @@ from test_topic_grant_no_tool_change import GUEST_MAY_CALL, TOOLS, fingerprint, 
 from topic_grant_tools_support import play, stage, tool
 
 from baton import app as app_module
-from baton import cli
+from baton.cli.main import _parser
 
 build_scene = refs.build_scene  # the fixture, under the name the tests ask for
 
@@ -240,7 +240,7 @@ def test_no_existing_tools_response_gained_a_field_and_a_stale_job_move_has_no_c
 def test_there_is_no_command_line_command_for_references():
     """GUARD. Q12: the reference tools are for agents; a core human gets no CLI command or page for them in this change,
     which a later ruling would add with its own tests and its own visual review."""
-    parser = cli._parser()
+    parser = _parser()
     for argv in (["reference"], ["references"], ["reference", "list"], ["references", "show", "job-hunt"]):
         with pytest.raises(SystemExit):
             parser.parse_args(argv)

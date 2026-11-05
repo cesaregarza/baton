@@ -1,7 +1,7 @@
 """Shared setup for the topic grant tests: a database with aliases and topics, a clock, and checks that
 say what is missing instead of raising.
 
-`baton/topic_grants.py` and its tables may not exist yet. Nothing here imports the module at the top
+`baton/topics/grants.py` and its tables may not exist yet. Nothing here imports the module at the top
 level: `grants_module()` asserts it exists first, so against a base without it every test that needs it
 fails on that assertion and never as an ImportError, a collection error or an OperationalError.
 
@@ -27,8 +27,8 @@ from test_topic_containers import ALIAS, OTHER_ALIAS, seed_aliases, topic_config
 from topic_backing import back_topics
 
 from baton.config import Config
+from baton.database.store import connect
 from baton.errors import BatonError
-from baton.store import connect
 
 START = datetime(2026, 11, 3, 12, 0, 0, tzinfo=UTC)
 CAPABILITIES = ("reference.edit", "thread.organise", "topic.create_sub")
@@ -46,10 +46,10 @@ AUTHORIZATION_COLUMNS = ("authorized_by", "authorized_at", "authorized_digest", 
 
 def grants_module() -> ModuleType:
     """The module under test, or a failed assertion saying it is not there."""
-    assert importlib.util.find_spec("baton.topic_grants") is not None, "baton/topic_grants.py does not exist yet"
-    module = importlib.import_module("baton.topic_grants")
+    assert importlib.util.find_spec("baton.topics.grants") is not None, "baton/topics/grants.py does not exist yet"
+    module = importlib.import_module("baton.topics.grants")
     for name in ("propose", "authorize", "revoke", "list_grants", "covering_grant", "_now"):
-        assert hasattr(module, name), f"baton.topic_grants has no {name}"
+        assert hasattr(module, name), f"baton.topics.grants has no {name}"
     return module
 
 

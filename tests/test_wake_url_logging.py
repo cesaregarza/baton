@@ -13,7 +13,7 @@ import pytest
 from conftest import free_port, make_config
 
 from baton import cli, messages, wakes
-from baton.store import connect
+from baton.database.store import connect
 
 SENTINEL = "sentinelwaketoken7f3a"
 

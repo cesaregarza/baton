@@ -58,6 +58,7 @@ from zoneinfo import ZoneInfo
 from baton import auth, board_read, conversations, datadir, jobs, messages
 from baton.config import Config, ConfigError
 from baton.database import Connection, Row
+from baton.database.store import connect
 from baton.errors import (
     BatonError,
     ConversationFull,
@@ -66,7 +67,6 @@ from baton.errors import (
     MailboxFull,
     NotAParticipant,
 )
-from baton.store import connect
 
 from .models import Response as Response
 from .models import _Refusal as _Refusal

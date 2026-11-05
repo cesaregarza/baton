@@ -13,8 +13,9 @@ from conftest import make_config
 from test_aliases import dispatch, payload, rpc
 from test_messages import rid
 
-from baton import auth, cli, store
+from baton import auth, cli
 from baton.app import guard
+from baton.database import store
 
 SECRET = "synthetic enrol secret"
 OTHER = "synthetic other secret"

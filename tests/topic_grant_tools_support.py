@@ -1,7 +1,7 @@
 """Shared setup for the tests of the topic grant check and the scoped topic tools, all driven over MCP.
 
 A `Scene` is one host with a guest login, a few core roles and a patched grant clock. Its grants are real:
-proposed and authorized through `baton.topic_grants`, never inserted as a row, so every key is one the module
+proposed and authorized through `baton.topics.grants`, never inserted as a row, so every key is one the module
 minted. A `Grantee` is a claimed alias holding one such grant, and presents both halves of what a grantee carries:
 the alias's binding token (`token`, who it is) and the grant key (`grant_token`, which grant it uses).
 
@@ -28,7 +28,8 @@ from conftest import make_config
 from test_aliases import dispatch, payload, rpc
 from topic_grant_support import Clock, grants_module
 
-from baton import auth, store
+from baton import auth
+from baton.database import store
 
 PASSPHRASE = "synthetic-" + secrets.token_urlsafe(12)
 ALL = ("reference.edit", "thread.organise", "topic.create_sub")

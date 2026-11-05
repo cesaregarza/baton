@@ -10,8 +10,10 @@ import pytest
 from test_conversations import group_config, refused, say, start
 from test_messages import rid
 
-from baton import conversations, inbox, messages, store
-from baton.store import SchemaMismatch, connect
+from baton import conversations, messages
+from baton.database import store
+from baton.database.store import SchemaMismatch, connect
+from baton.messages import inbox
 
 
 def test_host_notices_do_not_count_toward_the_hourly_limit(tmp_path: Path) -> None:

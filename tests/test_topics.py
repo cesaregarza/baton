@@ -17,9 +17,10 @@ from test_conversations import GROUP, count, group_config, refused
 from test_messages import rid
 from topic_backing import back_topics
 
-from baton import conversations, store
+from baton import conversations
 from baton.config import Config
-from baton.store import SCHEMA_VERSION, connect
+from baton.database import store
+from baton.database.store import SCHEMA_VERSION, connect
 
 FIXTURES = Path(__file__).parent / "fixtures"
 # Every older schema there is a real fixture for. Not read off MIGRATES_FROM on purpose: a version missing

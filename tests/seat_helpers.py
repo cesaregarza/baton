@@ -148,7 +148,7 @@ def log_in(config: Config, token: str):
 
 def conversation(host: SeatHost, participants: tuple[str, ...] = ("orchestrator", "operator"), title: str = "Example"):
     from baton import conversations
-    from baton.store import connect
+    from baton.database.store import connect
 
     conn = connect(host.config.db_path)
     try:
@@ -160,7 +160,7 @@ def conversation(host: SeatHost, participants: tuple[str, ...] = ("orchestrator"
 
 def agent_says(host: SeatHost, conversation_id: str, text: str, sender: str = "orchestrator", **kw):
     from baton import conversations
-    from baton.store import connect
+    from baton.database.store import connect
 
     conn = connect(host.config.db_path)
     try:

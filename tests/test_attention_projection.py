@@ -20,7 +20,7 @@ from topic_backing import back_topics
 from baton import config as config_module
 from baton import conversations, jobs
 from baton.config import Config, ConfigError
-from baton.store import connect
+from baton.database.store import connect
 
 try:
     from baton import dashboard

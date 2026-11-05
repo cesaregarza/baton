@@ -15,9 +15,10 @@ import pytest
 from test_artifact_reads import reads_config, shown
 from test_index_writer import artifacts_for, commit, converse, lose, read_all, say
 
-from baton import changes, derived, store
+from baton import changes, derived
+from baton.database import store
+from baton.database.store import connect, transaction
 from baton.errors import BatonError
-from baton.store import connect, transaction
 
 
 @pytest.fixture

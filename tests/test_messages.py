@@ -4,8 +4,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from baton import inbox, messages
+from baton import messages
 from baton.errors import IdempotencyConflict, InvalidRequest, MailboxFull, RequestTooOld
+from baton.messages import inbox
+from baton.messages import limits as message_limits
 
 
 def rid(suffix: str, at: datetime | None = None) -> str:
@@ -73,7 +75,7 @@ def test_oversized_messages_are_refused(conn) -> None:
 
 
 def test_a_full_mailbox_pushes_back_until_read(conn, monkeypatch) -> None:
-    monkeypatch.setattr(messages, "MAX_UNREAD", 2)
+    monkeypatch.setattr(message_limits, "MAX_UNREAD", 2)
     messages.send(conn, sender="planner", recipient="worker", text="a")
     messages.send(conn, sender="planner", recipient="worker", text="b")
     with pytest.raises(MailboxFull):

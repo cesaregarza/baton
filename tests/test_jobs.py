@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from baton import inbox, jobs, messages
+from baton import jobs, messages
 from baton.errors import (
     IdempotencyConflict,
     IllegalTransition,
@@ -14,6 +14,7 @@ from baton.errors import (
     StaleRevision,
     UnknownJob,
 )
+from baton.messages import inbox
 
 
 def test_a_job_follows_the_configured_graph_and_tells_whoever_acts_next(host, conn) -> None:

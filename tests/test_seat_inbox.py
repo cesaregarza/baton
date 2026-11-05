@@ -9,8 +9,8 @@ import pytest
 from seat_helpers import agent_says, conversation, get, hidden, log_in, mailbox, make_seat_host, post, stored_by_seat
 
 from baton import conversations
+from baton.database.store import connect
 from baton.errors import ConversationFull
-from baton.store import connect
 
 try:
     from baton import seat

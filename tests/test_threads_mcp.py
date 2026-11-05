@@ -15,7 +15,7 @@ import anyio
 from test_conversations_mcp import cli_as, client, grant, group_host, texts  # noqa: F401  (group_host: a fixture)
 from test_integration import payload
 
-from baton.store import connect
+from baton.database.store import connect
 
 CONVERSATION_ARGUMENTS = {"reply_to", "attention", "needs_decision"}
 

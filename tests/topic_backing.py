@@ -13,7 +13,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from baton.store import connect, new_topic_id
+from baton.database.store import connect, new_topic_id
 
 
 def back_topics(target: Any, *paths: str, members: tuple[str, ...] = ()) -> None:

@@ -136,7 +136,8 @@ for published versions.
 
 ## Contributing
 
-The [code map](docs/code-map.md) follows a message through the domain objects and database boundary.
+The [code map](docs/code-map.md) lists feature owners, shows where to make common changes, and traces a message
+from the CLI or MCP tool through the domain objects to the database.
 
 ```sh
 uv sync

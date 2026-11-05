@@ -22,7 +22,7 @@ from baton import app as app_module
 from baton import config as config_module
 from baton import conversations, dashboard, messages
 from baton.config import Config, ConfigError
-from baton.store import connect
+from baton.database.store import connect
 
 GROUP = ["orchestrator", "reviewer", "operator"]
 OTHERS = ["orchestrator", "assistant"]

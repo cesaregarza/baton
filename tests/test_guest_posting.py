@@ -16,8 +16,9 @@ from test_aliases import (
 )
 from topic_backing import back_topics
 
-from baton import app, messages, store
+from baton import app, messages
 from baton.config import Role
+from baton.database import store
 
 
 @pytest.fixture

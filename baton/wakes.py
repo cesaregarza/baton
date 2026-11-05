@@ -56,7 +56,7 @@ import httpx
 from baton import events, messages
 from baton.config import Config, Wake
 from baton.database import Connection, Row
-from baton.store import connect
+from baton.database.store import connect
 
 log = logging.getLogger("baton.wakes")
 

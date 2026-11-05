@@ -12,15 +12,14 @@ from pydantic import Field
 
 from baton import aliases, conversations, jobs, messages, topics
 from baton import search as search_module
+from baton.agents import Agent
+from baton.app.reference_tools import ReferenceTools
+from baton.app.topic_tools import TopicTools
 from baton.config import Config
-from baton.conversation import Conversation
 from baton.database import Connection
+from baton.database.store import connection
 from baton.errors import InvalidRequest
 from baton.jobs import Job
-from baton.participants import Participant
-from baton.reference_tools import ReferenceTools
-from baton.store import connection
-from baton.topic_tools import TopicTools
 
 MAX_WAIT_SECONDS = 30
 
@@ -119,7 +118,7 @@ class Tools(TopicTools, ReferenceTools):
         (`attention`, `needs_decision`); a direct message is already addressed to its recipient.
         """
         with self._conn() as conn:
-            return Participant(conn, self._config, role).send(
+            return Agent(conn, self._config, role).send(
                 text, to=to, conversation_id=conversation_id, job_id=job_id, relayed=relayed,
                 reply_to=reply_to, attention=attention, identity=identity, needs_decision=needs_decision,
                 request_id=request_id)
@@ -130,7 +129,7 @@ class Tools(TopicTools, ReferenceTools):
     ) -> dict[str, Any]:
         """Messages to you after `after_seq` (default: the ones not yet delivered), oldest first, with next_seq."""
         with self._conn() as conn:
-            return Participant(conn, self._config, role).inbox.read(after_seq, limit)
+            return Agent(conn, self._config, role).inbox.read(after_seq, limit)
 
     def create_conversation(
         self, role: str, title: str,
@@ -147,9 +146,9 @@ class Tools(TopicTools, ReferenceTools):
     ) -> dict[str, Any]:
         """Start a thread. Name `participants`, or as a guest give a `topic` and its members receive it."""
         with self._conn() as conn:
-            return Conversation.create(conn, self._config, actor=role, title=title, participants=participants,
-                                       topic=topic, request_id=request_id, identity=identity,
-                                       seen=topics.seen_by(call))
+            return Agent(conn, self._config, role).create_thread(
+                title, participants=participants, topic=topic, request_id=request_id, identity=identity,
+                seen=topics.seen_by(call))
 
     def list_conversations(
         self, role: str,
@@ -193,8 +192,8 @@ class Tools(TopicTools, ReferenceTools):
         """
         conversations.require_enabled(self._config)
         with self._conn() as conn:
-            return Conversation(conn, conversation_id).history(role, after_seq, limit, before_seq=before_seq,
-                                                              config=self._config)
+            return Agent(conn, self._config, role).thread(conversation_id).read(
+                after_seq, limit, before_seq=before_seq)
 
     def search(
         self, role: str,
@@ -248,17 +247,17 @@ class Tools(TopicTools, ReferenceTools):
     def add_participant(self, role: str, conversation_id: str, participant: str) -> dict[str, Any]:
         """Add a role to a conversation; every participant gets a host notice. Adding one already in changes nothing."""
         with self._conn() as conn:
-            return Conversation(conn, conversation_id).add(self._config, participant, actor=role)
+            return Agent(conn, self._config, role).thread(conversation_id).add_participant(participant)
 
     def remove_participant(self, role: str, conversation_id: str, participant: str) -> dict[str, Any]:
         """Remove a role from a conversation; it receives nothing more, and the others get a host notice."""
         with self._conn() as conn:
-            return Conversation(conn, conversation_id).remove(self._config, participant, actor=role)
+            return Agent(conn, self._config, role).thread(conversation_id).remove_participant(participant)
 
     def wait(self, role: str, timeout_seconds: Annotated[float, Field(ge=0, le=MAX_WAIT_SECONDS)] = 20) -> dict:
         """Block until messages or job changes are addressed to you, then return each exactly once."""
         with self._conn() as conn:
-            return Participant(conn, self._config, role).inbox.wait(timeout_seconds=timeout_seconds)
+            return Agent(conn, self._config, role).inbox.wait(timeout_seconds=timeout_seconds)
 
     def create_job(self, role: str, title: str, body: str = "", request_id: str | None = None) -> dict[str, Any]:
         """Open a job in the initial state. Pass a request_id to make a retry safe."""

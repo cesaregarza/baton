@@ -17,7 +17,7 @@ from test_dashboard_pages import get, page_config
 
 from baton import conversations, dashboard, topics
 from baton.config import Config
-from baton.store import connect
+from baton.database.store import connect
 
 ALIAS = {"alias_id": "al_0000000000000001", "alias": "lane-a", "badge": "guest", "code": "ab12",
          "effective_role": "guest"}

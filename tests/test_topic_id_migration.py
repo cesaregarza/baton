@@ -25,9 +25,10 @@ from test_migration_matrix import FIXTURE_VERSIONS
 from test_topic_containers import make_topic, topic_config
 from test_topic_migration import v14_database
 
-from baton import conversations, store, topics
+from baton import conversations, topics
 from baton.config import Config
-from baton.store import connect
+from baton.database import store
+from baton.database.store import connect
 
 FIXTURES = Path(__file__).parent / "fixtures"
 V15_VERSION = 15  # the version schema_v15.sql holds, not an assertion about the current one

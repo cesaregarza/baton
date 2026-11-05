@@ -10,9 +10,12 @@ from pathlib import Path
 import pytest
 from secretary_support import conversation, make_world, policy, say
 
-from baton import conversations, jobs, messages, secretary, secretary_decide, secretary_store
+from baton import conversations, jobs, messages
+from baton.agents.secretary import decide as secretary_decide
+from baton.agents.secretary import store as secretary_store
+from baton.agents.secretary import tracking as secretary
 from baton.config import ConfigError
-from baton.store import transaction
+from baton.database.store import transaction
 
 FAKE = Path(__file__).parent / "fixtures" / "secretary_fake_judge.py"
 QUESTIONS = "0" * 64

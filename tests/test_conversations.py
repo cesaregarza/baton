@@ -16,10 +16,12 @@ from test_messages import rid
 from test_wakes import Recorder
 
 from baton import config as config_module
-from baton import inbox, jobs, messages, wakes
+from baton import jobs, messages, wakes
 from baton.config import Config, ConfigError
+from baton.database.store import connect
 from baton.errors import BatonError
-from baton.store import connect
+from baton.messages import inbox
+from baton.messages import limits as message_limits
 
 try:
     from baton import conversations
@@ -240,7 +242,7 @@ def test_6_reading_a_conversations_history_does_not_mark_anything_read(db, confi
 
 
 def test_7_one_full_mailbox_refuses_the_whole_send(db, config, monkeypatch) -> None:
-    monkeypatch.setattr(messages, "MAX_UNREAD", 2)
+    monkeypatch.setattr(message_limits, "MAX_UNREAD", 2)
     conversation_id = start(db, config)
     for text in ("a", "b"):
         messages.send(db, sender="outsider", recipient="assistant", text=text)

@@ -18,9 +18,9 @@ import pytest
 
 from baton import config as config_module
 from baton import conversations, datadir
+from baton.database.store import connect
 from baton.datadir import UnsafeDataDir
 from baton.integrations import decision_push
-from baton.store import connect
 
 REAL_SCANDIR = os.scandir
 

@@ -16,9 +16,10 @@ import pytest
 from test_conversations import group_config
 from test_messages import rid
 
-from baton import conversations, events, messages, store
+from baton import conversations, events, messages
 from baton.config import Config
-from baton.store import SchemaMismatch, connect
+from baton.database import store
+from baton.database.store import SchemaMismatch, connect
 
 V3_SCHEMA = (Path(__file__).parent / "fixtures" / "schema_v3.sql").read_text()
 CONVERSATION = "conv_fromv3"

@@ -42,7 +42,7 @@ from test_topic_containers import (
 
 from baton import conversations, topics
 from baton.config import Config
-from baton.store import connect
+from baton.database.store import connect
 
 O = "orchestrator"  # noqa: E741 -- the one role that may manage topics in topic_config
 HISTORY_COLUMNS = {"topic_id", "operation", "actor", "grant_id", "before", "after", "at"}

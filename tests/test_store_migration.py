@@ -11,9 +11,11 @@ import pytest
 from test_conversations import GROUP, conversations, group_config
 from test_messages import rid
 
-from baton import events, inbox, messages, store
+from baton import events, messages
 from baton.config import Config
-from baton.store import SchemaMismatch, connect
+from baton.database import store
+from baton.database.store import SchemaMismatch, connect
+from baton.messages import inbox
 
 V2_SCHEMA = (Path(__file__).parent / "fixtures" / "schema_v2.sql").read_text()
 

@@ -15,9 +15,10 @@ import pytest
 from test_conversations import GROUP, bookmarks, count, group_config, mailbox, refused, say, start, woken
 from test_messages import rid
 
-from baton import conversations, inbox, messages
+from baton import conversations, messages
 from baton.config import Config
-from baton.store import connect
+from baton.database.store import connect
+from baton.messages import inbox
 
 # A parent's words, so a test can assert no reader ever sees them through a reply.
 HIDDEN = "the words of a parent a late joiner never saw"

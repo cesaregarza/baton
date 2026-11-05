@@ -209,7 +209,7 @@ renders currently visible source excerpts; `cancel ID --reason TEXT` records an 
 before `--floor`. Once a brief or digest is delivered, its `covered_through` is the next `--since`: a bound keeps
 the oldest whole lines, so what it leaves out comes next. Without `--since`, the first decision records the floor
 before it scans. It records each decision and never delivers;
-`python -m baton.secretary_decide` takes the same options without the CLI's import time. An optional policy
+`python -m baton.agents.secretary.decide` (also available as `baton.secretary_decide`) takes the same options without the CLI's import time. An optional policy
 `judge` block (`command`, an absolute argv; `timeout_seconds`; `questions_sha256`; and optionally
 `owed_digest_below` and `wake_at`) lets a wake's `decide` put at most two new messages to that host command,
 and a failed, late or malformed answer leaves a message to the deterministic rules, as does one that ties it
@@ -231,7 +231,7 @@ principal can't read as missing. Each message carries its id, position, conversa
 time, `reply_to`, text and relayed entries. A page holds at most `--limit` events or messages (default 20, at most
 100) and `--max-bytes` (default 256 KiB), always at least one, and `through_pos` is where the next page starts. Each
 of `decide`'s items says whether it was `delivered` to the principal in the same way. `read` opens the database
-read-only, needs no `--state`, and writes nothing; `python -m baton.secretary_read` takes the same options.
+read-only, needs no `--state`, and writes nothing; `python -m baton.agents.secretary.read` (also available as `baton.secretary_read`) takes the same options.
 The projection reads events addressed to or authored by the principal, plus later events for jobs whose
 earlier create or move event the principal authored. It derives job facts from those event rows and
 rechecks message visibility before retaining a cited message. Envelope version 1 refuses unknown stored

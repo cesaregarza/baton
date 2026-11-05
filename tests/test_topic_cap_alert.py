@@ -22,7 +22,7 @@ from test_topic_containers import ALIAS, OTHER_ALIAS, refused, seed_aliases, top
 
 from baton import conversations, messages, topics, wakes
 from baton.config import Config
-from baton.store import connect
+from baton.database.store import connect
 
 ALERT_ROLE = "orchestrator"
 

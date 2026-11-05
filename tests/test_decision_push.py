@@ -25,8 +25,8 @@ from test_messages import rid
 from baton import app as app_module
 from baton import config as config_module
 from baton.config import Config, ConfigError
+from baton.database.store import connect
 from baton.integrations import load_enabled
-from baton.store import connect
 
 try:
     from baton.integrations import decision_push

@@ -52,8 +52,8 @@ from mcp.server.mcpserver import MCPServer
 from baton import datadir
 from baton.config import Config, ConfigError
 from baton.dashboard import message_path
+from baton.database.store import connect
 from baton.integrations import IntegrationUnavailable
-from baton.store import connect
 
 NAME = "decision_push"
 TITLE = "A decision is waiting in Baton"

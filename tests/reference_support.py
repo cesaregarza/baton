@@ -1,7 +1,7 @@
 """Shared setup for the reference tests: the same hosts, scenes, grantees and grant clock as the topic grant tests, plus
 what references add.
 
-Nothing here imports `baton.references` or touches a reference table at the top level. `references_module()`,
+Nothing here imports `baton.topics.references` or touches a reference table at the top level. `references_module()`,
 `body_method()` and `require_reference_tables()` assert that the module, the tool and the tables exist first, as S1's
 `grants_module()` does, so against a base without them a test fails on that assertion and never as an ImportError, an
 AttributeError or an OperationalError.
@@ -36,9 +36,10 @@ import topic_grant_tools_support as support
 from topic_grant_support import Clock, grants_module, table_exists
 from topic_grant_tools_support import Grantee, Scene, build_host, tool
 
-from baton import aliases, store
+from baton import aliases
 from baton import app as app_module
 from baton.app import guard, tools
+from baton.database import store
 from baton.errors import BatonError
 
 REFERENCE_TABLES = ("reference_docs", "reference_revisions")
@@ -112,19 +113,21 @@ def revoked(grant_id: str) -> str:
 
 def references_module() -> ModuleType:
     """The module under test, or a failed assertion saying it is not there."""
-    assert importlib.util.find_spec("baton.references") is not None, "baton/references.py does not exist yet"
-    module = importlib.import_module("baton.references")
+    assert importlib.util.find_spec("baton.topics.references") is not None, \
+        "baton/topics/references.py does not exist yet"
+    module = importlib.import_module("baton.topics.references")
     for name in ("edit", "read", "history", "MAX_BODY_BYTES", "MAX_DOCS_PER_TOPIC", "MAX_NAME", "MAX_HISTORY_PAGE"):
-        assert hasattr(module, name), f"baton.references has no {name}"
+        assert hasattr(module, name), f"baton.topics.references has no {name}"
     return module
 
 
 def reference_tools_module() -> ModuleType:
     """The module the three tool methods live in, or a failed assertion saying it is not there."""
-    assert importlib.util.find_spec("baton.reference_tools") is not None, "baton/reference_tools.py does not exist yet"
-    module = importlib.import_module("baton.reference_tools")
+    assert importlib.util.find_spec("baton.app.reference_tools") is not None, \
+        "baton/app/reference_tools.py does not exist yet"
+    module = importlib.import_module("baton.app.reference_tools")
     for name in ("ReferenceTools", "REFERENCE_TOOLS", "REFERENCE_GUEST_TOOLS"):
-        assert hasattr(module, name), f"baton.reference_tools has no {name}"
+        assert hasattr(module, name), f"baton.app.reference_tools has no {name}"
     return module
 
 

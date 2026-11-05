@@ -11,7 +11,7 @@ from test_dashboard import text
 from test_dashboard_pages import MINE, get, made, needs_items, page_config
 
 from baton import conversations, dashboard, jobs
-from baton.store import connect
+from baton.database.store import connect
 
 LONG = "x" * 6000  # one unbroken word, far wider than any phone
 

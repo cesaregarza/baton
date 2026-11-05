@@ -8,7 +8,10 @@ from dataclasses import replace
 import pytest
 from secretary_support import conversation, make_world, policy, say
 
-from baton import cli, conversations, jobs, messages, secretary, secretary_store
+from baton import cli, conversations, jobs, messages
+from baton.agents.secretary import sources
+from baton.agents.secretary import store as secretary_store
+from baton.agents.secretary import tracking as secretary
 from baton.app import Tools
 from baton.config import JobState, Role
 from baton.errors import InvalidRequest
@@ -516,7 +519,7 @@ def test_brief_groups_work_and_separates_claimed_relays_and_notices(tmp_path) ->
         assert any({"key": "repo#7", "rev": REV2} in item["artifacts"] for item in items)
         assert any(item["relayed_sha256"] for item in items)
         assert all(len(secretary_store.canonical(version).encode()) <= secretary.MAX_BRIEF_BYTES
-                   and len(version["items"]) <= secretary.MAX_CITATIONS for version in versions)
+                   and len(version["items"]) <= sources.MAX_CITATIONS for version in versions)
         relayed = next(item for item in shown["items"] if item["envelope"]["relayed_sha256"])
         assert relayed["excerpt"]["relayed"][0]["excerpt"].startswith("PASS")
         assert relayed["excerpt"]["authored_excerpt"].startswith("received")
@@ -613,7 +616,7 @@ def test_sixty_five_artifact_tokens_record_a_bounded_reconcile(tmp_path) -> None
         shown = secretary.show(world.config, world.state_path, world.policy_path)
         key = f"message:{sent['message_id']}"
         item = next(row["envelope"] for row in shown["items"] if row["envelope"]["source_key"] == key)
-        assert item["artifact_over_limit"] is True and len(item["artifacts"]) == secretary.MAX_CITATIONS
+        assert item["artifact_over_limit"] is True and len(item["artifacts"]) == sources.MAX_CITATIONS
         assert any(row["source_key"] == key and row["kind"] == "reconcile" and "bounded" in row["reason"]
                    for row in shown["dispositions"])
         assert not any(row["opening_source"] == key for row in shown["expectations"])

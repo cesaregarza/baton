@@ -17,10 +17,11 @@ from pathlib import Path
 import pytest
 from test_topic_containers import ALIAS, refused, topic_config
 
-from baton import conversations, store
+from baton import conversations
 from baton.config import Config
+from baton.database import store
+from baton.database.store import connect
 from baton.errors import BatonError
-from baton.store import connect
 
 V14_SCHEMA = (Path(__file__).parent / "fixtures" / "schema_v14.sql").read_text()
 V14_VERSION = 14  # the version the fixture dump holds, not an assertion about the current one

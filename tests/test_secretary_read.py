@@ -17,8 +17,11 @@ import pytest
 from secretary_support import ALIAS_ID, conversation, make_world, say, table_hashes
 
 import baton
-from baton import cli, conversations, events, jobs, messages, secretary, secretary_store, store
-from baton.store import transaction
+from baton import cli, conversations, events, jobs, messages
+from baton.agents.secretary import store as secretary_store
+from baton.agents.secretary import tracking as secretary
+from baton.database import store
+from baton.database.store import transaction
 
 SECRET = "the private phrase"
 RELAYED = [{"source": "upstream", "at": "2026-11-02T00:00:00Z", "text": "Relayed words"}]

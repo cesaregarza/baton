@@ -8,10 +8,13 @@ import json
 import pytest
 from secretary_support import conversation, make_world, policy, say, table_hashes
 
-from baton import cli, conversations, events, jobs, messages, secretary, secretary_decide, secretary_store
+from baton import cli, conversations, events, jobs, messages
+from baton.agents.secretary import decide as secretary_decide
+from baton.agents.secretary import store as secretary_store
+from baton.agents.secretary import tracking as secretary
 from baton.config import ConfigError
+from baton.database.store import transaction
 from baton.errors import InvalidRequest
-from baton.store import transaction
 
 SECRET = "the secret phrase"
 NEW_KIND = "synthetic.notice"  # a kind of delivery no secretary code names

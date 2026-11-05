@@ -12,7 +12,7 @@ from test_dashboard_pages import MINE, made, page_config
 from test_dashboard_pages import get as dashboard_get
 
 from baton import conversations
-from baton.store import connect
+from baton.database.store import connect
 
 
 def _older(body: str) -> str | None:

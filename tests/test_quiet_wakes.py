@@ -19,7 +19,7 @@ from test_wakes import Recorder
 from baton import config as config_module
 from baton import conversations, jobs, messages, wakes
 from baton.config import Config, ConfigError
-from baton.store import connect
+from baton.database.store import connect
 
 QUIET = "assistant"
 

@@ -21,9 +21,10 @@ import pytest
 from test_conversations import group_config
 from test_messages import rid
 
-from baton import conversations, events, messages, store
+from baton import conversations, events, messages
 from baton.config import Config
-from baton.store import MIGRATES_FROM, SCHEMA_VERSION, SchemaMismatch, connect
+from baton.database import store
+from baton.database.store import MIGRATES_FROM, SCHEMA_VERSION, SchemaMismatch, connect
 
 FIXTURES = Path(__file__).parent / "fixtures"
 # Every older schema there is a real fixture for. Deliberately not read off MIGRATES_FROM: a version

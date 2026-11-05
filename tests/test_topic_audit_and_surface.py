@@ -34,8 +34,9 @@ from test_aliases import (  # noqa: F401 -- `guest_host` is a pytest fixture
 )
 from test_per_call_identity import audit, claim, enrol
 
-from baton import auth, conversations, store, topics
+from baton import auth, conversations, topics
 from baton.config import Role
+from baton.database import store
 
 BASE_KEYS = {"at", "role", "credential_role", "credential_id", "tool", "outcome"}
 TOPIC_TOOLS = ("list_topics", "get_topic", "create_topic", "update_topic", "rename_topic", "set_topic",

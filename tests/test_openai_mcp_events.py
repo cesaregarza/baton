@@ -36,8 +36,8 @@ from cryptography.x509.oid import NameOID
 
 from baton import messages, wakes
 from baton.config import ConfigError, parse
+from baton.database.store import connect
 from baton.integrations import openai_mcp_events as integration
-from baton.store import connect
 
 NAME = "callback.test"
 EVENT = integration.EVENT_NAME

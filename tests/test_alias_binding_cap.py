@@ -16,7 +16,8 @@ import pytest
 from test_aliases import dispatch
 from test_per_call_identity import OTHER, SECRET, build_host, call, claim, db
 
-from baton import auth, store
+from baton import auth
+from baton.database import store
 
 CAP = 3
 ALIAS = "lane-c"

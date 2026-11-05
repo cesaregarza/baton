@@ -25,7 +25,7 @@ from test_human_seat import SeatHost, local, remote
 
 from baton import config as config_module
 from baton.auth import new_token
-from baton.store import connect
+from baton.database.store import connect
 
 GROUP = "operator,reviewer,assistant"
 

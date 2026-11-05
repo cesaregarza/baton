@@ -8,9 +8,10 @@ import pytest
 from test_aliases import dispatch
 from test_per_call_identity import OTHER, SECRET, build_host, call, claim, db, enrol, owner
 
-from baton import aliases, auth, store
+from baton import aliases, auth
 from baton import config as config_module
 from baton.config import ConfigError
+from baton.database import store
 from baton.errors import Forbidden
 
 THIRD = "synthetic third secret"

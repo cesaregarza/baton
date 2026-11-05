@@ -21,12 +21,12 @@ from mcp.types import ToolAnnotations
 from starlette.types import ASGIApp
 
 from baton import __version__, auth, dashboard, datadir, seat
+from baton.app.reference_tools import LiteralArguments as LiteralArguments
+from baton.app.reference_tools import ReferenceTools as ReferenceTools
+from baton.app.topic_tools import TopicTools as TopicTools
 from baton.config import Config
+from baton.database.store import connect
 from baton.integrations import Integration, IntegrationUnavailable, load_enabled
-from baton.reference_tools import LiteralArguments as LiteralArguments
-from baton.reference_tools import ReferenceTools as ReferenceTools
-from baton.store import connect
-from baton.topic_tools import TopicTools as TopicTools
 from baton.wakes import Dispatcher
 
 from .catalog import ARTIFACT_TOOLS as ARTIFACT_TOOLS

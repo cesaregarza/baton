@@ -20,7 +20,8 @@ from test_topic_containers import ALIAS, OTHER_ALIAS, seed_aliases
 from topic_backing import back_topics
 from topic_grant_support import Clock, every_cell, grants_module
 
-from baton import cli, store
+from baton import cli
+from baton.database import store
 
 
 @pytest.fixture

@@ -12,8 +12,9 @@ import pytest
 from conftest import make_config
 
 from baton import app as app_module
-from baton import auth, store
+from baton import auth
 from baton.config import Role, StaticToken
+from baton.database import store
 
 PROTOCOL = "2026-07-28"
 

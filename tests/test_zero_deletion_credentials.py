@@ -59,10 +59,11 @@ from test_openai_mcp_events import (
 )
 from test_per_call_identity import OTHER, build_host, claim, owner
 
-from baton import auth, datadir, derived, seat, store, wakes
+from baton import auth, datadir, derived, seat, wakes
+from baton.database import store
+from baton.database.store import connect
 from baton.errors import BatonError
 from baton.integrations import openai_mcp_events as integration
-from baton.store import connect
 
 LAPSED = auth.UNUSED_CLIENT_TTL + 60  # how long ago a registration that has lapsed arrived
 LONG_AGO = 946_684_800  # 2000-01-01, long before any file a test writes, so only a rewrite moves a file off it

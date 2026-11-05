@@ -17,11 +17,12 @@ from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 from mcp.types import CallToolResult, TextContent
 
 from baton import aliases, auth, datadir, messages, topics
+from baton.agents.permissions import Permissions
+from baton.app.reference_tools import LiteralArguments
+from baton.app.tool_policy import BY_NAME
 from baton.config import Config
+from baton.database.store import connect
 from baton.errors import BatonError, Forbidden, InvalidRequest
-from baton.reference_tools import LiteralArguments
-from baton.store import connect
-from baton.tool_policy import BY_NAME
 
 from .catalog import (
     AUDITED_IDS,
@@ -128,27 +129,15 @@ class Guard:
 
     def _capability(self, name: str, call: dict[str, Any], kwargs: dict[str, Any]) -> str | None:
         """Why the role this call runs as may not make it, or None."""
-        role = call["role"]
         policy = BY_NAME[name]
-        if role == "guest":
-            if policy.guest == "no" or (policy.guest == "grant" and call["grant_key"] is None):
-                return f"guest may not call {name}"
-            if policy.guest == "binding" and call["identity"] is None:
-                return "alias binding is missing, invalid or expired"
-            if name == "search" and (kwargs.get("producer") is not None or kwargs.get("query_vector") is not None
-                                      or kwargs.get("model") is not None or
-                                      (kwargs.get("kinds") is not None and
-                                       (not isinstance(kwargs["kinds"], list) or
-                                        not all(kind == "message" for kind in kwargs["kinds"])))):
-                return "guest search is limited to messages"
-            if name == "send_message" and (kwargs.get("conversation_id") is None or kwargs.get("to") is not None
-                                           or kwargs.get("job_id") is not None or kwargs.get("needs_decision")):
-                return "guest posts require a conversation, without jobs or decisions"
-        if policy.job_authority and not self._config.roles[role].job_authority:
-            return f"role {role} may not mutate jobs"
-        if name == "send_message" and role != "guest" and kwargs.get("to") == "guest":
-            return "direct messages to guest are not allowed"
-        return None
+        return Permissions.for_role(self._config, call["role"]).tool_refusal(
+            name,
+            guest_access=policy.guest,
+            requires_job_authority=policy.job_authority,
+            has_binding=call["identity"] is not None,
+            has_grant=call["grant_key"] is not None,
+            arguments=kwargs,
+        )
 
     def _admit_post(self, principal: Any, call: dict[str, Any]) -> None:
         if call["identity"] is None:

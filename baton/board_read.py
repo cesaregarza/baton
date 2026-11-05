@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from baton.agents.permissions import Capability, Permissions
 from baton.config import Config
 from baton.database import Connection
 
 
 def sees_all(config: Config, role: str) -> bool:
     """Whether the configured principal may read every board conversation."""
-    return role in config.roles and config.roles[role].can_view_all_conversations
+    return Permissions.for_role(config, role).allows(Capability.VIEW_ALL_CONVERSATIONS)
 
 
 def message_condition(config: Config, role: str, alias: str = "m") -> tuple[str, dict[str, Any]]:

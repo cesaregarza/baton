@@ -55,8 +55,8 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from baton import board_read, conversations, jobs, messages, topics
 from baton.config import Config
+from baton.database.store import connect
 from baton.errors import BatonError
-from baton.store import connect
 
 HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'; "

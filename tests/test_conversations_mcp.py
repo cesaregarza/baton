@@ -32,7 +32,7 @@ from baton import cli, messages
 from baton import config as config_module
 from baton.auth import hash_passphrase, new_token
 from baton.config import Config
-from baton.store import connect
+from baton.database.store import connect
 
 CONVERSATION_TOOLS = {"create_conversation", "list_conversations", "read_history", "add_participant",
                       "remove_participant", "set_topic", "create_topic", "update_topic", "rename_topic",

@@ -4,17 +4,17 @@ from typing import Annotated
 
 from pydantic import Field
 
-from baton.tool_policy import ARTIFACT_TOOLS as ARTIFACT_TOOLS
-from baton.tool_policy import CONVERSATION_TOOLS as CONVERSATION_TOOLS
-from baton.tool_policy import GRANT_TOOLS as GRANT_TOOLS
-from baton.tool_policy import GUEST_IDENTIFIED as GUEST_IDENTIFIED
-from baton.tool_policy import GUEST_TOOLS as GUEST_TOOLS
-from baton.tool_policy import IDENTIFIED_CHANGES as IDENTIFIED_CHANGES
-from baton.tool_policy import LITERAL_TOOLS as LITERAL_TOOLS
-from baton.tool_policy import REFERENCE_GUEST_TOOLS as REFERENCE_GUEST_TOOLS
-from baton.tool_policy import REFERENCE_TOOLS as REFERENCE_TOOLS
-from baton.tool_policy import SEARCH_TOOLS as SEARCH_TOOLS
-from baton.tool_policy import TOOLS as TOOLS
+from baton.app.tool_policy import ARTIFACT_TOOLS as ARTIFACT_TOOLS
+from baton.app.tool_policy import CONVERSATION_TOOLS as CONVERSATION_TOOLS
+from baton.app.tool_policy import GRANT_TOOLS as GRANT_TOOLS
+from baton.app.tool_policy import GUEST_IDENTIFIED as GUEST_IDENTIFIED
+from baton.app.tool_policy import GUEST_TOOLS as GUEST_TOOLS
+from baton.app.tool_policy import IDENTIFIED_CHANGES as IDENTIFIED_CHANGES
+from baton.app.tool_policy import LITERAL_TOOLS as LITERAL_TOOLS
+from baton.app.tool_policy import REFERENCE_GUEST_TOOLS as REFERENCE_GUEST_TOOLS
+from baton.app.tool_policy import REFERENCE_TOOLS as REFERENCE_TOOLS
+from baton.app.tool_policy import SEARCH_TOOLS as SEARCH_TOOLS
+from baton.app.tool_policy import TOOLS as TOOLS
 
 INSTRUCTIONS = """baton relays messages and job state between agents. You act as one role, fixed by your credential.
 Call whoami to see your role and the others. send_message to a role, or to a conversation you take part in;

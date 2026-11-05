@@ -76,7 +76,7 @@ from mcp.shared.exceptions import MCPError
 
 from baton import aliases, auth, datadir
 from baton.config import Config, ConfigError
-from baton.store import connect
+from baton.database.store import connect
 
 log = logging.getLogger("baton.integrations.openai_mcp_events")
 

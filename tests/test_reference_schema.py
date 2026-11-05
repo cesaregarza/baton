@@ -53,8 +53,8 @@ from test_topic_containers import topic_config
 from test_topic_id_migration import install, snapshot, snapshot_plan
 from topic_grant_tools_support import play, refused, succeeded
 
-from baton import store
-from baton.store import connect
+from baton.database import store
+from baton.database.store import connect
 
 build_scene = refs.build_scene  # the fixture, under the name the tests ask for
 

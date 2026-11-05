@@ -26,7 +26,7 @@ from baton.config import Config
 from baton.conversations import utc_iso
 from baton.database import Connection, Row
 from baton.errors import InvalidRequest, UnknownMessage, UnsupportedKind
-from baton.topic_paths import check_topic
+from baton.topics.paths import check_topic
 
 MAX_HITS = 50
 MAX_TERMS = 8

@@ -9,7 +9,7 @@ import pytest
 from seat_helpers import FORM, SEAT_HOST, SEAT_ORIGIN, SESSION_COOKIE, get, hidden, log_in, make_seat_host, post
 
 from baton import conversations
-from baton.store import connect
+from baton.database.store import connect
 
 
 @pytest.fixture

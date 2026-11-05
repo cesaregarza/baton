@@ -35,7 +35,7 @@ from baton import cli
 from baton import config as config_module
 from baton.auth import hash_passphrase, new_token
 from baton.config import Config, ConfigError
-from baton.store import connect
+from baton.database.store import connect
 
 AUTHOR_FIELDS = ("from_role", "author_kind", "author", "sender", "from", "role", "on_behalf_of")
 GROUP = "operator,reviewer,assistant"
@@ -404,7 +404,8 @@ def test_a_version_3_database_is_migrated_and_its_messages_read_as_agents(tmp_pa
     import os
     import sqlite3
 
-    from baton import messages, store
+    from baton import messages
+    from baton.database import store
 
     path = seat_config(tmp_path, 8765, {"operator": new_token()[1]})
     config = config_module.load(path)

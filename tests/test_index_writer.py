@@ -17,12 +17,13 @@ from typing import Any
 
 import pytest
 
-from baton import cli, conversations, search, store
+from baton import cli, conversations, search
 from baton import config as config_module
 from baton.config import Config, ConfigError
+from baton.database import store
+from baton.database.store import connect
 from baton.derived import provenance, storage
 from baton.errors import BatonError
-from baton.store import connect
 
 try:  # written before the module exists: each test then fails on its own instead of the whole run stopping
     from baton import derived

@@ -20,8 +20,8 @@ from test_index_writer import converse, read_all, say
 from baton import config as config_module
 from baton import derived, search
 from baton.config import Config
+from baton.database.store import connect
 from baton.errors import BatonError
-from baton.store import connect
 
 ROLES = {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
          "reviewer": {}, "assistant": {}, "outsider": {}, "viewer": {"can_view_all_conversations": True}}

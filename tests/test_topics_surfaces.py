@@ -30,7 +30,7 @@ from baton import config as config_module
 from baton import conversations
 from baton import remote as remote_module
 from baton.auth import new_token
-from baton.store import connect
+from baton.database.store import connect
 
 GROUP = "operator,orchestrator,reviewer,assistant"
 

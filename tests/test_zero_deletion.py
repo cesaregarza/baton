@@ -23,8 +23,8 @@ from test_vectors import commit as commit_in_generation
 from test_vectors import fill as fill_generation
 
 from baton import changes, conversations, derived, jobs, messages, search
+from baton.database.store import connect
 from baton.errors import BatonError, RequestTooOld
-from baton.store import connect
 
 LONG_AGO = timedelta(days=40)  # past the old 30-day read retention and the 31-day retry-record retention
 

@@ -22,7 +22,8 @@ from test_aliases import dispatch, rpc
 from test_topic_guest_surface import call, claim, make_topic
 from topic_grant_support import CAPABILITIES, grants_module
 
-from baton import app, store
+from baton import app
+from baton.database import store
 
 guest_host = surface.guest_host  # the credentials the topic host is built on
 topic_host = surface.topic_host

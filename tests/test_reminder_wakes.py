@@ -19,7 +19,7 @@ from conftest import make_config
 
 from baton import messages, wakes
 from baton.config import Wake
-from baton.store import connect
+from baton.database.store import connect
 
 WORKER_WAKE = '[roles.worker.wake]\ncommand = ["true"]\n'
 FIVE_MINUTES, TWENTY_MINUTES = 300.0, 1200.0
@@ -460,7 +460,7 @@ def test_the_dispatcher_still_polls_every_second_and_sends_originals_in_the_same
 
 def test_upgrading_a_version_six_database_keeps_every_wake_row(tmp_path: Path) -> None:
     """The step that makes room for reminders is additive: existing wakes must come through untouched."""
-    from baton.store import SCHEMA_VERSION
+    from baton.database.store import SCHEMA_VERSION
 
     data = tmp_path / "data"
     data.mkdir(mode=0o700)

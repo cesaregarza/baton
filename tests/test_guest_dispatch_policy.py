@@ -20,8 +20,8 @@ from baton import auth, jobs
 from baton import config as config_module
 from baton import messages as messages_module
 from baton.config import Role, StaticToken
+from baton.database.store import connect, transaction
 from baton.integrations import openai_mcp_events
-from baton.store import connect, transaction
 
 PROTOCOL = "2026-07-28"
 

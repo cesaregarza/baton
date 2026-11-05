@@ -18,7 +18,7 @@ from server_support import running_server
 from baton import config as config_module
 from baton.auth import hash_passphrase, new_token
 from baton.config import Config
-from baton.store import connect
+from baton.database.store import connect
 
 PASSPHRASE = "example passphrase for tests"
 REDIRECT = "https://client.example.test/oauth/callback"

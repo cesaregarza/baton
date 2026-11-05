@@ -25,8 +25,8 @@ from test_topic_containers import topic_config
 from test_topic_id_migration import install, snapshot, snapshot_plan
 from topic_grant_support import GRANT_COLUMNS, grants_module, table_exists
 
-from baton import store
-from baton.store import connect
+from baton.database import store
+from baton.database.store import connect
 
 FIXTURES = Path(__file__).parent / "fixtures"
 V16_VERSION = 16  # the version schema_v16.sql holds, not an assertion about the current one

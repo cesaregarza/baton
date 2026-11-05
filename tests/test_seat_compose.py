@@ -19,7 +19,7 @@ from seat_helpers import (
 )
 
 from baton import conversations
-from baton.store import connect
+from baton.database.store import connect
 
 try:
     from baton import seat

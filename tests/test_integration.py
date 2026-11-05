@@ -85,7 +85,7 @@ def test_a_client_cannot_speak_for_another_role(start_host) -> None:
 
     anyio.run(run)
     from baton import messages
-    from baton.store import connect
+    from baton.database.store import connect
 
     conn = connect(host.config.db_path)
     assert [m["sender"] for m in messages.read(conn, "planner")["messages"]] == ["worker"]

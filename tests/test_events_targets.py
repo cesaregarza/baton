@@ -27,7 +27,8 @@ from test_openai_mcp_events import (
 )
 from test_per_call_identity import OTHER, SECRET, db, owner
 
-from baton import auth, store
+from baton import auth
+from baton.database import store
 from baton.integrations import openai_mcp_events as integration
 
 ROLES = """

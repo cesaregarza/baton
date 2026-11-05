@@ -17,7 +17,7 @@ from test_dashboard_pages import MINE, THEIRS, get, made, page_config
 
 from baton import conversations, dashboard, messages
 from baton.config import Config
-from baton.store import connect, transaction
+from baton.database.store import connect, transaction
 
 HEADER = "Thread: {title}\nId: {cid}\n\n"
 

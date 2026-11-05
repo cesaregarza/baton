@@ -1,56 +1,114 @@
-# Reading the code
+# Finding your way around Baton
 
-Start with the domain objects and follow one operation through the connection they receive.
+Start in the package named for the feature. The CLI and MCP server translate requests into domain
+operations; the domain owns behavior and uses the database connection it receives.
+
+## Package map
+
+```text
+baton/
+  app/                 MCP server, authentication guard, tool schemas and adapters
+  cli/                 Command parser and commands grouped by feature
+  agents/              Agent, Permissions and thread access
+    secretary/         Offline attention tracking, decisions, judge and private state
+  messages/            DirectMessage, Inbox, Post and mailbox delivery
+  conversations/       Conversation, membership, group delivery, history and listing
+  topics/              Topic containers, paths, grants and reference documents
+  jobs.py              Job creation, transitions, revisions and events
+  database/            Connection driver, checked files, schema and migrations
+  derived/             Index generations, batches, artifacts and vectors
+  config/              Configuration values, loading and validation
+  integrations/        Outbound service integrations
+  auth.py              Credentials, OAuth and token lifetime
+  aliases.py           Guest aliases and role bindings
+  board_read.py        Shared predicates for what a reader can see
+  events.py            Event records, request digests and event cursors
+  changes.py           Conversation change feed for indexers
+  wakes.py             Wake scheduling and delivery
+  search.py            Message and artifact search
+  dashboard.py         Read-only browser dashboard
+  seat/                Interactive human browser seat
+  remote.py            MCP client used by remote CLI commands
+  datadir.py           Private filesystem ownership and path checks
+  errors.py            Domain errors and their public codes
+```
+
+The two top-level `secretary_decide.py` and `secretary_read.py` files are executable compatibility
+entrypoints. Their implementations live in `agents/secretary/decide.py` and `agents/secretary/read.py`.
+
+## Where to make a change
+
+| Task | Start here | Related code |
+| --- | --- | --- |
+| Add or change a CLI flag | `cli/<feature>.py` | `cli/main.py` wires the command families; `cli/remote.py` forwards remote calls |
+| Add or change an MCP tool | `app/tools.py`, `app/topic_tools.py`, or `app/reference_tools.py` | `app/tool_policy.py` declares registration and caller policy; `app/guard.py` enforces it |
+| Change configured capabilities or guest restrictions | `agents/permissions.py` | `Permissions` owns capability checks; the MCP guard supplies authenticated context |
+| Change an agent's thread access | `agents/thread.py` | Binds read, send and membership operations to the agent's role |
+| Change who a message is sent as | `agents/agent.py` | Authentication resolves the role before constructing an agent |
+| Change direct send/retry behavior | `messages/direct.py` | `content.py` validates content; `mailbox.py` stores recipient copies |
+| Change inbox delivery or acknowledgment | `messages/inbox.py` | `mailbox.py` owns sequence positions and retiring answered wakes |
+| Change the message response shape | `messages/post.py` | `rendering.py` resolves visible reply parents and bounds pages |
+| Change conversation behavior | `conversations/conversation.py` | `access.py` checks permissions; `delivery.py` handles fanout and limits |
+| Change conversation listing | `conversations/queries.py` | The same module loads thread summaries and participant rows |
+| Change retained history | `Conversation.history()` | `conversations/retention.py` computes visibility boundaries and gaps |
+| Change topic membership or lifecycle | `topics/catalog.py` | `paths.py` validates names; `grants.py` handles delegated permissions |
+| Change reference documents | `topics/references.py` | `app/reference_tools.py` is the MCP adapter |
+| Change job transitions | `jobs.py` | `Job.move()` owns revision checks, retries and atomic event recording |
+| Change connection mechanics | `database/driver.py` | `files.py` checks private database files |
+| Change the authoritative schema | `database/schema.py`, `database/migrations.py` | `database/store.py` opens and initializes the database |
+| Change secretary tracking rules | `agents/secretary/tracking.py` | `policy.py` validates rules; `sources.py` reads visible source records |
+| Change wake/hold/digest decisions | `agents/secretary/decide.py` | `judge.py` handles optional external judgments; `store.py` owns private state |
+| Change secretary read output | `agents/secretary/read.py` | It reads authoritative data without advancing delivery cursors |
+
+## Follow one message
+
+```mermaid
+flowchart TD
+    CLI[cli/messages.py] --> Agent[agents/agent.py]
+    MCP[app/tools.py and app/guard.py] --> Agent
+    Agent --> Direct[messages/direct.py]
+    Agent --> Conversation[conversations/conversation.py]
+    Conversation --> Delivery[conversations/delivery.py]
+    Direct --> Mailbox[messages/mailbox.py]
+    Delivery --> Mailbox
+    Mailbox --> Database[database/driver.py]
+```
+
+For `baton message --to worker`, `cli/messages.py` parses and normalizes arguments. `Agent.send()`
+checks the destination and derives authorship from the acting role. `DirectMessage.send()` owns validation,
+retry identity, mailbox admission and the transaction. `mailbox.store_copy()` assigns the recipient's next
+sequence and records its event through the shared connection. `Inbox.read()` later reads that mailbox and
+advances its cursor atomically. A conversation send follows the same mailbox path for every recipient in
+one transaction.
+
+## Domain API
 
 ```python
-from baton.participants import Participant
-from baton.store import connection
+from baton.database import connection
+from baton.agents import Agent
 
 with connection(config.db_path) as db:
-    planner = Participant(db, config, "planner")
-    worker = Participant(db, config, "worker")
+    planner = Agent(db, config, "planner")
+    worker = Agent(db, config, "worker")
     receipt = planner.send("Please check this", to="worker")
     page = worker.inbox.read()
 ```
 
-This is trusted host-side code. MCP and browser entrypoints authenticate the caller before choosing its role.
-
-## Domain concepts
-
-- `participants.Participant` is a runtime actor: an agent or person acting as a role. It binds outgoing
-  messages to that role, derives authorship from configuration, checks destinations and owns its inbox
-  access. The CLI and MCP use the same send behavior. `config.Role` remains the role's static settings.
-- `messages.DirectMessage` is a submission addressed to one role. It owns validation, replay identity,
-  mailbox admission and the atomic send. Reusing the same object reuses its request ID. The dictionary
-  receipt reports whether that submission created a message or replayed an earlier one.
-- `posts.Post` is the stored message read model. It has explicit fields for text, sender, conversation,
-  attribution and attention. It decodes a database row and renders the existing public payload. A reply's
-  visible parent is supplied separately after checking the reader's access.
-- `inbox.Inbox` belongs to a role and a connection. `read()` delivers messages; `take()` delivers a page
-  of events; `wait()` waits for events. It owns the delivery cursor and advances it atomically with the read.
-- `conversation.Conversation` owns one thread's delivery, participant changes, topic moves and history.
-  It checks current membership on every send, including retries. A handle never caches membership.
-  Collection queries and shared conversation helpers live in `conversations.py`.
-- `jobs.Job` owns creation, transitions, revision checks, retry receipts and event history. It reloads
-  state for each operation so an existing handle sees changes made through another connection.
-- `message_content` contains pure content and retry-ID validation.
-
-The older message, inbox, conversation and job functions remain compatibility entrypoints. Their
-behavior lives in the objects; the adapters preserve existing integrations and wire payloads.
-Topics, references and collection queries keep their named function APIs.
+This is trusted host-side code. MCP and browser entrypoints authenticate the caller before choosing its
+role. An `Agent` represents an agent or person acting as that role; `config.Role` holds its static
+settings. Constructing an agent or a conversation handle is not proof of authorization.
 
 For a host configured with conversations and an `open` to `working` job transition:
 
 ```python
-from baton.conversation import Conversation
 from baton.jobs import Job
 
 with connection(config.db_path) as db:
-    created = Conversation.create(db, config, actor="planner", title="Release",
-                                  participants=["planner", "worker"])
-    thread = Conversation(db, created["conversation_id"])
-    thread.send(config, sender="planner", text="Please check the release")
-    history = thread.history("worker", config=config)
+    planner = Agent(db, config, "planner")
+    worker = Agent(db, config, "worker")
+    created = planner.create_thread("Release", participants=["planner", "worker"])
+    planner.thread(created["conversation_id"]).send("Please check the release")
+    history = worker.thread(created["conversation_id"]).read()
 
     created = Job.create(db, config.jobs, actor="planner", request_id="release-job-1", title="Release")
     job = Job(db, created["job_id"])
@@ -58,23 +116,43 @@ with connection(config.db_path) as db:
     result = job.move(config.jobs, "working", actor="worker", expected_revision=current["revision"])
 ```
 
-Creation returns the public receipt, including whether it replayed an earlier request. A `Conversation`
-or `Job` handle binds an existing ID to a connection; construction alone does not create or authorize it.
-Those handles and inboxes live within their connection's lifetime. A `DirectMessage` is independent of
-the connection: retain it, or retain its request ID, to retry the same submission safely.
+`Agent` composes an `Inbox`, a `Permissions` value and `Thread` handles. Core roles are configured instances
+of the same agent type. Permission differences are data, so ordinary role changes do not require a subclass
+or mixin. `agent.permissions.allows(Capability.CREATE_CONVERSATIONS)` exposes the configured capability set.
+Existing TOML role flags still load into that set; the configuration format has not changed.
 
-## Database boundary
+The MCP guard still validates credential scopes and binding proofs. `Permissions` owns role capabilities
+and guest/tool restrictions, while conversation membership and delegated topic grants are checked against
+current database state inside the operation. An agent's permissions are derived on access; thread handles
+do not cache membership. The secretary is an optional agent-side attention feature under `agents/secretary/`,
+with its existing private state and read-only access to authoritative records.
 
-`database.Connection` owns SQLAlchemy execution, result rows, connection lifetime, write transactions
-and read snapshots. All production driver imports live in this package. Domain code receives this
-connection and uses `db.transaction()` or `db.snapshot()` for operations that must see one consistent state.
-Closing a connection rolls back unfinished work. A snapshot inside an existing transaction borrows it.
+Conversation and job handles reload mutable state for each operation. Creation returns a receipt that
+says whether it created a record or replayed a previous request. The older `messages.send/read` and
+`conversations.create/send/history` function APIs remain available; their behavior lives in the objects.
+`conversations/api.py` contains only those adapters.
 
-`database.files.open_private` checks file ownership, permissions and path identity before returning a
-connection. `store.connection` adds Baton's schema policy and closes the connection after use.
-`store/schema.py` defines the current schema; `store/migrations.py` owns historical upgrade steps.
-The secretary's private database uses the same connection boundary with its own schema.
+A `DirectMessage` is an independent submission: retain it, or retain its request ID, to retry safely.
+Inboxes, conversations and jobs use a live connection and stay within its lifetime. Closing a connection
+rolls back unfinished work. `db.transaction()` owns a write transaction; `db.snapshot()` owns a consistent
+read, or borrows an existing transaction.
 
-SQLite is currently the supported backend. SQLAlchemy is the foundation for the intended PostgreSQL
-backend; existing SQL, FTS5 search and writer-serialization assumptions still need explicit porting.
-The connection does not rewrite SQL dialects or claim that a PostgreSQL URL alone enables support.
+## Organization rules
+
+- Keep a feature's implementation in its package. Put CLI parsing under `cli/` and MCP schemas under `app/`.
+- Keep public package entrypoints explicit. In the reorganized feature packages, `__init__.py` exposes
+  names; behavior lives in named modules. Internal modules import the module that owns a helper directly.
+- Name modules for their responsibility: `mailbox`, `delivery`, `retention`, `grants`, `tracking`. Avoid a
+  growing `utils.py` or a second top-level file that has to be read alongside a feature's package.
+- Split a module when it contains distinct responsibilities. A cohesive module such as `jobs.py` can
+  remain one file; a directory is not required for every object.
+- Keep behavior checks at the domain boundary and transactions around the complete operation. Moving
+  code does not move authority into a transport adapter or replace a real database check with cached state.
+
+Python import paths have moved with the implementation. CLI command names, MCP schemas and public wire
+payloads stay the same. New code should import `Agent`, `Permissions` and `Capability` from `baton.agents`, message objects from
+`baton.messages`, `Conversation` from `baton.conversations`, and connection APIs from `baton.database`.
+
+SQLite is currently supported. SQLAlchemy supplies the connection boundary for the intended PostgreSQL
+backend, but existing SQL, FTS5 search and writer serialization still need porting. Moving files does not
+make those backend assumptions portable.

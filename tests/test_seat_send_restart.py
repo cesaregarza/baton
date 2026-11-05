@@ -26,7 +26,7 @@ from seat_helpers import conversation, get, hidden, log_in, make_seat_host, post
 from baton import config as config_module
 from baton import conversations, seat
 from baton.config import ConfigError
-from baton.store import connect
+from baton.database.store import connect
 
 TESTS = Path(__file__).parent
 CRASH = 17

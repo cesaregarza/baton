@@ -17,7 +17,7 @@ import secrets
 from seat_helpers import conversation, get, log_in, make_seat_host
 
 from baton import conversations, dashboard
-from baton.store import connect, transaction
+from baton.database.store import connect, transaction
 
 ALIAS, CODE = "lane-a", "ab12"
 FROM, TO = "job-hunt/leads", "job-hunt/boards"

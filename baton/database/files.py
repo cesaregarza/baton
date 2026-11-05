@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 
 from baton import datadir
-from baton.database import Connection, connect_sqlite
+
+from .driver import Connection, connect_sqlite
 
 
 def open_private(path: Path, *, read_only: bool = False) -> Connection:

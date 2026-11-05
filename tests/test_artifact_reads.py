@@ -15,10 +15,11 @@ import pytest
 from test_index_writer import artifacts_for, begin, commit, converse, lose, read_all, say, snapshot
 
 from baton import config as config_module
-from baton import conversations, derived, messages, search, store
+from baton import conversations, derived, messages, search
 from baton.config import Config, ConfigError
+from baton.database import store
+from baton.database.store import connect
 from baton.errors import BatonError
-from baton.store import connect
 
 ROLES = {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
          "reviewer": {}, "assistant": {}, "outsider": {}, "late": {},

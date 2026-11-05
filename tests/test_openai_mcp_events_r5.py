@@ -36,8 +36,8 @@ from test_openai_mcp_events_r4 import BadServer, resolver_threads
 
 from baton import wakes
 from baton.config import parse
+from baton.database.store import connect
 from baton.integrations import openai_mcp_events as integration
-from baton.store import connect
 
 # --- R4-1: only unreserved characters in callback paths ---------------------------------------
 

@@ -33,8 +33,8 @@ from test_openai_mcp_events import (
 
 from baton import auth, wakes
 from baton.config import ConfigError, parse
+from baton.database.store import connect
 from baton.integrations import openai_mcp_events as integration
-from baton.store import connect
 
 BUDGET = 0.3
 EPSILON = 0.1

@@ -20,7 +20,7 @@ from topic_backing import back_topics
 from baton import config as config_module
 from baton import conversations, dashboard, jobs
 from baton.config import Config, ConfigError
-from baton.store import connect
+from baton.database.store import connect
 
 MINE = ["orchestrator", "reviewer", "operator"]
 THEIRS = ["orchestrator", "assistant"]

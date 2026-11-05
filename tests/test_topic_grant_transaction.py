@@ -27,8 +27,8 @@ import topic_grant_tools_support as support
 from topic_grant_tools_support import play, refused, stage, succeeded, thread
 
 from baton import app as app_module
-from baton import store
 from baton.app import guard, tools
+from baton.database import store
 
 build_scene = support.build_scene  # the fixture, under the name the tests ask for
 

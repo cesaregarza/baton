@@ -32,8 +32,8 @@ from test_openai_mcp_events import (
 
 from baton import auth, wakes
 from baton.config import ConfigError, parse
+from baton.database.store import connect
 from baton.integrations import openai_mcp_events as integration
-from baton.store import connect
 
 
 def signatures_valid_for(secret: str, headers: dict[str, str], body: bytes) -> bool:

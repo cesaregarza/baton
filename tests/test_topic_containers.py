@@ -19,8 +19,8 @@ import pytest
 from baton import config as config_module
 from baton import conversations, messages
 from baton.config import Config
+from baton.database.store import SCHEMA_VERSION, connect
 from baton.errors import BatonError
-from baton.store import SCHEMA_VERSION, connect
 
 try:
     from baton import topics

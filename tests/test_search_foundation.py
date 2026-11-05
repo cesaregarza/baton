@@ -21,11 +21,12 @@ from typing import Any
 
 import pytest
 
-from baton import cli, conversations, messages, store
+from baton import cli, conversations, messages
 from baton import config as config_module
 from baton.config import Config
+from baton.database import store
+from baton.database.store import SCHEMA_VERSION, connect
 from baton.errors import BatonError
-from baton.store import SCHEMA_VERSION, connect
 
 try:  # written before the modules exist: each test then fails on its own instead of the whole run stopping
     from baton import changes, search

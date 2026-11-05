@@ -11,6 +11,7 @@ from seat_helpers import make_seat_host, seat_config_text
 from baton import cli
 from baton import config as config_module
 from baton.auth import new_token
+from baton.cli.identity import new_token as cli_new_token
 from baton.config import ConfigError
 
 
@@ -86,7 +87,7 @@ def test_token_new_for_a_display_only_role_generates_no_secret(tmp_path: Path, m
     monkeypatch.setattr("baton.auth.new_token", never)
     args = argparse.Namespace(token_role="viewer", name="viewer-phone")
     with pytest.raises(ConfigError, match="display_only"):
-        cli._new_token(host.config, args)
+        cli_new_token(host.config, args)
 
 
 @pytest.mark.parametrize("origin", ["https://127.0.0.1:5444", "https://127.0.0.1"])

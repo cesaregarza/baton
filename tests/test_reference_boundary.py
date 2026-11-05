@@ -61,8 +61,8 @@ from reference_support import (
 )
 from topic_grant_tools_support import play, succeeded, thread
 
-from baton import topic_grants
 from baton.errors import Forbidden, InvalidRequest
+from baton.topics import grants as topic_grants
 
 build_scene = refs.build_scene  # the fixture, under the name the tests ask for
 

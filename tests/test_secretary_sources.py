@@ -11,10 +11,15 @@ from pathlib import Path
 import pytest
 from secretary_support import ALIAS_ID, conversation, make_world, policy, say, table_hashes
 
-from baton import cli, conversations, events, inbox, jobs, messages, secretary, secretary_store, store
+from baton import cli, conversations, events, jobs, messages
+from baton.agents.secretary import sources
+from baton.agents.secretary import store as secretary_store
+from baton.agents.secretary import tracking as secretary
 from baton.config import Role
+from baton.database import store
+from baton.database.store import transaction
 from baton.errors import InvalidRequest
-from baton.store import transaction
+from baton.messages import inbox
 
 
 def test_policy_rejects_invalid_relationships_before_state_file_exists(tmp_path) -> None:
@@ -79,10 +84,10 @@ def test_complete_envelopes_and_no_source_text_in_sidecar(tmp_path) -> None:
         envelopes = [item["envelope"] for item in shown["items"]]
         kinds = {item["event_kind"] for item in envelopes}
         assert {"message", "job.created", "job.moved", "conversation.rate_limited"} <= kinds
-        assert all(item["version"] == secretary.ENVELOPE_VERSION and item["source_key"] and
+        assert all(item["version"] == sources.ENVELOPE_VERSION and item["source_key"] and
                    item["can_view_all_conversations"] is False
                    for item in envelopes)
-        assert secretary.ENVELOPE_VERSION == 1
+        assert sources.ENVELOPE_VERSION == 1
         assert any(item["text_sha256"] == hashlib.sha256(b"Direct secret phrase").hexdigest()
                    for item in envelopes if item["event_kind"] == "message")
         assert any(item["needs_decision"] and item["attention"] == ["planner"] for item in envelopes)
