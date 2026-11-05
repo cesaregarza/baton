@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 
-from ..connections.decisions import AttentionDecision, AttentionVerdict, DecisionEngine, make_engine
+from ..connections.decisions import AttentionDecision, AttentionVerdict, DecisionEngine, EngineUnavailable, make_engine
 from ..connections.model import ToolCall
-from ..connections.transport import ModelUnavailable
+from ..connections.transport import ModelResponseInvalid, ModelUnavailable
 
 DECISION_TOOL = {
     "type": "function",
@@ -15,10 +16,11 @@ DECISION_TOOL = {
     "strict": True,
     "description": (
         "The harness asks the independent decision model to choose wake, hold, or keep for the "
-        "complete pending window before triage. Returns its decision and confidence."
+        "complete pending window before triage. Returns its decision and wake_probability."
     ),
     "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 }
+_LOGGER = logging.getLogger(__name__)
 
 
 class SecretaryTools:
@@ -31,6 +33,13 @@ class SecretaryTools:
         self.verdict: dict | None = None
         self.calls: list[dict] = []
         self._evaluated = False
+        self._last_failure: str | None = None
+
+    @property
+    def health(self) -> dict:
+        """Inspectable, sanitized state for this assessment's decision engine."""
+        state = self.status if self.status in {"available", "unavailable"} else "not_used"
+        return {"status": state, "last_failure": self._last_failure}
 
     @property
     def definitions(self) -> list[dict]:
@@ -43,11 +52,10 @@ class SecretaryTools:
                 return None
             return AttentionVerdict(
                 decision=AttentionDecision(self.verdict["decision"]),
-                confidence=self.verdict["confidence"],
+                wake_probability=self.verdict["wake_probability"],
             )
         self._evaluated = True
         if self.engine is None:
-            self.status = "unavailable"
             return None
         try:
             async with asyncio.timeout(timeout):
@@ -55,27 +63,38 @@ class SecretaryTools:
             if (
                 not isinstance(verdict, AttentionVerdict)
                 or not isinstance(verdict.decision, AttentionDecision)
-                or type(verdict.confidence) not in (int, float)
-                or not math.isfinite(verdict.confidence)
-                or not 0 <= verdict.confidence <= 1
+                or type(verdict.wake_probability) not in (int, float)
+                or not math.isfinite(verdict.wake_probability)
+                or not 0 <= verdict.wake_probability <= 1
             ):
-                raise ModelUnavailable("decision engine violated its typed result contract")
-            self.verdict = {"decision": verdict.decision.value, "confidence": float(verdict.confidence)}
+                raise EngineUnavailable("invalid_response", "decision engine violated its typed result contract")
+            self.verdict = {
+                "decision": verdict.decision.value,
+                "wake_probability": float(verdict.wake_probability),
+            }
             self.status = "available"
+            self._last_failure = None
             return verdict
-        except (ModelUnavailable, TimeoutError):
+        except TimeoutError:
             self.status = "unavailable"
+            self._last_failure = "timeout"
+            _LOGGER.warning("secretary decision engine unavailable: %s", self._last_failure)
+            return None
+        except ModelUnavailable as exc:
+            self.status = "unavailable"
+            self._last_failure = exc.category if isinstance(exc, EngineUnavailable) else "transport"
+            _LOGGER.warning("secretary decision engine unavailable: %s", self._last_failure)
             return None
 
     async def call(self, request: ToolCall, context: dict, timeout: float) -> dict:
         if request.name != "decide_attention" or self.engine is None:
-            raise ModelUnavailable("model requested an unavailable tool")
+            raise ModelResponseInvalid("model requested an unavailable tool")
         if request.arguments:
-            raise ModelUnavailable("decide_attention does not accept arguments; the harness supplies its context")
+            raise ModelResponseInvalid("decide_attention does not accept arguments; the harness supplies its context")
         cached = self._evaluated
         verdict = await self.evaluate(context, timeout)
         if verdict is None:
             self.calls.append({"name": request.name, "status": "unavailable", "cached": cached})
             return {"error": "decision_engine_unavailable"}
         self.calls.append({"name": request.name, "status": "available", "cached": cached})
-        return {"decision": verdict.decision.value, "confidence": verdict.confidence}
+        return {"decision": verdict.decision.value, "wake_probability": verdict.wake_probability}

@@ -190,7 +190,8 @@ configuration problem exits with status 2.
 | `baton events status\|unbind` | Inspect event subscriptions and receipts, or unbind a guest grant's event target. |
 | `baton seat logout-all` | End all browser-seat sessions. |
 | `baton secretary --state FILE --policy FILE decide\|show\|acknowledge` | Run model triage, acknowledge delivered summaries, and inspect private assessments. |
-| `baton secretary --policy FILE summaries [--after N] [--limit N]` | Page the append-only shared archive of deliverable summaries; no private `--state` file is required. |
+| `baton secretary --policy FILE summaries [--after N] [--limit N]` | Page the local principal's shared archive; no private `--state` file is required. |
+| `baton --host URL secretary summaries [--after N] [--limit N]` | Page the authenticated token role's archive remotely; no host-side secretary policy file is required. |
 | `baton secretary --policy FILE read --after POS\|--ids IDS` | Read what the principal was delivered, of any kind, text included, for a secretary thread. |
 
 `--as` defaults to `BATON_ROLE` in local mode and cannot select a human role. `--config` defaults to
@@ -198,26 +199,36 @@ configuration problem exits with status 2.
 host and the role of `BATON_TOKEN` or `BATON_TOKEN_COMMAND` for `message`, `read`, `wait`, and the
 `conversation new`, `list`, `topic`, and `history` subcommands. Administration commands require local mode.
 
-`secretary` is host-local and refuses `--host`. It requires a version 3 JSON policy with `principal`, stable
+Secretary assessment, worker, hook, and acknowledgement actions are host-local. `secretary summaries` also supports
+an authenticated remote read through `--host`; the token role selects the archive principal, and this read needs no
+host-side policy file or policy configuration. The MCP tool `read_secretary_summaries` provides the same role-scoped
+read. Local secretary actions require a version 3 JSON policy with `principal`, stable
 `secretary_id`, explicit `model` and `decision_engine` objects, `max_tool_calls`, `max_events`, `context_bytes`,
 `summary_bytes`, `wake_threshold`, `retry_initial_seconds`, `retry_max_seconds`, `max_attempts`, and
 `digest_seconds`. The [secretary guide](../baton/agents/secretary/README.md#policy) has a complete example.
+`decide` writes private assessment/queue state and appends deliverable summaries to `baton.db`, so the local
+database must be writable. `read` reads source messages from a read-only snapshot; `summaries` only reads the archive.
 Model and engine IDs and HTTP endpoints are selected in the policy; Baton does not supply model, URL, or
 transport defaults. Command providers require `command`, `env`, `timeout_seconds`, and `max_output_tokens`.
-Model commands use protocol 4; decision-engine commands use protocol 2 and return exactly a decision and
-confidence. The independent engine runs on each alert page. A wake verdict with confidence at or above `wake_threshold`
-forces a wake even if model triage holds, keeps, or fails. The model may call a tool to retrieve the cached
-verdict, which contains no rationale.
+Model commands use protocol 4; decision-engine commands use protocol 3 and return exactly `decision` and
+`wake_probability`. The independent engine runs on each alert page. JEV validates its probability distribution
+and uses `probabilities["wake"]` for `wake_threshold`; its separate wire `confidence` is not used as the threshold.
+A wake verdict at or above `wake_threshold` forces a wake even if model triage holds, keeps, or fails. The model
+may call a tool to retrieve the cached verdict, which contains no rationale.
 
 `decide --budget-seconds N` reads bounded, complete pages of the principal's visible events, including visible
-reply parents, and asks the independent engine and model for triage. The standalone implicit mode starts at the
-durable scan position; passing both `--since` and `--floor` requests an exact replay. An explicit trigger must
+reply parents, and asks the independent engine and model for triage. The engine timeout must be shorter than the
+assessment budget; install, worker startup, and standalone decisions validate that relationship. Integration
+delivery uses a separate required `delivery_timeout_seconds`, independent of engine timeout. Standalone implicit
+mode checks due retries before scanning new work, then starts at the durable scan position; a trigger matching a
+failed source page retries that page. A page in backoff remains eligible for a later retry. Passing both `--since`
+and `--floor` requests an exact replay. An explicit trigger must
 belong to the bounded page or the call fails. Page size also reserves a citation budget from model output
-capacity. Pages are never silently truncated. Transient failures retry in their original mode on the configured
-short backoff, separately from worker health status. Repeated failures split a page and retry; an event that
-still cannot be summarized receives a source-only operational notice. No semantic fallback invents a decision.
-Each poll reserves one configured budget for a fresh alert and another for scheduled work. Scheduled retries and
-digests alternate priority so sustained new traffic cannot starve recovery or digests.
+capacity. Pages are never silently truncated. Transport failures and timeouts retry indefinitely in their original
+mode with backoff and do not split pages. Invalid model content/output and `InboxTooLarge` count toward
+`max_attempts` and may split; other failures do not consume that limit. Each poll reserves one configured budget
+for a fresh alert and another for scheduled work. It runs one eligible scheduled lane per poll, alternating retry
+and digest priority, so a lane receives the full reserved budget rather than leftover time.
 
 The worker batches contiguous due held pages into one bounded hourly digest at `digest_seconds` intervals.
 Hold, keep, and model-error pages remain eligible while scanning continues. Pending wake IDs stay queued, with
@@ -227,8 +238,11 @@ activation floor to the current database head. Scan progress is separate from th
 Every summary, including a digest, must account for and cite all events in its page; citing visible reply parents
 is optional. Source checks validate references against supplied context, not the truth of summary claims, and the
 prompt forbids invented assignments or approvals. `acknowledge DECISION_ID` is idempotent. Delivered ranges
-merge only when contiguous, so acknowledging a later wake cannot skip a held gap. Model failures return retryable
-`secretary_unavailable` errors and follow the configured retry/split policy.
+merge only when contiguous, so acknowledging a later wake cannot skip a held gap. Sanitized decision-engine
+failure state remains in assessment health/status even when model triage later holds or fails. A model outage
+without a forced engine wake remains an outage, while an unavailable model after a forced wake produces a notice.
+Digest failures retain digest mode and eventually produce a keep notice, never an alert or wake. Transport/timeouts
+retry indefinitely; only invalid model output/content and oversized windows use the `max_attempts` split policy.
 
 `show` inspects saved assessments. Policy version 3 is required. Private state version 1 is refused and requires
 a new file; state version 2 is preserved. `--state` is a private SQLite sidecar for assessment work and positions.

@@ -10,7 +10,7 @@ from pathlib import Path
 from baton import config, datadir
 from baton.agents.secretary import Secretary
 from baton.config import ConfigError
-from baton.config.secretary import IntegrationConfig
+from baton.config.secretary import IntegrationConfig, load_policy, validate_decision_budget
 from baton.database.files import open_private
 
 
@@ -22,19 +22,24 @@ class Instance:
     secretary: Secretary
     poll_seconds: float
     budget_seconds: float
+    delivery_timeout_seconds: float
     codex: str | None
 
     @classmethod
     def load(cls, path: Path) -> Instance:
         path = datadir.canonical(path)
         integration = IntegrationConfig.load(path)
+        baton_config = config.load(integration.config)
+        policy = load_policy(baton_config, integration.policy)
+        validate_decision_budget(policy, integration.budget_seconds)
         return cls(
             path,
             integration.product,
             integration.project,
-            Secretary(config.load(integration.config), integration.state, integration.policy),
+            Secretary(baton_config, integration.state, integration.policy),
             integration.poll_seconds,
             integration.budget_seconds,
+            integration.delivery_timeout_seconds,
             integration.codex,
         )
 

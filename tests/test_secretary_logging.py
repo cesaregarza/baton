@@ -97,6 +97,8 @@ def test_http_client_request_url_does_not_reach_process_stderr(tmp_path) -> None
                     str(world.policy_path),
                     "--poll-seconds",
                     "0.05",
+                    "--delivery-timeout-seconds",
+                    "7",
                     "--budget-seconds",
                     "5",
                 ],

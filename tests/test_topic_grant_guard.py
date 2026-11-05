@@ -54,6 +54,7 @@ SCHEMAS = {
     "get_job": "c06fcdc9d84e",
     "list_jobs": "fe5579d7b511",
     "read_job_events": "e6bdf0ef0ebd",
+    "read_secretary_summaries": "460502b433e7",
     "create_conversation": "2b861c85cbb1",
     "list_conversations": "a4bb4da0edbc",
     "read_history": "63f54b713678",

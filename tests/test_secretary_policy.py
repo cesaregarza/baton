@@ -68,6 +68,17 @@ def test_explicit_model_engine_and_threshold_are_normalized(tmp_path) -> None:
     assert policy.raw["digest_seconds"] == 10.0
 
 
+def test_reasoning_effort_accepts_bounded_nonempty_provider_values(tmp_path) -> None:
+    value = _raw()
+    value["model"]["reasoning_effort"] = "minimal"
+
+    assert _load(tmp_path, value).model["reasoning_effort"] == "minimal"
+
+    value["model"]["reasoning_effort"] = " \t "
+    with pytest.raises(ConfigError, match="reasoning_effort"):
+        _load(tmp_path, value)
+
+
 @pytest.mark.parametrize(
     "field",
     [

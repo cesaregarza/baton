@@ -105,7 +105,7 @@ def test_a_guest_is_refused_every_tool_that_was_not_a_guest_tool_in_the_same_wor
             for one in await listed_tools(client, scene.host, "guest")
             if one["name"] in OLD_TOOLS and one["name"] not in GUEST_MAY_CALL
         ]
-        assert len(tools) == 16, [one["name"] for one in tools]
+        assert len(tools) == 17, [one["name"] for one in tools]
         callers = [Anonymous(scene.host), await bound_guest(client, scene), Bound.of(held)]
         for one in tools:
             for who in callers:

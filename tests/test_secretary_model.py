@@ -48,7 +48,7 @@ class Model:
         self.engine_expected = engine
         value = explicit_policy("planner")
         value["model"].update(command=self.command, timeout_seconds=timeout)
-        value["decision_engine"].update(command=self.engine_command, timeout_seconds=timeout)
+        value["decision_engine"].update(command=self.engine_command, timeout_seconds=1)
         self.world.policy_path.write_text(json.dumps(value))
 
     def set_timeout(self, timeout: float) -> None:
@@ -62,7 +62,7 @@ class Model:
             json.dumps(
                 {
                     "decision": value.get("engine_decision", "keep"),
-                    "confidence": value.get("engine_confidence", 0.2),
+                    "wake_probability": value.get("engine_wake_probability", 0.2),
                 }
             )
         )
@@ -236,27 +236,29 @@ def test_independent_engine_runs_for_every_alert_even_when_model_skips_its_tool(
 
 def test_confident_engine_wake_overrides_language_model_hold(tmp_path) -> None:
     with make_world(tmp_path) as world:
-        model = Model(world, tmp_path, plan={"decision": "hold", "summary": "A held but useful update."})
-        model.set_engine_plan({"decision": "wake", "confidence": 0.8})
+        model = Model(world, tmp_path, plan={"decision": "hold", "summary": "", "sources": []})
+        model.set_engine_plan({"decision": "wake", "wake_probability": 0.8})
         messages.send(world.baton, sender="worker", recipient="planner", text="The release is ready")
 
         result = _decide(world)
 
         assert result["decision"] == "wake"
-        assert result["engine_verdict"] == {"decision": "wake", "confidence": 0.8}
+        assert result["kind"] == "engine_wake" and "model chose hold" in result["brief"]
+        assert "could not generate" not in result["brief"]
+        assert result["engine_verdict"] == {"decision": "wake", "wake_probability": 0.8}
         assert len(model.engine_requests) == len(model.requests) == 1
 
 
 def test_engine_wake_below_configured_confidence_threshold_does_not_override_hold(tmp_path) -> None:
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path, plan={"decision": "hold", "summary": "", "sources": []})
-        model.set_engine_plan({"decision": "wake", "confidence": 0.79})
+        model.set_engine_plan({"decision": "wake", "wake_probability": 0.79})
         messages.send(world.baton, sender="worker", recipient="planner", text="A low-confidence alert")
 
         result = _decide(world)
 
         assert result["decision"] == "hold"
-        assert result["engine_verdict"] == {"decision": "wake", "confidence": 0.79}
+        assert result["engine_verdict"] == {"decision": "wake", "wake_probability": 0.79}
 
 
 @pytest.mark.parametrize("step", [{"exit": 1}, {"sleep": 2}])
@@ -264,7 +266,7 @@ def test_confident_engine_wake_survives_language_model_outage_with_notice(tmp_pa
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path, plan={"steps": [step]})
         model.set_timeout(0.2)
-        model.set_engine_plan({"decision": "wake", "confidence": 0.95})
+        model.set_engine_plan({"decision": "wake", "wake_probability": 0.95})
         sent = messages.send(world.baton, sender="worker", recipient="planner", text="Urgent synthetic notice")
 
         started = time.monotonic()
@@ -335,8 +337,8 @@ def test_responses_http_wire_uses_strict_schema_and_skips_reasoning_output(tmp_p
                 "model": "configured-triage-model",
                 "base_url": f"http://127.0.0.1:{server.server_port}/v1",
                 "api_key_env": "SECRETARY_TEST_KEY",
-                "reasoning_effort": "none",
-                "max_output_tokens": 2048,
+                "reasoning_effort": "high",
+                "max_output_tokens": 1536,
                 "timeout_seconds": 5,
                 "cache_mode": cache_mode,
             }
@@ -362,6 +364,8 @@ def test_responses_http_wire_uses_strict_schema_and_skips_reasoning_output(tmp_p
         assert request["path"] == "/v1/responses" and request["headers"]["Authorization"] == "Bearer synthetic-key"
         body = request["body"]
         assert body["model"] == "configured-triage-model" and body["store"] is False
+        assert all(item["body"]["reasoning"]["effort"] == "high" for item in seen)
+        assert all(item["body"]["max_output_tokens"] == 1536 for item in seen)
         assert body["text"]["format"]["type"] == "json_schema"
         assert body["text"]["format"]["strict"] is True
         assert body["text"]["format"]["schema"]["additionalProperties"] is False

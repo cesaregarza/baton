@@ -15,17 +15,18 @@ from pathlib import Path
 from baton import config as config_module
 from baton import datadir
 from baton.config import Config, ConfigError
-from baton.config.secretary import MAX_BUDGET_SECONDS, Policy, fingerprint, load_policy
+from baton.config.secretary import MAX_BUDGET_SECONDS, Policy, fingerprint, load_policy, validate_decision_budget
 from baton.errors import BatonError, InvalidRequest
 
 from ..connections.decisions import AttentionDecision
-from ..connections.transport import ModelUnavailable
+from ..connections.transport import ModelResponseInvalid, ModelUnavailable
 from ..harness.prompt import HARNESS_VERSION, INSTRUCTIONS, RESPONSE_SCHEMA
 from ..harness.run import SecretaryHarness
 from ..inbox import sources
 from ..inbox.window import InboxWindow
 from ..service import Secretary
 from .assessment import Assessment
+from .health import EngineHealth
 from .outcome import Outcome, persist
 from .runtime import DatabaseWorker
 from .state import AttentionLog
@@ -36,6 +37,10 @@ TRIGGER = re.compile(r"message:[1-9][0-9]{0,17}|job:job_[0-9a-f]{16}:[1-9][0-9]{
 class SecretaryUnavailable(BatonError):
     code = "secretary_unavailable"
     extra = {"retryable": True}
+
+
+class SecretaryResponseInvalid(SecretaryUnavailable):
+    """The page received an unusable model answer, rather than a transport outage."""
 
 
 @dataclass
@@ -53,11 +58,14 @@ class DecisionRun:
         self._check()
         async with DatabaseWorker() as database:
             policy = await database.call(load_policy, self.secretary.config, self.secretary.policy_path)
+            validate_decision_budget(policy, self.budget_seconds)
             self.deadline = self.clock() + self.budget_seconds
             try:
                 return await self._assess(database, policy)
             except TimeoutError as error:
                 raise SecretaryUnavailable("secretary budget expired; no delivery position advanced") from error
+            except ModelResponseInvalid as error:
+                raise SecretaryResponseInvalid(f"{error}; no delivery position advanced") from error
             except ModelUnavailable as error:
                 raise SecretaryUnavailable(f"{error}; no delivery position advanced") from error
 
@@ -76,8 +84,9 @@ class DecisionRun:
         verdict = None
         if window.events and not self.hourly:
             verdict = await harness.tools.evaluate(context, min(policy.decision_timeout, self._remaining()))
+            await database.call(EngineHealth(log).record, harness.tools.health)
         forced = bool(
-            verdict and verdict.decision == AttentionDecision.WAKE and verdict.confidence >= policy.wake_threshold
+            verdict and verdict.decision == AttentionDecision.WAKE and verdict.wake_probability >= policy.wake_threshold
         )
         context["engine_verdict"] = harness.tools.verdict
         context["wake_required"] = forced
@@ -136,15 +145,17 @@ class DecisionRun:
                     summary_bytes=outcome.policy.summary_bytes,
                     digest=self.hourly,
                 )
-                if forced and not assessment.summary:
-                    raise ModelUnavailable("model did not summarize the engine-required wake")
-                if forced:
-                    assessment = Assessment("wake", assessment.reason, assessment.summary, assessment.sources)
             except (ModelUnavailable, TimeoutError):
                 if not forced:
                     raise
                 return outcome.notice(
                     "The decision engine requires your attention, but the secretary could not generate a summary.",
+                    kind="engine_wake",
+                    engine_verdict=harness.tools.verdict,
+                )
+            if forced and assessment.decision != "wake":
+                return outcome.notice(
+                    f"The model chose {assessment.decision}, but the independent engine requires your attention.",
                     kind="engine_wake",
                     engine_verdict=harness.tools.verdict,
                 )

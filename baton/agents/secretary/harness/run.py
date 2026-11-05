@@ -9,7 +9,7 @@ import time
 from baton.config.secretary import Policy
 
 from ..connections.model import SecretaryModel
-from ..connections.transport import ModelUnavailable
+from ..connections.transport import ModelResponseInvalid
 from .prompt import PromptLayers
 from .tools import SecretaryTools
 
@@ -35,7 +35,9 @@ class SecretaryHarness:
 
     async def assess(self, context: dict, timeout: float) -> dict:
         if self.started:
-            raise ModelUnavailable("a secretary harness owns one assessment; create a new harness for another window")
+            raise ModelResponseInvalid(
+                "a secretary harness owns one assessment; create a new harness for another window"
+            )
         self.started = True
         messages = PromptLayers(context).messages(cache=self.model.layered_cache)
         used_ids: set[str] = set()
@@ -52,11 +54,11 @@ class SecretaryHarness:
                 if turn.answer is not None:
                     return turn.answer
                 if len(used_ids) + len(turn.calls) > self.policy.max_tool_calls:
-                    raise ModelUnavailable("secretary tool-call limit reached")
+                    raise ModelResponseInvalid("secretary tool-call limit reached")
                 # Validate all IDs before executing any part of a batch. Retain reasoning and calls verbatim.
                 ids = [call.id for call in turn.calls]
                 if len(set(ids)) != len(ids) or used_ids.intersection(ids):
-                    raise ModelUnavailable("model reused a tool call id")
+                    raise ModelResponseInvalid("model reused a tool call id")
                 used_ids.update(ids)
                 messages.extend(turn.items)
                 for call in turn.calls:
@@ -69,4 +71,4 @@ class SecretaryHarness:
                             "output": json.dumps(result, sort_keys=True, separators=(",", ":")),
                         }
                     )
-        raise ModelUnavailable("secretary did not finish an assessment")
+        raise ModelResponseInvalid("secretary did not finish an assessment")

@@ -6,13 +6,13 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from baton.config import Config
+from baton.config import Config, ConfigError
 
 
 def add_commands(commands: Any) -> None:
     group = commands.add_parser("secretary", help="triage an inbox with a lightweight model and inspect its summaries")
     group.add_argument("--state", type=Path, help="private SQLite state file (not required for read or summaries)")
-    group.add_argument("--policy", type=Path, required=True, help="versioned secretary model policy")
+    group.add_argument("--policy", type=Path, help="versioned secretary model policy")
     actions = group.add_subparsers(dest="secretary_command", required=True)
     show = actions.add_parser("show", help="inspect saved assessments whose sources remain visible")
     show.add_argument("--source", dest="source_key")
@@ -39,6 +39,9 @@ def run(config: Config, args: argparse.Namespace, action: str) -> dict[str, Any]
     from baton.agents import secretary
     from baton.agents.secretary.attention import decide as secretary_decide
     from baton.agents.secretary.inbox import read as secretary_read
+
+    if args.policy is None:
+        raise ConfigError("the following arguments are required: --policy")
 
     if action == "acknowledge":
         import asyncio

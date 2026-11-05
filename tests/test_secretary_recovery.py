@@ -36,6 +36,7 @@ def _worker(world, tmp_path: Path, *, plan: dict | None = None) -> tuple[Worker,
                 secretary=Secretary(world.config, world.state_path, world.policy_path),
                 poll_seconds=0.1,
                 budget_seconds=5,
+                delivery_timeout_seconds=7,
                 codex=None,
             )
         ),

@@ -10,11 +10,15 @@ import httpx
 
 from baton.config.secretary import MAX_COMMAND_RESPONSE_BYTES, MAX_MODEL_RESPONSE_BYTES
 
-from .command import Command
+from .command import Command, OutputLimitExceeded
 
 
 class ModelUnavailable(Exception):
     """A model or tool transport did not return a usable response."""
+
+
+class ModelResponseInvalid(ModelUnavailable):
+    """A received response was invalid or truncated; retrying a smaller page may help."""
 
 
 async def post_json(
@@ -31,7 +35,7 @@ async def post_json(
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
                     if size > max_bytes:
-                        raise ModelUnavailable("model response exceeds its size limit")
+                        raise ModelResponseInvalid("model response exceeds its size limit")
                     chunks.append(chunk)
         return json_object(b"".join(chunks))
     except asyncio.CancelledError:
@@ -55,6 +59,8 @@ async def command_json(
         code, output = await Command(argv, max_output=max_bytes, env=allowed_environment).run(payload, timeout)
     except asyncio.CancelledError:
         raise
+    except OutputLimitExceeded:
+        raise ModelResponseInvalid("model response exceeds its size limit") from None
     except Exception:
         raise ModelUnavailable("model command failed") from None
     if code != 0:
@@ -66,7 +72,7 @@ def json_object(raw: str | bytes) -> dict:
     try:
         result = json.loads(raw)
     except (UnicodeDecodeError, ValueError, TypeError):
-        raise ModelUnavailable("model returned invalid JSON") from None
+        raise ModelResponseInvalid("model returned invalid JSON") from None
     if not isinstance(result, dict):
-        raise ModelUnavailable("model response is not an object")
+        raise ModelResponseInvalid("model response is not an object")
     return result

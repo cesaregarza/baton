@@ -7,22 +7,23 @@ These project skills explain how a local secretary instance can deliver decision
 
 ## Requirements and limits
 
-- Install and run on the same host and as the same user as the local Baton data and model authentication. Remote mode is unsupported.
+- Install and run the worker on the same host and as the same user as the local Baton data and model authentication. Remote delivery is unsupported; remote authenticated reads of archived summaries are supported.
 - The runner uses POSIX file locks (Linux/macOS). The supplied systemd unit is for Linux; use another supervisor on macOS.
-- Set integration `poll_seconds` and `budget_seconds` so `2 * budget_seconds + poll_seconds <= 60`; the examples use a 2-second poll and a 28-second budget.
+- Set integration `poll_seconds` and `budget_seconds` so `2 * budget_seconds + poll_seconds <= 60`; the examples use a 2-second poll and a 28-second budget. Set required `delivery_timeout_seconds` independently of the engine timeout. The engine timeout must be shorter than the assessment budget; install and startup validate this, as does standalone `decide` before work.
 - Use a complete secretary v3 policy. Model ID, provider URL, API-key variable, timeout, reasoning effort, output limit, and cache mode are explicit policy values; there is no forced model ID. The independent decision engine is also required and can use JEV or a command adapter.
 - Set `summary_bytes` explicitly to 4000 (maximum 6000) for hook output limits.
-- Installation binds the activation floor to the current database head. The worker scans bounded, complete pages of visible events, including visible reply parents, with output space reserved for citations. It never truncates a page; repeated failures split it, and an unsummarizable event receives a source-only operational notice.
-- Each poll reserves one configured budget for a fresh alert and a second for scheduled work. Within scheduled work, retries and digests alternate priority so sustained new traffic cannot starve recovery or digests. Transient failures retry in their original mode using the configured backoff, separately from worker health. Contiguous held pages are combined into one bounded digest at `digest_seconds` intervals.
+- Installation binds the activation floor to the current database head. The worker scans bounded, complete pages of visible events, including visible reply parents, with output space reserved for citations. It never truncates a page. Transport failures and timeouts retry indefinitely in their original mode; they do not split pages. Invalid model content/output and `InboxTooLarge` count toward `max_attempts` and may split pages.
+- Each poll reserves one full configured budget for a fresh alert and one for scheduled work. It runs one eligible scheduled lane per poll, alternating retry and digest priority, so retries and digests never receive leftover slivers. Held contiguous pages are combined into one bounded digest at `digest_seconds` intervals. Digest failures remain digests and eventually produce a keep notice, never an alert or wake.
 - Run only one worker per instance. The generated user unit uses `Restart=on-failure`; standalone `run` may be managed by another supervisor.
 - systemd user-service enablement alone does not promise operation after logout or reboot. That depends on user-manager linger and host configuration.
 
-The decision engine evaluates every alert page independently. A `wake` verdict with confidence at or above `wake_threshold`
-forces a wake even if model triage holds, keeps, or fails. The model may call a tool to retrieve that cached
-decision and confidence; the engine cannot explain its choice. If model output is unavailable for a forced wake,
-the host receives a source-only operational notice. Hold pages and transient model failures retry in their
-original mode; after `max_attempts`, the worker splits a page and eventually issues a source-only notice for an
-event it cannot summarize. No semantic fallback invents a decision. Worker `status` reports health separately.
+The decision engine evaluates every alert page independently. A `wake` verdict with `wake_probability` at or above
+`wake_threshold` forces a wake even if model triage holds, keeps, or fails. JEV thresholds use `probabilities["wake"]`;
+the separate wire `confidence` is validated but not used as the threshold. The command-engine protocol is version 3
+and requires exactly `{"decision":"wake","wake_probability":0.91}`. The model may call a tool to retrieve the
+cached decision and wake probability; the engine cannot explain its choice. If model output is unavailable for a
+forced wake, the host receives a forced-wake notice. A model outage without a forced wake remains an outage, not
+an alert. Sanitized engine failures are retained in health/status even if model triage later holds or fails.
 
 Every summary, including a digest, accounts for and cites all events in its page; visible reply parents are
 optional citations. Validation checks source references, not the truth of summary claims. The prompt forbids
@@ -52,6 +53,7 @@ python -m baton.integrations.secretary install \
   --policy /absolute/path/to/secretary-policy-v3.json \
   --poll-seconds 2 \
   --budget-seconds 28 \
+  --delivery-timeout-seconds 8 \
   --apply-hooks
 ```
 
@@ -97,8 +99,16 @@ python -m baton.integrations.secretary --instance /absolute/private/secretary-in
 baton secretary --policy /absolute/path/to/secretary-policy-v3.json summaries --after 0 --limit 50
 ```
 
-The `summaries` command pages archived deliverable summaries from `baton.db`; it does not require the private
-secretary state file.
+The local `summaries` command pages archived deliverable summaries from `baton.db`; it does not require the private
+secretary state file. An authenticated remote token can read its own archive without a host-side policy file or
+host policy configuration:
+
+```sh
+baton --host https://baton.example secretary summaries --after 0 --limit 50
+```
+
+The same role-scoped read is available through MCP as `read_secretary_summaries`. Only this archive read supports
+`--host`; installation, worker operation, hooks, acknowledgement, and other secretary actions remain host-local.
 
 SessionStart binds the first matching project session. Other sessions are refused unless explicitly rebound. Hooks
 and `receive` recheck source visibility. Each hook announces newly pending IDs while retaining unacknowledged

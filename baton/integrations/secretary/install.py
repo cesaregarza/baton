@@ -14,7 +14,7 @@ from typing import Any
 from baton import datadir
 from baton.agents.secretary.service import Secretary, activate
 from baton.config import load
-from baton.config.secretary import IntegrationConfig, load_policy, require_hook_summary
+from baton.config.secretary import IntegrationConfig, load_policy, require_hook_summary, validate_decision_budget
 
 
 def install(
@@ -27,6 +27,7 @@ def install(
     python: Path,
     poll_seconds: float,
     budget_seconds: float,
+    delivery_timeout_seconds: float,
     codex: Path | None = None,
 ) -> dict[str, Any]:
     """Write instance, hook-fragment, and user-unit artifacts to a new private directory."""
@@ -38,6 +39,7 @@ def install(
     baton_config = load(config)
     policy_config = load_policy(baton_config, policy)
     require_hook_summary(policy_config)
+    validate_decision_budget(policy_config, budget_seconds)
     python = _executable(python, "python")
     codex_path = (_executable(codex, "codex") if codex is not None else _find_codex()) if product == "codex" else None
     destination = datadir.canonical(destination)
@@ -81,6 +83,7 @@ def install(
         state=destination / "attention.sqlite",
         poll_seconds=poll_seconds,
         budget_seconds=budget_seconds,
+        delivery_timeout_seconds=delivery_timeout_seconds,
         codex=str(codex_path) if codex_path is not None else None,
     ).as_dict()
     IntegrationConfig.from_dict(instance)

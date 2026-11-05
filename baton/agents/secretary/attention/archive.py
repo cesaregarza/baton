@@ -45,7 +45,7 @@ class SummaryArchive:
         decision_id, brief = result.get("decision_id"), result.get("brief")
         if not isinstance(decision_id, str) or not decision_id or not isinstance(brief, str):
             raise InvalidRequest("secretary summary must have a decision id and brief")
-        # Hold and keep decisions carry no deliverable summary; they do not enter this archive.
+        # Alert holds/keeps carry no summary; digest summaries and notices still enter the archive.
         if not brief.strip():
             return None
         deliverable = {key: result[key] for key in _DELIVERABLE_FIELDS if key in result}

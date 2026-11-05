@@ -64,6 +64,7 @@ POLICIES = (
     ToolPolicy("search", group="search", guest="yes"),
     ToolPolicy("get_message", group="search", guest="yes"),
     ToolPolicy("read_artifacts", group="artifact"),
+    ToolPolicy("read_secretary_summaries"),
 )
 BY_NAME = {policy.name: policy for policy in POLICIES}
 

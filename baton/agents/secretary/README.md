@@ -9,8 +9,8 @@ notification itself or advances the principal's inbox.
 
 1. Baton builds an authorized, bounded, complete page of visible events, including visible reply parents and
    context about the principal's own sends. Page size also reserves model output space for required citations.
-   Pages are never truncated. An event too large to fit is retried, then the page is split; an event that still
-   cannot be summarized receives a source-only operational notice. A trigger outside the bounded page is an error.
+   Pages are never truncated. An `InboxTooLarge` page can be retried and split; an event that still cannot fit
+   receives an operational notice. A trigger outside the bounded page is an error.
 2. The harness sends four ordered prompt layers: stable secretary system instructions, operator-authored contextual
    knowledge, principal-specific instructions and summary limit, then the current event window. The first three
    layers are intended to remain stable across assessments; layered caching puts explicit breakpoints on them
@@ -18,11 +18,11 @@ notification itself or advances the principal's inbox.
    Implicit mode omits explicit breakpoints for compatible endpoints or older
    models. Cache hits are not guaranteed: model support, minimum prompt size, cache expiry, and provider reporting
    affect them. The harness does not add padding to chase a cache hit.
-3. On every alert page, the configured independent decision engine returns a typed decision and confidence. If it
-   returns `wake` with confidence at or above `wake_threshold`, Baton forces a wake even when model triage holds, keeps, or fails.
+3. On every alert page, the configured independent decision engine returns a typed decision and wake probability. If it
+   returns `wake` with `wake_probability` at or above `wake_threshold`, Baton forces a wake even when model triage holds, keeps, or fails.
 4. The model interprets the page and returns the strict assessment (`wake`, `hold`, or `keep`, reason, summary,
    and source keys). It may call `decide_attention` to retrieve the engine's already cached verdict. The tool
-   returns only decision and confidence; the engine cannot explain its choice. The model owns the grounded
+   returns only decision and wake probability; the engine cannot explain its choice. The model owns the grounded
    explanation and summary. If model output is unavailable for a forced wake, Baton issues a source-only notice.
 5. The harness appends each model response and matching tool result to the conversation, under one overall callback
    deadline chosen by the host (at most 60 seconds) and the policy's required tool-call limit (one to eight).
@@ -30,11 +30,12 @@ notification itself or advances the principal's inbox.
    including a digest, must account for and cite every event in the page; it may cite visible reply parents too.
    The response's source references are checked against offered context and source visibility is rechecked, but
    Baton does not verify the truth of summary claims. The prompt forbids invented assignments or approvals.
-6. Scan progress and delivered coverage are separate. Transient failures retry in their original mode with the
-   configured short backoff, separately from worker health. Each poll reserves one configured budget for a fresh
-   alert and another for scheduled work; scheduled retries and digests alternate priority so new traffic cannot
-   starve recovery or digests. After `max_attempts`, the worker splits a page and
-   retries its pieces; held contiguous pages are batched into one bounded hourly digest after `digest_seconds`.
+6. Scan progress and delivered coverage are separate. Transport failures and timeouts retry indefinitely in their
+   original mode with backoff; they do not split pages or consume `max_attempts`. Invalid model content/output and
+   `InboxTooLarge` failures count toward `max_attempts`; those pages may split. Each poll reserves one full budget
+   for a fresh alert and one for scheduled work. It runs one eligible scheduled lane per poll, alternating retry
+   and digest priority, so a lane never receives a sliver of the budget. Held contiguous pages are batched into a
+   bounded digest after `digest_seconds`.
    Pending receipts retain all decision IDs, surface wakes first, and announce new IDs even if older ones remain
    unacknowledged. Acknowledgement is idempotent by summary ID, and delivered ranges merge only when contiguous.
 
@@ -88,9 +89,12 @@ example's `gpt-6-luna` is not a forced default.
 The model and engine objects are both required. The model's OpenAI configuration requires explicit model ID,
 base URL, credential variable, timeout, reasoning effort, output-token limit, and cache mode. The JEV engine
 requires its model ID, base URL, credential variable, and timeout; do not add model reasoning or output-token
-fields to its configuration. `wake_threshold` is the minimum independent-engine confidence that forces a wake;
+fields to its configuration. `wake_threshold` is the minimum independent-engine wake probability that forces a wake;
 the example's `0.8` is configurable, not a hard-coded cutoff.
-`retry_initial_seconds`, `retry_max_seconds`, and `max_attempts` control transient retry and page splitting;
+`model.reasoning_effort` must be a nonempty string of at most 100 characters; the provider determines accepted
+values, so values such as `minimal` are valid policy inputs.
+`retry_initial_seconds` and `retry_max_seconds` bound the retry backoff. Transport failures and timeouts retry
+indefinitely; `max_attempts` applies only to invalid model content/output and oversized windows, which may split.
 `digest_seconds` schedules held-page digests. `knowledge` and `instructions` are operator-authored text, each
 limited to 8 KiB; the full policy is limited to 16 KiB. `max_tool_calls` ranges from one to eight.
 `max_events` bounds page event/context entries, `context_bytes` bounds serialized input, and `summary_bytes`
@@ -103,7 +107,7 @@ reports its historical usage, not usage from a new model call.
 
 The independent engine runs on each alert page. The model may call `decide_attention` to retrieve that page's
 cached verdict; tool use is optional and does not trigger another engine evaluation. The engine can return only
-a typed decision and confidence, with no rationale. Configure either the TypeSafe JEV choice API:
+a typed decision and wake probability, with no rationale. Configure either the TypeSafe JEV choice API:
 
 ```json
 "decision_engine": {
@@ -127,10 +131,12 @@ or a local command adapter:
 }
 ```
 
-JEV returns a typed choice and confidence, which Baton validates. Its choice API has no text-generation
-effort or output-token setting; Baton does not invent those parameters. A command engine receives protocol version 2
-with task `decide_attention`, the full authorized context, choices, and output limit. It must return exactly
-`{"decision":"wake","confidence":0.91}` (with one allowed decision and confidence from 0 to 1).
+JEV returns a typed choice and probability distribution, which Baton validates. `wake_threshold` uses
+`probabilities["wake"]`; JEV's separate wire `confidence` field is validated but does not affect the threshold.
+Its choice API has no text-generation effort or output-token setting; Baton does not invent those parameters.
+A command engine receives protocol version 3 with task `decide_attention`, the full authorized context, choices,
+and output limit. It must return exactly `{"decision":"wake","wake_probability":0.91}` (with one allowed
+decision and wake probability from 0 to 1).
 The command's required `env` list is an explicit allowlist of service environment variables forwarded to it.
 
 The model can instead run as a host command, independent of the decision engine. It receives one JSON
@@ -156,7 +162,7 @@ Command adapters should preserve input order and tool history. Their required `e
 service environment variables; set credentials in the service environment and list their names in the policy.
 The required `timeout_seconds` and `max_output_tokens` bound each command. Commands still run as the Baton host
 user and have access to that user's files; environment filtering is not a filesystem sandbox. The decision
-command's version 2 request uses the exact `{"decision":"wake","confidence":0.91}` response shape.
+command's version 3 request uses the exact `{"decision":"wake","wake_probability":0.91}` response shape.
 
 The OpenAI Responses API is stateless across calls; the harness resends the complete ordered input and append-only
 tool history for each turn. It requests strict structured output and encrypted reasoning continuation. See the
@@ -188,7 +194,10 @@ earlier unacknowledged gap.
 
 `trigger` may identify `message:SEQ`, `job:JOB_ID:SEQ`, or `conversation`. It must fall within the bounded page.
 Use `hourly=True` for a digest of contiguous due held pages. The host chooses a callback budget greater than zero
-and at most 60 seconds; model and engine timeouts are set explicitly in policy.
+and at most 60 seconds; the engine timeout must be shorter than the assessment budget. Installed integrations check
+this at install and startup. Integration delivery has a separate required `delivery_timeout_seconds` setting; it
+does not inherit the engine timeout. Standalone decisions check due retries before scanning new work. A trigger
+matching a failed source page retries that page, while a page still in backoff remains eligible for a later retry.
 
 Results contain a `brief`, cited `sources`, and `source_refs` resolving keys to current message/thread IDs or
 event positions. Every summary, including a digest, must account for and cite every event on its page; visible
@@ -205,14 +214,20 @@ pages this shared archive without `--state`; it accepts `--after` and `--limit` 
 `has_more`.
 Authorized message context is sent to the configured model provider or host command, and the configured decision
 engine receives context for each alert page. Host commands run as the Baton host user;
-their environment filtering does not sandbox access to files available to that user. A tool transport failure is returned
-to the model as `decision_engine_unavailable`, allowing the model to finish its own assessment. Model transport,
-invalid protocol/assessment, or exhausted callback budget produces a retryable `secretary_unavailable` error and
-does not advance delivery.
+their environment filtering does not sandbox access to files available to that user. A decision-engine transport
+or timeout failure is returned to the model as `decision_engine_unavailable`, allowing it to finish its own
+assessment. Sanitized engine failure status is retained with the assessment and exposed in worker health even if
+model triage later holds or fails. If a wake verdict forces attention but the model cannot summarize it, the worker
+emits a forced-wake notice; a model outage without a forced wake remains an outage and does not become an alert.
+Digest failures retain digest mode and eventually produce a keep notice, never an alert or wake. Transport failures
+and timeouts retry indefinitely in their original mode without page splitting. Invalid model protocol/content and
+oversized windows count toward `max_attempts` and may split; exhausted callback budget is a timeout and remains
+retryable.
 
 Pages use the configured `max_events`, `context_bytes`, `summary_bytes`, and citation budget. They are complete
-and never silently truncated. Transient failures retry in their original alert or digest mode using the configured
-backoff. Repeated failures split a page; an unsummarizable event eventually gets a source-only operational notice.
+and never silently truncated. Transport and timeout failures retry in their original alert or digest mode using
+the configured backoff without splitting pages. Invalid model content/output and oversized windows count toward
+`max_attempts`; repeated eligible failures may split a page.
 No deterministic semantic fallback is used. Worker health is tracked separately from page retries. A held page
 does not produce an immediate alert; contiguous due held pages are combined into one bounded hourly digest.
 
@@ -225,11 +240,15 @@ baton secretary --state /private/secretary.sqlite --policy /private/policy.json 
 baton secretary --state /private/secretary.sqlite --policy /private/policy.json acknowledge DECISION_ID
 baton secretary --policy /private/policy.json read --ids msg_0123456789abcdef
 baton secretary --policy /private/policy.json summaries --after 0 --limit 50
+baton --host https://baton.example secretary summaries --after 0 --limit 50
 ```
 
-The CLI supports `decide`, `show`, `acknowledge`, `read`, and `summaries`. The `show` command inspects saved
+The CLI supports `decide`, `show`, `acknowledge`, `read`, and `summaries`. Local summaries use the policy principal;
+remote summaries use the authenticated token's role and need no host-side policy file. The MCP tool
+`read_secretary_summaries` offers the same role-scoped archive read. Other secretary actions remain host-local.
+The `show` command inspects saved
 assessments; `read` applies current visibility rules. Private state version 1 is refused; use a new file. State
-version 2 is preserved, concurrent initialization is serialized, and harness version 2 invalidates older
+version 2 is preserved, concurrent initialization is serialized, and harness version 4 invalidates older
 unchecked cache entries. The shared database uses schema version 21
 for the append-only summary archive. `summaries` pages archive entries for the policy's principal without a
 private state file.

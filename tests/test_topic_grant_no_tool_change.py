@@ -44,6 +44,7 @@ TOOLS = {
     "get_job": "cb0fd5be32be",
     "list_jobs": "7af25ba35768",
     "read_job_events": "1248657164ef",
+    "read_secretary_summaries": "a29a3ee6651d",
     "create_conversation": "4c477d055d79",
     "list_conversations": "d2564ef0696d",
     "read_history": "a77467aef649",

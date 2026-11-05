@@ -36,7 +36,9 @@ if step.get("raw") is not None:
 elif engine_mode:
     response = {
         "decision": step.get("decision", plan.get("engine_decision", plan.get("decision", "keep"))),
-        "confidence": step.get("confidence", plan.get("engine_confidence", plan.get("confidence", 0.2))),
+        "wake_probability": step.get(
+            "wake_probability", plan.get("engine_wake_probability", plan.get("wake_probability", 0.2))
+        ),
     }
     sys.stdout.write(json.dumps(response))
 elif step.get("tool_calls") is not None:

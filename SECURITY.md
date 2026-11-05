@@ -240,10 +240,15 @@ The data directory contains the following. Protect backups as carefully as the l
   outcome, and any alias ID and code. It excludes message text, job bodies, passphrases, and credentials.
   Malformed secret-bearing calls are refused before validation can echo their input.
 - A secretary state file stores model assessments, including full reasons and briefs, source references, and
-  bounded result metadata; it does not archive source message bodies. The independent decision engine and model
+  bounded result metadata; it does not archive source message bodies. The secretary reads source messages and
+  events under a read-only database snapshot, but appending deliverable summaries to `secretary_summaries` requires
+  database write access. The independent decision engine and model
   receive authorized page context on alert pages, and the model receives page context for summaries. State
   version 1 is refused and requires a new file; version 2 remains supported. Private state is retained until the
   operator removes it. Deliverable summaries are also appended to `secretary_summaries` in `baton.db`.
+- `read_secretary_summaries` exposes a role-scoped read of the archive over MCP. The remote `baton --host URL
+  secretary summaries` command uses the authenticated token role and requires no host-side secretary policy file;
+  other secretary operations remain host-local.
 - Command providers receive only environment variables named in their policy `env` allowlist. They run as the
   Baton host user and retain that user's filesystem access; filtering the environment is not a sandbox.
 

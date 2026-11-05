@@ -132,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     setup.add_argument("--apply-hooks", action="store_true")
     setup.add_argument("--poll-seconds", type=float, required=True)
     setup.add_argument("--budget-seconds", type=float, required=True)
+    setup.add_argument("--delivery-timeout-seconds", type=float, required=True)
     for name in ("run", "hook", "status", "receive", "apply-hooks"):
         actions.add_parser(name)
     actions.choices["receive"].add_argument("--text", action="store_true")
@@ -154,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
                 codex=args.codex,
                 poll_seconds=args.poll_seconds,
                 budget_seconds=args.budget_seconds,
+                delivery_timeout_seconds=args.delivery_timeout_seconds,
             )
             instance = Instance.load(result["instance"])
             if args.apply_hooks:

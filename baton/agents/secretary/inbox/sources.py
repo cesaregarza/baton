@@ -7,8 +7,35 @@ import json
 from baton import board_read
 from baton.config import Config, ConfigError
 from baton.database import Connection, Row
+from baton.database.store import connect_read_only
+from baton.errors import InvalidRequest
 
 DEFAULT_BATCH = 100
+
+
+def trigger_position(config: Config, principal: str, trigger: str | None) -> int | None:
+    """Resolve a validated trigger to its current visible event, for retry-page selection."""
+    if trigger is None or trigger == "conversation":
+        return None
+    parts = trigger.split(":")
+    with connect_read_only(config.db_path) as baton, baton.snapshot():
+        if parts[0] == "message":
+            row = baton.execute(
+                "SELECT pos FROM events WHERE kind='message' AND seq=? AND audience=? ORDER BY pos LIMIT 1",
+                (int(parts[1]), principal),
+            ).fetchone()
+        else:
+            row = baton.execute(
+                "SELECT pos FROM events WHERE job_id=? AND seq=? ORDER BY pos LIMIT 1", (parts[1], int(parts[2]))
+            ).fetchone()
+        if row is not None:
+            candidates = _source_rows(baton, principal, row["pos"] - 1, 1)
+            if candidates and candidates[0]["pos"] == row["pos"]:
+                from .read import _entry
+
+                if _entry(baton, config, principal, candidates[0], set()) is not None:
+                    return row["pos"]
+    raise InvalidRequest("trigger is not a visible event for this principal")
 
 
 def _epoch(baton: Connection) -> str:

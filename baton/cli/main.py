@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hash-passphrase":
         return identity.hash_passphrase()
     try:
-        if args.command == "secretary" and args.host:
+        if args.command == "secretary" and args.host and args.secretary_command != "summaries":
             raise ConfigError("secretary commands are host-local; --host is not supported")
         if args.host:
             result = remote_cli.dispatch(args)

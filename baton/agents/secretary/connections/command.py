@@ -12,6 +12,10 @@ from baton.config.secretary import MAX_COMMAND_RESPONSE_BYTES
 _CHUNK_SIZE = 64 * 1024
 
 
+class OutputLimitExceeded(ValueError):
+    """The command answered, but its output exceeded the configured bound."""
+
+
 @dataclass(frozen=True)
 class Command:
     """Run argv with bounded stdout and a reduced environment, not a sandbox.
@@ -117,7 +121,7 @@ async def _read_output(reader: asyncio.StreamReader, max_output: int) -> bytes:
     except asyncio.IncompleteReadError as exc:
         output = exc.partial
     if len(output) > max_output:
-        raise ValueError("command output exceeds its bound")
+        raise OutputLimitExceeded("command output exceeds its bound")
     return output
 
 

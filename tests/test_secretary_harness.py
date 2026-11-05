@@ -52,11 +52,12 @@ def test_command_decision_adapter_roundtrips_typed_choice_and_reuses_verdict(tmp
         assessment = asyncio.run(harness.assess(_context(), 5))
         assert assessment["decision"] == "wake"
         assert harness.tools.status == "available"
-        assert harness.tools.verdict == {"decision": "hold", "confidence": 0.2}
+        assert harness.tools.verdict == {"decision": "hold", "wake_probability": 0.2}
+        assert harness.tools.health == {"status": "available", "last_failure": None}
         assert harness.metrics["model_calls"] == 2 and len(harness.tools.calls) == 1
         [engine_request] = model.engine_requests
         assert engine_request == {
-            "version": 2,
+            "version": 3,
             "task": "decide_attention",
             "context": _context(),
             "choices": ["wake", "hold", "keep"],
@@ -315,6 +316,7 @@ def test_malformed_jev_result_is_unavailable_and_model_can_finish(tmp_path, monk
             server.server_close()
         assert assessment["decision"] == "wake"
         assert harness.tools.status == "unavailable"
+        assert harness.tools.health == {"status": "unavailable", "last_failure": "invalid_response"}
         assert len(requests) == 1
         [_, model_finish] = model.requests
         assert model_finish["input"][-1]["type"] == "function_call_output"
@@ -453,7 +455,7 @@ def test_responses_keeps_append_only_prefix_reasoning_cache_usage_and_tool_schem
         assert second["input"][6]["call_id"] == "call_1"
         assert second["input"][7]["type"] == "function_call_output"
         assert second["input"][7]["call_id"] == "call_1"
-        assert second["input"][7]["output"] == '{"confidence":1.0,"decision":"hold"}'
+        assert second["input"][7]["output"] == '{"decision":"hold","wake_probability":0.0}'
         assert first_prefix[0]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
         assert first_prefix[1]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
         assert first_prefix[2]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}

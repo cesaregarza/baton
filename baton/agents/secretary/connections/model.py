@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass, field
 
 from ..harness.prompt import RESPONSE_SCHEMA
-from .transport import ModelUnavailable, command_json, json_object, post_json
+from .transport import ModelResponseInvalid, ModelUnavailable, command_json, json_object, post_json
 
 
 @dataclass(frozen=True)
@@ -19,11 +19,11 @@ class ToolCall:
     @classmethod
     def parse(cls, value: object) -> ToolCall:
         if not isinstance(value, dict) or value.keys() != {"id", "name", "arguments"}:
-            raise ModelUnavailable("invalid tool call shape")
+            raise ModelResponseInvalid("invalid tool call shape")
         if not all(isinstance(value[key], str) and 0 < len(value[key]) <= 200 for key in ("id", "name")):
-            raise ModelUnavailable("invalid tool call identity")
+            raise ModelResponseInvalid("invalid tool call identity")
         if not isinstance(value["arguments"], dict):
-            raise ModelUnavailable("tool arguments must be an object")
+            raise ModelResponseInvalid("tool arguments must be an object")
         return cls(**value)
 
     def item(self) -> dict:
@@ -47,21 +47,17 @@ class ModelTurn:
         if "tool_calls" not in value:
             return cls(answer=value)
         if value.keys() != {"tool_calls"} or not isinstance(value["tool_calls"], list) or not value["tool_calls"]:
-            raise ModelUnavailable("invalid command tool response")
+            raise ModelResponseInvalid("invalid command tool response")
         calls = [ToolCall.parse(call) for call in value["tool_calls"]]
         return cls(None, calls, [call.item() for call in calls])
 
     @classmethod
     def responses(cls, value: dict) -> ModelTurn:
-        if value.get("status") != "completed" or value.get("refusal"):
-            raise ModelUnavailable("model response is incomplete or refused")
-        output = value.get("output")
-        if not isinstance(output, list):
-            raise ModelUnavailable("model response has no output")
+        output = _response_output(value)
         texts, calls = [], []
         for item in output:
             if not isinstance(item, dict):
-                raise ModelUnavailable("model output item is invalid")
+                raise ModelResponseInvalid("model output item is invalid")
             match item.get("type"):
                 case "reasoning":
                     pass  # Preserve the encrypted reasoning item for stateless continuation.
@@ -78,21 +74,33 @@ class ModelTurn:
                 case "message":
                     content = item.get("content")
                     if not isinstance(content, list):
-                        raise ModelUnavailable("model message has invalid content")
+                        raise ModelResponseInvalid("model message has invalid content")
                     for part in content:
                         if (
                             not isinstance(part, dict)
                             or part.get("type") != "output_text"
                             or not isinstance(part.get("text"), str)
                         ):
-                            raise ModelUnavailable("model message was refused or invalid")
+                            raise ModelResponseInvalid("model message was refused or invalid")
                         texts.append(part["text"])
                 case _:
-                    raise ModelUnavailable("model returned an unsupported output item")
+                    raise ModelResponseInvalid("model returned an unsupported output item")
         if not calls and len(texts) != 1:
-            raise ModelUnavailable("model must return tool calls or one structured assessment")
+            raise ModelResponseInvalid("model must return tool calls or one structured assessment")
         # A tool turn may include a preamble. Preserve it in history; only a call-free turn is final.
         return cls(None if calls else json_object(texts[0]), calls, output, _usage(value.get("usage")))
+
+
+def _response_output(value: dict) -> list:
+    """Separate a provider failure from a completed but unusable answer."""
+    if value.get("status") == "failed":
+        raise ModelUnavailable("model request failed")
+    if value.get("status") != "completed" or value.get("refusal"):
+        raise ModelResponseInvalid("model response is incomplete or refused")
+    output = value.get("output")
+    if not isinstance(output, list):
+        raise ModelResponseInvalid("model response has no output")
+    return output
 
 
 def _usage(value: object) -> dict | None:

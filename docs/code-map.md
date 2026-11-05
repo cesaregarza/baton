@@ -76,7 +76,8 @@ model prompting and bounded turns (`harness`), and model/decision-engine I/O (`c
 `Secretary`, `show`, `Policy`, and `load_policy` API. Configuration code is centralized in `config/secretary.py`.
 The Baton host TOML format is unchanged. Secretary policy version 3 is required, with explicit model, decision
 engine, threshold, retry, and page settings. Private state version 1 is refused and requires a new file; version
-2 remains supported. The installed integration JSON is a separate version 1 worker configuration.
+2 remains supported. The installed integration JSON is a separate worker configuration with independent
+assessment and required delivery timeouts; startup validates that the engine timeout is shorter than its assessment budget.
 
 ## Follow one message
 
@@ -160,25 +161,32 @@ read, or borrows an existing transaction.
 The [secretary developer guide](../baton/agents/secretary/README.md) documents model setup, host delivery,
 and source references. The planned principal feedback loop is described in the [roadmap](roadmap.md).
 
-Installation binds the activation floor to the current database head. Standalone implicit decisions resume from
-durable scan progress; explicit `since` and `floor` request an exact replay. The worker reads complete bounded
-pages, reserving model output space for citations. Trigger IDs outside the current page fail. Transient errors
-retry in their original mode; after the configured attempts, pages split and an unsummarizable event gets a
-source-only operational notice. Held contiguous pages combine into bounded hourly digests. Worker health is
-tracked separately from page retry state. Each poll reserves one configured budget for a fresh alert and another
-for scheduled work; scheduled retries and digests alternate priority so sustained new traffic cannot starve them.
+Installation binds the activation floor to the current database head. Standalone implicit decisions check due
+retries first and then resume from durable scan progress; explicit `since` and `floor` request an exact replay.
+Trigger IDs outside the current page fail; a trigger matching a failed source page retries that page, while a page
+in backoff remains eligible. The worker reads complete bounded pages and reserves model output space for citations.
+Transport failures and timeouts retry indefinitely in their original mode without splitting. Invalid model
+content/output and oversized windows count toward `max_attempts` and may split. Held contiguous pages combine into
+bounded digests; digest failures remain digest work and eventually yield a keep notice. Worker health is tracked
+separately from page retry state. Each poll reserves one full budget for a fresh alert and one for scheduled work;
+one eligible scheduled lane receives the full reserved budget per poll, with retry and digest priority alternating.
 
-An independent decision engine evaluates each alert page. A `wake` with confidence at or above `wake_threshold` overrides model
-hold, keep, or failure; the model can call a tool to read the already-computed decision and confidence, without
-engine reasoning. Every deliverable summary cites and accounts for each page event; parent citations are
+An independent decision engine evaluates each alert page. A `wake` with `wake_probability` at or above
+`wake_threshold` overrides model hold, keep, or failure. JEV uses `probabilities["wake"]`, not its separate wire
+`confidence`; command engines use protocol 3 with exactly `decision` and `wake_probability`. The model can call a
+tool to read the already-computed verdict, without engine reasoning. Sanitized engine failures remain in health
+and status even when model triage holds or fails; model outage only becomes a notice when the engine forced a wake.
+Every deliverable summary cites and accounts for each page event; parent citations are
 optional. Validation checks source references, not claim truth, and instructions prohibit invented assignments
 or approvals. Pending receipts retain all decision IDs, surface wakes first, and announce newly pending IDs even
 while older ones await acknowledgement. Acknowledgements are idempotent and advance delivery only across
-contiguous ranges. Deliverable summaries are also appended to `secretary_summaries` in the shared Baton database.
+contiguous ranges. Source reads use a read-only snapshot. Writing a deliverable archive row to
+`secretary_summaries` requires database write access; archive reads are available locally and through the
+authenticated, role-scoped `read_secretary_summaries` MCP tool / remote CLI command.
 
 The secretary accepts policy version 3 with explicit model, engine, thresholds, retries, and limits. Private
-state version 1 is refused and requires a new file; version 2 remains supported. Harness version 2 invalidates
-older unchecked assessment cache entries. The top-level
+state version 1 is refused and requires a new file; version 2 remains supported. Harness version 4 invalidates
+older assessment cache entries after the engine result and prompt changes. The top-level
 `baton.secretary_decide` and `baton.secretary_read` modules are CLI wrappers run with `python -m`; they are not
 the full Python API. The public Python
 API exports `Secretary`, `show`, `Policy`, and `load_policy`; import implementation from canonical modules.

@@ -287,12 +287,15 @@ the data directory; MCP Events keeps only its subscriptions there and its record
 directory and its contents for unsafe ownership, permissions, and links; see
 [Security: the data directory](../SECURITY.md#the-data-directory) for the exact boundary and limitations.
 
-The host-local secretary reads `baton.db` read-only under a snapshot and keeps private version-2 assessment,
-scan, retry, and acknowledgment state. State version 1 is refused; existing version-2 state remains supported.
+The host-local secretary reads source messages and events from `baton.db` in a read-only snapshot and keeps private
+version-2 assessment, scan, retry, and acknowledgment state. State version 1 is refused; existing version-2 state
+remains supported.
 The configured model and independent decision engine receive only authorized, bounded event pages. Summaries
 cite every event in their page, while the validator checks source references rather than the truth of claims.
-Deliverable summaries are copied to the append-only shared `secretary_summaries` table, keyed by stable
-`secretary_id` and principal, and can be paged without the private state file. The feature owns no jobs,
+Deliverable summaries are appended to shared `baton.db` table `secretary_summaries`, keyed by stable
+`secretary_id` and principal. This archive write requires database write access even though source reads use a
+read-only snapshot. Local CLI reads, authenticated remote CLI reads, and the role-scoped
+`read_secretary_summaries` MCP tool can page the archive without the private state file. The feature owns no jobs,
 messages, permissions, or Baton inbox cursor.
 
 ## Design directions

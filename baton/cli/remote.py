@@ -16,7 +16,16 @@ def dispatch(args: argparse.Namespace) -> Any:
     """Run a message, read, wait or conversation command through the host."""
     if getattr(args, "role", None):
         raise ConfigError("--as has no effect with --host: the token decides the role")
-    command = " ".join(filter(None, [args.command, getattr(args, "conversation_command", None)]))
+    command = " ".join(
+        filter(
+            None,
+            [args.command, getattr(args, "conversation_command", None), getattr(args, "secretary_command", None)],
+        )
+    )
+    if command == "secretary summaries":
+        if getattr(args, "policy", None) is not None:
+            raise ConfigError("--policy is host-local and cannot be used with --host")
+        return call(args, "read_secretary_summaries", {"after": args.after, "limit": args.limit})
     if command == "message":
         if (args.to is None) == (args.conversation_id is None):
             raise InvalidRequest("name a recipient with --to or a conversation with --conversation")
@@ -51,7 +60,7 @@ def dispatch(args: argparse.Namespace) -> Any:
         )
     raise ConfigError(
         f"`baton {command}` runs on the host only; with --host use message, read, wait, "
-        "conversation new, conversation list, conversation topic or conversation history"
+        "conversation new, conversation list, conversation topic, conversation history or secretary summaries"
     )
 
 

@@ -5,7 +5,7 @@ description: Install and operate the local Baton secretary integration for Codex
 
 # Baton secretary for Codex
 
-Use this skill when setting up or operating a Baton secretary instance that presents decision briefs in a Codex project. The integration is host-local: the worker and Codex must run as the same user and be able to access the same Baton SQLite database and model authentication. Remote delivery is unsupported.
+Use this skill when setting up or operating a Baton secretary instance that presents decision briefs in a Codex project. The integration is host-local: the worker and Codex must run as the same user and be able to access the same Baton SQLite database and model authentication. Remote delivery is unsupported; authenticated remote reads of archived summaries are supported.
 
 ## Install
 
@@ -23,6 +23,7 @@ Use this skill when setting up or operating a Baton secretary instance that pres
      --policy /absolute/path/to/secretary-policy-v3.json \
      --poll-seconds 2 \
      --budget-seconds 28 \
+     --delivery-timeout-seconds 8 \
      --apply-hooks
    ```
 
@@ -49,8 +50,9 @@ in the provider's required `env` allowlist. Commands run as the Baton host user;
 filesystem sandbox. Restart the worker after changing policy.
 
 - Installation binds the activation floor to the current database head. The worker scans complete bounded pages and tracks durable scan progress separately from delivered coverage. Page output reserves space for required source citations; pages are split after repeated failures, never silently truncated.
-- The independent engine evaluates each alert page. A `wake` with confidence at or above `wake_threshold` forces a wake even when model triage holds, keeps, or fails. The model may call a tool to read the cached decision and confidence; the engine cannot explain its choice. If the model cannot summarize a forced wake, the notice contains sources only.
-- Transient failures retry in the same alert or digest mode, separately from worker health. After `max_attempts`, pages are split; an unsummarizable event eventually gets a source-only notice. No semantic fallback invents a decision.
+- The required `delivery_timeout_seconds` is independent of the engine timeout. The engine timeout must be shorter than the assessment budget; install and worker startup validate this. A standalone `decide` call checks due retries before scanning new work, and a trigger matching a failed source page retries that page.
+- The independent engine evaluates each alert page. A `wake` with `wake_probability` at or above `wake_threshold` forces a wake even when model triage holds, keeps, or fails. JEV thresholds use `probabilities["wake"]`, not its separate wire `confidence`; command engines use protocol 3 and return exactly `decision` plus `wake_probability`. The model may call a tool to read the cached decision and wake probability; the engine cannot explain its choice. If the model cannot summarize a forced wake, the worker emits a forced-wake notice. A model outage without a forced wake remains an outage, not an alert.
+- Transport failures and timeouts retry indefinitely in the same alert or digest mode and never split pages. Invalid model content/output and `InboxTooLarge` count toward `max_attempts` and may split. Each poll reserves one full budget for a fresh alert and one for scheduled work; one scheduled lane gets the whole reserved budget per poll, with retry/digest priority alternating. Digest failures retain digest mode and eventually produce a keep notice, never an alert or wake. Sanitized engine failures remain visible in health/status even if model triage holds or fails.
 - A Codex assessment sends one `codex queue --thread <bound-id> --message ... --resume` request. A successful command means the message was queued, not that a model read or acted on it. Resuming an idle thread can warn or fail; check the target session.
 - SessionStart binds the first matching project session. The instance refuses delivery to a different session. Use the explicit `bind SESSION` command only when intentionally reassigning the instance.
 - Hooks and explicit `receive` re-check current source visibility before showing a brief. Stop offers a fresh summary only and respects the stop-hook recursion guard. Do not create synthetic keep-alive turns.
@@ -66,7 +68,11 @@ python -m baton.integrations.secretary --instance /absolute/private/secretary-in
 python -m baton.integrations.secretary --instance /absolute/private/secretary-instance/integration.json receive
 python -m baton.integrations.secretary --instance /absolute/private/secretary-instance/integration.json acknowledge DECISION_ID
 python -m baton.integrations.secretary --instance /absolute/private/secretary-instance/integration.json bind SESSION_ID
+baton --host https://baton.example secretary summaries --after 0 --limit 50
 ```
+
+Remote archive reads use the authenticated token's role and need no host-side policy file. The matching MCP tool is
+`read_secretary_summaries`; other secretary commands remain host-local.
 
 Stop with `systemctl --user disable --now secretary-XXXXXXXX.service`, then verify its generated unit symlinks were removed and run `systemctl --user daemon-reload`. Remove only this integration's hook entries from the project file, retaining other hooks and settings; keep or securely remove the private instance state according to the owner's retention choice. Never clear pending decisions as an implicit part of uninstalling.
 

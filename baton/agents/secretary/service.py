@@ -49,8 +49,8 @@ class Secretary:
         from .attention.queue import AttentionQueue
 
         async with DatabaseWorker() as database:
-            queue = await AttentionQueue.open(self, database)
-            result = await queue.digest(budget_seconds) if hourly else await queue.scan(budget_seconds, trigger=trigger)
+            queue = await AttentionQueue.open(self, database, budget_seconds=budget_seconds)
+            result = await queue.assess(budget_seconds, trigger=trigger, hourly=hourly)
             if result is not None:
                 return result
             if queue.last_error is not None:

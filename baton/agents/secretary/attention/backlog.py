@@ -16,6 +16,7 @@ class Page:
     through: int
     mode: str = "alert"
     attempts: int = 0
+    content_failures: int = 0
 
 
 class Backlog:
@@ -38,6 +39,7 @@ class Backlog:
             "attempts": "INTEGER NOT NULL DEFAULT 0",
             "status": "TEXT NOT NULL DEFAULT 'retry'",
             "error": "TEXT",
+            "content_failures": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, declaration in additions.items():
             if name not in columns:
@@ -80,9 +82,10 @@ class Backlog:
 
     def _insert(self, conn: Connection, page: Page, now: float) -> None:
         conn.execute(
-            "INSERT OR IGNORE INTO backlog_windows(principal,since,through,next_attempt,mode,attempts,status) "
-            "VALUES (?,?,?,?,?,?,'retry')",
-            (self.log.principal, page.since, page.through, now, page.mode, page.attempts),
+            "INSERT OR IGNORE INTO backlog_windows"
+            "(principal,since,through,next_attempt,mode,attempts,content_failures,status) "
+            "VALUES (?,?,?,?,?,?,?,'retry')",
+            (self.log.principal, page.since, page.through, now, page.mode, page.attempts, page.content_failures),
         )
 
     def finish(self, page: Page, result: dict, now: float, digest_seconds: float) -> None:
@@ -97,32 +100,53 @@ class Backlog:
                 ).one()[0]
                 status, mode, due, decision = "held", "digest", scheduled or now + digest_seconds, None
             conn.execute(
-                "UPDATE backlog_windows SET status=?,mode=?,next_attempt=?,decision=?,attempts=0,error=NULL "
+                "UPDATE backlog_windows SET status=?,mode=?,next_attempt=?,decision=?,"
+                "attempts=0,content_failures=0,error=NULL "
                 "WHERE principal=? AND since=? AND through=?",
                 (status, mode, due, decision, self.log.principal, page.since, page.through),
             )
 
-    def failed(self, page: Page, now: float, error: str, *, initial: float, maximum: float) -> Page:
+    def failed(
+        self, page: Page, now: float, error: str, *, initial: float, maximum: float, content: bool = False
+    ) -> Page:
         attempts = page.attempts + 1
+        content_failures = page.content_failures + int(content)
         delay = min(maximum, initial * 2 ** min(attempts - 1, 20))
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
             conn.execute(
-                "UPDATE backlog_windows SET status='retry',attempts=?,next_attempt=?,error=? "
+                "UPDATE backlog_windows SET status='retry',attempts=?,content_failures=?,next_attempt=?,error=? "
                 "WHERE principal=? AND since=? AND through=?",
-                (attempts, now + delay, error, self.log.principal, page.since, page.through),
+                (attempts, content_failures, now + delay, error, self.log.principal, page.since, page.through),
             )
-        return Page(page.since, page.through, page.mode, attempts)
+        return Page(page.since, page.through, page.mode, attempts, content_failures)
 
-    def due(self, now: float, *, held: bool = False, limit: int = 1) -> list[Page]:
+    def due(
+        self, now: float, *, held: bool = False, limit: int = 1, position: int | None = None, mode: str | None = None
+    ) -> list[Page]:
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
             rows = conn.execute(
-                "SELECT since,through,mode,attempts FROM backlog_windows WHERE principal=? AND status=? "
-                "AND next_attempt<=? ORDER BY next_attempt,since LIMIT ?",
-                (self.log.principal, "held" if held else "retry", now, limit),
+                "SELECT since,through,mode,attempts,content_failures FROM backlog_windows "
+                "WHERE principal=? AND status=? "
+                "AND next_attempt<=? AND (? IS NULL OR (since<? AND through>=?)) "
+                "AND (? IS NULL OR mode=?) ORDER BY next_attempt,since LIMIT ?",
+                (self.log.principal, "held" if held else "retry", now, position, position, position, mode, mode, limit),
             )
             return [Page(*row) for row in rows]
+
+    def waiting_retry(self, position: int) -> bool:
+        """Whether this trigger belongs to retained failed work, even during its backoff."""
+        with self.log.connection() as conn, conn.transaction():
+            self._initialize(conn)
+            return (
+                conn.execute(
+                    "SELECT 1 FROM backlog_windows WHERE principal=? AND status='retry' "
+                    "AND since<? AND through>=? LIMIT 1",
+                    (self.log.principal, position, position),
+                ).fetchone()
+                is not None
+            )
 
     def replace(self, originals: list[Page], replacements: list[Page], now: float) -> None:
         """Partition failed work or combine held pages without deleting assessments."""
@@ -163,7 +187,7 @@ class Backlog:
             self._initialize(conn)
             self._prune(conn)
             conn.execute(
-                "UPDATE backlog_windows SET decision=NULL,status='retry',attempts=0,next_attempt=? "
+                "UPDATE backlog_windows SET decision=NULL,status='retry',attempts=0,content_failures=0,next_attempt=? "
                 "WHERE principal=? AND decision=?",
                 (now, self.log.principal, decision),
             )

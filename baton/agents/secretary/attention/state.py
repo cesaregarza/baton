@@ -15,7 +15,7 @@ from baton.database.files import open_private
 from baton.errors import InvalidRequest
 
 _BASE_TABLES = {"attention_version", "principals", "assessments"}
-_KNOWN_TABLES = _BASE_TABLES | {"acknowledgments", "backlog_settings", "backlog_windows"}
+_KNOWN_TABLES = _BASE_TABLES | {"acknowledgments", "backlog_settings", "backlog_windows", "engine_health"}
 
 
 def _create_acknowledgments(conn: Connection) -> None:

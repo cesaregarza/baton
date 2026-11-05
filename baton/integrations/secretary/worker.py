@@ -14,6 +14,7 @@ import time
 from contextlib import contextmanager
 
 from baton import datadir
+from baton.agents.secretary.attention.health import EngineHealth
 from baton.agents.secretary.attention.queue import AttentionQueue
 from baton.agents.secretary.attention.runtime import DatabaseWorker
 from baton.config import ConfigError
@@ -49,6 +50,7 @@ class Worker:
         self.retry_at = 0.0
         self.failed_pages = 0
         self.digest_first = False
+        self.engine_health = {"status": "not_used", "last_failure": None, "checked_at": None}
 
     async def run(self) -> None:
         with exclusive(self.instance):
@@ -65,8 +67,9 @@ class Worker:
                             self.instance.receipts.set,
                             "health",
                             {
-                                "status": "running",
+                                "status": "degraded" if self.engine_health["status"] == "unavailable" else "running",
                                 "failed_pages": self.failed_pages,
+                                "engine": self.engine_health,
                                 "checked_at": time.time(),
                             },
                         )
@@ -79,6 +82,7 @@ class Worker:
                             {
                                 "status": "retrying",
                                 "error": type(error).__name__,
+                                "engine": self.engine_health,
                                 "checked_at": time.time(),
                             },
                         )
@@ -87,8 +91,13 @@ class Worker:
                     await asyncio.sleep(self.instance.poll_seconds)
 
     async def step(self, database: DatabaseWorker) -> None:
-        queue = await AttentionQueue.open(self.instance.secretary, database)
-        pending = await queue.poll(self.instance.budget_seconds, digest_first=self.digest_first)
+        queue = await AttentionQueue.open(
+            self.instance.secretary, database, budget_seconds=self.instance.budget_seconds
+        )
+        try:
+            pending = await queue.poll(self.instance.budget_seconds, digest_first=self.digest_first)
+        finally:
+            self.engine_health = await database.call(EngineHealth(queue.backlog.log).read)
         self.digest_first = not self.digest_first
         self.failed_pages = await database.call(queue.backlog.failures)
         decisions = [result["decision_id"] for result in pending]
@@ -106,7 +115,7 @@ class Worker:
         )
         if not set(decisions).difference(offered) or time.monotonic() < self.retry_at:
             return
-        if await self._queue(session, policy.decision_timeout):
+        if await self._queue(session, self.instance.delivery_timeout_seconds):
             await database.call(self.instance.receipts.set, "queued", {"session": session, "decisions": decisions})
             self.retry_at = 0.0
         else:

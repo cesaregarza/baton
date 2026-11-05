@@ -55,11 +55,11 @@ class Outcome:
             **details,
         }
 
-    def notice(self, reason: str, *, kind: str, engine_verdict: dict | None = None) -> dict:
+    def notice(self, reason: str, *, kind: str, engine_verdict: dict | None = None, decision: str = "wake") -> dict:
         """Report a workflow failure or an engine-forced wake without inventing a model summary."""
         sources = [ref["source_key"] for ref in _references(self.window)]
         assessment = Assessment(
-            "wake", reason, reason + " Read the source references before deciding what to do.", sources
+            decision, reason, reason + " Read the source references before deciding what to do.", sources
         )
         key = fingerprint(
             {"notice": kind, "window": self.window.digest, "policy": self.policy.digest, "mode": self.mode}

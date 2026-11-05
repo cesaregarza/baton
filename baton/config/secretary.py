@@ -155,6 +155,13 @@ def require_hook_summary(policy: Policy) -> None:
         raise ConfigError("hook integrations require summary_bytes <= 6000; update the policy")
 
 
+def validate_decision_budget(policy: Policy, assessment_budget_seconds: float) -> None:
+    """Ensure a decision engine timeout leaves time for assessment work to finish."""
+    budget = _timeout(assessment_budget_seconds, "budget_seconds")
+    if policy.decision_timeout >= budget:
+        raise ConfigError("decision_engine.timeout_seconds must be less than the assessment budget_seconds")
+
+
 @dataclass(frozen=True)
 class IntegrationConfig:
     """Validated version 1 JSON settings for an installed secretary worker."""
@@ -166,6 +173,7 @@ class IntegrationConfig:
     state: Path
     poll_seconds: float
     budget_seconds: float
+    delivery_timeout_seconds: float
     codex: str | None = None
     version: int = INTEGRATION_VERSION
 
@@ -194,6 +202,7 @@ class IntegrationConfig:
             raise ConfigError("integration state must be in its private instance directory")
         poll_seconds = _timeout(value.get("poll_seconds"), "poll_seconds")
         budget_seconds = _timeout(value.get("budget_seconds"), "budget_seconds")
+        delivery_timeout_seconds = _timeout(value.get("delivery_timeout_seconds"), "delivery_timeout_seconds")
         if 2 * budget_seconds + poll_seconds > MAX_BUDGET_SECONDS:
             raise ConfigError("two assessment passes plus the poll interval must fit within 60 seconds")
         product = value["product"]
@@ -208,6 +217,7 @@ class IntegrationConfig:
             codex=executable,
             poll_seconds=poll_seconds,
             budget_seconds=budget_seconds,
+            delivery_timeout_seconds=delivery_timeout_seconds,
             version=INTEGRATION_VERSION,
         )
 
@@ -221,6 +231,7 @@ class IntegrationConfig:
             "state": str(self.state),
             "poll_seconds": self.poll_seconds,
             "budget_seconds": self.budget_seconds,
+            "delivery_timeout_seconds": self.delivery_timeout_seconds,
         }
         if self.codex is not None:
             value["codex"] = self.codex
@@ -255,8 +266,12 @@ def _model(value: object) -> dict:
     settings = dict(value)
     if settings["cache_mode"] not in ("implicit", "layered"):
         raise ConfigError("model.cache_mode must be implicit or layered")
-    if settings["reasoning_effort"] not in ("none", "low", "medium", "high", "xhigh", "max"):
-        raise ConfigError("model.reasoning_effort is invalid")
+    if (
+        not isinstance(settings["reasoning_effort"], str)
+        or not settings["reasoning_effort"].strip()
+        or len(settings["reasoning_effort"]) > 100
+    ):
+        raise ConfigError("model.reasoning_effort must be a nonempty string of at most 100 characters")
     settings["max_output_tokens"] = _integer(settings["max_output_tokens"], "max_output_tokens", 256, 32768)
     return _http_settings(settings, "model")
 

@@ -362,6 +362,18 @@ class Tools(TopicTools, ReferenceTools):
         with self._conn() as conn:
             return search_module.read_artifacts(conn, self._config, role, conversation_id, producer=producer)
 
+    def read_secretary_summaries(
+        self,
+        role: str,
+        after: Annotated[int, Field(ge=0)] = 0,
+        limit: Annotated[int, Field(ge=1, le=100)] = 50,
+    ) -> dict[str, Any]:
+        """Page your own archived secretary summaries, oldest first; continue with `next` as `after`."""
+        from baton.agents.secretary.attention.archive import SummaryArchive
+
+        with self._conn() as conn:
+            return SummaryArchive(self._config).page_for(Agent(conn, self._config, role), after=after, limit=limit)
+
     def get_message(self, role: str, message_id: str) -> dict[str, Any]:
         """One message by its id, if you can read it: one you sent or hold, or any conversation message if
         your role may view them all. Unknown and not permitted give the same refusal."""

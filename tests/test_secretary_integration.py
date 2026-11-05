@@ -80,6 +80,8 @@ def _install(world, tmp_path: Path, product: str, *, project_name: str = "projec
             str(world.policy_path),
             "--poll-seconds",
             "0.05",
+            "--delivery-timeout-seconds",
+            "7",
             "--budget-seconds",
             "5",
             "--codex",
