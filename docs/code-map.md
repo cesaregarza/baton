@@ -183,5 +183,5 @@ payloads stay the same. New code should import `Agent`, `Permissions` and `Capab
 `baton.messages`, `Conversation` from `baton.conversations`, and connection APIs from `baton.database`.
 
 SQLite is currently supported. SQLAlchemy supplies the connection boundary for the intended PostgreSQL
-backend, but existing SQL, FTS5 search and writer serialization still need porting. Moving files does not
-make those backend assumptions portable.
+backend, but existing SQL, FTS5 search and writer serialization still need porting. The
+[PostgreSQL roadmap](roadmap.md#postgresql-backend) describes the remaining work and backend validation.

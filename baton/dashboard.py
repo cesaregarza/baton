@@ -576,6 +576,44 @@ def _topic_link(topic: str | None) -> str:
     return f'<a href="/t/{_e(topic)}">{_e(topic)}</a>' if topic else "No topic"
 
 
+def _needs_jobs(
+    config: Config, conn: Connection, topic: str | None, page: int, params: dict[str, str]
+) -> tuple[str, str]:
+    """The Needs page's jobs count and block, preserving the visibility rules for each view."""
+    viewer = _viewer(config)
+    subject = config.dashboard.attention_role or viewer
+    you = _attention_label(config)
+    if subject != viewer and not config.dashboard.attention_jobs:
+        # Listing them would widen what the view's audience sees; that takes `dashboard.attention_jobs`.
+        return (
+            "",
+            f'<h2 id="jobs">Jobs</h2><p class="muted">Jobs waiting on {_e(you)} aren\'t '
+            "shown in this read-only view.</p>",
+        )
+    if topic is not None:
+        return (
+            "",
+            '<h2 id="jobs">Jobs</h2><p class="muted">Jobs have no topic, so none are '
+            f'shown under a topic filter. <a href="/needs">See every job waiting on '
+            f"{_e(you)}</a>.</p>",
+        )
+
+    total = jobs.count_jobs(conn, waiting_on=subject)
+    waiting = jobs.list_jobs(conn, waiting_on=subject, limit=MAX_NEEDS_JOBS, offset=(page - 1) * MAX_NEEDS_JOBS)
+    job_span = _span(len(waiting), total, page, MAX_NEEDS_JOBS, "", newest=False)
+    job_count = f" · {total} job{' is' if total == 1 else 's are'} waiting on {_e(you)}" + (
+        f", {job_span}" if job_span else ""
+    )
+    job_pager = _pager("/needs", params, "jobs_page", page, MAX_NEEDS_JOBS, total, "More jobs", "jobs")
+    job_block = (
+        f'<h2 id="jobs">Jobs waiting on {_e(you)}</h2><ul>'
+        + ("".join(_job(job) for job in waiting) or "<li class=muted>None.</li>")
+        + "</ul>"
+        + job_pager
+    )
+    return job_count, job_block
+
+
 def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) -> str:
     """What singles out the attention role, from what the viewer could read, then the jobs waiting on it.
 
@@ -620,42 +658,7 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
         f"{' ' + other_span.capitalize() + '.' if other_span else ''}</p>"
         f"<ul>{other_items or '<li class=muted>None.</li>'}</ul>{other_pager}</details>"
     )
-    if projected and not config.dashboard.attention_jobs:
-        # Listing them would widen what the view's audience sees; that takes `dashboard.attention_jobs`.
-        job_count, job_block = (
-            "",
-            (
-                f'<h2 id="jobs">Jobs</h2><p class="muted">Jobs waiting on {_e(you)} aren\'t '
-                "shown in this read-only view.</p>"
-            ),
-        )
-    elif topic is not None:
-        job_count, job_block = (
-            "",
-            (
-                '<h2 id="jobs">Jobs</h2><p class="muted">Jobs have no topic, so none are '
-                f'shown under a topic filter. <a href="/needs">See every job waiting on '
-                f"{_e(you)}</a>.</p>"
-            ),
-        )
-    else:
-        total = jobs.count_jobs(conn, waiting_on=subject)
-        waiting = jobs.list_jobs(
-            conn, waiting_on=subject, limit=MAX_NEEDS_JOBS, offset=(pages["jobs_page"] - 1) * MAX_NEEDS_JOBS
-        )
-        job_span = _span(len(waiting), total, pages["jobs_page"], MAX_NEEDS_JOBS, "", newest=False)
-        job_count = f" · {total} job{' is' if total == 1 else 's are'} waiting on {_e(you)}" + (
-            f", {job_span}" if job_span else ""
-        )
-        job_pager = _pager(
-            "/needs", params, "jobs_page", pages["jobs_page"], MAX_NEEDS_JOBS, total, "More jobs", "jobs"
-        )
-        job_block = (
-            f'<h2 id="jobs">Jobs waiting on {_e(you)}</h2><ul>'
-            + ("".join(_job(job) for job in waiting) or "<li class=muted>None.</li>")
-            + "</ul>"
-            + job_pager
-        )
+    job_count, job_block = _needs_jobs(config, conn, topic, pages["jobs_page"], params)
     needs = f"Needs {_e(you)}"
     crumbs = (
         '<p class="crumbs"><a href="/">All conversations</a>'

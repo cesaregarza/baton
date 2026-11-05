@@ -1,5 +1,15 @@
 # Roadmap
 
+## PostgreSQL backend
+
+**Status:** Planned; SQLite is the supported backend today.
+
+The shared connection API uses SQLAlchemy, but the stores still depend on SQLite SQL, FTS5 search,
+schema migration details, and writer serialization. Supporting PostgreSQL requires porting those operations
+behind the connection and store APIs, defining equivalent search behavior, and running the same message,
+retry, permission, and concurrency scenarios against both backends. A SQLAlchemy dependency alone does not
+establish backend support.
+
 ## Principal feedback for secretary triage
 
 **Status:** Planned, not implemented.
