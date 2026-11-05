@@ -119,7 +119,13 @@ class SecretaryModel:
         if self.settings["provider"] == "command":
             value = await command_json(
                 self.settings,
-                {"version": 3, "input": messages, "tools": tools, "response_schema": RESPONSE_SCHEMA},
+                {
+                    "version": 4,
+                    "input": messages,
+                    "tools": tools,
+                    "response_schema": RESPONSE_SCHEMA,
+                    "max_output_tokens": self.settings["max_output_tokens"],
+                },
                 timeout,
             )
             return ModelTurn.command(value)

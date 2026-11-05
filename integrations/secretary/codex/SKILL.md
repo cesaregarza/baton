@@ -11,7 +11,7 @@ Use this skill when setting up or operating a Baton secretary instance that pres
 
 1. Check the current Codex hook support using the installed `codex --help` and the in-product `/hooks` command. If the installed version does not support the required hook events, stop and report that; do not guess a compatible configuration.
 2. Copy this skill folder into the project at `.agents/skills/baton-secretary-codex/` so it is available to that project's Codex sessions.
-3. Choose an absolute, private, empty destination directory for the instance. Use the existing v2 secretary policy, Baton config, and project paths. Do not create user-specific policy, role, or path assumptions.
+3. Choose an absolute, private, empty destination directory for the instance. Use a complete v3 secretary policy, Baton config, and project paths. Start from the [policy example](../../../baton/agents/secretary/README.md#policy); do not omit explicit model or decision-engine settings.
 4. Generate the integration artifacts with the repository's current CLI:
 
    ```sh
@@ -20,7 +20,9 @@ Use this skill when setting up or operating a Baton secretary instance that pres
      --destination /absolute/private/secretary-instance \
      --project /absolute/path/to/project \
      --config /absolute/path/to/baton.toml \
-     --policy /absolute/path/to/secretary-policy-v2.json \
+     --policy /absolute/path/to/secretary-policy-v3.json \
+     --poll-seconds 2 \
+     --budget-seconds 28 \
      --apply-hooks
    ```
 
@@ -41,16 +43,18 @@ Use this skill when setting up or operating a Baton secretary instance that pres
 ## Delivery and acknowledgement
 
 Supply credentials through the service environment or the optional mode-0600 `environment` file in the
-instance directory. A user service does not inherit your shell environment. The default OpenAI model uses
-`OPENAI_API_KEY`; a JEV decision engine uses `TYPESAFE_API_KEY` or its configured credential variable. Model and
-decision engine can each use a command adapter. Both use the same secretary harness regardless of whether the
-principal runs in Codex or Claude Code. Restart the worker after changing its policy.
+instance directory. A user service does not inherit your shell environment. Set the variables named by model
+and JEV `api_key_env` values. For command providers, set the credential in that environment and list its name
+in the provider's required `env` allowlist. Commands run as the Baton host user; environment filtering is not a
+filesystem sandbox. Restart the worker after changing policy.
 
-- The worker polls the read-only visible-event feed every two seconds. It performs inference at startup and when new visible events arrive; an empty poll does not trigger an inference.
+- Installation binds the activation floor to the current database head. The worker scans complete bounded pages and tracks durable scan progress separately from delivered coverage. Page output reserves space for required source citations; pages are split after repeated failures, never silently truncated.
+- The independent engine evaluates each alert page. A `wake` with confidence at or above `wake_threshold` forces a wake even when model triage holds, keeps, or fails. The model may call a tool to read the cached decision and confidence; the engine cannot explain its choice. If the model cannot summarize a forced wake, the notice contains sources only.
+- Transient failures retry in the same alert or digest mode, separately from worker health. After `max_attempts`, pages are split; an unsummarizable event eventually gets a source-only notice. No semantic fallback invents a decision.
 - A Codex assessment sends one `codex queue --thread <bound-id> --message ... --resume` request. A successful command means the message was queued, not that a model read or acted on it. Resuming an idle thread can warn or fail; check the target session.
 - SessionStart binds the first matching project session. The instance refuses delivery to a different session. Use the explicit `bind SESSION` command only when intentionally reassigning the instance.
 - Hooks and explicit `receive` re-check current source visibility before showing a brief. Stop offers a fresh summary only and respects the stop-hook recursion guard. Do not create synthetic keep-alive turns.
-- A brief remains pending across restarts and can be recovered with `receive` if a hook was missed. A principal acknowledges only after reading the brief and its exact decision ID, using `acknowledge ID`. Hook exit or successful queueing is never an acknowledgement.
+- Pending receipts retain all decision IDs, surface wakes first, and announce new IDs even when older summaries remain unacknowledged. JSON `receive` returns every currently authorized pending summary with a trust label and acknowledgment command. `receive --text` prints complete JSON-framed summaries and acknowledgment commands when hook output is too large. Read a summary before acknowledging its ID; hook exit or successful queueing is not acknowledgment. Later holds do not clear pending wakes; acknowledgments merge delivered ranges only when contiguous.
 - Set `summary_bytes` explicitly to 4000 (maximum 6000). Do not acknowledge on the principal's behalf.
 
 ## Operate and remove

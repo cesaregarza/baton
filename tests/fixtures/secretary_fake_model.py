@@ -34,7 +34,10 @@ time.sleep(step.get("sleep", 0))
 if step.get("raw") is not None:
     sys.stdout.write(step["raw"])
 elif engine_mode:
-    response = {"decision": step.get("decision", plan.get("engine_decision", "wake"))}
+    response = {
+        "decision": step.get("decision", plan.get("engine_decision", plan.get("decision", "keep"))),
+        "confidence": step.get("confidence", plan.get("engine_confidence", plan.get("confidence", 0.2))),
+    }
     sys.stdout.write(json.dumps(response))
 elif step.get("tool_calls") is not None:
     sys.stdout.write(json.dumps({"tool_calls": step["tool_calls"]}))

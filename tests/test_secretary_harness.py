@@ -9,7 +9,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
-from secretary_support import make_world, table_hashes
+from secretary_support import archived_summary_count, make_world, table_hashes
 from test_secretary_model import Model, _decide, _positions
 
 from baton import messages
@@ -52,14 +52,15 @@ def test_command_decision_adapter_roundtrips_typed_choice_and_reuses_verdict(tmp
         assessment = asyncio.run(harness.assess(_context(), 5))
         assert assessment["decision"] == "wake"
         assert harness.tools.status == "available"
-        assert harness.tools.verdict == {"decision": "hold"}
+        assert harness.tools.verdict == {"decision": "hold", "confidence": 0.2}
         assert harness.metrics["model_calls"] == 2 and len(harness.tools.calls) == 1
         [engine_request] = model.engine_requests
         assert engine_request == {
-            "version": 1,
+            "version": 2,
             "task": "decide_attention",
             "context": _context(),
             "choices": ["wake", "hold", "keep"],
+            "max_output_tokens": 256,
             "_pid": engine_request["_pid"],
         }
 
@@ -104,7 +105,7 @@ def test_repeated_calls_with_distinct_ids_stop_at_policy_limit(tmp_path) -> None
         assert len(model.engine_requests) == 1  # The second request reuses the first typed verdict.
 
 
-def test_model_call_after_tool_is_saved_and_replayed_without_writing_baton(tmp_path) -> None:
+def test_model_call_after_tool_is_archived_and_replayed_without_changing_sources(tmp_path) -> None:
     with make_world(tmp_path) as world:
         model = Model(
             world,
@@ -116,7 +117,7 @@ def test_model_call_after_tool_is_saved_and_replayed_without_writing_baton(tmp_p
             },
         )
         sent = messages.send(world.baton, sender="worker", recipient="planner", text="A synthetic incoming event")
-        before = table_hashes(world.baton)
+        before = table_hashes(world.baton, exclude={"secretary_summaries"})
         result = _decide(world)
         assert result["decision"] == "wake" and result["brief"]
         assert f"message:{sent['message_id']}" in result["sources"]
@@ -125,8 +126,9 @@ def test_model_call_after_tool_is_saved_and_replayed_without_writing_baton(tmp_p
         assert len(show(world.config, world.state_path, world.policy_path)["assessments"]) == 1
         replay = _decide(world)
         assert replay["cached"] is True and replay["decision_id"] == result["decision_id"]
-        assert len(model.requests) == 2 and len(model.engine_requests) == 1
-        assert table_hashes(world.baton) == before
+        assert len(model.requests) == 2 and len(model.engine_requests) == 2
+        assert table_hashes(world.baton, exclude={"secretary_summaries"}) == before
+        assert archived_summary_count(world.baton) == 1
 
 
 def test_cancellation_during_command_tool_reaps_child_without_assessment(tmp_path) -> None:
@@ -298,6 +300,7 @@ def test_malformed_jev_result_is_unavailable_and_model_can_finish(tmp_path, monk
         value = json.loads(world.policy_path.read_text())
         value["decision_engine"] = {
             "provider": "jev",
+            "model": "configured-test-decision-model",
             "base_url": f"http://127.0.0.1:{server.server_port}",
             "api_key_env": "SECRETARY_JEV_TEST_KEY",
             "timeout_seconds": 2,
@@ -407,13 +410,20 @@ def test_responses_keeps_append_only_prefix_reasoning_cache_usage_and_tool_schem
         policy = json.loads(world.policy_path.read_text())
         policy["model"] = {
             "provider": "openai",
+            "model": "configured-test-model",
             "base_url": f"http://127.0.0.1:{server.server_port}/v1",
             "api_key_env": "SECRETARY_OPENAI_TEST_KEY",
+            "reasoning_effort": "none",
+            "max_output_tokens": 4096,
+            "timeout_seconds": 20,
+            "cache_mode": "layered",
         }
         policy["decision_engine"] = {
             "provider": "jev",
+            "model": "configured-test-decision-model",
             "base_url": f"http://127.0.0.1:{server.server_port}/jev",
             "api_key_env": "SECRETARY_JEV_TEST_KEY",
+            "timeout_seconds": 3,
         }
         world.policy_path.write_text(json.dumps(policy))
         try:
@@ -443,7 +453,7 @@ def test_responses_keeps_append_only_prefix_reasoning_cache_usage_and_tool_schem
         assert second["input"][6]["call_id"] == "call_1"
         assert second["input"][7]["type"] == "function_call_output"
         assert second["input"][7]["call_id"] == "call_1"
-        assert second["input"][7]["output"] == '{"decision":"hold"}'
+        assert second["input"][7]["output"] == '{"confidence":1.0,"decision":"hold"}'
         assert first_prefix[0]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
         assert first_prefix[1]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
         assert first_prefix[2]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}

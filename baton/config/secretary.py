@@ -14,25 +14,11 @@ from urllib.parse import urlsplit
 from baton import datadir
 from baton.config import Config, ConfigError
 
-POLICY_VERSION = 2
+POLICY_VERSION = 3
 MAX_POLICY_BYTES = 16 * 1024
 INTEGRATION_VERSION = 1
-DEFAULT_MODEL_PROVIDER = "openai"
-DEFAULT_MODEL = "gpt-6-luna"
-DEFAULT_MODEL_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_MODEL_API_KEY_ENV = "OPENAI_API_KEY"
-DEFAULT_REASONING_EFFORT = "low"
-DEFAULT_MAX_OUTPUT_TOKENS = 4096
-DEFAULT_MODEL_TIMEOUT_SECONDS = 20
-DEFAULT_MODEL_CACHE_MODE = "layered"
-DEFAULT_DECISION_ENGINE_PROVIDER = "jev"
-DEFAULT_DECISION_ENGINE_MODEL = "jev-latest"
-DEFAULT_DECISION_ENGINE_BASE_URL = "https://api.typesafe.ai/v1"
-DEFAULT_DECISION_ENGINE_API_KEY_ENV = "TYPESAFE_API_KEY"
-DEFAULT_DECISION_TIMEOUT_SECONDS = 3
-DEFAULT_INTEGRATION_POLL_SECONDS = 2
-DEFAULT_INTEGRATION_BUDGET_SECONDS = 30
 MAX_BUDGET_SECONDS = 60
+MAX_SCHEDULE_SECONDS = 24 * 60 * 60
 HOOK_SUMMARY_BYTES = 6000
 MAX_MODEL_RESPONSE_BYTES = 1024 * 1024
 MAX_COMMAND_RESPONSE_BYTES = 64 * 1024
@@ -47,21 +33,25 @@ def fingerprint(value: object) -> str:
 @dataclass(frozen=True)
 class Policy:
     principal: str
+    secretary_id: str
     model: dict
-    decision_engine: dict | None
+    decision_engine: dict
     instructions: str
     knowledge: str
     max_tool_calls: int
     max_events: int
     context_bytes: int
     summary_bytes: int
+    wake_threshold: float
+    retry_initial_seconds: float
+    retry_max_seconds: float
+    max_attempts: int
+    digest_seconds: float
     raw: dict
     digest: str
 
     @property
     def decision_timeout(self) -> float:
-        if self.decision_engine is None:
-            return DEFAULT_DECISION_TIMEOUT_SECONDS
         return self.decision_engine["timeout_seconds"]
 
 
@@ -74,12 +64,13 @@ def load_policy(config: Config, path: Path) -> Policy:
     except (OSError, ValueError) as error:
         raise ConfigError("cannot read secretary policy JSON") from error
     if not isinstance(raw, dict) or type(raw.get("version")) is not int:
-        raise ConfigError("secretary policy must name version 2")
+        raise ConfigError("secretary policy must name version 3")
     if raw["version"] != POLICY_VERSION:
-        raise ConfigError("unsupported secretary policy version; use version 2 with a model configuration")
+        raise ConfigError("unsupported secretary policy version; use version 3 with explicit model configuration")
     fields = {
         "version",
         "principal",
+        "secretary_id",
         "model",
         "decision_engine",
         "instructions",
@@ -88,6 +79,11 @@ def load_policy(config: Config, path: Path) -> Policy:
         "max_events",
         "context_bytes",
         "summary_bytes",
+        "wake_threshold",
+        "retry_initial_seconds",
+        "retry_max_seconds",
+        "max_attempts",
+        "digest_seconds",
     }
     if "principal" not in raw or raw.keys() - fields:
         raise ConfigError("secretary policy fields are invalid")
@@ -95,17 +91,30 @@ def load_policy(config: Config, path: Path) -> Policy:
     role = config.roles.get(principal) if isinstance(principal, str) else None
     if role is None or principal == "guest" or role.human or role.display_only:
         raise ConfigError("secretary principal must be an existing non-human, non-display agent role")
+    secretary_id = raw.get("secretary_id")
+    if not isinstance(secretary_id, str) or not secretary_id.strip() or len(secretary_id) > 200:
+        raise ConfigError("secretary_id must be a nonempty stable identifier of at most 200 characters")
     instructions = _text(raw.get("instructions", ""), "instructions")
     knowledge = _text(raw.get("knowledge", ""), "knowledge")
-    model = _model(raw.get("model", {}))
-    engine = _engine(raw.get("decision_engine"))
-    max_tool_calls = _integer(raw.get("max_tool_calls", 2), "max_tool_calls", 1, 8)
-    max_events = _integer(raw.get("max_events", 1000), "max_events", 1, 10000)
-    context_bytes = _integer(raw.get("context_bytes", 1024 * 1024), "context_bytes", 1024, 8388608)
-    summary_bytes = _integer(raw.get("summary_bytes", 8192), "summary_bytes", 256, 65536)
+    if "model" not in raw or "decision_engine" not in raw:
+        raise ConfigError("secretary policy requires explicit model and decision_engine configuration")
+    model = _model(raw["model"])
+    engine = _engine(raw["decision_engine"])
+    max_tool_calls = _integer(raw.get("max_tool_calls"), "max_tool_calls", 1, 8)
+    max_events = _integer(raw.get("max_events"), "max_events", 1, 10000)
+    context_bytes = _integer(raw.get("context_bytes"), "context_bytes", 1024, 8388608)
+    summary_bytes = _integer(raw.get("summary_bytes"), "summary_bytes", 256, 65536)
+    wake_threshold = _probability(raw.get("wake_threshold"), "wake_threshold")
+    retry_initial_seconds = _duration(raw.get("retry_initial_seconds"), "retry_initial_seconds")
+    retry_max_seconds = _duration(raw.get("retry_max_seconds"), "retry_max_seconds")
+    if retry_max_seconds < retry_initial_seconds:
+        raise ConfigError("retry_max_seconds must be greater than or equal to retry_initial_seconds")
+    max_attempts = _integer(raw.get("max_attempts"), "max_attempts", 1, 100)
+    digest_seconds = _duration(raw.get("digest_seconds"), "digest_seconds")
     normalized = {
         "version": POLICY_VERSION,
         "principal": principal,
+        "secretary_id": secretary_id,
         "model": model,
         "decision_engine": engine,
         "instructions": instructions,
@@ -114,9 +123,15 @@ def load_policy(config: Config, path: Path) -> Policy:
         "max_events": max_events,
         "context_bytes": context_bytes,
         "summary_bytes": summary_bytes,
+        "wake_threshold": wake_threshold,
+        "retry_initial_seconds": retry_initial_seconds,
+        "retry_max_seconds": retry_max_seconds,
+        "max_attempts": max_attempts,
+        "digest_seconds": digest_seconds,
     }
     return Policy(
         principal=principal,
+        secretary_id=secretary_id,
         model=model,
         decision_engine=engine,
         instructions=instructions,
@@ -125,6 +140,11 @@ def load_policy(config: Config, path: Path) -> Policy:
         max_events=max_events,
         context_bytes=context_bytes,
         summary_bytes=summary_bytes,
+        wake_threshold=wake_threshold,
+        retry_initial_seconds=retry_initial_seconds,
+        retry_max_seconds=retry_max_seconds,
+        max_attempts=max_attempts,
+        digest_seconds=digest_seconds,
         raw=normalized,
         digest=fingerprint(normalized),
     )
@@ -144,9 +164,9 @@ class IntegrationConfig:
     config: Path
     policy: Path
     state: Path
+    poll_seconds: float
+    budget_seconds: float
     codex: str | None = None
-    poll_seconds: float = DEFAULT_INTEGRATION_POLL_SECONDS
-    budget_seconds: float = DEFAULT_INTEGRATION_BUDGET_SECONDS
     version: int = INTEGRATION_VERSION
 
     @classmethod
@@ -174,6 +194,8 @@ class IntegrationConfig:
             raise ConfigError("integration state must be in its private instance directory")
         poll_seconds = _timeout(value.get("poll_seconds"), "poll_seconds")
         budget_seconds = _timeout(value.get("budget_seconds"), "budget_seconds")
+        if 2 * budget_seconds + poll_seconds > MAX_BUDGET_SECONDS:
+            raise ConfigError("two assessment passes plus the poll interval must fit within 60 seconds")
         product = value["product"]
         executable = value.get("codex")
         if product == "codex" and (
@@ -208,37 +230,29 @@ class IntegrationConfig:
 def _model(value: object) -> dict:
     if not isinstance(value, dict):
         raise ConfigError("model must be an object")
-    provider = value.get("provider", DEFAULT_MODEL_PROVIDER)
+    provider = value.get("provider")
     common = {"provider", "timeout_seconds"}
     if provider == "command":
-        if value.keys() - common - {"command", "env"}:
+        if value.keys() != common | {"command", "env", "max_output_tokens"}:
             raise ConfigError("command model fields are invalid")
         return {
             "provider": provider,
             "command": _command(value.get("command")),
-            "env": _environment_names(value.get("env", []), "model.env"),
-            "timeout_seconds": _timeout(value.get("timeout_seconds", DEFAULT_MODEL_TIMEOUT_SECONDS)),
+            "env": _environment_names(value.get("env"), "model.env"),
+            "timeout_seconds": _timeout(value.get("timeout_seconds")),
+            "max_output_tokens": _integer(value.get("max_output_tokens"), "model.max_output_tokens", 256, 32768),
         }
-    if provider != DEFAULT_MODEL_PROVIDER or value.keys() - common - {
+    required = common | {
         "model",
         "base_url",
         "api_key_env",
         "reasoning_effort",
         "max_output_tokens",
         "cache_mode",
-    }:
-        raise ConfigError("model provider or fields are invalid")
-    settings = {
-        "provider": DEFAULT_MODEL_PROVIDER,
-        "model": DEFAULT_MODEL,
-        "base_url": DEFAULT_MODEL_BASE_URL,
-        "api_key_env": DEFAULT_MODEL_API_KEY_ENV,
-        "reasoning_effort": DEFAULT_REASONING_EFFORT,
-        "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
-        "timeout_seconds": DEFAULT_MODEL_TIMEOUT_SECONDS,
-        "cache_mode": DEFAULT_MODEL_CACHE_MODE,
-        **value,
     }
+    if provider != "openai" or value.keys() != required:
+        raise ConfigError("model provider or fields are invalid")
+    settings = dict(value)
     if settings["cache_mode"] not in ("implicit", "layered"):
         raise ConfigError("model.cache_mode must be implicit or layered")
     if settings["reasoning_effort"] not in ("none", "low", "medium", "high", "xhigh", "max"):
@@ -272,40 +286,32 @@ def _http_settings(settings: dict, label: str) -> dict:
     return settings
 
 
-def _engine(value: object) -> dict | None:
-    if value is None:
-        return None
+def _engine(value: object) -> dict:
     if not isinstance(value, dict):
-        raise ConfigError("decision_engine must be an object")
+        raise ConfigError("decision_engine must be an explicitly configured object")
     provider = value.get("provider")
     if provider == "command":
-        if value.keys() - {"provider", "command", "env", "timeout_seconds"}:
+        if value.keys() != {"provider", "command", "env", "timeout_seconds", "max_output_tokens"}:
             raise ConfigError("command decision_engine fields are invalid")
         return {
             "provider": provider,
             "command": _command(value.get("command")),
-            "env": _environment_names(value.get("env", []), "decision_engine.env"),
-            "timeout_seconds": _timeout(value.get("timeout_seconds", DEFAULT_DECISION_TIMEOUT_SECONDS)),
+            "env": _environment_names(value.get("env"), "decision_engine.env"),
+            "timeout_seconds": _timeout(value.get("timeout_seconds")),
+            "max_output_tokens": _integer(
+                value.get("max_output_tokens"), "decision_engine.max_output_tokens", 256, 32768
+            ),
         }
-    if provider != DEFAULT_DECISION_ENGINE_PROVIDER or value.keys() - {
+    expected = {
         "provider",
         "model",
         "base_url",
         "api_key_env",
         "timeout_seconds",
-    }:
-        raise ConfigError("decision_engine must name provider jev or command; automatic advice is retired")
-    return _http_settings(
-        {
-            "provider": DEFAULT_DECISION_ENGINE_PROVIDER,
-            "model": DEFAULT_DECISION_ENGINE_MODEL,
-            "base_url": DEFAULT_DECISION_ENGINE_BASE_URL,
-            "api_key_env": DEFAULT_DECISION_ENGINE_API_KEY_ENV,
-            "timeout_seconds": DEFAULT_DECISION_TIMEOUT_SECONDS,
-            **value,
-        },
-        "decision_engine",
-    )
+    }
+    if provider != "jev" or value.keys() != expected:
+        raise ConfigError("decision_engine must explicitly name provider jev or command and all provider settings")
+    return _http_settings(dict(value), "decision_engine")
 
 
 def _text(value: object, field: str) -> str:
@@ -351,3 +357,19 @@ def _integer(value: object, field: str, least: int, most: int) -> int:
     if type(value) is not int or not least <= value <= most:
         raise ConfigError(f"{field} must be an integer from {least} to {most}")
     return value
+
+
+def _probability(value: object, field: str) -> float:
+    if not (type(value) is int or type(value) is float) or not math.isfinite(value) or not 0 <= value <= 1:
+        raise ConfigError(f"{field} must be a finite number from 0 to 1")
+    return float(value)
+
+
+def _duration(value: object, field: str) -> float:
+    if (
+        not (type(value) is int or type(value) is float)
+        or not math.isfinite(value)
+        or not 0 < value <= MAX_SCHEDULE_SECONDS
+    ):
+        raise ConfigError(f"{field} must be greater than zero and at most {MAX_SCHEDULE_SECONDS}")
+    return float(value)

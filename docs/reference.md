@@ -189,7 +189,8 @@ configuration problem exits with status 2.
 | `baton alias arm-enrol\|arm-rekey\|map\|unmap` | Manage enrolled aliases on the host. |
 | `baton events status\|unbind` | Inspect event subscriptions and receipts, or unbind a guest grant's event target. |
 | `baton seat logout-all` | End all browser-seat sessions. |
-| `baton secretary --state FILE --policy FILE decide\|read\|show\|acknowledge` | Run model triage, record delivered summaries, and inspect saved assessments. |
+| `baton secretary --state FILE --policy FILE decide\|show\|acknowledge` | Run model triage, acknowledge delivered summaries, and inspect private assessments. |
+| `baton secretary --policy FILE summaries [--after N] [--limit N]` | Page the append-only shared archive of deliverable summaries; no private `--state` file is required. |
 | `baton secretary --policy FILE read --after POS\|--ids IDS` | Read what the principal was delivered, of any kind, text included, for a secretary thread. |
 
 `--as` defaults to `BATON_ROLE` in local mode and cannot select a human role. `--config` defaults to
@@ -197,40 +198,42 @@ configuration problem exits with status 2.
 host and the role of `BATON_TOKEN` or `BATON_TOKEN_COMMAND` for `message`, `read`, `wait`, and the
 `conversation new`, `list`, `topic`, and `history` subcommands. Administration commands require local mode.
 
-`secretary` is host-local and refuses `--host`. The version 2 JSON policy names an existing non-human principal
-and can otherwise use defaults: `{"version":2,"principal":"planner"}` selects `gpt-6-luna` through the OpenAI
-Responses API using `OPENAI_API_KEY`. The optional `model` block configures the provider, model, timeout, and
-output settings; `instructions`, `max_events`, `context_bytes`, and `summary_bytes` tune the model context and
-summary. Policy version 1 deterministic rules are no longer supported; use a version 2 model policy and a new
-private state file. A `model` provider of `command` invokes a host executable using protocol version 3 and
-expects a structured assessment or a supported tool-call response. An optional decision engine is called by the
-model when useful and can use the JEV provider or a command adapter; its typed result is advisory context, and
-an unavailable engine does not prevent the model from completing its own assessment. The Baton host TOML
-format is unchanged.
+`secretary` is host-local and refuses `--host`. It requires a version 3 JSON policy with `principal`, stable
+`secretary_id`, explicit `model` and `decision_engine` objects, `max_tool_calls`, `max_events`, `context_bytes`,
+`summary_bytes`, `wake_threshold`, `retry_initial_seconds`, `retry_max_seconds`, `max_attempts`, and
+`digest_seconds`. The [secretary guide](../baton/agents/secretary/README.md#policy) has a complete example.
+Model and engine IDs and HTTP endpoints are selected in the policy; Baton does not supply model, URL, or
+transport defaults. Command providers require `command`, `env`, `timeout_seconds`, and `max_output_tokens`.
+Model commands use protocol 4; decision-engine commands use protocol 2 and return exactly a decision and
+confidence. The independent engine runs on each alert page. A wake verdict with confidence at or above `wake_threshold`
+forces a wake even if model triage holds, keeps, or fails. The model may call a tool to retrieve the cached
+verdict, which contains no rationale.
 
 `decide --budget-seconds N` reads bounded, complete pages of the principal's visible events, including visible
-reply parents, and asks the model for wake, hold, or keep. `--hourly` can retry retained hold, keep, and failed
-pages as a digest while scanning proceeds through later pages. Installation binds the activation floor to the
-current database head; a standalone first `decide` without explicit positions does the same. Passing both
-`--since` and `--floor` explicitly requests a replay. Scan position is durable and separate from the delivered
-contiguous watermark. An oversized first event is retained as a failed page, and the worker scans past it; pages
-are never silently truncated.
+reply parents, and asks the independent engine and model for triage. The standalone implicit mode starts at the
+durable scan position; passing both `--since` and `--floor` requests an exact replay. An explicit trigger must
+belong to the bounded page or the call fails. Page size also reserves a citation budget from model output
+capacity. Pages are never silently truncated. Transient failures retry in their original mode on the configured
+short backoff, separately from worker health status. Repeated failures split a page and retry; an event that
+still cannot be summarized receives a source-only operational notice. No semantic fallback invents a decision.
+Each poll reserves one configured budget for a fresh alert and another for scheduled work. Scheduled retries and
+digests alternate priority so sustained new traffic cannot starve recovery or digests.
 
-Every summary, including a digest, must account for and cite all events in its page; citing visible reply parents is optional. Source
-checks validate references against supplied context, not the truth of summary claims, and the prompt forbids invented
-assignments or approvals. Pending wake IDs remain queued until individually acknowledged; later hold/keep
-decisions do not clear them. `acknowledge DECISION_ID` is idempotent for a validated summary. Delivered ranges
-merge only when contiguous, so acknowledging a later wake cannot skip a held gap. Identical policy and page
-input can reuse an assessment. Callback budgets are at most 60 seconds; model failures return retryable
-`secretary_unavailable` errors.
+The worker batches contiguous due held pages into one bounded hourly digest at `digest_seconds` intervals.
+Hold, keep, and model-error pages remain eligible while scanning continues. Pending wake IDs stay queued, with
+wakes surfaced first; new IDs are announced even when older ones remain unacknowledged. Installation binds the
+activation floor to the current database head. Scan progress is separate from the contiguous delivered watermark.
 
-`show` inspects saved assessments. Policy version 2 is the only supported format; older policies are unsupported
-and require a current policy. Private model attention state version 1 migrates additively to version 2; retired
-deterministic state is incompatible and requires a new `--state` file. Harness version 2 invalidates older
-unchecked assessment cache entries. `--state` is a private SQLite sidecar for generated
-assessments and positions. It stores the full model reason and brief, source references, and bounded result metadata,
-but does not archive source message bodies. The secretary reads Baton records read-only and does not deliver or
-modify Baton work. The sidecar is retained until the operator removes it; there is no automatic assessment cleanup.
+Every summary, including a digest, must account for and cite all events in its page; citing visible reply parents
+is optional. Source checks validate references against supplied context, not the truth of summary claims, and the
+prompt forbids invented assignments or approvals. `acknowledge DECISION_ID` is idempotent. Delivered ranges
+merge only when contiguous, so acknowledging a later wake cannot skip a held gap. Model failures return retryable
+`secretary_unavailable` errors and follow the configured retry/split policy.
+
+`show` inspects saved assessments. Policy version 3 is required. Private state version 1 is refused and requires
+a new file; state version 2 is preserved. `--state` is a private SQLite sidecar for assessment work and positions.
+Deliverable summaries are also appended to shared `baton.db` table `secretary_summaries`, tagged with
+`secretary_id` and principal and uniquely recorded by decision ID. `summaries` pages that archive without `--state`.
 
 `read` returns currently visible source text for the principal. After an event position (`--after`), it pages
 events addressed to or authored by the principal and relevant job events in `deliveries` and `context`; with
@@ -239,14 +242,13 @@ IDs and conversation IDs for opening the cited thread. A page holds at most `--l
 20, maximum 100) and aims for `--max-bytes` (default 256 KiB); one oversized entry may be returned alone.
 Position-based reads return `through_pos` for the next page; ID-based reads report any `not_read` IDs. `read` opens
 the database read-only, needs no `--state`, and writes nothing; the canonical module command is
-`python -m baton.agents.secretary.inbox.read`. The compatibility CLI wrapper `python -m baton.secretary_read`
-(also available as the `baton.secretary_read` executable) takes the same options. It is a CLI entrypoint, not
-an alias for the full Python API. `python -m baton.agents.secretary.attention.decide` is the canonical module
-command for the decision entrypoint; `python -m baton.secretary_decide` remains available as a CLI wrapper.
+`python -m baton.agents.secretary.inbox.read`. `python -m baton.secretary_read` is a compatibility module
+wrapper with the same options; there is no `baton.secretary_read` executable. `python -m baton.agents.secretary.attention.decide`
+is the canonical decision module; `python -m baton.secretary_decide` remains a compatibility module wrapper.
 
 Secretary policy and installed-instance configuration code lives in `baton.config.secretary`. The Baton host
-TOML format is unchanged. Secretary policy version 2 is required; deterministic version 1 policies are
-unsupported, and the retired state format requires a new state file. The installed integration JSON is a
+TOML format is unchanged. Secretary policy version 3 is required; policies v1 and v2 are unsupported. Private
+state version 1 requires a new file; state version 2 is preserved. The installed integration JSON is a
 separate version 1 worker configuration.
 
 ## Local indexing interface

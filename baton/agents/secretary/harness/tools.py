@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import math
 
-from ..connections.decisions import AttentionDecision, DecisionEngine, make_engine
+from ..connections.decisions import AttentionDecision, AttentionVerdict, DecisionEngine, make_engine
 from ..connections.model import ToolCall
 from ..connections.transport import ModelUnavailable
 
@@ -13,9 +14,8 @@ DECISION_TOOL = {
     "name": "decide_attention",
     "strict": True,
     "description": (
-        "Ask an independent decision model to choose wake, hold, or keep for the complete pending "
-        "window. Returns a typed decision only, with no explanation or text. Use when an "
-        "independent judgment would help; you still write the summary and final assessment."
+        "The harness asks the independent decision model to choose wake, hold, or keep for the "
+        "complete pending window before triage. Returns its decision and confidence."
     ),
     "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 }
@@ -30,28 +30,52 @@ class SecretaryTools:
         self.status = "not_used" if self.engine else "not_configured"
         self.verdict: dict | None = None
         self.calls: list[dict] = []
+        self._evaluated = False
 
     @property
     def definitions(self) -> list[dict]:
         return [DECISION_TOOL] if self.engine else []
+
+    async def evaluate(self, context: dict, timeout: float) -> AttentionVerdict | None:
+        """Run the independent judgment at most once for this assessment."""
+        if self._evaluated:
+            if self.verdict is None:
+                return None
+            return AttentionVerdict(
+                decision=AttentionDecision(self.verdict["decision"]),
+                confidence=self.verdict["confidence"],
+            )
+        self._evaluated = True
+        if self.engine is None:
+            self.status = "unavailable"
+            return None
+        try:
+            async with asyncio.timeout(timeout):
+                verdict = await self.engine.decide(context, timeout)
+            if (
+                not isinstance(verdict, AttentionVerdict)
+                or not isinstance(verdict.decision, AttentionDecision)
+                or type(verdict.confidence) not in (int, float)
+                or not math.isfinite(verdict.confidence)
+                or not 0 <= verdict.confidence <= 1
+            ):
+                raise ModelUnavailable("decision engine violated its typed result contract")
+            self.verdict = {"decision": verdict.decision.value, "confidence": float(verdict.confidence)}
+            self.status = "available"
+            return verdict
+        except (ModelUnavailable, TimeoutError):
+            self.status = "unavailable"
+            return None
 
     async def call(self, request: ToolCall, context: dict, timeout: float) -> dict:
         if request.name != "decide_attention" or self.engine is None:
             raise ModelUnavailable("model requested an unavailable tool")
         if request.arguments:
             raise ModelUnavailable("decide_attention does not accept arguments; the harness supplies its context")
-        cached = self.verdict is not None
-        if not cached:
-            try:
-                async with asyncio.timeout(timeout):
-                    decision = await self.engine.decide(context, timeout)
-                if not isinstance(decision, AttentionDecision):
-                    raise ModelUnavailable("decision engine violated its typed result contract")
-                self.verdict = {"decision": decision.value}
-            except (ModelUnavailable, TimeoutError):
-                self.status = "unavailable"
-                self.calls.append({"name": request.name, "status": self.status, "cached": False})
-                return {"error": "decision_engine_unavailable"}
-        self.status = "available"
-        self.calls.append({"name": request.name, "status": self.status, "cached": cached})
-        return self.verdict
+        cached = self._evaluated
+        verdict = await self.evaluate(context, timeout)
+        if verdict is None:
+            self.calls.append({"name": request.name, "status": "unavailable", "cached": cached})
+            return {"error": "decision_engine_unavailable"}
+        self.calls.append({"name": request.name, "status": "available", "cached": cached})
+        return {"decision": verdict.decision.value, "confidence": verdict.confidence}

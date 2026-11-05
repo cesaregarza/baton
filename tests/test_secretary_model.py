@@ -1,4 +1,4 @@
-"""Empirical version 2 secretary tests through its subprocess and HTTP transports."""
+"""Empirical version 3 secretary tests through its subprocess and HTTP transports."""
 
 from __future__ import annotations
 
@@ -7,11 +7,12 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
-from secretary_support import conversation, make_world, say, table_hashes
+from secretary_support import archived_summary_count, conversation, explicit_policy, make_world, say, table_hashes
 
 from baton import conversations, messages
 from baton.agents.secretary import Secretary, show
@@ -26,6 +27,7 @@ class Model:
     ) -> None:
         self.world = world
         self.plan_path = tmp_path / "model-plan.json"
+        self.engine_plan_path = tmp_path / "engine-plan.json"
         self.log_path = tmp_path / "model-requests.jsonl"
         self.engine_log_path = tmp_path / "engine-requests.jsonl"
         self.set_plan(plan or {})
@@ -35,24 +37,18 @@ class Model:
             "-I",
             "-S",
             str(FAKE),
-            str(self.plan_path),
+            str(self.engine_plan_path),
             str(self.engine_log_path),
             "engine",
         ]
+        self.engine_expected = engine
         self.configure(timeout=timeout, engine=engine)
 
     def configure(self, *, timeout: float = 5.0, engine: bool = False) -> None:
-        value = {
-            "version": 2,
-            "principal": "planner",
-            "model": {"provider": "command", "command": self.command, "timeout_seconds": timeout},
-        }
-        if engine:
-            value["decision_engine"] = {
-                "provider": "command",
-                "command": self.engine_command,
-                "timeout_seconds": timeout,
-            }
+        self.engine_expected = engine
+        value = explicit_policy("planner")
+        value["model"].update(command=self.command, timeout_seconds=timeout)
+        value["decision_engine"].update(command=self.engine_command, timeout_seconds=timeout)
         self.world.policy_path.write_text(json.dumps(value))
 
     def set_timeout(self, timeout: float) -> None:
@@ -62,6 +58,17 @@ class Model:
 
     def set_plan(self, value: dict) -> None:
         self.plan_path.write_text(json.dumps(value))
+        self.engine_plan_path.write_text(
+            json.dumps(
+                {
+                    "decision": value.get("engine_decision", "keep"),
+                    "confidence": value.get("engine_confidence", 0.2),
+                }
+            )
+        )
+
+    def set_engine_plan(self, value: dict) -> None:
+        self.engine_plan_path.write_text(json.dumps(value))
 
     async def wait_for_request(self) -> dict:
         """Wait for a complete record: opening the log creates it before its buffered write."""
@@ -86,9 +93,12 @@ class Model:
 
 
 def _decide(world, **options) -> dict:
-    # These scenarios intentionally replay their fixture history. Normal activation starts at the head.
-    if not world.state_path.exists() and "since" not in options:
-        options.update(since=0, floor=0)
+    # Tests replay an explicit page. Production starts at activation head unless given positions.
+    if "since" not in options and "floor" not in options:
+        if world.state_path.exists():
+            options["since"], options["floor"] = _positions(world)
+        else:
+            options.update(since=0, floor=0)
     return asyncio.run(
         Secretary(world.config, world.state_path, world.policy_path).decide(
             budget_seconds=options.pop("budget_seconds", 5), **options
@@ -110,7 +120,8 @@ def test_command_model_assesses_grouped_conversation_once_caches_and_reads_baton
         model = Model(world, tmp_path)
         first = say(world, room, "worker", "The migration is ready")
         second = say(world, room, "reviewer", "The review found one follow up")
-        before = table_hashes(world.baton)
+        before = table_hashes(world.baton, exclude={"secretary_summaries"})
+        before_archived = archived_summary_count(world.baton)
 
         result = _decide(world, trigger=f"message:{second['seqs']['planner']}")
         [request] = model.requests
@@ -118,13 +129,17 @@ def test_command_model_assesses_grouped_conversation_once_caches_and_reads_baton
         message_sources = {f"message:{first['message_id']}", f"message:{second['message_id']}"}
         assert message_sources <= set(event_sources) & set(result["sources"])
         assert result["decision"] == "wake" and result["brief"]
-        assert request["version"] == 3 and request["context"]["mode"] == "alert"
+        assert request["version"] == 4 and request["context"]["mode"] == "alert"
+        assert request["max_output_tokens"] == 4096
+        assert model.engine_requests
         assert request["response_schema"]["additionalProperties"] is False
-        assert table_hashes(world.baton) == before
+        assert table_hashes(world.baton, exclude={"secretary_summaries"}) == before
+        assert archived_summary_count(world.baton) == before_archived + 1
 
         replay = _decide(world, trigger=f"message:{second['seqs']['planner']}")
         assert replay["cached"] is True and replay["decision_id"] == result["decision_id"]
-        assert len(model.requests) == 1 and table_hashes(world.baton) == before
+        assert len(model.requests) == 1 and table_hashes(world.baton, exclude={"secretary_summaries"}) == before
+        assert archived_summary_count(world.baton) == before_archived + 1
 
 
 def test_acknowledgment_advances_coverage_only_after_delivery_and_next_call_excludes_it(tmp_path) -> None:
@@ -209,18 +224,56 @@ def test_unknown_source_reference_is_rejected_without_saving_assessment(tmp_path
         assert result["decision"] == "wake" and len(model.requests) == 2
 
 
-def test_configured_decision_tool_is_discretionary_and_needs_no_key_when_skipped(tmp_path, monkeypatch) -> None:
+def test_independent_engine_runs_for_every_alert_even_when_model_skips_its_tool(tmp_path) -> None:
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path)
-        monkeypatch.delenv("SECRETARY_UNUSED_JEV_KEY", raising=False)
-        policy = json.loads(world.policy_path.read_text())
-        policy["decision_engine"] = {"provider": "jev", "api_key_env": "SECRETARY_UNUSED_JEV_KEY"}
-        world.policy_path.write_text(json.dumps(policy))
         messages.send(world.baton, sender="worker", recipient="planner", text="A real incoming note")
         result = _decide(world)
-        assert len(model.requests) == 1 and model.requests[0]["version"] == 3
-        assert model.engine_requests == []
-        assert result["engine_status"] == "not_used" and result["decision"] == "wake"
+        assert len(model.requests) == 1 and model.requests[0]["version"] == 4
+        assert len(model.engine_requests) == 1
+        assert result["engine_status"] == "available" and result["decision"] == "wake"
+
+
+def test_confident_engine_wake_overrides_language_model_hold(tmp_path) -> None:
+    with make_world(tmp_path) as world:
+        model = Model(world, tmp_path, plan={"decision": "hold", "summary": "A held but useful update."})
+        model.set_engine_plan({"decision": "wake", "confidence": 0.8})
+        messages.send(world.baton, sender="worker", recipient="planner", text="The release is ready")
+
+        result = _decide(world)
+
+        assert result["decision"] == "wake"
+        assert result["engine_verdict"] == {"decision": "wake", "confidence": 0.8}
+        assert len(model.engine_requests) == len(model.requests) == 1
+
+
+def test_engine_wake_below_configured_confidence_threshold_does_not_override_hold(tmp_path) -> None:
+    with make_world(tmp_path) as world:
+        model = Model(world, tmp_path, plan={"decision": "hold", "summary": "", "sources": []})
+        model.set_engine_plan({"decision": "wake", "confidence": 0.79})
+        messages.send(world.baton, sender="worker", recipient="planner", text="A low-confidence alert")
+
+        result = _decide(world)
+
+        assert result["decision"] == "hold"
+        assert result["engine_verdict"] == {"decision": "wake", "confidence": 0.79}
+
+
+@pytest.mark.parametrize("step", [{"exit": 1}, {"sleep": 2}])
+def test_confident_engine_wake_survives_language_model_outage_with_notice(tmp_path, step) -> None:
+    with make_world(tmp_path) as world:
+        model = Model(world, tmp_path, plan={"steps": [step]})
+        model.set_timeout(0.2)
+        model.set_engine_plan({"decision": "wake", "confidence": 0.95})
+        sent = messages.send(world.baton, sender="worker", recipient="planner", text="Urgent synthetic notice")
+
+        started = time.monotonic()
+        result = _decide(world)
+        assert time.monotonic() - started < 60
+
+        assert result["decision"] == "wake" and result["kind"] == "engine_wake"
+        assert f"message:{sent['message_id']}" in result["sources"]
+        assert len(model.engine_requests) == len(model.requests) == 1
 
 
 @pytest.mark.parametrize("cache_mode", ["layered", "implicit"])
@@ -276,30 +329,39 @@ def test_responses_http_wire_uses_strict_schema_and_skips_reasoning_output(tmp_p
         thread.start()
         try:
             monkeypatch.setenv("SECRETARY_TEST_KEY", "synthetic-key")
-            world.policy_path.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "principal": "planner",
-                        "model": {
-                            "provider": "openai",
-                            "base_url": f"http://127.0.0.1:{server.server_port}/v1",
-                            "api_key_env": "SECRETARY_TEST_KEY",
-                            "cache_mode": cache_mode,
-                        },
-                    }
-                )
-            )
+            policy = explicit_policy("planner")
+            policy["model"] = {
+                "provider": "openai",
+                "model": "configured-triage-model",
+                "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+                "api_key_env": "SECRETARY_TEST_KEY",
+                "reasoning_effort": "none",
+                "max_output_tokens": 2048,
+                "timeout_seconds": 5,
+                "cache_mode": cache_mode,
+            }
+            world.policy_path.write_text(json.dumps(policy))
             result = _decide(world)
+            changed_model = json.loads(world.policy_path.read_text())
+            changed_model["model"]["model"] = "configured-second-triage-model"
+            world.policy_path.write_text(json.dumps(changed_model))
+            second_result = _decide(world)
         finally:
             server.shutdown()
             thread.join()
             server.server_close()
         assert result["decision"] == "wake"
-        [request] = seen
+        assert second_result["decision"] == "wake"
+        assert result["decision_id"] != second_result["decision_id"]
+        assert not result["cached"] and not second_result["cached"]
+        assert [request["body"]["model"] for request in seen] == [
+            "configured-triage-model",
+            "configured-second-triage-model",
+        ]
+        [request, second_request] = seen
         assert request["path"] == "/v1/responses" and request["headers"]["Authorization"] == "Bearer synthetic-key"
         body = request["body"]
-        assert body["model"] == "gpt-6-luna" and body["store"] is False
+        assert body["model"] == "configured-triage-model" and body["store"] is False
         assert body["text"]["format"]["type"] == "json_schema"
         assert body["text"]["format"]["strict"] is True
         assert body["text"]["format"]["schema"]["additionalProperties"] is False
@@ -430,7 +492,7 @@ def test_old_policy_is_rejected_before_model_or_state_access(tmp_path) -> None:
         before = table_hashes(world.baton)
         world.policy_path.write_text(json.dumps({"version": 1, "principal": "planner"}))
         with pytest.raises(ConfigError, match="unsupported secretary policy version"):
-            _decide(world)
+            asyncio.run(Secretary(world.config, world.state_path, world.policy_path).decide(budget_seconds=5))
         assert not world.state_path.exists() and model.requests == []
         assert table_hashes(world.baton) == before
 

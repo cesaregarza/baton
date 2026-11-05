@@ -16,6 +16,40 @@ from baton.database import store
 ALIAS_ID = "al_0000000000000001"
 
 
+def explicit_policy(principal: str = "planner") -> dict:
+    """Complete synthetic version 3 policy with inert provider commands."""
+    return {
+        "version": 3,
+        "principal": principal,
+        "secretary_id": f"test-secretary-{principal}",
+        "model": {
+            "provider": "command",
+            "command": ["/usr/bin/false"],
+            "env": [],
+            "timeout_seconds": 5,
+            "max_output_tokens": 4096,
+        },
+        "decision_engine": {
+            "provider": "command",
+            "command": ["/usr/bin/false"],
+            "env": [],
+            "timeout_seconds": 3,
+            "max_output_tokens": 256,
+        },
+        "instructions": "",
+        "knowledge": "",
+        "max_tool_calls": 2,
+        "max_events": 1000,
+        "context_bytes": 1024 * 1024,
+        "summary_bytes": 8192,
+        "wake_threshold": 0.8,
+        "retry_initial_seconds": 5,
+        "retry_max_seconds": 300,
+        "max_attempts": 3,
+        "digest_seconds": 3600,
+    }
+
+
 @dataclass
 class World:
     config: Config
@@ -76,7 +110,7 @@ next = ["done", "working"]
     config.db_path.chmod(0o600)
     baton = store.connect(config.db_path)  # migrate only this synthetic test fixture, before any secretary call
     policy_path = tmp_path / "policy.json"
-    policy_path.write_text(json.dumps({"version": 2, "principal": principal}))
+    policy_path.write_text(json.dumps(explicit_policy(principal)))
     return World(config, config_path, policy_path, data_dir / "secretary.db", baton)
 
 
@@ -102,12 +136,28 @@ def say(world: World, room: str, sender: str, text: str, **kwargs: object) -> di
     return conversations.send(world.baton, world.config, sender=sender, conversation_id=room, text=text, **kwargs)
 
 
-def table_hashes(conn: sqlite3.Connection) -> dict[str, str]:
+def table_hashes(conn: sqlite3.Connection, *, exclude: set[str] | None = None) -> dict[str, str]:
     """All Baton tables, including delivery positions, with stable order and no sidecar rows."""
-    names = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+    excluded = exclude or set()
+    names = [
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        if row["name"] not in excluded
+    ]
     return {
         name: hashlib.sha256(
-            "\n".join(sorted(repr(tuple(row)) for row in conn.execute(f'SELECT * FROM "{name}"'))).encode()
+            "\n".join(
+                sorted(
+                    repr(tuple(row))
+                    for row in conn.execute(f'SELECT * FROM "{name}"')
+                    if name != "sqlite_sequence" or row[0] not in excluded
+                )
+            ).encode()
         ).hexdigest()
         for name in names
     }
+
+
+def archived_summary_count(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT COUNT(*) FROM secretary_summaries").fetchone()
+    return int(row[0])

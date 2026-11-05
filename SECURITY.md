@@ -186,7 +186,7 @@ and database device and inode after SQLite opens them, but a file swapped and sw
 and that check could still be used. That requires write access to the private directory, which is within
 the host-user trust boundary above.
 
-This revision uses database schema 19. Schemas 2–18 upgrade in one transaction; unsupported versions are
+This revision uses database schema 21. Schemas 2–20 upgrade in one transaction; unsupported versions are
 refused before journal-mode or schema changes. Back up the data before upgrading.
 
 <a name="integrations"></a>
@@ -216,7 +216,9 @@ The data directory contains the following. Protect backups as carefully as the l
 
 - `baton.db`: message text, senders, recipients, times, authorship markers, and relayed words; conversation
   titles and participants; jobs and their state history; event and wake state; retry digests; aliases,
-  their mappings and the times of their rekeys; and optional indexing, seat and MCP Events state. Message
+  their mappings and the times of their rekeys; optional indexing, seat and MCP Events state; and the
+  append-only `secretary_summaries` archive containing deliverable summaries, source references, principal,
+  stable secretary ID, decision ID, and creation time. Message
   copies, read or unread, conversation metadata, job history, ended seat rows and MCP Events receipts,
   outcomes and rotation times remain until the database is deleted.
 - Message-request and job-move retry digests and outcomes are kept until the database is deleted. Wake
@@ -237,13 +239,13 @@ The data directory contains the following. Protect backups as carefully as the l
 - `audit.jsonl`: call time, credential and effective roles, credential identifier, tool, relevant IDs,
   outcome, and any alias ID and code. It excludes message text, job bodies, passphrases, and credentials.
   Malformed secret-bearing calls are refused before validation can echo their input.
-- An optional secretary state file stores model assessments, including their full reason and brief plus
-  source references and bounded result metadata. It does not archive the source message bodies, but message
-  context is sent to the configured model provider or host command for assessment; an optional decision
-  engine also receives authorized context when the model calls it. The state file is subject to the private
-  file checks described above. It is retained until the operator removes it; Baton does not automatically
-  delete old assessments. Host commands run as the Baton host user. Their filtered environment limits
-  inherited environment variables, but does not sandbox their access to files available to that user.
+- A secretary state file stores model assessments, including full reasons and briefs, source references, and
+  bounded result metadata; it does not archive source message bodies. The independent decision engine and model
+  receive authorized page context on alert pages, and the model receives page context for summaries. State
+  version 1 is refused and requires a new file; version 2 remains supported. Private state is retained until the
+  operator removes it. Deliverable summaries are also appended to `secretary_summaries` in `baton.db`.
+- Command providers receive only environment variables named in their policy `env` allowlist. They run as the
+  Baton host user and retain that user's filesystem access; filtering the environment is not a sandbox.
 
 The host's stderr logs record events such as registration, consent outcomes, and wake failures without
 message text or secrets. Operator-configured webhook signing secrets are read from named environment

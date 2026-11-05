@@ -122,6 +122,18 @@ _SCHEMA = (
     _MESSAGE_REQUESTS,
     _MESSAGES,
     "CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation_id, conversation_seq)",
+    # Delivered secretary summaries live in the shared Baton database, outside each secretary's private
+    # working state. Rows are append-only; the cursor is stable for principal-scoped paging.
+    """CREATE TABLE IF NOT EXISTS secretary_summaries (
+        cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+        secretary_id TEXT NOT NULL,
+        principal TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        result TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (secretary_id, decision_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS secretary_summaries_by_principal ON secretary_summaries (principal, cursor)",
     # `last_seq` is the last seq handed out, kept here so deleting old messages
     # never renumbers; `read_seq` is the last one delivered to the recipient.
     """CREATE TABLE IF NOT EXISTS mailboxes (

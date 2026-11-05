@@ -24,4 +24,4 @@ against example alert windows and resulting wake decisions and summaries before 
 alone does not guarantee resistance to gaming or manipulative feedback.
 
 Policy `instructions` provides static operator preferences. This roadmap item concerns a future principal
-feedback loop; it is not supported by the current policy or API. The current secretary policy format is version 2.
+feedback loop; it is not supported by the current policy or API. The current secretary policy format is version 3.

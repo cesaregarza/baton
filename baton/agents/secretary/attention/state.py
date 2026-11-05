@@ -24,6 +24,7 @@ def _create_acknowledgments(conn: Connection) -> None:
         "since INTEGER NOT NULL, covered_through INTEGER NOT NULL, "
         "PRIMARY KEY(principal,decision_id))"
     )
+    conn.execute("CREATE INDEX acknowledgments_coverage ON acknowledgments(principal, covered_through, since)")
 
 
 @dataclass(frozen=True)
@@ -38,11 +39,15 @@ class AttentionLog:
         if data_dir in path.parents and path.parent != data_dir:
             raise ConfigError("secretary state inside data_dir must be a direct child file")
         with open_private(path) as conn:
-            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if tables and (not _BASE_TABLES <= tables or not tables <= _KNOWN_TABLES):
-                raise ConfigError("secretary state has an obsolete or unrelated schema; use a new private state file")
-            if not tables:
-                with conn.transaction():
+            # Schema inspection and first creation must share the same write lock:
+            # two fresh openers otherwise both observe an empty database.
+            with conn.transaction():
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if tables and (not _BASE_TABLES <= tables or not tables <= _KNOWN_TABLES):
+                    raise ConfigError(
+                        "secretary state has an obsolete or unrelated schema; use a new private state file"
+                    )
+                if not tables:
                     conn.execute("CREATE TABLE attention_version (version INTEGER NOT NULL)")
                     conn.execute("INSERT INTO attention_version VALUES (2)")
                     conn.execute(
@@ -54,14 +59,16 @@ class AttentionLog:
                         "result TEXT NOT NULL, PRIMARY KEY(principal,id))"
                     )
                     _create_acknowledgments(conn)
-            else:
-                version = conn.execute("SELECT version FROM attention_version").one()[0]
-                if version == 1:
-                    with conn.transaction():
-                        _create_acknowledgments(conn)
-                        conn.execute("UPDATE attention_version SET version=2")
-                elif version != 2 or "acknowledgments" not in tables:
-                    raise ConfigError("unsupported model secretary state version")
+                else:
+                    version = conn.execute("SELECT version FROM attention_version").one()[0]
+                    if version == 1:
+                        raise ConfigError("secretary state version 1 is unsupported; use a new private state file")
+                    if version != 2 or "acknowledgments" not in tables:
+                        raise ConfigError("unsupported model secretary state version")
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS acknowledgments_coverage ON acknowledgments"
+                        "(principal, covered_through, since)"
+                    )
             yield conn
 
     def positions(self) -> tuple[int, int]:
@@ -177,12 +184,16 @@ def _position(value: int, name: str) -> None:
 
 def _advance_delivered(conn: Connection, principal: str) -> int:
     delivered = conn.execute("SELECT delivered FROM principals WHERE principal=?", (principal,)).one()[0]
-    while True:
-        row = conn.execute(
-            "SELECT MAX(covered_through) FROM acknowledgments WHERE principal=? AND since<=? AND covered_through>?",
-            (principal, delivered, delivered),
-        ).one()
-        if row[0] is None:
-            return delivered
-        delivered = row[0]
+    rows = conn.execute(
+        "SELECT since,covered_through FROM acknowledgments "
+        "WHERE principal=? AND covered_through>? ORDER BY since,covered_through",
+        (principal, delivered),
+    )
+    for row in rows:
+        if row[0] > delivered:
+            break
+        if row[1] > delivered:
+            delivered = row[1]
+    if delivered:
         conn.execute("UPDATE principals SET delivered=? WHERE principal=?", (delivered, principal))
+    return delivered

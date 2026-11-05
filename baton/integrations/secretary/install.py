@@ -25,6 +25,8 @@ def install(
     policy: Path,
     product: str,
     python: Path,
+    poll_seconds: float,
+    budget_seconds: float,
     codex: Path | None = None,
 ) -> dict[str, Any]:
     """Write instance, hook-fragment, and user-unit artifacts to a new private directory."""
@@ -77,8 +79,11 @@ def install(
         config=config,
         policy=policy,
         state=destination / "attention.sqlite",
+        poll_seconds=poll_seconds,
+        budget_seconds=budget_seconds,
         codex=str(codex_path) if codex_path is not None else None,
     ).as_dict()
+    IntegrationConfig.from_dict(instance)
     activate(Secretary(baton_config, destination / "attention.sqlite", policy))
     _write_private(instance_path, json.dumps(instance, indent=2, sort_keys=True) + "\n")
     _write_private(destination / "hooks.json", json.dumps(hooks, indent=2, sort_keys=True) + "\n")

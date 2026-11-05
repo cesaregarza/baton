@@ -8,9 +8,9 @@ from collections.abc import Callable
 
 from .driver import Connection
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
 
 
 # The version-2 tables a migration rebuilds, with the columns they keep.
@@ -121,6 +121,8 @@ _ADDED_TABLES = {
     # Records kept where something used to be overwritten or expired: each alias rekey and each MCP Events secret
     # rotation (neither with a secret), and each MCP Events wake's occurrence, outcomes and delivery receipts.
     19: ("alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes", "events_receipts"),
+    # Deliverable secretary summaries outlive each private secretary's working state.
+    21: ("secretary_summaries",),
 }
 
 

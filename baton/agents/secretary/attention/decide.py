@@ -10,7 +10,6 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
 from baton import config as config_module
@@ -19,13 +18,15 @@ from baton.config import Config, ConfigError
 from baton.config.secretary import MAX_BUDGET_SECONDS, Policy, fingerprint, load_policy
 from baton.errors import BatonError, InvalidRequest
 
+from ..connections.decisions import AttentionDecision
 from ..connections.transport import ModelUnavailable
 from ..harness.prompt import HARNESS_VERSION, INSTRUCTIONS, RESPONSE_SCHEMA
 from ..harness.run import SecretaryHarness
-from ..harness.tools import DECISION_TOOL
+from ..inbox import sources
 from ..inbox.window import InboxWindow
 from ..service import Secretary
 from .assessment import Assessment
+from .outcome import Outcome, persist
 from .runtime import DatabaseWorker
 from .state import AttentionLog
 
@@ -54,8 +55,7 @@ class DecisionRun:
             policy = await database.call(load_policy, self.secretary.config, self.secretary.policy_path)
             self.deadline = self.clock() + self.budget_seconds
             try:
-                async with asyncio.timeout(self.budget_seconds):
-                    return await self._assess(database, policy)
+                return await self._assess(database, policy)
             except TimeoutError as error:
                 raise SecretaryUnavailable("secretary budget expired; no delivery position advanced") from error
             except ModelUnavailable as error:
@@ -67,9 +67,47 @@ class DecisionRun:
         if self.since is None:
             epoch, head = await database.call(InboxWindow.head, config)
             self.since, self.floor = await database.call(log.activate, epoch, head)
+        assert self.floor is not None  # Explicit positions are validated together; activation supplies both.
         window = await database.call(InboxWindow.read, config, policy, self.since, through=self.through)
         await database.call(log.bind, window.epoch, self.floor)
-        context = {
+        self._check_trigger(window)
+        context = self._context(policy, window)
+        harness = SecretaryHarness(policy)
+        verdict = None
+        if window.events and not self.hourly:
+            verdict = await harness.tools.evaluate(context, min(policy.decision_timeout, self._remaining()))
+        forced = bool(
+            verdict and verdict.decision == AttentionDecision.WAKE and verdict.confidence >= policy.wake_threshold
+        )
+        context["engine_verdict"] = harness.tools.verdict
+        context["wake_required"] = forced
+        key = fingerprint(
+            {
+                "policy": policy.digest,
+                "context": context,
+                "epoch": window.epoch,
+                "prompt": INSTRUCTIONS,
+                "schema": RESPONSE_SCHEMA,
+                "harness": HARNESS_VERSION,
+            }
+        )
+        cached = await database.call(log.get, key)
+        if cached is not None:
+            await database.call(persist, self.secretary, policy, cached)
+            return {**cached, "cached": True}
+        outcome = Outcome(policy, window, self.floor, context["mode"], self.trigger)
+        result = await self._infer(harness, context, outcome, key, forced)
+        if not window.events:
+            return result
+        current = await database.call(InboxWindow.read, config, policy, self.since, through=window.through)
+        if current.digest != window.digest:
+            raise SecretaryUnavailable(
+                "inbox visibility or content changed during inference; retry with current context"
+            )
+        return await database.call(persist, self.secretary, policy, result)
+
+    def _context(self, policy: Policy, window: InboxWindow) -> dict:
+        return {
             "principal": policy.principal,
             "mode": "digest" if self.hourly else "alert",
             "trigger": self.trigger,
@@ -82,72 +120,59 @@ class DecisionRun:
             "events": window.events,
             "reply_context": window.reply_context,
         }
-        key = fingerprint(
-            {
-                "policy": policy.digest,
-                "context": context,
-                "epoch": window.epoch,
-                "prompt": INSTRUCTIONS,
-                "schema": RESPONSE_SCHEMA,
-                "harness": HARNESS_VERSION,
-                "tools": DECISION_TOOL if policy.decision_engine else None,
-            }
-        )
-        cached = await database.call(log.get, key)
-        if cached is not None:
-            return {**cached, "cached": True}
-        harness = SecretaryHarness(policy)
+
+    async def _infer(self, harness: SecretaryHarness, context: dict, outcome: Outcome, key: str, forced: bool) -> dict:
+        window = outcome.window
+        assert isinstance(window, InboxWindow)
         if not window.events:
             assessment = Assessment("keep", "No pending visible events.", "", [])
         else:
-            answer = await harness.assess(context, self._remaining())
-            assessment = Assessment.parse(
-                answer,
-                offered=window.source_keys,
-                required={event["source_key"] for event in window.events},
-                summary_bytes=policy.summary_bytes,
-                digest=self.hourly,
+            try:
+                answer = await harness.assess(context, self._remaining())
+                assessment = Assessment.parse(
+                    answer,
+                    offered=window.source_keys,
+                    required={event["source_key"] for event in window.events},
+                    summary_bytes=outcome.policy.summary_bytes,
+                    digest=self.hourly,
+                )
+                if forced and not assessment.summary:
+                    raise ModelUnavailable("model did not summarize the engine-required wake")
+                if forced:
+                    assessment = Assessment("wake", assessment.reason, assessment.summary, assessment.sources)
+            except (ModelUnavailable, TimeoutError):
+                if not forced:
+                    raise
+                return outcome.notice(
+                    "The decision engine requires your attention, but the secretary could not generate a summary.",
+                    kind="engine_wake",
+                    engine_verdict=harness.tools.verdict,
+                )
+        return outcome.build(
+            assessment,
+            decision_id=key,
+            engine_status=harness.tools.status,
+            engine_verdict=harness.tools.verdict,
+            harness=harness.metrics,
+        )
+
+    def _check_trigger(self, window: InboxWindow) -> None:
+        if self.trigger is None or self.trigger == "conversation":
+            return
+        parts = self.trigger.split(":")
+        if parts[0] == "message":
+            included = any(
+                event["kind"] == "message"
+                and event["seq"] == int(parts[1])
+                and sources.delivered_to(window.principal, event["audience"])
+                for event in window.events
             )
-        # Recheck the same sources after inference: permission changes or edits invalidate the generated summary.
-        current = await database.call(InboxWindow.read, config, policy, self.since, through=window.through)
-        if current.digest != window.digest:
-            raise SecretaryUnavailable(
-                "inbox visibility or content changed during inference; retry with current context"
+        else:
+            included = any(event["job_id"] == parts[1] and event["seq"] == int(parts[2]) for event in window.events)
+        if not included:
+            raise InvalidRequest(
+                "trigger is outside this bounded inbox page; process earlier pages or specify its range"
             )
-        result = {
-            "principal": policy.principal,
-            "mode": context["mode"],
-            "trigger": self.trigger,
-            "since": self.since,
-            "floor": self.floor,
-            "through_pos": window.through,
-            "covered_through": window.through if assessment.summary else self.since,
-            "coverage": "complete" if assessment.summary else "none",
-            "decision": assessment.decision,
-            "reason": assessment.reason,
-            "brief": assessment.summary,
-            "sources": assessment.sources,
-            "source_refs": [
-                {
-                    "source_key": e["source_key"],
-                    "pos": e["pos"],
-                    "message_id": e["message"]["id"] if e["message"] else None,
-                    "conversation_id": e["message"]["conversation_id"] if e["message"] else None,
-                    "job_id": e["job_id"],
-                }
-                for e in [*window.events, *window.reply_context]
-                if e["source_key"] in assessment.sources
-            ],
-            "decision_id": key,
-            "window_digest": window.digest,
-            "policy_digest": policy.digest,
-            "engine_status": harness.tools.status,
-            "harness": harness.metrics,
-            "cached": False,
-            "model": {k: policy.model[k] for k in ("provider", "model") if k in policy.model},
-            "scanned_at": _now(),
-        }
-        return await database.call(log.remember, result)
 
     def _remaining(self) -> float:
         remaining = self.deadline - self.clock()
@@ -190,10 +215,6 @@ def decide(
             budget_seconds=budget_seconds, since=since, floor=floor, trigger=trigger, hourly=hourly, clock=clock
         )
     )
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:

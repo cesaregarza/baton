@@ -15,10 +15,10 @@ from pathlib import Path
 
 from baton.errors import BatonError
 
-from .hooks import handle, receive
+from .hooks import TRUST_LABEL, handle, receive, summaries_text
 from .install import install, merge_hooks
 from .instance import Instance
-from .worker import Worker
+from .worker import Worker, invocation
 
 
 def apply_hooks(instance: Instance) -> dict:
@@ -61,7 +61,18 @@ async def dispatch(instance: Instance, args) -> int:
         case "hook":
             return await _handle_hook(instance)
         case "receive":
-            result = await receive(instance)
+            summaries = await receive(instance)
+            if args.text:
+                print(summaries_text(instance, summaries, bounded=False) or "No pending summaries.", flush=True)
+                return 0
+            result = [
+                {
+                    **summary,
+                    "trust_label": TRUST_LABEL,
+                    "acknowledge_command": invocation(instance, "acknowledge", summary["decision_id"]),
+                }
+                for summary in summaries
+            ]
         case "acknowledge":
             result = {"since": await instance.secretary.acknowledge(args.decision_id)}
         case "bind":
@@ -75,7 +86,7 @@ async def dispatch(instance: Instance, args) -> int:
             result["heartbeat_stale"] = not health or time.time() - health["checked_at"] > max(
                 30, 2 * instance.budget_seconds + instance.poll_seconds
             )
-    print(json.dumps(result, ensure_ascii=False), flush=True)
+    print(json.dumps(result, ensure_ascii=args.action == "receive"), flush=True)
     return 0
 
 
@@ -119,8 +130,11 @@ def main(argv: list[str] | None = None) -> int:
         setup.add_argument(f"--{name}", type=Path, required=True)
     setup.add_argument("--codex", type=Path)
     setup.add_argument("--apply-hooks", action="store_true")
+    setup.add_argument("--poll-seconds", type=float, required=True)
+    setup.add_argument("--budget-seconds", type=float, required=True)
     for name in ("run", "hook", "status", "receive", "apply-hooks"):
         actions.add_parser(name)
+    actions.choices["receive"].add_argument("--text", action="store_true")
     actions.add_parser("acknowledge").add_argument("decision_id")
     actions.add_parser("bind").add_argument("session")
     args = parser.parse_args(argv)
@@ -138,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
                 product=args.product,
                 python=Path(sys.executable),
                 codex=args.codex,
+                poll_seconds=args.poll_seconds,
+                budget_seconds=args.budget_seconds,
             )
             instance = Instance.load(result["instance"])
             if args.apply_hooks:

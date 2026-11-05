@@ -13,6 +13,7 @@ from baton.errors import InvalidRequest
 
 from .attention.runtime import DatabaseWorker
 from .attention.state import AttentionLog
+from .inbox.references import ReferenceWindow
 from .inbox.window import InboxTooLarge, InboxWindow
 
 
@@ -40,7 +41,21 @@ class Secretary:
     ) -> dict:
         from .attention.decide import DecisionRun
 
-        return await DecisionRun(self, budget_seconds, since, floor, trigger, hourly, clock, through).run()
+        run = DecisionRun(self, budget_seconds, since, floor, trigger, hourly, clock, through)
+        run._check()
+        if since is not None:
+            return await run.run()
+        from .attention.decide import SecretaryUnavailable
+        from .attention.queue import AttentionQueue
+
+        async with DatabaseWorker() as database:
+            queue = await AttentionQueue.open(self, database)
+            result = await queue.digest(budget_seconds) if hourly else await queue.scan(budget_seconds, trigger=trigger)
+            if result is not None:
+                return result
+            if queue.last_error is not None:
+                raise queue.last_error
+            raise SecretaryUnavailable("no digest is due; held pages remain scheduled")
 
     async def acknowledge(self, decision_id: str) -> int:
         """Advance coverage after the host has successfully delivered this generated summary."""
@@ -91,7 +106,10 @@ def _acknowledge(secretary: Secretary, decision_id: str) -> int:
 def _current_window(config: Config, policy: Policy, log: AttentionLog, result: dict) -> bool:
     """A saved summary is stale when edited sources no longer fit or match its original context."""
     try:
-        current = InboxWindow.read(config, policy, result["since"], through=result["through_pos"])
+        if result.get("reference_only"):
+            current = ReferenceWindow.read(config, policy, result["since"], result["through_pos"])
+        else:
+            current = InboxWindow.read(config, policy, result["since"], through=result["through_pos"])
     except InboxTooLarge:
         return False
     log.bind(current.epoch, result["floor"])

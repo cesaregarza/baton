@@ -9,38 +9,39 @@ These project skills explain how a local secretary instance can deliver decision
 
 - Install and run on the same host and as the same user as the local Baton data and model authentication. Remote mode is unsupported.
 - The runner uses POSIX file locks (Linux/macOS). The supplied systemd unit is for Linux; use another supervisor on macOS.
-- Use a secretary v2 policy and Baton configuration. The default model uses OpenAI `gpt-6-luna` and `OPENAI_API_KEY`; policy can select another model ID or the host-command transport. An optional decision engine is separately configured as JEV or a command. This integration does not provide a CLI model adapter.
+- Set integration `poll_seconds` and `budget_seconds` so `2 * budget_seconds + poll_seconds <= 60`; the examples use a 2-second poll and a 28-second budget.
+- Use a complete secretary v3 policy. Model ID, provider URL, API-key variable, timeout, reasoning effort, output limit, and cache mode are explicit policy values; there is no forced model ID. The independent decision engine is also required and can use JEV or a command adapter.
 - Set `summary_bytes` explicitly to 4000 (maximum 6000) for hook output limits.
-- Installation binds the activation floor to the current database head. The worker scans bounded, complete pages of visible events, including visible reply parents, and never truncates a page. An oversized first event is retained as a failed page while scanning continues past it.
-- The worker keeps its durable scan position separate from the contiguous delivered watermark. Hold, keep, and failed pages remain eligible for hourly digest retries while later pages continue to be scanned.
+- Installation binds the activation floor to the current database head. The worker scans bounded, complete pages of visible events, including visible reply parents, with output space reserved for citations. It never truncates a page; repeated failures split it, and an unsummarizable event receives a source-only operational notice.
+- Each poll reserves one configured budget for a fresh alert and a second for scheduled work. Within scheduled work, retries and digests alternate priority so sustained new traffic cannot starve recovery or digests. Transient failures retry in their original mode using the configured backoff, separately from worker health. Contiguous held pages are combined into one bounded digest at `digest_seconds` intervals.
 - Run only one worker per instance. The generated user unit uses `Restart=on-failure`; standalone `run` may be managed by another supervisor.
 - systemd user-service enablement alone does not promise operation after logout or reboot. That depends on user-manager linger and host configuration.
 
-The worker waits with asyncio between local event checks and asks the model to classify each page. Every summary,
-including a digest, must account for and cite every event in its page; it may cite visible parents as well. Source validation checks references,
-not the truth of summary claims, and the prompt forbids invented assignments or approvals. Hold, keep, and model
-error pages stay available for hourly digest retries while the worker continues to later pages. Model errors back
-off from five seconds to five minutes; no deterministic decision replaces failed inference. An operational alert
-for a prolonged model outage remains an open product question; inspect worker status and logs for health.
+The decision engine evaluates every alert page independently. A `wake` verdict with confidence at or above `wake_threshold`
+forces a wake even if model triage holds, keeps, or fails. The model may call a tool to retrieve that cached
+decision and confidence; the engine cannot explain its choice. If model output is unavailable for a forced wake,
+the host receives a source-only operational notice. Hold pages and transient model failures retry in their
+original mode; after `max_attempts`, the worker splits a page and eventually issues a source-only notice for an
+event it cannot summarize. No semantic fallback invents a decision. Worker `status` reports health separately.
 
-Pending wake IDs remain queued until individually acknowledged. Codex receives a queued request to retrieve a
-summary; Claude Code's hook presents the summary to the bound session. Queueing or hook completion does not
-acknowledge it. A principal acknowledges only after seeing the summary and its exact decision ID. Pending wakes
-survive worker restarts, and later hold/keep results never clear them. Acknowledgement is idempotent by summary ID,
-and ranges merge only when contiguous, so acknowledging a later wake cannot skip an earlier held gap.
+Every summary, including a digest, accounts for and cites all events in its page; visible reply parents are
+optional citations. Validation checks source references, not the truth of summary claims. The prompt forbids
+invented assignments or approvals. Pending receipts retain every decision ID, surface wakes first, and announce
+new IDs even if older ones remain unacknowledged. Later holds never clear pending wakes. Acknowledgement is
+idempotent by summary ID, and delivered ranges merge only when contiguous.
+
+Pending wake IDs remain queued across restarts and later holds never clear them. Codex receives a request to
+retrieve summaries; Claude Code's hook presents new IDs to the bound session. Queueing or hook completion does
+not acknowledge a summary. Read it and acknowledge its exact decision ID. Acknowledgement is idempotent, and
+delivery ranges merge only when contiguous, so acknowledging a later wake cannot skip an earlier held gap.
 
 ## Create an instance
 
 From the repository environment where `baton` is importable, use absolute paths:
 
-For example, a policy for an existing `planner` role using the default lightweight OpenAI model is:
-
-```json
-{"version": 2, "principal": "planner", "summary_bytes": 4000}
-```
-
-Set the principal to the actual Baton role. This model choice is independent of whether the principal runs
-in Codex or Claude Code; an existing policy with a command model works in either integration as well.
+Create the version 3 policy using the complete [policy example](../../baton/agents/secretary/README.md#policy).
+Set `principal` to the actual Baton role and choose stable `secretary_id` and explicit provider settings. The
+policy is the same whether the principal runs in Codex or Claude Code.
 
 ```sh
 python -m baton.integrations.secretary install \
@@ -48,7 +49,9 @@ python -m baton.integrations.secretary install \
   --destination /absolute/private/secretary-instance \
   --project /absolute/path/to/project \
   --config /absolute/path/to/baton.toml \
-  --policy /absolute/path/to/secretary-policy-v2.json \
+  --policy /absolute/path/to/secretary-policy-v3.json \
+  --poll-seconds 2 \
+  --budget-seconds 28 \
   --apply-hooks
 ```
 
@@ -64,10 +67,10 @@ Link and start the generated unit, substituting its exact generated name:
 
 Supply credentials to the service separately: a user service does not inherit your interactive shell's
 environment. The generated unit optionally reads `environment` in the private instance directory. Create that
-file with mode 0600 using your usual secret provisioning method. For the default OpenAI model use
-`OPENAI_API_KEY=...`; for a JEV decision engine use `TYPESAFE_API_KEY=...` (or the configured `api_key_env`).
-Command adapters need their executable and any authentication available in the service environment. The installer
-copies no credentials. Restart the service after changing its policy.
+file with mode 0600 using your usual secret provisioning method. Set the variables named by the model and JEV
+`api_key_env` fields there. For command providers, set credentials there and list their names in that provider's
+required `env` allowlist. Command processes run as the same Baton host user; environment filtering does not
+sandbox access to that user's files. The installer copies no credentials. Restart the service after changing policy.
 
 ```sh
 systemctl --user link /absolute/private/secretary-instance/secretary-XXXXXXXX.service
@@ -88,14 +91,24 @@ Runtime operations:
 ```sh
 python -m baton.integrations.secretary --instance /absolute/private/secretary-instance/integration.json status
 python -m baton.integrations.secretary --instance /absolute/private/secretary-instance/integration.json receive
+python -m baton.integrations.secretary --instance /absolute/private/secretary-instance/integration.json receive --text
 python -m baton.integrations.secretary --instance /absolute/private/secretary-instance/integration.json acknowledge DECISION_ID
 python -m baton.integrations.secretary --instance /absolute/private/secretary-instance/integration.json bind SESSION_ID
+baton secretary --policy /absolute/path/to/secretary-policy-v3.json summaries --after 0 --limit 50
 ```
 
-SessionStart binds the first matching project session. Other sessions are refused unless explicitly rebound. A hook or `receive` rechecks source visibility before showing a brief. `receive` can recover pending briefs if a hook was missed. The same unacknowledged summary may be offered again after a session resumes or compacts; offers are not limited to once per session.
+The `summaries` command pages archived deliverable summaries from `baton.db`; it does not require the private
+secretary state file.
 
-Hooks escape the model's summary so its text cannot close the reported-content delimiter. If escaping makes the
-output too large, the hook gives a `receive` command instead. Read that complete summary before acknowledging it.
+SessionStart binds the first matching project session. Other sessions are refused unless explicitly rebound. Hooks
+and `receive` recheck source visibility. Each hook announces newly pending IDs while retaining unacknowledged
+summaries; wakes are surfaced first. JSON `receive` returns all currently authorized pending summaries, each
+with a trust label and an `acknowledge_command`. `receive --text` prints complete JSON-framed summaries and
+acknowledgment commands when hook output exceeds its context limit.
+
+Hooks JSON-escape Unicode, control, and bidirectional text inside a clearly labeled untrusted-content frame. If
+the framed output exceeds the hook limit, the hook gives the `receive --text` command instead. Read the complete
+summary and its sources before acknowledging it.
 
 If several sessions share the project, use `bind SESSION_ID` to choose the principal explicitly before
 starting the worker. A stopped or closed principal cannot receive a hook: Codex's resume is best-effort, and
@@ -122,11 +135,12 @@ The skills in this directory guide installation. The installed Python runtime is
 [`baton/integrations/secretary`](../../baton/integrations/secretary): `install.py` creates artifacts,
 `instance.py` owns configuration and session receipts, `worker.py` watches the inbox and requests notifications,
 and `hooks.py` delivers checked summaries to the bound session. `__main__.py` exposes these operations.
-Assessment prompting, the bounded model/tool harness, optional typed decision engine, and model transports live in
+Assessment prompting, the bounded model/tool harness, independent typed decision engine, and model transports live in
 [`baton/agents/secretary`](../../baton/agents/secretary/README.md). Both Codex and Claude Code integrations use
 that same assessment path, split across `attention`, `inbox`, `harness`, and `connections` packages. Policy and
 installed-instance configuration code is centralized in `baton/config/secretary.py`. The Baton host TOML
-format is unchanged. Secretary policy version 2 is required; deterministic version 1 policies are unsupported,
-and the retired state format is incompatible, so use a version 2 policy and a new state file. The installed
+format is unchanged. Secretary policy version 3 is required. Private secretary state version 1 is refused and
+requires a new file; version 2 is preserved. The append-only `secretary_summaries` archive is in shared `baton.db`
+under schema version 21. The installed
 `integration.json` is a separate version 1 worker configuration. This runner is started separately; it is not enabled with a
 `[integrations.secretary]` Baton server table.

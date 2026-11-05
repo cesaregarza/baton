@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 
 from baton.config import Config
-from baton.config.secretary import Policy, fingerprint
+from baton.config.secretary import MAX_COMMAND_RESPONSE_BYTES, Policy, fingerprint
 from baton.database import Connection
 from baton.database.store import connect_read_only
 from baton.errors import BatonError, InvalidRequest
@@ -48,6 +48,19 @@ class InboxWindow:
     def source_keys(self) -> set[str]:
         return {event["source_key"] for event in [*self.events, *self.reply_context]}
 
+    def fits_output(self, policy: Policy) -> bool:
+        return _json_size(sorted(self.source_keys)) <= _citation_budget(policy)
+
+    @classmethod
+    def split_position(cls, config: Config, policy: Policy, since: int, through: int) -> int | None:
+        """Return the event cursor that divides a visible reference range as evenly as possible."""
+        from .references import ReferenceWindow
+
+        window = ReferenceWindow.read(config, policy, since, through)
+        if len(window.refs) <= 1:
+            return None
+        return window.refs[(len(window.refs) + 1) // 2 - 1]["pos"]
+
     @classmethod
     def head(cls, config: Config) -> tuple[str, int]:
         """Return the log epoch and event head from one read-only database snapshot."""
@@ -75,6 +88,7 @@ def _pending_events(
     parents: list[dict] = []
     listed: set[str] = set()
     size = 0
+    citation_limit = _citation_budget(policy)
     scanned = since
     while scanned < end:
         rows = sources._source_rows(baton, policy.principal, scanned, 500)
@@ -96,14 +110,17 @@ def _pending_events(
                 candidate_parents.append(parent)
             candidate_events = [*events, entry]
             candidate_size = size + _size(entry) + (_size(parent) if parent is not None else 0)
+            candidate_keys = [event["source_key"] for event in [*candidate_events, *candidate_parents]]
+            candidate_citation_size = _json_size(candidate_keys)
             exceeds_events = len(candidate_events) + len(candidate_parents) > policy.max_events
             exceeds_bytes = candidate_size > policy.context_bytes
-            if exceeds_events or exceeds_bytes:
+            exceeds_citations = paginate and candidate_citation_size > citation_limit
+            if exceeds_events or exceeds_bytes or exceeds_citations:
                 if not paginate:
                     raise InboxTooLarge("pending inbox and reply context exceed the configured input bounds")
                 if not events:
                     raise InboxTooLarge(
-                        "pending inbox and reply context exceed the configured input bounds", through_pos=row["pos"]
+                        "pending inbox exceeds the configured input or citation output bounds", through_pos=row["pos"]
                     )
                 stopped = True
                 break
@@ -148,3 +165,15 @@ def _reply_parent(baton: Connection, config: Config, policy: Policy, entry: dict
 
 def _size(value: dict) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode())
+
+
+def _json_size(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _citation_budget(policy: Policy) -> int:
+    """Reserve half of the provider's bounded response for source citations."""
+    output_tokens = policy.model.get("max_output_tokens")
+    if type(output_tokens) is int:
+        return max(1, output_tokens // 2)
+    return MAX_COMMAND_RESPONSE_BYTES // 2

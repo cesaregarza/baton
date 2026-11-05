@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
@@ -18,8 +19,14 @@ class AttentionDecision(StrEnum):
     KEEP = "keep"
 
 
+@dataclass(frozen=True)
+class AttentionVerdict:
+    decision: AttentionDecision
+    confidence: float
+
+
 class DecisionEngine(Protocol):
-    async def decide(self, context: dict, timeout: float) -> AttentionDecision: ...
+    async def decide(self, context: dict, timeout: float) -> AttentionVerdict: ...
 
 
 _OPTIONS = {
@@ -38,7 +45,7 @@ class JevDecisionEngine:
     def __init__(self, settings: dict):
         self.settings = settings
 
-    async def decide(self, context: dict, timeout: float) -> AttentionDecision:
+    async def decide(self, context: dict, timeout: float) -> AttentionVerdict:
         api_key = os.environ.get(self.settings["api_key_env"])
         if not api_key:
             raise transport.ModelUnavailable("decision engine credential is unavailable")
@@ -61,31 +68,35 @@ class JevDecisionEngine:
             timeout,
             max_bytes=MAX_MODEL_RESPONSE_BYTES,
         )
-        return _jev_decision(response)
+        return _jev_verdict(response)
 
 
 class CommandDecisionEngine:
     def __init__(self, settings: dict):
         self.settings = settings
 
-    async def decide(self, context: dict, timeout: float) -> AttentionDecision:
+    async def decide(self, context: dict, timeout: float) -> AttentionVerdict:
         response = await transport.command_json(
             self.settings,
             {
-                "version": 1,
+                "version": 2,
                 "task": "decide_attention",
                 "context": context,
                 "choices": [decision.value for decision in AttentionDecision],
+                "max_output_tokens": self.settings["max_output_tokens"],
             },
             timeout,
             MAX_COMMAND_RESPONSE_BYTES,
         )
-        if not isinstance(response, dict) or set(response) != {"decision"}:
+        if not isinstance(response, dict) or set(response) != {"decision", "confidence"}:
             raise transport.ModelUnavailable("decision command returned an invalid response")
         try:
-            return AttentionDecision(response["decision"])
+            decision = AttentionDecision(response["decision"])
         except (TypeError, ValueError):
             raise transport.ModelUnavailable("decision command returned an invalid decision") from None
+        if not _is_probability(response["confidence"]):
+            raise transport.ModelUnavailable("decision command returned invalid confidence")
+        return AttentionVerdict(decision, float(response["confidence"]))
 
 
 def make_engine(settings: dict) -> DecisionEngine:
@@ -97,7 +108,7 @@ def make_engine(settings: dict) -> DecisionEngine:
     raise transport.ModelUnavailable("decision engine provider is unavailable")
 
 
-def _jev_decision(response: object) -> AttentionDecision:
+def _jev_verdict(response: object) -> AttentionVerdict:
     """Validate JEV's reply by category, then return its selected decision."""
     if not isinstance(response, dict):
         raise transport.ModelUnavailable("decision engine returned an invalid response")
@@ -106,7 +117,7 @@ def _jev_decision(response: object) -> AttentionDecision:
     _validate_jev_probabilities(answer["probabilities"], decision)
     _validate_jev_confidence(answer["confidence"])
     _validate_jev_usage(response)
-    return decision
+    return AttentionVerdict(decision, float(answer["confidence"]))
 
 
 def _jev_attention_answer(response: dict) -> dict:

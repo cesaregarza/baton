@@ -18,7 +18,7 @@ from baton.errors import BatonError
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
-    if args.command == "secretary" and args.state is None and args.secretary_command != "read":
+    if args.command == "secretary" and args.state is None and args.secretary_command not in {"read", "summaries"}:
         parser.error("the following arguments are required: --state")
     if args.command == "hash-passphrase":
         return identity.hash_passphrase()
