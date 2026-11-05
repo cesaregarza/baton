@@ -1,376 +1,211 @@
-# Baton secretary
+# Baton secretary (policy version 2)
 
-The secretary is an attention layer for one agent, called the **principal**. It reads that agent's visible Baton
-messages and job events, remembers outstanding requests, and recommends whether the host should interrupt the
-agent now or save the information for a later digest. The underlying messages stay in Baton either way.
+The secretary is a lightweight model-driven attention layer for one agent, the **principal**. The host wakes it
+when Baton reports activity. It reads the principal's pending, currently visible messages and events together,
+then asks a model whether the more expensive principal needs attention now. A wake result includes a narrative
+summary and source references. The host delivers it; the principal can then decide which threads to open.
+The secretary itself never sends that notification or advances the principal's Baton inbox.
 
-There are two interpretation paths: **built-in rules**, which need no model, and an **optional external judge**,
-which can use an LLM. Both feed the same request ledger and attention selection. The external judge interprets
-one message; Baton converts that interpretation into `wake`, `hold`, or `keep` for the outstanding event window.
-Judging a reported result does not verify that the work actually happened.
+The model is the default interpreter. It weighs meaning and actionability across the whole pending window; there
+is no rule-word fallback in version 2. An optional decision engine can provide extra advice to the model. If that
+advisory command fails, the model still assesses the inbox without it. Version 1 is retained under `legacy/` and
+runs only when a version 1 policy explicitly selects it.
 
-The host supplies callbacks, scheduling, and delivery. This package does not run a background watcher, send a
-notification, or advance the principal's Baton inbox cursor.
+## What happens on an alert
 
-## From an event to a decision
+1. Read all pending visible events, deduplicating recipient copies of the same message. Include visible reply
+   parents as context even when they precede the last delivered summary.
+2. If configured, ask the decision engine for advisory signals about that window.
+3. Give the lightweight model the messages, reply context, operator preferences, and engine advice. The model
+   interprets the conversation and chooses an attention decision; Baton does not derive it from words or scores.
+4. In the same inference, the model writes a summary when it chooses to wake the principal, or when asked for a
+   scheduled digest. It covers the material information across the pending messages, grouping related updates.
+5. Validate the response format, size, and cited IDs, and recheck source visibility. Return the assessment to
+   the host. Save delivery coverage only after the host confirms delivery.
 
-A normal callback goes through these steps:
+| Model decision | Meaning on an alert |
+| --- | --- |
+| `wake` | Interrupt the principal with the generated summary and source references. |
+| `hold` | Useful information can wait; retain it for another alert or a scheduled digest. |
+| `keep` | No attention is needed now; keep the underlying messages available in Baton. |
 
-1. **Read new visible events in order.** `DecisionRun` asks `ScanBatch` to read pages after the saved scan position.
-   `sources.py` supplies message identity, authored text, reply and attention metadata, artifact references, and
-   job handoffs. Previously processed sources are not interpreted again.
-2. **Find what this event could refer to.** `Expectations` tracks requests that are **owed** by the principal or
-   **awaited** from someone else. For a possible answer, it matches the author to the expected responder, the job
-   or conversation to the request's context, and an explicit reply to the opening message.
-3. **Interpret the event.** Messages normally go through `MessageRules`. During a callback, a configured
-   `JudgeSession` can instead send an eligible message and its candidate requests to an external command.
-   Job handoffs always use the built-in job rules. The next two sections explain both message paths.
-4. **Update the ledger and record a disposition.** Interpretation can open a request, acknowledge it, close it,
-   or retain uncertain evidence. It also records `retain`, `route`, `digest`, `brief`, or `reconcile` for this
-   source. Each page's ledger changes, dispositions, and scan position commit together.
-5. **Choose attention across the outstanding window.** `AttentionWindow` looks at all recorded sources after
-   the host's last delivered position, including older undelivered sources. It maps dispositions to
-   `wake`/`hold`/`keep`, picks the strongest, then applies the callback's trigger restrictions.
-6. **Return a result to the host.** A wake includes a bounded brief. Hold and keep include reasons and counts but
-   no brief. The host decides whether to deliver; only successful delivery should advance its saved position.
+For example, the window may contain “Migration finished” from the worker followed by “Health checks regressed;
+can you approve a rollback?” from the reviewer. The secretary should explain both the completion and the new
+blocker, identify who needs a decision, and cite the messages. It should not wake merely because one message
+contains an answer word, or summarize only the last alert. These are model instructions, not hard-coded rules.
 
-Interpretation and notification are separate because evidence can change without an interruption. For example,
-“starting” acknowledges a request but leaves it open. A later hourly digest can mention that acknowledgment.
+## First setup
 
-## The built-in rule engine
-
-[`MessageRules`](rules.py) uses message structure and configured word lists. It does not ask a model to infer intent.
-An addressed message is a direct message to the principal, an attention tag naming it, or a reply to its message.
-
-For a possible answer to an existing request, the rules apply these checks in order:
-
-1. An unrelated artifact does not identify the request. A stale revision is retained as evidence without closing it.
-2. An answer with the wrong result kind produces `reconcile`. Kinds come from words such as `check`/`test`/`ci`,
-   `review`, and `release`; an untyped answer cannot satisfy a review or release request.
-3. An uncertain artifact match or conflicting answer signals produces `reconcile`.
-4. A configured answer phrase plus an identifying artifact, or a matching reply for an artifactless request,
-   satisfies the request. An awaited result produces `brief`; completing the principal's own owed work produces
-   `retain`.
-5. An acknowledgment records evidence and leaves the request open: `digest` for an awaited result, `retain` for
-   the principal's own owed work. Otherwise an unresolved candidate produces `reconcile`.
-
-Default answer phrases are `PASS`, `FAIL`, `BLOCK`, `CHANGES REQUIRED`, and `APPROVED`; acknowledgments are `claimed`,
-`starting`, `received`, and `recorded`. Matching is case-insensitive and uses whole token sequences. Multiple answer
-phrases, or an answer together with an acknowledgment, count as conflicting signals.
-
-When a message does not match an existing request, an addressed message from another author opens **owed** work and
-produces `brief`. A principal's attention-tagged request opens **awaited** work for the named responders and
-produces `retain`. Without semantic interpretation, even an incoming direct “thanks” can be treated as owed work.
-An incoming direct message can both answer an awaited request and open a new owed request.
-
-Direct messages have no reply pointer. An outgoing direct answer can satisfy one unambiguous owed request from
-its recipient, subject to the same task and artifact checks. With a judge configured, an outgoing direct message
-opens an awaited item unless it already answered a request; this does not involve asking the judge about the
-principal's own message. Word rules alone do not match incoming direct replies to those awaited items; the external
-judge supplies that interpretation. Without a judge configured, outgoing direct messages do not open awaited items.
-
-For job events, the configured state determines who owns the next action. A handoff to the principal can open
-owed work; waiting on another actor routes the event and tracks an awaited handoff. Actor changes supersede
-expectations opened by job events, while preserving message requests. Entering a policy-listed terminal state
-cancels open expectations for that job.
-
-### Example without a judge
-
-Suppose `planner` posts “Please review `repo#7@abc1234`” with `attention=["worker"]`. Both agents have a secretary:
-
-| Event | Planner's ledger and attention | Worker's ledger and attention |
-| --- | --- | --- |
-| Planner sends the request | Open **awaited** review from worker; `retain` → `keep`. | Open **owed** review for planner; `brief` → `wake`. |
-| Worker replies “starting” | Record acknowledgment, leave review open; `digest` → `hold`. | No completion yet. |
-| Worker replies “APPROVED review `repo#7@abc1234`” | Satisfy awaited review; `brief` → `wake`. | Satisfy owed review; `retain` → `keep`. |
-
-These decisions assume message callbacks, no stronger outstanding item, and successful delivery of earlier wakes.
-A reply saying only “PASS `repo#7@abc1234`” would not satisfy the typed review request: it lacks the review kind and
-would need reconciliation.
-
-## What the external judge does
-
-The optional judge answers four questions about **one message**:
-
-- Does it answer, acknowledge, change, or cancel an outstanding request?
-- Which offered request does it refer to?
-- Does it ask the principal to do something new?
-- Does it need the principal's attention now?
-
-Baton bundles no LLM adapter, model, or prompt. The plug-in boundary is a host executable configured in the policy.
-That adapter owns its prompt/questions, model choice, credentials, model call, and conversion of the model's answer
-into the JSON verdict below. It can also be ordinary deterministic code. No Python subclass or model SDK is required.
-
-### Configure the plug-in
-
-A complete policy can look like this; replace the example alias, executable, and placeholder hash:
+Create a **new private state file** for version 2. Do not point it at the state file used by version 1: the formats
+and behavior are separate. A minimal policy names the principal:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "principal": "planner"
+}
+```
+
+The principal must be an existing non-human agent role. The default model is `gpt-6-luna` through the OpenAI
+Responses API, with `OPENAI_API_KEY` read from the host process environment. A missing key produces an explicit
+`secretary_unavailable` error; there is no silent local or rule-based fallback.
+
+The default model can be customized. For example:
+
+```json
+{
+  "version": 2,
   "principal": "planner",
-  "secretary_alias_id": "al_existing",
-  "judge": {
-    "command": ["/opt/baton/judge-adapter"],
-    "timeout_seconds": 3,
-    "questions_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-    "owed_digest_below": 0.4,
-    "wake_at": 0.8
+  "model": {
+    "provider": "openai",
+    "model": "gpt-6-luna",
+    "api_key_env": "OPENAI_API_KEY",
+    "reasoning_effort": "low",
+    "timeout_seconds": 20
+  },
+  "instructions": "Prefer waking me for decisions that block another agent.",
+  "max_events": 1000,
+  "context_bytes": 1048576,
+  "summary_bytes": 8192
+}
+```
+
+`base_url` can point to another Responses-compatible endpoint; it must use HTTPS, except HTTP on localhost. The
+model can also run as a host command. The command receives one JSON request on stdin and writes one JSON object
+to stdout; Baton starts an argv list directly, without a shell:
+
+```json
+{
+  "version": 2,
+  "principal": "planner",
+  "model": {
+    "provider": "command",
+    "command": ["/opt/secretary/model-adapter"],
+    "timeout_seconds": 20
   }
 }
 ```
 
-The principal must be an existing non-human, non-display agent role; the secretary alias must exist and be unmapped
-to a role. Omit `judge` to use built-in rules only. `command` is an argv list whose executable has an absolute path;
-Baton starts it without a shell. The timeout must be greater than zero and at most 10 seconds, and is shortened to
-fit the callback's remaining budget. The two thresholds shown are defaults and may be omitted.
+The request envelope is `{ "version": 2, "instructions": ..., "context": ..., "response_schema": ... }`.
+The adapter returns an assessment object with exactly `decision`, `reason`, `summary`, and `sources`; `decision`
+is `wake`, `hold`, or `keep`. The schema is supplied in the request so the host command can enforce the same
+contract as the OpenAI structured output path.
 
-`questions_sha256` identifies the adapter's question/prompt configuration. Baton validates the 64-character
-lowercase hex format, includes it in the policy digest, and passes it to the command. **Baton does not load or
-verify a prompt file.** Keeping that hash consistent with the actual prompt is the adapter's responsibility.
+## One wake callback
 
-### What goes into the command
-
-Baton writes one JSON object to stdin. This example shows a reply to an artifactless request; IDs are illustrative:
-
-```json
-{
-  "version": 1,
-  "principal": "planner",
-  "questions_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "timeout_seconds": 3.0,
-  "message": {
-    "id": "msg_result",
-    "from": "worker",
-    "from_kind": "agent",
-    "at": "2026-11-05T10:00:00Z",
-    "channel": "conversation",
-    "conversation_id": "conv_example",
-    "job_id": null,
-    "attention": [],
-    "reply_to": "msg_request",
-    "replies_to_principal": true,
-    "artifacts": [],
-    "relayed": false,
-    "notice": false,
-    "text": "All done on that"
-  },
-  "items": [
-    {
-      "id": "0123456789abcdef01234567",
-      "direction": "awaited",
-      "counterpart": "worker",
-      "job_id": null,
-      "artifact": null,
-      "state": "open",
-      "title": "Please run the migration check",
-      "relayed": false
-    }
-  ]
-}
-```
-
-The command gets the message's authored text, not relayed text, and at most four structurally matched, currently
-visible candidate requests. Their titles contain at most the first 30 words of the opening message. The most
-recent candidates are selected and presented oldest first. `items` may be empty. The command cannot select an
-arbitrary request outside this list.
-
-### What comes back, and how Baton uses it
-
-The command exits successfully and writes exactly one JSON object to stdout, with exactly these four fields:
-
-```json
-{
-  "relation": "answers",
-  "item": "0123456789abcdef01234567",
-  "opens_owed": 0.0,
-  "needs_now": 0.2
-}
-```
-
-| Field | Meaning |
-| --- | --- |
-| `relation` | One of `answers`, `acknowledges`, `changes_or_cancels`, or `none`. |
-| `item` | The ID of an offered request, or `null`. A relation only affects a request when an item is selected. |
-| `opens_owed` | Score from 0 to 1 for whether the message asks the principal to do something new. |
-| `needs_now` | Score from 0 to 1 for whether the principal needs to attend now. |
-
-The scores must be finite numbers, not booleans. An adapter that cannot interpret a message can instead return
-exactly `{"declined":"reason"}`. Extra fields, surrounding prose, and Markdown fences are not accepted.
-
-[`Judgment`](judge.py) applies a valid verdict in this order:
-
-| Step | Condition | Ledger effect and disposition |
-| --- | --- | --- |
-| 1. Relate to an offered request | Artifact revision is stale or uncertain | Keep stale evidence without closing, or `reconcile` uncertainty. The claimed relation cannot bypass this check. |
-| 1. Relate to an offered request | `answers`, with an acceptable artifact match | Satisfy the request; `brief`. |
-| 1. Relate to an offered request | `acknowledges` | Record acknowledgment, leave request open; `digest`. |
-| 1. Relate to an offered request | `changes_or_cancels` | Record changed evidence, **leave request open**; `digest`. |
-| 2. Check for new work, if addressed to the principal | `opens_owed >= 0.5` | Open owed work; `digest` if `needs_now < owed_digest_below`, otherwise `brief`. |
-| 2. Check for new work, if addressed to the principal | `opens_owed < 0.5` | No new owed work; `digest`. |
-| 3. Apply urgency | `needs_now >= wake_at` and outcome so far is `retain` or `digest` | Promote to `brief`. |
-| Otherwise | No relation, new work, or urgency applies | `retain`. |
-
-The `0.5` request threshold is fixed; `owed_digest_below` and `wake_at` are policy settings. Outcomes from the
-steps combine using `reconcile > brief > digest/route > retain`. Ledger or evidence limits can require
-reconciliation; urgency cannot override it. A full request ledger preserves an incoming request's attention
-level and records that it could not be tracked.
-
-In the JSON example, “All done on that” has no built-in answer phrase. Word rules would leave the request open
-and require reconciliation. The judge's `answers` verdict identifies the awaited request, so Baton closes it and
-records `brief`. That yields `wake` on a normal message callback even though `needs_now` is only `0.2`: receiving
-an awaited result is itself an attention rule, independent of the urgency threshold.
-
-For an addressed message with `relation="none"`, default thresholds give these examples:
-
-| `opens_owed` | `needs_now` | Result for this message |
-| --- | --- | --- |
-| 0.1 | 0.1 | No new request; `digest` → `hold`. |
-| 0.9 | 0.2 | Open owed work that can wait; `digest` → `hold`. |
-| 0.9 | 0.6 | Open owed work needing attention; `brief` → `wake`. |
-| 0.1 | 0.9 | No new request, but urgent information; `brief` → `wake`. |
-
-### When the judge runs, and what happens on failure
-
-Only new messages with a named author other than the principal are eligible. On a message callback, judging
-starts at the triggering message; earlier messages use word rules. Catch-up/public `scan`, hourly digests,
-job events, and the principal's own messages never invoke the command. Already recorded messages are not judged
-again on retry. This is an optional message interpreter, not a second pass over every recorded disposition.
-
-A callback can make at most two judge calls, and a call needs at least one second of decision budget remaining.
-After that, scanning stops before the next eligible message past a known trigger position and reports itself
-behind. Up through the trigger, word rules provide the fallback. A `conversation` trigger names no event position,
-so scanning continues with word rules after the judge budget is spent.
-
-Timeout, nonzero exit, invalid JSON, wrong shape, explicit decline, or lack of judge budget invokes the word
-rules for that message. If some candidates were omitted from the request, a verdict with `relation="none"` or
-`item=null` also falls back: seeing four candidates cannot rule out a fifth. Output is limited to 64 KiB. A failure
-neither automatically wakes the principal nor discards the event; the built-in rules determine its effect.
-
-For a valid verdict, Baton also computes the word-rule alternative in a rolled-back savepoint, then applies only
-the judge's effects. It records the verdict, the alternative, and any fallback reason. Replay uses these stored
-verdicts without executing the command or asking a model again.
-
-## How dispositions become wake, hold, or keep
-
-The five dispositions describe an individual source; the three decisions describe attention for the outstanding
-window. [`AttentionWindow`](decide.py) first maps each source as follows:
-
-| Disposition | Meaning | Attention |
-| --- | --- | --- |
-| `brief` | New action or an awaited result | `wake` for a message; a job brief wakes only with `job_events_wake: true`, otherwise `hold`. |
-| `digest` | An acknowledgment or information that can wait | `hold`. |
-| `reconcile` | Uncertain, conflicting, or bounded evidence needing inspection | `hold`. |
-| `retain` | Context without a new principal action | `keep`. |
-| `route` | A job waits on its existing actor | `keep`. |
-
-It then selects the strongest attention level: **wake before hold before keep**, with the oldest event breaking
-a tie. An empty window returns `keep`. This is different from disposition precedence within a single message:
-an uncertain message can hold while a separate actionable message makes the overall window wake.
-
-The callback trigger applies one final gate. A message trigger, or a call without a trigger, can wake. A job
-trigger can wake only with `job_events_wake: true`. A `conversation` trigger always reduces a would-be wake to
-hold. The result is about the whole undelivered window, so an older brief can determine it even when the trigger
-itself is routine.
-
-| Final decision | What the host receives and can do |
-| --- | --- |
-| `wake` | A brief plus its evidence source and rule. The host can deliver it and interrupt the principal. |
-| `hold` | Reasons and counts, with an empty brief. Keep the delivery position; a later wake or hourly digest can include it. |
-| `keep` | Reasons and counts, with an empty brief. Record context without interrupting; it remains available in Baton. |
-
-Keep items contribute counts but do not get individual lines in a brief or digest. Neither hold nor keep schedules
-anything: the host must invoke a later callback or digest to reconsider the outstanding window.
-
-An hourly call skips this selection and renders a digest instead; its `decision`, `rule`, and `evidence` are `null`.
-It can render previously recorded judged items but interprets newly scanned messages using word rules.
-
-## Host lifecycle and delivery positions
-
-There are three distinct positions:
-
-- `floor`: the activation boundary; older sources may populate the request ledger but cannot cause a new wake.
-- `through_pos`: how far the secretary has scanned, whether delivered or not.
-- `since`: the host's last successfully delivered coverage position; the attention window starts after it.
-
-Before activation, run `scan` until `events_seen` is zero. Then make the first `decide` call without `since`/`floor`;
-it records the catch-up position as the activation floor **before** scanning any new events. Save the returned
-`floor`, and initialize the host's `since` from the returned `since`. A retry of this first call reuses the stored
-floor even if scanning progressed before an interruption.
-
-For an async host, the entry point is [`Secretary`](service.py). After catch-up and activation, a callback can use
-the saved `since`/`floor` as below. `config` is the loaded Baton configuration; `state_path` and `policy_path` are
-private `Path` objects. `deliver_to_principal` and `save_delivery_position` are functions supplied by the host:
+An async host can call the public service directly:
 
 ```python
+from pathlib import Path
 from baton.agents.secretary import Secretary
 
-secretary = Secretary(config, state_path, policy_path)
-
-# message_seq is the principal's mailbox delivery sequence.
-result = await secretary.decide(
-    budget_seconds=5, since=since, floor=floor, trigger=f"message:{message_seq}"
-)
+secretary = Secretary(config, Path("/private/secretary-v2.sqlite"), Path("/private/policy-v2.json"))
+result = await secretary.decide(budget_seconds=30, trigger="message:42")
 if result["decision"] == "wake":
     await deliver_to_principal(result["brief"])
-    await save_delivery_position(since=result["covered_through"], floor=result["floor"])
+    await secretary.acknowledge(result["decision_id"])
 ```
 
-`coverage` says whether scanning is `current` or `behind`. `covers_trigger` says whether this result covers the
-trigger. If false, the host must not treat the result as a completed decision about that trigger; schedule another
-call using the last successfully delivered position. `trigger_item`, `rule`, `evidence`, `counts`, and `judge`
-explain what was considered, what won, and how many external calls fell back.
+On its first call, the secretary uses its saved activation floor and delivery position (initially zero) and reads
+the full pending visible window. There is no offline catch-up scan requirement. For a host that owns positions,
+pass `since` and `floor` together on every call. After successfully delivering a non-empty `brief`, either call
+`acknowledge(decision_id)` or pass that result's `covered_through` as `since` with the same `floor` next time.
+Advance only after delivery succeeds. A `hold`, `keep`, error, or empty inbox does not advance coverage. Retries
+with the same policy, prompt, and identical inbox reuse the saved assessment instead of making another model call.
 
-A wake brief defaults to 2048 bytes (`brief_bytes`); an hourly digest is bounded to 4096 bytes. Both contain IDs,
-roles, artifacts, and derived reasons, not message bodies. `covered_through` stops before the first omitted line
-when the size bound leaves items out. **After actual delivery**, save it as the next `since`; a failed delivery
-retries with the same `since` and `floor`. Hold/keep leave `covered_through` equal to `since`.
+`trigger` is optional and may identify `message:SEQ`, `job:JOB_ID:SEQ`, or `conversation`. A one-hour digest uses
+`hourly=True`; it asks the same model to summarize the pending window. An empty inbox skips inference and returns
+`keep`. Every callback budget is greater than zero and at most 60 seconds; the default model timeout is 20 seconds.
 
-The host schedules hourly calls with `hourly=True`, the saved `since`/`floor`, and no trigger. Handle digest delivery
-and coverage the same way. Use `read` to fetch currently visible original text when the principal needs details.
+### Results and source references
 
-## Where the behavior lives
+The model makes one assessment of the entire alert window and returns its decision and summary together. A wake
+has a concise narrative that says what changed, who needs what, and what remains unresolved, so the principal can
+choose which thread to open. A digest also has a summary. `hold` and `keep` alert results have an empty `brief`.
+The returned `sources` list names the cited source keys, and `source_refs` resolves them to current message and
+thread IDs (or event positions). The host can pass those references to its thread-reading UI; the secretary does
+not open threads on the principal's behalf.
 
-| Owner | Responsibility and caller |
-| --- | --- |
-| [`Secretary`](service.py) / [`DecisionRun`](decide.py) | Host API / one callback's activation, scan budget, and response. |
-| [`ScanBatch` and `Projection`](tracking.py) | Called by scan/decide; interpret ordered sources and commit ledger effects with progress. |
-| [`Expectations`](expectations.py) | Request matching, openings, evidence, closures, and limits, shared by both interpreters. |
-| [`MessageRules`](rules.py) / [`Judgment`](judge.py) | Built-in interpretation / external verdict application to that ledger. |
-| [`JudgeSession`](judge.py) / [`JudgeCommand`](command.py) | Callback call budget / asynchronous subprocess transport. |
-| [`AttentionWindow`](decide.py) / [`digest.py`](digest.py) | Select attention from recorded dispositions / render bounded output. |
-| [`RecordedJudgments`](judge.py) | Supplies saved interpretations during replay. |
+The model receives authorized message text in `context.events` and visible parent messages in
+`context.reply_context`. The prompt treats messages and engine advice as untrusted data, not instructions.
+The service checks that every citation was in this supplied context and re-reads it after inference. If content or visibility
+changed during the call, it returns a retryable `secretary_unavailable` error without advancing delivery. It does
+not independently verify the meaning of a generated summary. The private sidecar stores generated assessments
+and references, but does not archive message bodies.
 
-Supporting modules have narrower jobs: `sources.py` controls visibility and event envelopes, `policy.py` validates
-configuration, `store.py` persists the private state, and `read.py` fetches original visible text.
+By default the model sees at most 1,000 event/context entries and 1 MiB of their serialized content. `max_events` and `context_bytes` are
+configurable. If the complete window exceeds either limit, the call fails with `secretary_context_limit`; it does
+not silently truncate the context. `summary_bytes` defaults to 8 KiB. Model timeout, transport, command, or
+assessment errors become retryable `secretary_unavailable` errors and leave the delivery position unchanged.
 
-External process I/O uses asyncio. [`DatabaseWorker`](runtime.py) keeps the existing synchronous database driver
-on one worker thread per decision, so database waits do not block the host's event loop. Source interpretation
-stays sequential so later messages can match requests opened earlier. Cancellation rolls back an unfinished
-page and preserves completed pages; an already-issued database operation settles before connection cleanup.
+## Optional decision-engine advice
 
-## State, inspection, and CLI
+An optional command can provide a separate advisory input before the primary model call:
 
-The secretary opens Baton read-only and writes only a separate private SQLite sidecar, bound to the Baton log
-epoch. The sidecar stores identifiers, visibility metadata, artifacts, text hashes, dispositions, request evidence,
-and judge verdicts, not authored message bodies. Text reaches the external adapter transiently; the adapter owns
-any further logging or transmission. `read` returns visible text without changing secretary state.
+```json
+{
+  "version": 2,
+  "principal": "planner",
+  "decision_engine": {
+    "command": ["/opt/secretary/advisor"],
+    "timeout_seconds": 3
+  }
+}
+```
 
-`show` exposes the ledger, source excerpts, and recorded dispositions. `replay` rebuilds from retained envelopes,
-currently visible source text, and saved verdicts in memory, then compares outcomes without changing either
-database. Sources no longer visible cannot be replayed. Explicit `cancel` closes an expectation when the operator
-chooses to do so.
+It receives `{ "version": 2, "task": "advise_secretary", "context": ... }` and must return a JSON object.
+That object is passed to the configured model as `context.engine_advice`; it does not make the final decision. If
+the advisory command times out, exits unsuccessfully, or returns unusable JSON, the model proceeds without advice.
+The old version 1 Jev adapter speaks a different protocol and is not directly compatible; it needs a version 2
+adapter. Baton does not bundle a Jev SDK.
 
-The synchronous CLI remains available; state and policy options go before the action:
+The model command's response is the decision itself, for example (replace the illustrative source IDs):
+
+```json
+{
+  "decision": "wake",
+  "reason": "The reviewer needs the principal's rollback decision.",
+  "summary": "The worker reports the migration is complete, but the reviewer reports regressed health checks and asks you to approve a rollback. Open the deployment thread to decide.",
+  "sources": ["message:msg_worker_update", "message:msg_reviewer_request"]
+}
+```
+
+`reason` explains the attention choice. `summary` is delivered as the result's `brief`. Citations must identify
+supplied events or reply parents; a wake or nonempty digest needs a summary and at least one citation. A normal
+hold/keep alert has an empty summary. The optional engine's JSON is advice, not this final assessment.
+
+## CLI and version 1 compatibility
+
+Use a separate policy and state path for each workflow:
 
 ```sh
-baton secretary --state /private/secretary.sqlite --policy /private/policy.json scan --limit 100
-baton secretary --state /private/secretary.sqlite --policy /private/policy.json decide --budget-seconds 5
-baton secretary --state /private/secretary.sqlite --policy /private/policy.json decide \
-  --budget-seconds 10 --since 420 --floor 300 --hourly
-baton secretary --policy /private/policy.json read --after 420 --limit 100 --max-bytes 65536
+baton secretary --state /private/secretary-v2.sqlite --policy /private/policy-v2.json decide \
+  --budget-seconds 30 --trigger message:42
+baton secretary --state /private/secretary-v2.sqlite --policy /private/policy-v2.json show
+baton secretary --state /private/secretary-v2.sqlite --policy /private/policy-v2.json acknowledge DECISION_ID
+baton secretary --policy /private/policy-v2.json read --ids msg_0123456789abcdef
 ```
 
-Use `baton --config /path/to/baton.toml ...` when the host's default configuration is not appropriate.
-`decide` requires `--budget-seconds` (greater than zero, at most 60). Its optional trigger is `message:SEQ`,
-`job:JOB_ID:SEQ`, or `conversation`. `read` requires exactly one of `--after POSITION` or `--ids ID,ID`.
+`show` and `replay` inspect saved v2 assessments; replay reports recorded results and does not infer again. `read`
+uses the same current visibility rules for either policy version. `scan` and `cancel` are version 1 compatibility
+operations; version 2 reads its inbox during `decide` and has no inferred request ledger to cancel. Existing
+version 1 data remains available only with its version 1 policy and old state file. To migrate, create a version 2
+policy and a new, separate private state file; version 1 state is not converted in place. The
+[legacy guide](legacy/README.md) describes the previous workflow.
+
+## Code map
+
+| Module | Responsibility |
+|---|---|
+| [service.py](service.py) | Async host API, version dispatch, and delivery acknowledgment. |
+| [decide.py](decide.py) | Reads the window, enforces the callback budget, caches identical assessments, and rechecks visibility. |
+| [inbox.py](inbox.py) | Builds the complete pending context and rejects over-limit windows. |
+| [model.py](model.py) | OpenAI Responses and host-command transports; optional advisory command. |
+| [prompt.py](prompt.py) | Model instructions and structured response schema. |
+| [assessment.py](assessment.py) | Validates decisions, summary bounds, and source references. |
+| [policy.py](policy.py) | Validates version 2 configuration and dispatches version 1 policies. |
+| [state.py](state.py) | Private v2 assessment cache, activation/delivery positions, and acknowledgment. |
+| [legacy/](legacy/README.md) | Isolated version 1 rule interpreter, request ledger, judge protocol, and state. |
+
+For the OpenAI transport, see the [Responses API structured outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs)
+and [GPT-6 Luna model reference](https://developers.openai.com/api/docs/models/gpt-6-luna).

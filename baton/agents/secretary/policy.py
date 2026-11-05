@@ -1,127 +1,142 @@
-"""Secretary policy values, loading, and validation.
-
-The engine, decision gate, judge, and read interface share this policy definition.
-Validation order and normalized policy digests are part of its contract."""
+"""Configuration for the principal's lightweight model and optional decision engine."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from urllib.parse import urlsplit
 
 from baton.config import Config, ConfigError
 from baton.database import Connection
+from baton.database.store import connect_read_only
 
-from . import store as secretary_store
-
-POLICY_VERSION = 1
+POLICY_VERSION = 2
 MAX_POLICY_BYTES = 16 * 1024
-DEFAULT_ANSWERS = ("PASS", "FAIL", "BLOCK", "CHANGES REQUIRED", "APPROVED")
-DEFAULT_ACKS = ("claimed", "starting", "received", "recorded")
-BRIEF_BYTES = (512, 2048, 16 * 1024)  # the least, default and most bytes `decide` may append to a wake
-JUDGE_THRESHOLDS = {"owed_digest_below": 0.4, "wake_at": 0.8}  # their defaults; secretary_judge says how they apply
+
+
+def fingerprint(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=False).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
 class Policy:
     principal: str
-    secretary_alias_id: str
-    answer_words: tuple[str, ...]
-    ack_words: tuple[str, ...]
-    terminal_job_states: tuple[str, ...]
-    job_events_wake: bool
-    brief_bytes: int
-    judge: dict[str, Any] | None
-    raw: dict[str, Any]
+    model: dict
+    decision_engine: dict | None
+    instructions: str
+    max_events: int
+    context_bytes: int
+    summary_bytes: int
+    raw: dict
     digest: str
 
 
-def _words(value: Any, field: str, default: tuple[str, ...]) -> tuple[str, ...]:
-    words = value if value is not None else list(default)
-    if not isinstance(words, list) or not words or len(words) > 32 or not all(
-        isinstance(word, str) and 1 <= len(word) <= 40 and word.strip() == word for word in words
-    ) or len(set(words)) != len(words):
-        raise ConfigError(f"policy.{field} must be 1-32 distinct short words or phrases")
-    return tuple(words)
+def read_policy(config: Config, path: Path):
+    with connect_read_only(config.db_path) as baton:
+        return load_policy(config, baton, path)
 
 
-def load_policy(config: Config, baton: Connection, path: Path) -> Policy:
+def load_policy(config: Config, baton: Connection, path: Path):
     try:
         data = path.read_bytes()
-    except OSError as error:
-        raise ConfigError(f"cannot read secretary policy: {error}") from error
-    if len(data) > MAX_POLICY_BYTES:
-        raise ConfigError("secretary policy exceeds 16 KiB")
-    try:
+        if len(data) > MAX_POLICY_BYTES:
+            raise ConfigError("secretary policy exceeds 16 KiB")
         raw = json.loads(data)
-    except (UnicodeError, json.JSONDecodeError) as error:
-        raise ConfigError(f"invalid secretary policy JSON: {error}") from error
-    fields = {"version", "principal", "secretary_alias_id", "answer_words", "ack_words", "terminal_job_states",
-              "job_events_wake", "brief_bytes", "judge"}
-    if not isinstance(raw, dict) or not {"version", "principal", "secretary_alias_id"} <= raw.keys() \
-            or raw.keys() - fields:
-        raise ConfigError("secretary policy fields are invalid")
-    if type(raw["version"]) is not int or raw["version"] != POLICY_VERSION:
+    except (OSError, ValueError) as error:
+        raise ConfigError("cannot read secretary policy JSON") from error
+    if not isinstance(raw, dict) or type(raw.get("version")) is not int:
+        raise ConfigError("secretary policy must name version 2 (or legacy version 1)")
+    if raw["version"] == 1:
+        from .legacy.policy import load_policy as load_legacy
+        return load_legacy(config, baton, path)
+    if raw["version"] != POLICY_VERSION:
         raise ConfigError("unsupported secretary policy version")
-    principal, alias_id = raw["principal"], raw["secretary_alias_id"]
+    fields = {"version", "principal", "model", "decision_engine", "instructions", "max_events",
+              "context_bytes", "summary_bytes"}
+    if "principal" not in raw or raw.keys() - fields:
+        raise ConfigError("secretary policy fields are invalid")
+    principal = raw["principal"]
     role = config.roles.get(principal) if isinstance(principal, str) else None
     if role is None or principal == "guest" or role.human or role.display_only:
         raise ConfigError("secretary principal must be an existing non-human, non-display agent role")
-    if not isinstance(alias_id, str) or not alias_id or alias_id == principal:
-        raise ConfigError("secretary must name an existing, different guest alias ID")
-    if baton.execute("SELECT 1 FROM aliases WHERE id=?", (alias_id,)).fetchone() is None:
-        raise ConfigError("secretary alias does not exist")
-    if baton.execute("SELECT 1 FROM alias_roles WHERE alias_id=?", (alias_id,)).fetchone() is not None:
-        raise ConfigError("secretary alias is mapped to a role")
-    answers = _words(raw.get("answer_words"), "answer_words", DEFAULT_ANSWERS)
-    acks = _words(raw.get("ack_words"), "ack_words", DEFAULT_ACKS)
-    terminal = _words(raw.get("terminal_job_states"), "terminal_job_states",
-                      tuple(name for name, state in config.jobs.states.items() if state.terminal))
-    if any(name not in config.jobs.states or not config.jobs.states[name].terminal for name in terminal):
-        raise ConfigError("policy.terminal_job_states must name configured terminal states")
-    # Job events never wake the principal on their own unless this key says so (decide).
-    job_wakes = raw.get("job_events_wake", False)
-    if type(job_wakes) is not bool:
-        raise ConfigError("policy.job_events_wake must be true or false")
-    least, default, most = BRIEF_BYTES
-    brief_bytes = raw.get("brief_bytes", default)
-    if type(brief_bytes) is not int or not least <= brief_bytes <= most:
-        raise ConfigError(f"policy.brief_bytes must be an integer from {least} to {most}")
-    judge = _judge_block(raw.get("judge"))
-    normalized = {"version": POLICY_VERSION, "principal": principal, "secretary_alias_id": alias_id,
-                  "answer_words": list(answers), "ack_words": list(acks), "terminal_job_states": list(terminal),
-                  "job_events_wake": job_wakes, "brief_bytes": brief_bytes, **({"judge": judge} if judge else {})}
-    return Policy(principal, alias_id, answers, acks, terminal, job_wakes, brief_bytes, judge, normalized,
-                  secretary_store.digest(normalized))
+    instructions = raw.get("instructions", "")
+    if not isinstance(instructions, str) or len(instructions.encode()) > 8192:
+        raise ConfigError("secretary instructions must be text of at most 8192 bytes")
+    model = _model(raw.get("model", {}))
+    engine = raw.get("decision_engine")
+    if engine is not None:
+        if not isinstance(engine, dict) or engine.keys() - {"command", "timeout_seconds"}:
+            raise ConfigError("decision_engine needs command and optional timeout_seconds")
+        engine = {"command": _command(engine.get("command")),
+                  "timeout_seconds": _timeout(engine.get("timeout_seconds", 3))}
+    normalized = {"version": POLICY_VERSION, "principal": principal, "model": model,
+                  "decision_engine": engine, "instructions": instructions,
+                  "max_events": _integer(raw.get("max_events", 1000), "max_events", 1, 10000),
+                  "context_bytes": _integer(raw.get("context_bytes", 1024 * 1024), "context_bytes", 1024, 8388608),
+                  "summary_bytes": _integer(raw.get("summary_bytes", 8192), "summary_bytes", 256, 65536)}
+    return Policy(**{key: value for key, value in normalized.items() if key != "version"},
+                  raw=normalized, digest=fingerprint(normalized))
 
 
-def _judge_block(value: Any) -> dict[str, Any] | None:
-    """The optional judge: its command, its timeout, the sha256 of the question file it asks, and the two
-    thresholds. All of them are in the policy digest, so a recorded decision names exactly the judge it used."""
-    if value is None:
-        return None
-    fields = {"command", "timeout_seconds", "questions_sha256", *JUDGE_THRESHOLDS}
-    if not isinstance(value, dict) or not {"command", "timeout_seconds", "questions_sha256"} <= value.keys() \
-            or value.keys() - fields:
-        raise ConfigError("policy.judge fields are invalid")
-    block = {**JUDGE_THRESHOLDS, **value}
-    command = block["command"]
-    if not isinstance(command, list) or not 1 <= len(command) <= 16 or not all(
-            isinstance(part, str) and 0 < len(part) <= 4096 and "\0" not in part for part in command) \
-            or not command[0].startswith("/"):
-        raise ConfigError("policy.judge.command must be an argv list that starts with an absolute path")
-    if not _finite(block["timeout_seconds"]) or not 0 < block["timeout_seconds"] <= 10:
-        raise ConfigError("policy.judge.timeout_seconds must be more than 0 and at most 10")
-    if not isinstance(block["questions_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", block["questions_sha256"]):
-        raise ConfigError("policy.judge.questions_sha256 must be a lowercase hex sha256")
-    if not all(_finite(block[key]) for key in JUDGE_THRESHOLDS) or not (
-            0 <= block["owed_digest_below"] <= block["wake_at"] <= 1):
-        raise ConfigError("policy.judge needs 0 <= owed_digest_below <= wake_at <= 1")
-    return block
+def _model(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ConfigError("model must be an object")
+    provider = value.get("provider", "openai")
+    common = {"provider", "timeout_seconds"}
+    if provider == "command":
+        if value.keys() - common - {"command"}:
+            raise ConfigError("command model fields are invalid")
+        return {"provider": provider, "command": _command(value.get("command")),
+                "timeout_seconds": _timeout(value.get("timeout_seconds", 20))}
+    if provider != "openai" or value.keys() - common - {
+            "model", "base_url", "api_key_env", "reasoning_effort", "max_output_tokens"}:
+        raise ConfigError("model provider or fields are invalid")
+    settings = {"provider": "openai", "model": "gpt-6-luna", "base_url": "https://api.openai.com/v1",
+                "api_key_env": "OPENAI_API_KEY", "reasoning_effort": "low", "max_output_tokens": 4096,
+                "timeout_seconds": 20, **value}
+    if not isinstance(settings["model"], str) or not 1 <= len(settings["model"]) <= 200:
+        raise ConfigError("model.model must be a nonempty model ID")
+    if not isinstance(settings["api_key_env"], str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*",
+                                                                      settings["api_key_env"]):
+        raise ConfigError("model.api_key_env must name an environment variable")
+    if settings["reasoning_effort"] not in ("none", "low", "medium", "high", "xhigh", "max"):
+        raise ConfigError("model.reasoning_effort is invalid")
+    try:
+        url = urlsplit(settings["base_url"])
+        valid = url.scheme in ("http", "https") and url.hostname and not (
+            url.username or url.password or url.query or url.fragment)
+        # HTTP is useful for a local model server; credentials must not cross plaintext remote networks.
+        valid = valid and (url.scheme == "https" or url.hostname in ("localhost", "127.0.0.1", "::1"))
+    except (AttributeError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise ConfigError("model.base_url must be HTTPS, or HTTP on localhost, without credentials/query/fragment")
+    settings["base_url"] = settings["base_url"].rstrip("/")
+    settings["timeout_seconds"] = _timeout(settings["timeout_seconds"])
+    settings["max_output_tokens"] = _integer(settings["max_output_tokens"], "max_output_tokens", 256, 32768)
+    return settings
 
 
-def _finite(value: Any) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)
+def _command(value: object) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 32 or not all(
+            isinstance(part, str) and 0 < len(part) <= 4096 and "\0" not in part for part in value) \
+            or not Path(value[0]).is_absolute():
+        raise ConfigError("command must be an argv list starting with an absolute executable path")
+    return value
+
+
+def _timeout(value: object) -> float:
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= 60:
+        raise ConfigError("timeout_seconds must be greater than zero and at most 60")
+    return float(value)
+
+
+def _integer(value: object, field: str, least: int, most: int) -> int:
+    if type(value) is not int or not least <= value <= most:
+        raise ConfigError(f"{field} must be an integer from {least} to {most}")
+    return value

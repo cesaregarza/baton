@@ -10,9 +10,10 @@ from secretary_support import conversation, make_world, policy, say, table_hashe
 
 from baton import cli, conversations, events, jobs, messages
 from baton.agents.secretary import decide as secretary_decide
-from baton.agents.secretary import digest as secretary_digest
-from baton.agents.secretary import store as secretary_store
-from baton.agents.secretary import tracking as secretary
+from baton.agents.secretary.legacy import decide as legacy_decide
+from baton.agents.secretary.legacy import digest as secretary_digest
+from baton.agents.secretary.legacy import store as secretary_store
+from baton.agents.secretary.legacy import tracking as secretary
 from baton.config import ConfigError
 from baton.database.store import transaction
 from baton.errors import InvalidRequest
@@ -215,7 +216,7 @@ def test_the_window_lists_what_is_outstanding_since_the_last_brief_however_littl
         assert [item["source_key"] for item in window.get("context", [])] == [f"message:{own['message_id']}"]
         assert [item["delivered"] for item in window["deliveries"] + window["context"]] == [True, True, True, False]
         assert (window["more_deliveries"], window["more_context"]) == (0, 0)
-        monkeypatch.setattr(secretary_decide, "LISTED", 2)
+        monkeypatch.setattr(legacy_decide, "LISTED", 2)
         bounded = _decide(world, **_after(first, trigger=trigger))["window"]
         assert [item["source_key"] for item in bounded["deliveries"]] == [
             item["source_key"] for item in window["deliveries"][:2]]
@@ -242,7 +243,7 @@ def test_behind_scan_names_its_position_and_whether_it_covers_the_trigger(tmp_pa
         for index in range(4):
             say(world, room, "worker", f"Filler {index}")
         last, last_trigger = _direct(world, "Please decide two")
-        monkeypatch.setattr(secretary_decide, "BATCH", 2)
+        monkeypatch.setattr(legacy_decide, "BATCH", 2)
         behind = _decide(world, trigger=first_trigger, budget_seconds=0.001)
         assert behind["coverage"] == "behind" and behind["covers_trigger"] is True
         assert behind["through_pos"] < behind["head"]

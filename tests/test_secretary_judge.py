@@ -12,8 +12,8 @@ from secretary_support import conversation, make_world, policy, say
 
 from baton import conversations, jobs, messages
 from baton.agents.secretary import decide as secretary_decide
-from baton.agents.secretary import store as secretary_store
-from baton.agents.secretary import tracking as secretary
+from baton.agents.secretary.legacy import store as secretary_store
+from baton.agents.secretary.legacy import tracking as secretary
 from baton.config import ConfigError
 from baton.database.store import transaction
 

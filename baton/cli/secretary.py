@@ -1,4 +1,4 @@
-"""Host-only offline attention record commands."""
+"""Host-local model secretary and legacy attention records."""
 
 from __future__ import annotations
 
@@ -10,22 +10,25 @@ from baton.config import Config
 
 
 def add_commands(commands: Any) -> None:
-    group = commands.add_parser("secretary", help="scan, replay and inspect offline attention records")
+    group = commands.add_parser("secretary", help="triage an inbox with a lightweight model and inspect its summaries")
     group.add_argument("--state", type=Path, help="private SQLite state file (every action but read)")
-    group.add_argument("--policy", type=Path, required=True, help="versioned JSON relationship and rules")
+    group.add_argument("--policy", type=Path, required=True, help="versioned secretary model policy")
     actions = group.add_subparsers(dest="secretary_command", required=True)
-    scan = actions.add_parser("scan", help="read a bounded page of Baton events without advancing Baton cursors")
+    scan = actions.add_parser("scan", help="version-1 compatibility catch-up (version 2 needs no scan)")
     scan.add_argument("--limit", type=int, default=100)
     scan.set_defaults(handler=lambda config, args: run(config, args, "scan"))
-    actions.add_parser("replay", help="compare a recomputation without changing saved records").set_defaults(
+    actions.add_parser("replay", help="inspect saved assessments, or recompute legacy rules").set_defaults(
         handler=lambda config, args: run(config, args, "replay"))
-    show = actions.add_parser("show", help="inspect one principal and render visible source excerpts")
+    show = actions.add_parser("show", help="inspect current-visible assessments or legacy source records")
     show.add_argument("--source", dest="source_key")
     show.set_defaults(handler=lambda config, args: run(config, args, "show"))
     cancel = actions.add_parser("cancel", help="explicitly cancel an expectation with a reason")
     cancel.add_argument("expectation_id")
     cancel.add_argument("--reason", required=True)
     cancel.set_defaults(handler=lambda config, args: run(config, args, "cancel"))
+    acknowledge = actions.add_parser("acknowledge", help="record successful delivery of a version-2 summary")
+    acknowledge.add_argument("decision_id")
+    acknowledge.set_defaults(handler=lambda config, args: run(config, args, "acknowledge"))
     from baton.agents.secretary import decide as secretary_decide
     from baton.agents.secretary import read as secretary_read
 
@@ -42,6 +45,10 @@ def run(config: Config, args: argparse.Namespace, action: str) -> dict[str, Any]
     from baton.agents.secretary import decide as secretary_decide
     from baton.agents.secretary import read as secretary_read
 
+    if action == "acknowledge":
+        import asyncio
+        service = secretary.Secretary(config, args.state, args.policy)
+        return {"since": asyncio.run(service.acknowledge(args.decision_id))}
     if action == "read":
         return secretary_read.read(config, args.policy, **secretary_read.options(args))
     if action == "decide":

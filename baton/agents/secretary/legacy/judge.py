@@ -53,10 +53,10 @@ from baton import messages
 from baton.config import Config
 from baton.database import Connection, Row
 
+from .. import sources
+from ..command import JudgeCommand
 from . import policy as policy_module
-from . import sources
 from . import store as secretary_store
-from .command import JudgeCommand
 from .expectations import EVIDENCE_LIMIT, Expectations, artifact_match
 from .rules import NO_ACTION, MessageRules, addressed, choose_disposition, result_kind, signals
 

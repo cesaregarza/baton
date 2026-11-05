@@ -10,7 +10,7 @@ baton/
   app/                 MCP server, authentication guard, tool schemas and adapters
   cli/                 Command parser and commands grouped by feature
   agents/              Agent, Permissions and thread access
-    secretary/         Offline attention tracking, decisions, judge and private state
+    secretary/         Model-driven inbox triage, summary delivery and isolated v1 compatibility
   messages/            DirectMessage, Inbox, Post and mailbox delivery
   conversations/       Conversation, membership, group delivery, history and listing
   topics/              Topic containers, paths, grants and reference documents
@@ -56,14 +56,13 @@ entrypoints. Their implementations live in `agents/secretary/decide.py` and `age
 | Change job transitions | `jobs.py` | `Job.move()` owns revision checks, retries and atomic event recording |
 | Change connection mechanics | `database/driver.py` | `files.py` checks private database files |
 | Change the authoritative schema | `database/schema.py`, `database/migrations.py` | `database/store.py` opens and initializes the database |
-| Change secretary message matching or job handoffs | `agents/secretary/rules.py` | `MessageRules` interprets messages; `job_disposition` follows job actors |
-| Change expectation lifecycle or evidence limits | `agents/secretary/expectations.py` | `Expectations` opens, records and closes requests for one principal |
-| Change secretary scan or replay | `agents/secretary/tracking.py` | `sources.py` reads visible records; `store.py` owns the private schema |
-| Change wake/hold decisions | `agents/secretary/decide.py` | `DecisionRun` owns a callback; `AttentionWindow` selects and presents outstanding items |
-| Integrate asynchronous secretary calls | `agents/secretary/service.py` | `Secretary.scan/decide` await database work and external judgments |
-| Change judge interpretation or command execution | `agents/secretary/judge.py`, `command.py` | `Judgment` owns meaning; `JudgeSession` owns budget; `JudgeCommand` owns process I/O |
-| Change brief or digest text | `agents/secretary/digest.py` | Rendering checks visibility and returns the position covered by the byte bound |
-| Change secretary read output | `agents/secretary/read.py` | It reads authoritative data without advancing delivery cursors |
+| Change version 2 secretary policy or version dispatch | `agents/secretary/policy.py`, `service.py` | Version 1 behavior is isolated under `agents/secretary/legacy/` |
+| Change the model's inbox context or size limits | `agents/secretary/inbox.py` | Reads currently visible pending events; refuses an oversized full window |
+| Change wake/hold/keep assessment and callback lifecycle | `agents/secretary/decide.py` | `DecisionRun` coordinates the window, model call, cache and visibility recheck |
+| Change model or optional advisory transport | `agents/secretary/model.py` | OpenAI Responses and host commands use `prompt.py`'s schema |
+| Change instructions or structured response shape | `agents/secretary/prompt.py`, `assessment.py` | Assessment validation checks decisions, summary bounds and cited source keys |
+| Change private assessment cache or delivery acknowledgment | `agents/secretary/state.py` | `service.py` advances coverage only after host delivery |
+| Change secretary source visibility or read output | `agents/secretary/read.py`, `sources.py` | Reads current authoritative data without advancing Baton inbox cursors |
 
 ## Follow one message
 
@@ -144,23 +143,18 @@ read, or borrows an existing transaction.
 
 ### Secretary workflow
 
-The [secretary developer guide](../baton/agents/secretary/README.md) explains owed and awaited requests,
-rule order, judge behavior, and the scan/decision/delivery lifecycle with examples.
+The [secretary developer guide](../baton/agents/secretary/README.md) documents model setup, host delivery,
+source references and the version 1 compatibility path.
 
-`Secretary.scan()` awaits a `ScanBatch` that reads visible events and commits their effects with the scan position.
-`MessageRules.interpret()` matches a message to outstanding requests, records its result, then opens any new
-request addressed to the principal. Job events use `job_disposition()` instead. Both use an `Expectations`
-ledger bound to the principal and the scan's connection; the ledger owns opening, evidence and closure limits.
+For a version 2 policy, `Secretary.decide()` asks `InboxWindow` for the complete pending visible context, then
+`SecretaryModel` returns one semantic wake/hold/keep decision with a summary when needed. The optional
+`DecisionEngine` supplies advisory context to that model. `Assessment` checks its output against the offered
+source keys. The service rechecks source visibility after inference and caches a completed assessment for an
+identical policy and input. The host delivers the returned `brief`, then acknowledges its `decision_id` or
+supplies `covered_through` as the next `since`; a hold, keep or failed call does not advance coverage.
 
-When a judge is configured, `JudgeSession` asks an asynchronous `JudgeCommand` to interpret a message's
-prepared question. `Judgment` applies the answer through the same ledger. It also
-records what the word rules would have decided, rolling back that trial before applying the judgment.
-`tracking.replay()` uses recorded verdicts and an in-memory ledger, so it neither calls the judge again nor
-rewrites stored state.
-
-`Secretary.decide()` creates a `DecisionRun` that scans within its budget. Its `AttentionWindow` chooses
-wake/hold/keep and renders text when needed. Rendering returns both the text and the position it actually covered. The caller supplies that
-position on the next call only after delivering the text; an undelivered brief is therefore retried.
+Version 1 policy dispatches to the isolated `legacy/` interpreter and request ledger. Its scan, rules, judge,
+replay and cancel behavior are compatibility support, not the version 2 workflow.
 
 ## Organization rules
 

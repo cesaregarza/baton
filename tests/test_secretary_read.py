@@ -18,8 +18,8 @@ from secretary_support import ALIAS_ID, conversation, make_world, say, table_has
 
 import baton
 from baton import cli, conversations, events, jobs, messages
-from baton.agents.secretary import store as secretary_store
-from baton.agents.secretary import tracking as secretary
+from baton.agents.secretary.legacy import store as secretary_store
+from baton.agents.secretary.legacy import tracking as secretary
 from baton.database import store
 from baton.database.store import transaction
 

@@ -1,4 +1,4 @@
-"""Async transport for a secretary judge command."""
+"""Async process I/O for host-run models and decision engines."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ _CHUNK_SIZE = 64 * 1024
 
 
 @dataclass(frozen=True)
-class JudgeCommand:
+class Command:
     """An argv command with a strict bound on captured stdout."""
 
     argv: list[str]
@@ -100,7 +100,7 @@ async def _read_output(reader: asyncio.StreamReader, max_output: int) -> bytes:
     except asyncio.IncompleteReadError as exc:
         output = exc.partial
     if len(output) > max_output:
-        raise ValueError("judge output exceeds its bound")
+        raise ValueError("command output exceeds its bound")
     return output
 
 
@@ -139,3 +139,6 @@ async def _cleanup(process: asyncio.subprocess.Process, tasks: list[asyncio.Task
         if not wait_task.done():
             wait_task.cancel()
         await asyncio.gather(wait_task, return_exceptions=True)
+
+
+JudgeCommand = Command  # Version-1 host imports.

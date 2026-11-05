@@ -15,8 +15,6 @@ from baton.config import Config, ConfigError
 from baton.database import Connection, Row
 from baton.errors import InvalidRequest
 
-from . import store as secretary_store
-
 ENVELOPE_VERSION = 1
 DEFAULT_BATCH = 100
 MAX_CITATIONS = 64
@@ -24,6 +22,11 @@ ARTIFACT = re.compile(r"(?<![\w/.-])(?P<key>[\w./-]+#\d+)@(?P<rev>[0-9a-fA-F]{7,
                       r"|(?<![0-9a-fA-F])(?P<sha>[0-9a-fA-F]{40})(?![0-9a-fA-F])")
 SUPERSEDES = re.compile(r"\bsupersedes\s+(?P<key>[\w./-]+#\d+)@(?P<rev>[0-9a-fA-F]{7,40})"
                         r"(?![0-9a-fA-F])", re.IGNORECASE)
+
+
+def _digest(value: object) -> str:
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _epoch(baton: Connection) -> str:
@@ -123,8 +126,8 @@ def _envelope(baton: Connection, config: Config, principal: str,
                   "conversation_seq": message["conversation_seq"], "reply_to": message["reply_to"],
                   "attention": shaped["attention"], "needs_decision": shaped["needs_decision"],
                   "text_sha256": _sha_text(text),
-                  "relayed_sha256": secretary_store.digest(relayed) if relayed is not None else None,
-                  "notice_sha256": secretary_store.digest(notice) if notice is not None else None,
+                  "relayed_sha256": _digest(relayed) if relayed is not None else None,
+                  "notice_sha256": _digest(notice) if notice is not None else None,
                   "relayed_count": len(relayed) if relayed else 0, "has_notice": notice is not None}
     else:
         source_key = f"event:{event['pos']}"

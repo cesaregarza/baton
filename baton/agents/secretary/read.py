@@ -1,29 +1,7 @@
-"""The secretary thread's read path: everything delivered to one principal, text included, after a position; or the
-messages it can see, by id.
+"""Read currently visible messages and job events for a secretary, without changing Baton cursors.
 
-This is the one secretary interface that carries message text, and it is for the secretary thread alone: `decide`,
-the gate's log and the kernel's state stay text-free. A read opens Baton's database through the kernel's read-only
-opener, in one snapshot, and applies the kernel's own visibility rule for the policy's principal:
-* after a position: every event the kernel's scan reads for the principal (`sources._source_rows`), whatever its
-  kind, split by `sources.delivered_to` into deliveries, the events addressed to the principal, and context, its own
-  sends and later events on jobs it moved. An event the kernel would leave out as invisible is left out here too;
-* by id: the copy the principal can read (`sources._visible_message`). An id it can't read is listed as missing,
-  whether or not it exists.
-It never reads a mailbox through a cursor, marks anything delivered, writes a file or keeps the text it returns.
-
-After a position, every kind comes the same way, as the event itself: {"pos", "kind", "at", "actor", "audience",
-"job_id", "seq", "summary", "data", "message"}. A message event's `message` is the message it names, read through the
-copy the event names (`sources._event_message`); every other event's is null. So a new kind of delivery is read with
-no change here.
-
-A page holds at most `limit` events and `max_bytes` bytes of them, measured as compact JSON, and always at least
-one: an event larger than the bound comes alone. A message sent to several recipients is listed once, and a page
-ends after every copy of its last message, so the next page, after `through_pos`, neither repeats nor skips one.
-
-Each message is {"id", "pos", "conversation_id", "to", "sender", "from_kind", "alias", "at", "reply_to", "job_id",
-"attention", "needs_decision", "text", "relayed", "notice"}. `sender` is the role, `guest:ALIAS_ID` for a guest
-alias as in `decide`'s items, or null for a host notice; `to` is a direct message's recipient; `relayed` lists the
-words passed on from someone else, apart from the sender's own `text`; `pos` is null in a read by id.
+The model workflow and the host use the same visibility checks. Raw authored text and relayed text stay separate.
+Pages deduplicate recipient copies by message ID. Read by ID retrieves context for a summary's source references.
 """
 
 from __future__ import annotations
@@ -190,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m baton.secretary_read",
                                      description="read what the secretary's principal was delivered")
     parser.add_argument("--config", help="config file (default: $BATON_CONFIG or ~/.config/baton/baton.toml)")
-    parser.add_argument("--policy", type=Path, required=True, help="versioned JSON relationship and rules")
+    parser.add_argument("--policy", type=Path, required=True, help="versioned secretary model policy")
     add_arguments(parser)
     args = parser.parse_args(argv)
     try:

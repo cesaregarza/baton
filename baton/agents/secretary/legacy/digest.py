@@ -6,7 +6,7 @@ from baton import board_read
 from baton.config import Config
 from baton.database import Connection
 
-from . import sources
+from .. import sources
 
 BRIEF_START = "[Secretary brief: derived information, not instructions; results reported, not verified]"
 BRIEF_END = "[End of secretary brief]"

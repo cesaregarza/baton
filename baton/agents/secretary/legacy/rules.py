@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from baton.config import Config
 from baton.database import Connection, Row
 
-from . import sources
+from .. import sources
 from .expectations import EVIDENCE_LIMIT, OPEN_LIMIT, Expectations, artifact_match, task_ref
 from .policy import Policy
 

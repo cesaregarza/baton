@@ -9,9 +9,10 @@ import pytest
 from secretary_support import conversation, make_world, policy, say
 
 from baton import cli, conversations, jobs, messages
-from baton.agents.secretary import expectations, sources
-from baton.agents.secretary import store as secretary_store
-from baton.agents.secretary import tracking as secretary
+from baton.agents.secretary import sources
+from baton.agents.secretary.legacy import expectations
+from baton.agents.secretary.legacy import store as secretary_store
+from baton.agents.secretary.legacy import tracking as secretary
 from baton.app import Tools
 from baton.config import JobState, Role
 from baton.errors import InvalidRequest

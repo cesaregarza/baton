@@ -10,7 +10,7 @@ from pathlib import Path
 
 from baton import config as config_module
 from baton import conversations
-from baton.agents.secretary import store as secretary_store
+from baton.agents.secretary.legacy import store as secretary_store
 from baton.config import Config
 from baton.database import store
 

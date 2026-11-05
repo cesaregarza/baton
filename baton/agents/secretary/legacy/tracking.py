@@ -22,13 +22,13 @@ from baton.database import Connection
 from baton.database.store import connect_read_only
 from baton.errors import InvalidRequest
 
+from .. import sources
+from ..runtime import DatabaseWorker
 from . import judge as secretary_judge
-from . import sources
 from . import store as secretary_store
 from .expectations import Expectations
 from .policy import POLICY_VERSION, Policy, load_policy
 from .rules import MessageRules, job_disposition
-from .runtime import DatabaseWorker
 
 RULES_VERSION = 7
 MAX_BATCH = 1000
