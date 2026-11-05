@@ -88,43 +88,6 @@ def test_archive_does_not_delete_rows_when_private_state_is_gone(host, tmp_path)
 
 def test_summaries_cli_pages_by_policy_principal_without_private_state(tmp_path) -> None:
     with make_world(tmp_path) as world:
-        world.policy_path.write_text(
-            json.dumps(
-                {
-                    "version": 3,
-                    "principal": "planner",
-                    "secretary_id": "planner-secretary",
-                    "model": {
-                        "provider": "openai",
-                        "model": "unused-model",
-                        "base_url": "https://models.example.invalid/v1",
-                        "api_key_env": "UNUSED_KEY",
-                        "reasoning_effort": "none",
-                        "max_output_tokens": 1024,
-                        "timeout_seconds": 5,
-                        "cache_mode": "implicit",
-                    },
-                    "decision_engine": {
-                        "provider": "jev",
-                        "model": "unused-engine",
-                        "base_url": "https://decision.example.invalid/v1",
-                        "api_key_env": "UNUSED_ENGINE_KEY",
-                        "timeout_seconds": 3,
-                    },
-                    "instructions": "",
-                    "knowledge": "",
-                    "max_tool_calls": 1,
-                    "max_events": 100,
-                    "context_bytes": 1024,
-                    "summary_bytes": 256,
-                    "wake_threshold": 0.8,
-                    "retry_initial_seconds": 1,
-                    "retry_max_seconds": 2,
-                    "max_attempts": 2,
-                    "digest_seconds": 2,
-                }
-            )
-        )
         archive = SummaryArchive(world.config)
         archive.save("planner-secretary", _result("planner", "planner-first", "first"))
         archive.save("planner-secretary", _result("planner", "planner-second", "second"))

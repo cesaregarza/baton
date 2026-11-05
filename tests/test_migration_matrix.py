@@ -1,9 +1,9 @@
 """Every upgrade path onto the current schema, from each older version baton says it can climb from.
 
-Both lanes that raised the schema version add columns to `messages`, and one of them backfills
-`author_kind`. A database three versions behind has to pick up every step, in order, not just the one
-matching its own version. Each fixture is the schema that version really created, generated from the
-head that created it, not hand-edited.
+The historical steps add columns and tables, including the shared secretary summary archive at version 21;
+one of the older steps backfills `author_kind`. A database several versions behind has to pick up every step,
+in order, not just the one matching its own version. Each fixture is the schema that version really created,
+generated from the head that created it, not hand-edited.
 
 From the version that introduced `author_kind` the column already holds values, a person's own message
 among them, so these also pin that an upgrade never relabels one as an agent's.
@@ -236,6 +236,7 @@ WHOLE_TABLES = {
     17: {"topic_grants", "topic_grant_events"},  # the owner's topic grant records and their log
     18: {"reference_docs", "reference_revisions"},  # the documents a topic keeps, and their revisions
     19: {"alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes", "events_receipts"},
+    21: {"secretary_summaries"},  # shared secretary summary archive
 }  # records kept instead of overwritten or expired
 
 
