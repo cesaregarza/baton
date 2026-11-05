@@ -102,6 +102,17 @@ def make_engine(settings: dict) -> DecisionEngine:
 
 
 def _jev_decision(response: object) -> AttentionDecision:
+    """Validate JEV's reply by category, then return its selected decision."""
+    answer = _jev_attention_answer(response)
+    decision = _jev_choice(answer)
+    _validate_jev_probabilities(answer["probabilities"], decision)
+    _validate_jev_confidence(answer["confidence"])
+    _validate_jev_usage(response)
+    return decision
+
+
+def _jev_attention_answer(response: object) -> dict:
+    """Locate the single attention answer and require its four wire fields."""
     if not isinstance(response, dict):
         raise transport.ModelUnavailable("decision engine returned an invalid response")
     model = response.get("model")
@@ -116,33 +127,53 @@ def _jev_decision(response: object) -> AttentionDecision:
     answer = answers["attention"]
     if not isinstance(answer, dict) or set(answer) != {"type", "choice", "probabilities", "confidence"}:
         raise transport.ModelUnavailable("decision engine returned an invalid answer")
+    return answer
+
+
+def _jev_choice(answer: dict) -> AttentionDecision:
+    """Read wake, hold, or keep from a typed choice answer."""
     if answer["type"] != "choice" or not isinstance(answer["choice"], str):
         raise transport.ModelUnavailable("decision engine returned an invalid answer")
     try:
-        decision = AttentionDecision(answer["choice"])
+        return AttentionDecision(answer["choice"])
     except ValueError:
         raise transport.ModelUnavailable("decision engine returned an unknown decision") from None
 
-    probabilities = answer["probabilities"]
+
+def _validate_jev_probabilities(probabilities: object, decision: AttentionDecision) -> None:
+    """Require a complete distribution with the selected choice at its maximum.
+
+    Allow rounding in the total and ties for the most likely option.
+    """
     if not isinstance(probabilities, dict) or set(probabilities) != set(_OPTIONS):
         raise transport.ModelUnavailable("decision engine returned invalid probabilities")
-    values = probabilities.values()
-    if any(type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1 for value in values):
+    if not all(_is_probability(value) for value in probabilities.values()):
         raise transport.ModelUnavailable("decision engine returned invalid probabilities")
     if abs(sum(probabilities.values()) - 1.0) > 0.01:
         raise transport.ModelUnavailable("decision engine returned invalid probabilities")
     if probabilities[decision.value] != max(probabilities.values()):
         raise transport.ModelUnavailable("decision engine choice is not the most likely option")
-    confidence = answer["confidence"]
-    if type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+
+
+def _validate_jev_confidence(confidence: object) -> None:
+    """Confidence must be a finite number between zero and one."""
+    if not _is_probability(confidence):
         raise transport.ModelUnavailable("decision engine returned invalid confidence")
 
-    if "usage" in response:
-        usage = response["usage"]
-        if (
-            not isinstance(usage, dict)
-            or set(usage) != {"input_tokens", "output_tokens"}
-            or any(type(value) is not int or value < 0 for value in usage.values())
-        ):
-            raise transport.ModelUnavailable("decision engine returned invalid usage")
-    return decision
+
+def _validate_jev_usage(response: dict) -> None:
+    """Usage is optional; when present, both token counts must be nonnegative integers."""
+    if "usage" not in response:
+        return
+    usage = response["usage"]
+    if (
+        not isinstance(usage, dict)
+        or set(usage) != {"input_tokens", "output_tokens"}
+        or any(type(value) is not int or value < 0 for value in usage.values())
+    ):
+        raise transport.ModelUnavailable("decision engine returned invalid usage")
+
+
+def _is_probability(value: object) -> bool:
+    # JSON booleans are not probabilities, even though Python treats bool as an int.
+    return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1

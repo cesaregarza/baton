@@ -129,21 +129,42 @@ def test_cancellation_during_command_tool_reaps_child_without_assessment(tmp_pat
         asyncio.run(run())
 
 
-@pytest.mark.parametrize("bad_answer", [
-    {"choice": "ignore", "probabilities": {"wake": 0, "hold": 1, "keep": 0}, "confidence": 1},
-    {"choice": "hold", "probabilities": {"wake": float("nan"), "hold": 0, "keep": 0}, "confidence": 1},
-    {"choice": "wake", "probabilities": {"wake": 0.2, "hold": 0.8, "keep": 0}, "confidence": 0.8},
+@pytest.mark.parametrize("bad_response", [
+    pytest.param({"model": "", "answers": {"attention": {}}}, id="invalid-envelope"),
+    pytest.param({"model": "fake-jev", "answers": {"other": {}}}, id="wrong-answer-key"),
+    pytest.param({"model": "fake-jev", "answers": {"attention": {
+        "type": "text", "choice": "hold", "probabilities": {"wake": 0, "hold": 1, "keep": 0}, "confidence": 1,
+    }}}, id="wrong-answer-type"),
+    pytest.param({"model": "fake-jev", "answers": {"attention": {
+        "type": "choice", "choice": "hold", "probabilities": {"wake": 0, "hold": 1, "keep": 0},
+    }}}, id="missing-answer-field"),
+    pytest.param({"model": "fake-jev", "answers": {"attention": {
+        "type": "choice", "choice": "ignore", "probabilities": {"wake": 0, "hold": 1, "keep": 0}, "confidence": 1,
+    }}}, id="unknown-choice"),
+    pytest.param({"model": "fake-jev", "answers": {"attention": {
+        "type": "choice", "choice": "hold",
+        "probabilities": {"wake": float("nan"), "hold": 0, "keep": 0}, "confidence": 1,
+    }}}, id="non-finite-probability"),
+    pytest.param({"model": "fake-jev", "answers": {"attention": {
+        "type": "choice", "choice": "hold", "probabilities": {"wake": 0.2, "hold": 0.7, "keep": 0}, "confidence": 0.7,
+    }}}, id="probabilities-do-not-sum-to-one"),
+    pytest.param({"model": "fake-jev", "answers": {"attention": {
+        "type": "choice", "choice": "wake", "probabilities": {"wake": 0.2, "hold": 0.8, "keep": 0}, "confidence": 0.8,
+    }}}, id="choice-is-not-most-likely"),
+    pytest.param({"model": "fake-jev", "answers": {"attention": {
+        "type": "choice", "choice": "hold", "probabilities": {"wake": 0, "hold": 1, "keep": 0}, "confidence": 1.1,
+    }}}, id="invalid-confidence"),
+    pytest.param({"model": "fake-jev", "answers": {"attention": {
+        "type": "choice", "choice": "hold", "probabilities": {"wake": 0, "hold": 1, "keep": 0}, "confidence": 1,
+    }}, "usage": {"input_tokens": 1}}, id="invalid-optional-usage"),
 ])
-def test_malformed_jev_result_is_unavailable_and_model_can_finish(tmp_path, monkeypatch, bad_answer) -> None:
+def test_malformed_jev_result_is_unavailable_and_model_can_finish(tmp_path, monkeypatch, bad_response) -> None:
     requests: list[dict] = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-            response = {"model": "fake-jev", "answers": {"attention": {
-                "type": "choice", **bad_answer,
-            }}}
-            body = json.dumps(response, allow_nan=True).encode()
+            body = json.dumps(bad_response, allow_nan=True).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -194,7 +215,7 @@ def test_responses_keeps_append_only_prefix_reasoning_cache_usage_and_tool_schem
                 response = {"model": "fake-jev", "answers": {"attention": {
                     "type": "choice", "choice": "hold",
                     "probabilities": {"wake": 0, "hold": 1, "keep": 0}, "confidence": 1,
-                }}}
+                }}, "usage": {"input_tokens": 4, "output_tokens": 2}}
             else:
                 model_request_count += 1
                 if model_request_count == 1:
