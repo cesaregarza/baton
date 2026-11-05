@@ -35,7 +35,7 @@ import errno
 import os
 import secrets
 import stat
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -64,7 +64,7 @@ def canonical(path: Path | str) -> Path:
 
 
 @contextmanager
-def opened(path: Path) -> Iterator[int]:
+def opened(path: Path) -> Generator[int]:
     """A descriptor for `path` after creating or checking it and its parents, and checking every entry in it."""
     path = canonical(path)
     fd = _walk(path)

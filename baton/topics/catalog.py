@@ -356,7 +356,7 @@ def create(
             " request_id, request_digest, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (checked, title, description, json.dumps(chosen), actor, stamp, request_id, digest, topic_id),
         )
-        created = _row(conn, checked)
+        created = require_exists(conn, checked)
         record_seen(seen, checked, created, grant_id=grant_id)
         record(
             conn,
@@ -404,7 +404,7 @@ def update(
                 checked,
             ),
         )
-        updated = _row(conn, checked)
+        updated = require_exists(conn, checked)
         if _state(updated) != _state(row):
             record(
                 conn,
@@ -474,7 +474,7 @@ def rename(
             raise InvalidRequest(f"new_path {taken[0]!r} is already a topic")
         affected = topic_grants.affected_by_rename(conn, checked, target, moving)
         _require_acknowledged(checked, affected, acknowledge_topic_grants)
-        ids = {old: _row(conn, old)["id"] for old in moving}
+        ids = {old: require_exists(conn, old)["id"] for old in moving}
         # Deepest first, so a path never collides with one still to move.
         for old in sorted(moving, key=len, reverse=True):
             conn.execute("UPDATE topics SET path = ? WHERE path = ?", (moving[old], old))
@@ -485,7 +485,7 @@ def rename(
                 conn, topic_id=ids[old], operation="rename_topic", actor=who, before={"path": old}, after={"path": new}
             )
         topic_grants.record_rename(conn, affected, who, ids[checked], checked, target)
-        renamed = _row(conn, target)
+        renamed = require_exists(conn, target)
         record_seen(seen, checked, renamed, new_path=target)
         return {**_summary(renamed), "renamed_from": checked, "subtopics": len(children)}
 
@@ -505,9 +505,12 @@ def record_move(
     """
     before_id = None if before is None else id_of(conn, before)
     after_id = None if after is None else id_of(conn, after)
+    topic_id = after_id or before_id
+    if topic_id is None:
+        raise InvalidRequest("a topic move needs an existing source or destination")
     record(
         conn,
-        topic_id=after_id or before_id,
+        topic_id=topic_id,
         operation="set_topic",
         actor=actor,
         before={"conversation_id": conversation_id, "topic": before, "topic_id": before_id},
@@ -580,7 +583,7 @@ def _readable(conn: Connection, config: Config, reader: str, path: str) -> tuple
         row = conn.execute(
             "SELECT COUNT(*), MAX(last_activity_at) FROM conversations WHERE topic = ? OR topic LIKE ?",
             (path, f"{path}/%"),
-        ).fetchone()
+        ).one()
     else:
         row = conn.execute(
             "SELECT COUNT(*), MAX(c.last_activity_at) FROM conversations c"
@@ -588,5 +591,5 @@ def _readable(conn: Connection, config: Config, reader: str, path: str) -> tuple
             " (SELECT 1 FROM participants p WHERE p.conversation_id = c.id"
             " AND p.role = ?)",
             (path, f"{path}/%", reader),
-        ).fetchone()
+        ).one()
     return row[0], row[1]

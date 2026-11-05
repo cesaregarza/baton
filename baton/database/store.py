@@ -13,7 +13,7 @@ including optional search indexes.
 from __future__ import annotations
 
 import secrets
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -59,7 +59,7 @@ def connect(path: Path) -> Connection:
     conn = open_private(path)
     try:
         version = _refuse_other_schema(conn)
-        if conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+        if conn.execute("PRAGMA journal_mode").one()[0] != "wal":
             conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA foreign_keys = ON")
         if version != SCHEMA_VERSION:
@@ -71,7 +71,7 @@ def connect(path: Path) -> Connection:
 
 
 @contextmanager
-def connection(path: Path, *, read_only: bool = False) -> Iterator[Connection]:
+def connection(path: Path, *, read_only: bool = False) -> Generator[Connection]:
     """Own a connection's lifetime; domain operations still own their transactions."""
     conn = connect_read_only(path) if read_only else connect(path)
     try:

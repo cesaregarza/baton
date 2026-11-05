@@ -70,19 +70,18 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
         *(item for integration in integrations.values() for item in integration.middleware()),
     ]
     settings = auth.auth_settings(config)
-    common = {
-        "name": "baton",
-        "version": __version__,
-        "instructions": INSTRUCTIONS,
-        "auth": settings,
-        "middleware": middleware,
-    }
-    if config.oauth.enabled:
-        provider = auth.PassphraseProvider(config)
-        server = MCPServer(auth_server_provider=provider, **common)
+    provider = auth.PassphraseProvider(config) if config.oauth.enabled else None
+    server = MCPServer(
+        name="baton",
+        version=__version__,
+        instructions=INSTRUCTIONS,
+        auth=settings,
+        middleware=middleware,
+        auth_server_provider=provider,
+        token_verifier=auth.StaticTokenVerifier(config) if provider is None else None,
+    )
+    if provider is not None:
         auth.register_login_routes(server, provider)
-    else:
-        server = MCPServer(token_verifier=auth.StaticTokenVerifier(config), **common)
     for name, scope, read_only in (
         TOOLS
         + (CONVERSATION_TOOLS if config.conversations.enabled else ())
@@ -91,10 +90,12 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
         server.add_tool(
             guard.wrap(name, scope, getattr(tools, name)),
             name=name,
-            annotations=ToolAnnotations(readOnlyHint=read_only, destructiveHint=False, openWorldHint=False),
+            annotations=ToolAnnotations(read_only_hint=read_only, destructive_hint=False, open_world_hint=False),
         )
         if name in LITERAL_TOOLS:  # these take every argument as sent: a reference may be named "null"
-            guard.take_literally(server._tool_manager.get_tool(name))
+            tool = server._tool_manager.get_tool(name)
+            assert tool is not None  # add_tool above registered this exact name.
+            guard.take_literally(tool)
     for integration in integrations.values():
         integration.register(server)
     public = urlparse(config.public_url)
@@ -105,7 +106,7 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
             allowed_origins=[f"{public.scheme}://{public.netloc}", *config.allowed_origins],
         ),
     )
-    if config.oauth.enabled:
+    if provider is not None:
         app.add_middleware(auth.EndpointGuard, provider=provider)
         app.add_middleware(auth.IssuerIdentification, provider=provider)
     return app

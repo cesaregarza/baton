@@ -26,10 +26,10 @@ class SecretaryHarness:
     @property
     def metrics(self) -> dict:
         totals = None
-        if self.usage and all(usage is not None for usage in self.usage):
+        recorded = [usage for usage in self.usage if usage is not None]
+        if recorded and len(recorded) == len(self.usage):
             totals = {
-                key: sum(usage[key] for usage in self.usage)
-                for key in ("input_tokens", "output_tokens", "cached_tokens")
+                key: sum(usage[key] for usage in recorded) for key in ("input_tokens", "output_tokens", "cached_tokens")
             }
         return {"model_calls": self.model_calls, "tool_calls": self.tools.calls, "usage": totals}
 

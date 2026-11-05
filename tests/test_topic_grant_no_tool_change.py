@@ -49,7 +49,8 @@ TOOLS = {
     "read_history": "a77467aef649",
     "add_participant": "aa43e161b34c",
     "remove_participant": "4f585683f8ad",
-    "set_topic": "fc1d16794258",
+    # c7842ef shortened the explicit-null explanation; its arguments and annotations are unchanged.
+    "set_topic": "2568e770ab26",
     "create_topic": "e7ca129d5f35",
     "update_topic": "95e4df4d625a",
     "rename_topic": "383655a18830",

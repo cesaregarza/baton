@@ -198,7 +198,7 @@ def list_jobs(
 def count_jobs(conn: Connection, *, state: str | None = None, waiting_on: str | None = None) -> int:
     """How many jobs `list_jobs` would match with no limit."""
     where, params = _filters(state, waiting_on)
-    return conn.execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", params).fetchone()[0]
+    return conn.execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", params).one()[0]
 
 
 def _filters(state: str | None, waiting_on: str | None) -> tuple[str, list[str]]:

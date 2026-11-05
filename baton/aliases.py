@@ -79,7 +79,7 @@ def _admit(conn: Connection, limits: Aliases, credential: str, name: str, now: f
         counts = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(credential = ?), 0), COALESCE(SUM(name = ?), 0) FROM alias_claims",
             (credential, skeleton(name)),
-        ).fetchone()
+        ).one()
         caps = (
             limits.max_claims_per_hour,
             limits.max_claims_per_credential_per_hour,
@@ -115,6 +115,7 @@ def claim(conn: Connection, config: Config, principal: AccessToken | None, name:
     cap replaces the alias's oldest binding.
     """
     credential, role = _credential(principal), auth.role_of(principal)
+    assert role is not None  # _credential refuses a principal without a role.
     _check_lifetimes(config.aliases)
     name = normalize(name)
     validate_passphrase(passphrase)
@@ -153,7 +154,7 @@ def _replace_oldest_at_cap(conn: Connection, limits: Aliases, alias_id: str, now
     """
     live = conn.execute(
         "SELECT COUNT(*) FROM alias_bindings WHERE alias_id = ? AND expires_at > ?", (alias_id, now)
-    ).fetchone()[0]
+    ).one()[0]
     if live < limits.max_bindings_per_alias:
         return
     conn.execute(
@@ -194,7 +195,7 @@ def _reset(conn: Connection, config: Config, name: str, passphrase: str, arm: st
         now = time.time()
         if conn.execute("DELETE FROM alias_arms WHERE id = ? AND expires_at > ?", (arm, now)).rowcount != 1:
             return None
-        row = conn.execute("SELECT * FROM aliases WHERE name = ?", (name,)).fetchone()
+        row = conn.execute("SELECT * FROM aliases WHERE name = ?", (name,)).one()
         conn.execute("UPDATE aliases SET verifier = ? WHERE id = ?", (auth.hash_passphrase(passphrase), row["id"]))
         conn.execute("INSERT INTO alias_rekeys (alias_id, at) VALUES (?, ?)", (row["id"], now))  # neither verifier
         conn.execute("DELETE FROM alias_bindings WHERE alias_id = ?", (row["id"],))
@@ -238,7 +239,7 @@ def _create(conn: Connection, config: Config, role: str, name: str, passphrase: 
     if role != "guest":
         conn.execute("INSERT INTO core_enrolment VALUES (?, ?, ?, NULL)", (role, alias_id, now))
         conn.execute("INSERT INTO alias_roles VALUES (?, ?)", (role, alias_id))
-    return conn.execute("SELECT * FROM aliases WHERE id = ?", (alias_id,)).fetchone()
+    return conn.execute("SELECT * FROM aliases WHERE id = ?", (alias_id,)).one()
 
 
 def _take_arm(conn: Connection, kind: str, target: str, now: float) -> bool:
@@ -317,17 +318,18 @@ def _arm(conn: Connection, kind: str, target: str) -> dict:
     return {"armed": kind, "target": target, "expires_at": expires_at}
 
 
-def validate_proof(proof: object) -> None:
+def validate_proof(proof: object) -> str:
     if not isinstance(proof, str) or not proof or len(proof) > 256 or not proof.isascii():
         raise Forbidden("alias binding is missing, invalid or expired")
+    return proof
 
 
-def resolve_binding(conn: Connection, proof: str | None) -> dict:
+def resolve_binding(conn: Connection, proof: object) -> dict:
     """The alias a live proof binds, with the role its calls run as (`guest` when unmapped).
 
     One query reads the proof, the alias and its mapping, so an owner's map or unmap can't land between them.
     """
-    validate_proof(proof)
+    proof = validate_proof(proof)
     row = conn.execute(
         "SELECT a.*, r.role AS mapped_role FROM alias_bindings b JOIN aliases a ON a.id = b.alias_id"
         " LEFT JOIN alias_roles r ON r.alias_id = a.id WHERE b.digest = ? AND b.expires_at > ?",
@@ -347,7 +349,7 @@ def admit_post(conn: Connection, config: Config, principal: AccessToken, identit
         counts = conn.execute(
             "SELECT COALESCE(SUM(alias_id = ?), 0), COALESCE(SUM(credential = ?), 0) FROM alias_posts",
             (identity["alias_id"], credential),
-        ).fetchone()
+        ).one()
         caps = (config.aliases.max_posts_per_alias_per_hour, config.aliases.max_posts_per_credential_per_hour)
         for count, cap, limit in zip(counts, caps, ("posts_per_alias", "posts_per_credential"), strict=True):
             if count >= cap:

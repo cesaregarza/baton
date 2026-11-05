@@ -63,6 +63,15 @@ class Model:
     def set_plan(self, value: dict) -> None:
         self.plan_path.write_text(json.dumps(value))
 
+    async def wait_for_request(self) -> dict:
+        """Wait for a complete record: opening the log creates it before its buffered write."""
+        while True:
+            if self.log_path.exists():
+                lines = self.log_path.read_text().splitlines(keepends=True)
+                if lines and lines[0].endswith("\n"):
+                    return json.loads(lines[0])
+            await asyncio.sleep(0.01)
+
     @property
     def requests(self) -> list[dict]:
         if not self.log_path.exists():
@@ -308,8 +317,7 @@ def test_revoking_visibility_during_inference_discards_the_summary(tmp_path) -> 
                 Secretary(world.config, world.state_path, world.policy_path).decide(budget_seconds=5)
             )
             async with asyncio.timeout(3):
-                while not model.log_path.exists():
-                    await asyncio.sleep(0.01)
+                await model.wait_for_request()
             conversations.remove(world.baton, world.config, room, "planner", actor="planner")
             with pytest.raises(SecretaryUnavailable, match="visibility or content changed"):
                 await task
@@ -328,9 +336,7 @@ def test_cancelling_model_reaps_child_and_retry_keeps_the_same_pending_window(tm
             secretary = Secretary(world.config, world.state_path, world.policy_path)
             task = asyncio.create_task(secretary.decide(budget_seconds=5))
             async with asyncio.timeout(3):
-                while not model.log_path.exists():
-                    await asyncio.sleep(0.01)
-            [request] = model.requests
+                request = await model.wait_for_request()
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task

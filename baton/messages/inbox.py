@@ -42,7 +42,7 @@ class Inbox:
             rows = conn.execute(
                 "SELECT * FROM messages WHERE recipient = ? AND seq > ? ORDER BY seq LIMIT ?", (recipient, start, limit)
             ).fetchall()
-            oldest = conn.execute("SELECT MIN(seq) FROM messages WHERE recipient = ?", (recipient,)).fetchone()[0]
+            oldest = conn.execute("SELECT MIN(seq) FROM messages WHERE recipient = ?", (recipient,)).one()[0]
             page = rendering.as_page_for(conn, recipient, rows, config=self.config)
             if page:
                 mailbox.mark_read(conn, recipient, page[-1]["seq"])

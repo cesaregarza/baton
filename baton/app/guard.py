@@ -57,7 +57,7 @@ class Guard:
             return self._guarded_call(name, scope, body, policy, passes_context, kwargs)
 
         # The role is bound from the credential, so it is not part of the tool's schema; `token` is everyone's.
-        guarded.__signature__ = _tool_signature(name, body)  # type: ignore[attr-defined]
+        guarded.__dict__["__signature__"] = _tool_signature(name, body)
         if name not in GUEST_TOOLS:
             guarded.__doc__ = (body.__doc__ or "") + CORE_PROOF_NOTE
         self._validators[name] = func_metadata(guarded, structured_output=False).validate_arguments
@@ -189,7 +189,9 @@ class Guard:
         """
         params = ctx.params if isinstance(getattr(ctx, "params", None), dict) else {}
         arguments = params.get("arguments")
-        named = sorted(set(arguments) & set(messages.AUTHOR_FIELDS)) if isinstance(arguments, dict) else []
+        if not isinstance(arguments, dict):
+            return await call_next(ctx)
+        named = sorted(set(arguments) & set(messages.AUTHOR_FIELDS))
         if getattr(ctx, "method", None) != "tools/call" or not named:
             return await call_next(ctx)
         name = str(params.get("name", ""))
@@ -239,9 +241,9 @@ class Guard:
             return await call_next(ctx)
         try:
             # Past this check the arguments are a dict: either a token or key was present in one, or it's a post.
-            if name == "send_message" and (
-                not isinstance(arguments, dict) or not isinstance(arguments.get("text"), str)
-            ):
+            if not isinstance(arguments, dict):
+                raise InvalidRequest("send_message requires text")
+            if name == "send_message" and not isinstance(arguments.get("text"), str):
                 raise InvalidRequest("send_message requires text")
             if arguments.get("token") is not None or (call["credential_role"] == "guest" and name == "send_message"):
                 aliases.validate_proof(arguments.get("token"))

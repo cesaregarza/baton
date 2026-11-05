@@ -2,7 +2,7 @@
 
 The notice is the one a grantee's move writes (see test_topic_grant_scoped_tools.py for its exact shape):
 `{"event": "topic_moved", "from", "to", "by", "alias", "alias_code", "grant_id"}`, with a sentence as its text and no
-sender. These tests store such a notice the way the move does, through `conversations._fan_out`, with invented names,
+sender. These tests store such a notice the way the move does, through `delivery._fan_out`, with invented names,
 and look at the pages. The dashboard names a notice's `participant`, which a topic move does not have, so it must
 learn the new event. The seat shows a notice's text, so it needs no change and is only pinned.
 
@@ -16,7 +16,8 @@ import secrets
 
 from seat_helpers import conversation, get, log_in, make_seat_host
 
-from baton import conversations, dashboard
+from baton import dashboard
+from baton.conversations import delivery
 from baton.database.store import connect, transaction
 
 ALIAS, CODE = "lane-a", "ab12"
@@ -39,7 +40,7 @@ def store_moved_notice(host, conversation_id: str) -> str:
     conn = connect(host.config.db_path)
     try:
         with transaction(conn):
-            conversations._fan_out(
+            delivery._fan_out(
                 conn, conversation_id, ["orchestrator", "operator"], sender=None, text=text, notice=notice
             )
     finally:

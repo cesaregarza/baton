@@ -34,7 +34,7 @@ import os
 import secrets
 import time
 from collections import OrderedDict, deque
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,7 +57,7 @@ from mcp.server.transport_security import RequestBodyLimitMiddleware
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from baton import datadir
 from baton.config import Config, ConfigError
@@ -341,7 +341,7 @@ class TokenStore:
         self._signature = signature
 
     @contextmanager
-    def mutation(self) -> Iterator[TokenStore]:
+    def mutation(self) -> Generator[TokenStore]:
         directory = self.path.parent
         with datadir.opened(directory) as dir_fd:
             lock = datadir.open_file(dir_fd, self.path.stem + ".lock", os.O_RDWR | os.O_CREAT, directory=directory)
@@ -720,7 +720,7 @@ class IssuerIdentification:
     def _with_iss(self, send: Send) -> Send:
         refused = False
 
-        async def wrapped(message: dict) -> None:
+        async def wrapped(message: Message) -> None:
             nonlocal refused
             if refused:
                 return  # the original response's body, replaced below
@@ -754,10 +754,10 @@ class IssuerIdentification:
         return wrapped
 
     def _with_flag(self, send: Send) -> Send:
-        start: dict | None = None
+        start: Message | None = None
         body = b""
 
-        async def wrapped(message: dict) -> None:
+        async def wrapped(message: Message) -> None:
             nonlocal start, body
             if message["type"] == "http.response.start":
                 start = message

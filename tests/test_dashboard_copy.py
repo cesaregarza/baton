@@ -17,6 +17,7 @@ from test_dashboard_pages import MINE, THEIRS, get, made, page_config
 
 from baton import conversations, dashboard, messages
 from baton.config import Config
+from baton.conversations import delivery
 from baton.database.store import connect, transaction
 
 HEADER = "Thread: {title}\nId: {cid}\n\n"
@@ -248,7 +249,7 @@ def test_a_topic_move_notice_has_the_same_words_in_the_page_and_copy(tmp_path) -
     conn = connect(config.db_path)
     try:
         with transaction(conn):
-            conversations._fan_out(
+            delivery._fan_out(
                 conn,
                 cid,
                 MINE,

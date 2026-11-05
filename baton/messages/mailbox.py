@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Mapping
 
 from baton import events
 from baton.database import Connection
@@ -23,7 +24,7 @@ def store_copy(
     conversation_id: str | None = None,
     conversation_seq: int | None = None,
     relayed: list[dict] | None = None,
-    notice: dict[str, str] | None = None,
+    notice: Mapping[str, str | int | None] | None = None,
     author_kind: str | None = None,
     reply_to: str | None = None,
     attention: list[str] | None = None,

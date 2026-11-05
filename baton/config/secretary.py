@@ -99,6 +99,10 @@ def load_policy(config: Config, path: Path) -> Policy:
     knowledge = _text(raw.get("knowledge", ""), "knowledge")
     model = _model(raw.get("model", {}))
     engine = _engine(raw.get("decision_engine"))
+    max_tool_calls = _integer(raw.get("max_tool_calls", 2), "max_tool_calls", 1, 8)
+    max_events = _integer(raw.get("max_events", 1000), "max_events", 1, 10000)
+    context_bytes = _integer(raw.get("context_bytes", 1024 * 1024), "context_bytes", 1024, 8388608)
+    summary_bytes = _integer(raw.get("summary_bytes", 8192), "summary_bytes", 256, 65536)
     normalized = {
         "version": POLICY_VERSION,
         "principal": principal,
@@ -106,13 +110,21 @@ def load_policy(config: Config, path: Path) -> Policy:
         "decision_engine": engine,
         "instructions": instructions,
         "knowledge": knowledge,
-        "max_tool_calls": _integer(raw.get("max_tool_calls", 2), "max_tool_calls", 1, 8),
-        "max_events": _integer(raw.get("max_events", 1000), "max_events", 1, 10000),
-        "context_bytes": _integer(raw.get("context_bytes", 1024 * 1024), "context_bytes", 1024, 8388608),
-        "summary_bytes": _integer(raw.get("summary_bytes", 8192), "summary_bytes", 256, 65536),
+        "max_tool_calls": max_tool_calls,
+        "max_events": max_events,
+        "context_bytes": context_bytes,
+        "summary_bytes": summary_bytes,
     }
     return Policy(
-        **{key: value for key, value in normalized.items() if key != "version"},
+        principal=principal,
+        model=model,
+        decision_engine=engine,
+        instructions=instructions,
+        knowledge=knowledge,
+        max_tool_calls=max_tool_calls,
+        max_events=max_events,
+        context_bytes=context_bytes,
+        summary_bytes=summary_bytes,
         raw=normalized,
         digest=fingerprint(normalized),
     )
@@ -160,11 +172,8 @@ class IntegrationConfig:
             values[name] = Path(candidate)
         if instance_path is not None and values["state"].parent != instance_path.parent:
             raise ConfigError("integration state must be in its private instance directory")
-        poll_seconds = value.get("poll_seconds")
-        budget_seconds = value.get("budget_seconds")
-        for name, candidate in (("poll_seconds", poll_seconds), ("budget_seconds", budget_seconds)):
-            if type(candidate) not in (int, float) or not 0 < candidate <= MAX_BUDGET_SECONDS:
-                raise ConfigError(f"{name} must be greater than zero and at most {MAX_BUDGET_SECONDS}")
+        poll_seconds = _timeout(value.get("poll_seconds"), "poll_seconds")
+        budget_seconds = _timeout(value.get("budget_seconds"), "budget_seconds")
         product = value["product"]
         executable = value.get("codex")
         if product == "codex" and (
@@ -314,9 +323,13 @@ def _command(value: object) -> list[str]:
     return value
 
 
-def _timeout(value: object) -> float:
-    if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= MAX_BUDGET_SECONDS:
-        raise ConfigError("timeout_seconds must be greater than zero and at most 60")
+def _timeout(value: object, field: str = "timeout_seconds") -> float:
+    if (
+        not (type(value) is int or type(value) is float)
+        or not math.isfinite(value)
+        or not 0 < value <= MAX_BUDGET_SECONDS
+    ):
+        raise ConfigError(f"{field} must be greater than zero and at most {MAX_BUDGET_SECONDS}")
     return float(value)
 
 

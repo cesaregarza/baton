@@ -35,17 +35,15 @@ add broad ignores to accommodate a new violation.
 `make typecheck` runs Astral's ty against `baton/`, targeting Python 3.12. It uses the project's installed
 dependencies and does not require every function to be annotated. Tests remain checked by Ruff and pytest.
 
-`ty-baseline.json` records existing type diagnostics explicitly. Normal checks suppress only matching
-baseline findings and fail on new diagnostics; they never rewrite the baseline. This is gradual adoption,
-not a claim that the existing code is type-correct. The initial findings include optional database rows and
-partially typed adapters. Fix them when working in those areas instead of adding blanket rule exclusions.
+All production code is checked without a diagnostic baseline. Fix reported errors at their source: validate
+external values, narrow optional values, and describe the actual contracts between components. Database
+queries that require exactly one row use `one()`; queries where absence is valid use `fetchone()` and handle
+`None`. Do not replace useful types with `Any` or add blanket exclusions to make a check pass.
 
-After fixing existing findings, run `uv run --locked ty check --update-baseline` and inspect the diff. It
-should remove resolved entries. Adding baseline entries requires explaining the remaining typing debt in
-the change; never regenerate it automatically in CI or as part of `make check`. ty's baseline format is in
-preview, so its exact version is pinned and upgrades must inspect baseline changes.
+ty's exact version is pinned so developers and CI use the same diagnostics. Review newly reported findings
+when upgrading it.
 
 References: [Ruff complexity](https://docs.astral.sh/ruff/rules/complex-structure/),
 [statement limits](https://docs.astral.sh/ruff/rules/too-many-statements/),
 [formatter](https://docs.astral.sh/ruff/formatter/), and
-[ty baselines](https://docs.astral.sh/ty/reference/configuration/#baseline).
+[ty](https://docs.astral.sh/ty/).

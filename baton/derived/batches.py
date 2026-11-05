@@ -69,7 +69,7 @@ def begin_batch(
         open_batches = conn.execute(
             "SELECT COUNT(*) FROM batches WHERE producer = ? AND state = 'open' AND expires_at > ?",
             (producer, time.time()),
-        ).fetchone()[0]
+        ).one()[0]
         if open_batches >= limits.max_open_batches:
             raise LimitExceeded(f"{producer} already has {open_batches} open batches", "max_open_batches")
         if generation is None:
@@ -221,12 +221,12 @@ def _validate_commit_delivery(
     hour_ago = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     recent = conn.execute(
         "SELECT COUNT(*) FROM commit_requests WHERE producer = ? AND committed_at > ?", (producer, hour_ago)
-    ).fetchone()[0]
+    ).one()[0]
     if recent >= limits.max_commits_per_hour:
         raise LimitExceeded(f"{producer} has committed {recent} times in the last hour", "max_commits_per_hour")
     for artifact in artifacts:
         _validate_artifact_limits(artifact, manifest, limits)
-    delivered = conn.execute("SELECT COUNT(*) FROM batch_pages WHERE batch_id = ?", (batch_id,)).fetchone()[0]
+    delivered = conn.execute("SELECT COUNT(*) FROM batch_pages WHERE batch_id = ?", (batch_id,)).one()[0]
     if delivered < manifest["pages"]:
         raise BatchIncomplete(f"{manifest['pages'] - delivered} of {manifest['pages']} pages not yet read")
 
@@ -315,6 +315,7 @@ def _validate_artifact_inputs(
 def _write_message_vectors(conn: Connection, manifest: dict, embedding: dict | None, owed: dict) -> None:
     for (field, value), entry in owed.items():
         if field == "message_id" and entry is not None:
+            assert embedding is not None  # _check_vectors rejects vectors without an embedding profile.
             vector_module._write_vector(conn, manifest["generation"], embedding, "message", value, entry)
 
 
@@ -390,7 +391,7 @@ def _has_copies(conn: Connection, conversation_id: str) -> bool:
     )
 
 
-def _commit_request(payload: Any) -> tuple[str, list[dict[str, Any]]]:
+def _commit_request(payload: Any) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """The request in canonical form, or a refusal naming what's wrong with it."""
     if not isinstance(payload, dict):
         raise InvalidRequest("a commit is an object with request_id and artifacts")

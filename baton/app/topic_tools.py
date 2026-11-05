@@ -7,12 +7,16 @@ There is no `from __future__ import annotations` here, as in `baton.app`: the SD
 the wrapper `Guard` makes, whose namespace is not this module's, so they must already be evaluated.
 """
 
+from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from typing import Annotated, Any
 
 from pydantic import Field
 
 from baton import conversations, topics
+from baton.config import Config
+from baton.database import Connection
 from baton.topics import grants as topic_grants
 
 # Declared so it is in the tool's schema and the SDK passes it on. `Guard` takes it out of the arguments, so no body
@@ -28,8 +32,14 @@ GRANT_TOKEN = Annotated[
 ]
 
 
-class TopicTools:
+class TopicTools(ABC):
     """create_topic, update_topic, rename_topic, list_topics, get_topic and set_topic."""
+
+    _config: Config
+
+    @abstractmethod
+    def _conn(self) -> AbstractContextManager[Connection]:
+        """Open the host connection supplied by the concrete tool set."""
 
     def _under_grant(
         self,
@@ -37,7 +47,7 @@ class TopicTools:
         role: str,
         identity: dict[str, str] | None,
         call: dict[str, Any] | None,
-        operate: Callable[[Any, str | None], dict[str, Any]],
+        operate: Callable[[Connection, str | None], dict[str, Any]],
     ) -> dict[str, Any]:
         """Run `operate(conn, grant_key)`, with the key only if the caller is a guest.
 

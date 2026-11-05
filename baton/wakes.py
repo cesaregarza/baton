@@ -387,7 +387,7 @@ class Dispatcher:
                 "SELECT COUNT(*) FROM wakes WHERE role = ? AND ordinal IS NOT NULL"
                 " AND claimed_at IS NOT NULL AND claimed_at > ?",
                 (role, _now() - REMINDER_WINDOW_SECONDS),
-            ).fetchone()[0]
+            ).one()[0]
             already = conn.execute("SELECT claimed_at FROM wakes WHERE role = ? AND key = ?", (role, key)).fetchone()
             if already is None:
                 return False

@@ -163,7 +163,7 @@ def _document(conn: Connection, topic_id: str, path: str, name: str, expected: i
         )
     if doc_id is not None:
         return doc_id
-    held = conn.execute("SELECT COUNT(*) FROM reference_docs WHERE topic_id = ?", (topic_id,)).fetchone()[0]
+    held = conn.execute("SELECT COUNT(*) FROM reference_docs WHERE topic_id = ?", (topic_id,)).one()[0]
     if held >= MAX_DOCS_PER_TOPIC:
         raise LimitExceeded(
             f"topic {path!r} already holds {MAX_DOCS_PER_TOPIC} references; edit one of them", "references_per_topic"
@@ -223,7 +223,7 @@ def _revision(conn: Connection, doc_id: str, number: int) -> Row:
     """
     return conn.execute(
         f"SELECT {_DESCRIBED}, body FROM reference_revisions WHERE doc_id = ? AND revision = ?", (doc_id, number)
-    ).fetchone()
+    ).one()
 
 
 def _author(row: Row) -> dict[str, str]:

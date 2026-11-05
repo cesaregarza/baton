@@ -46,6 +46,7 @@ def read(
             principal = policy_module.load_policy(config, policy_path).principal
             if ids is not None:
                 return {"principal": principal, **_by_id(baton, config, principal, ids, limit, max_bytes)}
+            assert after is not None  # _check requires one of after or ids.
             return {"principal": principal, "after": after, **_after(baton, config, principal, after, limit, max_bytes)}
     finally:
         baton.close()

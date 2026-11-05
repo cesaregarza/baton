@@ -171,7 +171,9 @@ def _route_post(config: Config, conn: Connection, session: _Session, request: _R
         return _logout(conn, session)
     if request.path == "/seat/ack":
         return _ack(config, conn, session, request.form["receipt"])
-    return _send(config, conn, session, SEND_PATH.fullmatch(request.path).group(1), request.form)
+    match = SEND_PATH.fullmatch(request.path)
+    assert match is not None  # Request parsing accepts only the three POST routes handled here.
+    return _send(config, conn, session, match.group(1), request.form)
 
 
 def _route_get(config: Config, conn: Connection, session: _Session, request: _Request) -> Response:
@@ -215,7 +217,7 @@ def _login_form(conn: Connection, status: int = 200, notice: str = "", *, paused
     pre = secrets.token_urlsafe(24)
     now = _now()
     with conn.transaction():
-        issued = conn.execute("SELECT COUNT(*) FROM seat_prelogin WHERE expires_at > ?", (now,)).fetchone()[0]
+        issued = conn.execute("SELECT COUNT(*) FROM seat_prelogin WHERE expires_at > ?", (now,)).one()[0]
         if issued < MAX_PRE:
             conn.execute("INSERT INTO seat_prelogin (digest, expires_at) VALUES (?, ?)", (_digest(pre), now + PRE_TTL))
     if issued >= MAX_PRE:
@@ -574,7 +576,7 @@ def _conversation(
         page = conversations.history(conn, session.role, conversation_id, after, HISTORY_PAGE, config=config)
     except BatonError:
         return _not_in()
-    title = conn.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,)).fetchone()["title"]
+    title = conn.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,)).one()["title"]
     request_id = request_id or _mint_request(conn, session, conversation_id)
     shown = {int(item["seq"]) for item in page["messages"]}
     items = _with_gaps(
@@ -644,10 +646,10 @@ def _send(config: Config, conn: Connection, session: _Session, conversation_id: 
             and bound["conversation_id"] == conversation_id
         )
         full = False
-        if mine and bound["sent_at"] is None:
+        if mine and bound is not None and bound["sent_at"] is None:
             taken = conn.execute(
                 "SELECT COUNT(*) FROM seat_requests WHERE session = ? AND sent_at > ?", (session.digest, now - 3600)
-            ).fetchone()[0]
+            ).one()[0]
             full = taken >= SENDS_PER_HOUR
             if not full:
                 conn.execute("UPDATE seat_requests SET sent_at = ? WHERE request_id = ?", (now, request_id))
@@ -715,9 +717,9 @@ def _store(config: Config, conn: Connection, session: _Session, conversation_id:
     # replayed message that it can no longer open.
     if result.get("created") is False and session.role not in _participants(conn, conversation_id):
         return _not_in(403, "You're no longer in this conversation.")
-    seq = conn.execute(
-        "SELECT conversation_seq FROM messages WHERE id = ? LIMIT 1", (result["message_id"],)
-    ).fetchone()["conversation_seq"]
+    seq = conn.execute("SELECT conversation_seq FROM messages WHERE id = ? LIMIT 1", (result["message_id"],)).one()[
+        "conversation_seq"
+    ]
     return _redirect(_link(conversation_id, seq))
 
 
@@ -789,6 +791,7 @@ class _Handler(BaseHTTPRequestHandler):
     timeout = REQUEST_TIMEOUT
 
     def _answer(self) -> None:
+        assert isinstance(self.server, _Server)
         headers = list(self.headers.items())
         body = b""
         if self.command == "POST":

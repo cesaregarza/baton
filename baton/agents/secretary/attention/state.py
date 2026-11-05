@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from baton import datadir
 from baton.config import ConfigError
+from baton.database import Connection
 from baton.database.files import open_private
 from baton.errors import InvalidRequest
 
@@ -20,7 +22,7 @@ class AttentionLog:
     principal: str
 
     @contextmanager
-    def connection(self):
+    def connection(self) -> Generator[Connection]:
         path, data_dir = datadir.canonical(self.path), datadir.canonical(self.data_dir)
         if data_dir in path.parents and path.parent != data_dir:
             raise ConfigError("secretary state inside data_dir must be a direct child file")
@@ -40,7 +42,7 @@ class AttentionLog:
                         "CREATE TABLE assessments (principal TEXT NOT NULL, id TEXT NOT NULL, "
                         "result TEXT NOT NULL, PRIMARY KEY(principal,id))"
                     )
-            elif conn.execute("SELECT version FROM attention_version").fetchone()[0] != 1:
+            elif conn.execute("SELECT version FROM attention_version").one()[0] != 1:
                 raise ConfigError("unsupported model secretary state version")
             yield conn
 
@@ -52,7 +54,7 @@ class AttentionLog:
     def bind(self, epoch: str, floor: int) -> None:
         with self.connection() as conn, conn.transaction():
             conn.execute("INSERT OR IGNORE INTO principals VALUES (?,?,?,?)", (self.principal, epoch, floor, floor))
-            row = conn.execute("SELECT epoch,floor FROM principals WHERE principal=?", (self.principal,)).fetchone()
+            row = conn.execute("SELECT epoch,floor FROM principals WHERE principal=?", (self.principal,)).one()
             if row[0] != epoch or row[1] != floor:
                 raise ConfigError("secretary epoch or activation floor changed; use a new state file")
 
@@ -73,7 +75,7 @@ class AttentionLog:
             return json.loads(
                 conn.execute(
                     "SELECT result FROM assessments WHERE principal=? AND id=?", (self.principal, result["decision_id"])
-                ).fetchone()[0]
+                ).one()[0]
             )
 
     def acknowledge(self, decision_id: str) -> int:
@@ -90,7 +92,7 @@ class AttentionLog:
                 "UPDATE principals SET delivered=MAX(delivered,?) WHERE principal=?",
                 (result["covered_through"], self.principal),
             )
-            return conn.execute("SELECT delivered FROM principals WHERE principal=?", (self.principal,)).fetchone()[0]
+            return conn.execute("SELECT delivered FROM principals WHERE principal=?", (self.principal,)).one()[0]
 
     def recent(self) -> list[dict]:
         with self.connection() as conn:

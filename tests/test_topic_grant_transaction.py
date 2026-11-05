@@ -27,7 +27,7 @@ import topic_grant_tools_support as support
 from topic_grant_tools_support import play, refused, stage, succeeded, thread
 
 from baton import app as app_module
-from baton.app import guard, tools
+from baton.app import guard
 from baton.database import store
 
 build_scene = support.build_scene  # the fixture, under the name the tests ask for
@@ -78,7 +78,7 @@ def watch(scene, monkeypatch, grant_id: str) -> Interleaver:
         conn.set_trace_callback(interleaver.trace)
         return conn
 
-    for module in (app_module, guard, tools):
+    for module in (app_module, guard, store):
         monkeypatch.setattr(module, "connect", traced)
     return interleaver
 

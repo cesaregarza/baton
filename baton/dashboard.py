@@ -50,11 +50,11 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import SplitResult, parse_qs, quote, unquote, urlsplit
 
 from baton import board_read, conversations, jobs, messages, topics
-from baton.config import Config
+from baton.config import Config, ConfigError
 from baton.database import Connection
 from baton.database.store import connect
 from baton.errors import BatonError
@@ -335,7 +335,9 @@ def _page_route(
     pages: dict[str, int],
 ) -> Response:
     if url.path == "/needs":
-        body = _needs(config, conn, _needs_topic(url.query), pages)
+        topic_filter = _needs_topic(url.query)
+        assert topic_filter is not False  # respond rejected an invalid filter before opening the database.
+        body = _needs(config, conn, topic_filter, pages)
         return _page(200, f"Needs {_attention_label(config)}", body)
     if topic is not None:
         return _topic_page(config, conn, topic, pages["page"])
@@ -351,7 +353,7 @@ def _page_route(
 
 def _topic_page(config: Config, conn: Connection, topic: str, page: int) -> Response:
     # Topic details are visible only to viewers who can open that topic.
-    if not topics.exists(conn, topic) or not topics.may_open(conn, config, config.dashboard.viewer_role, topic):
+    if not topics.exists(conn, topic) or not topics.may_open(conn, config, _viewer(config), topic):
         return _not_found()
     return _page(200, topic, _index(config, conn, topic, page))
 
@@ -465,7 +467,7 @@ def _id(value: Any) -> str:
     return f'<span class="id" title="{_e(value)}">{_e(value)}</span>'
 
 
-def _needs_topic(query: str) -> str | None | bool:
+def _needs_topic(query: str) -> str | None | Literal[False]:
     """`/needs`'s topic filter: None for none, the topic, or False when it is invalid or given more than once."""
     values = parse_qs(query, keep_blank_values=True).get("topic")
     if values is None:
@@ -481,7 +483,7 @@ def _needs_topic(query: str) -> str | None | bool:
 def _topic_header(config: Config, conn: Any, topic: str) -> str:
     """A topic's own details, above its threads: what it is, who opened it, and who a thread here reaches."""
     try:
-        details = topics.get(conn, config, reader=config.dashboard.viewer_role, path=topic)
+        details = topics.get(conn, config, reader=_viewer(config), path=topic)
     except BatonError:
         return ""
     title = f"<h2>{_e(details['title'])}</h2>" if details["title"] != topic else ""
@@ -510,7 +512,7 @@ def _directory(config: Config, conn: Any) -> str:
     board-reading viewer sees every topic, including one still empty, which is what makes the
     directory usable as a directory.
     """
-    viewer = config.dashboard.viewer_role
+    viewer = _viewer(config)
     every = board_read.sees_all(config, viewer)
     listed = [entry for entry in topics.listing(conn, config, reader=viewer) if every or entry["threads"]]
     children: dict[str, list[str]] = {}
@@ -537,7 +539,7 @@ def _directory(config: Config, conn: Any) -> str:
 
 
 def _index(config: Config, conn: Any, topic: str | None = None, page: int = 1) -> str:
-    viewer = config.dashboard.viewer_role
+    viewer = _viewer(config)
     total, shown = conversations.list_readable_page(
         conn, config, viewer, topic, limit=MAX_LISTED, offset=(page - 1) * MAX_LISTED
     )
@@ -583,7 +585,7 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
     the page is a read-only projection of what the viewer may already read, and it never reads as that role.
     "replied" means only that the role sent a reply to the message; nothing records a resolution.
     """
-    viewer = config.dashboard.viewer_role
+    viewer = _viewer(config)
     subject = config.dashboard.attention_role or viewer
     projected = subject != viewer
     you = _attention_label(config)  # plain text: every use below escapes it
@@ -684,10 +686,18 @@ def _needs(config: Config, conn: Any, topic: str | None, pages: dict[str, int]) 
     )
 
 
+def _viewer(config: Config) -> str:
+    """Page reads require the viewer role that enabled-dashboard validation guarantees."""
+    role = config.dashboard.viewer_role
+    if role is None:
+        raise ConfigError("dashboard reads require a viewer_role")
+    return role
+
+
 def _attention_label(config: Config) -> str:
     """Whom the Needs page is about, as plain text: "you" for the viewer itself, else the attention role's display
     name. It is configured text, so every page escapes it where it shows it."""
-    viewer = config.dashboard.viewer_role
+    viewer = _viewer(config)
     subject = config.dashboard.attention_role or viewer
     return "you" if subject == viewer else config.roles[subject].label
 
@@ -703,7 +713,7 @@ def _asking(
     counts as `subject`'s only when `subject` sent it; when `subject` isn't the viewer it must also be stored as
     a person's, so an agent relaying or quoting the person never counts.
     """
-    viewer = config.dashboard.viewer_role
+    viewer = _viewer(config)
     return conversations.attention_signals(conn, config, viewer, subject, topic, human_replies_only=subject != viewer)
 
 
@@ -776,7 +786,7 @@ def _after_seq(value: str) -> int | None:
 
 def _read(config: Config, conn: Any, conversation_id: str, after_seq: int, limit: int) -> dict[str, Any]:
     """Read a thread page under the dashboard viewer's permissions."""
-    return conversations.history(conn, config.dashboard.viewer_role, conversation_id, after_seq, limit, config=config)
+    return conversations.history(conn, _viewer(config), conversation_id, after_seq, limit, config=config)
 
 
 def _history_pages(config: Config, conn: Any, conversation_id: str, limit: int) -> Iterator[dict[str, Any]]:
@@ -792,7 +802,7 @@ def _history_pages(config: Config, conn: Any, conversation_id: str, limit: int) 
 
 def _title(config: Config, conn: Any, conversation_id: str) -> str:
     """A thread's title as the viewer's list gives it, or its id when that list does not hold it."""
-    summary = conversations.readable_summary(conn, config, config.dashboard.viewer_role, conversation_id)
+    summary = conversations.readable_summary(conn, config, _viewer(config), conversation_id)
     return summary["title"] if summary is not None else conversation_id
 
 
@@ -861,7 +871,7 @@ def _thread(
     top = []
     for item in items:
         parent = (item.get("reply_to") or {}).get("seq")
-        if parent in on_page and parent < item["seq"]:
+        if isinstance(parent, int) and parent in on_page and parent < item["seq"]:
             replies.setdefault(parent, []).append(item)
         else:
             top.append(item)
@@ -1035,6 +1045,7 @@ class _Handler(BaseHTTPRequestHandler):
     sys_version = ""
 
     def _answer(self) -> None:
+        assert isinstance(self.server, _Server)
         response = respond(self.server.config, self.command, self.path, self.headers.get("Host", ""))
         self.send_response(response.status)
         for name, value in response.headers.items():

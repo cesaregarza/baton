@@ -41,7 +41,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
@@ -92,7 +92,7 @@ def parse_settings(config: Config, table: dict[str, Any]) -> Settings:
     if role not in config.roles:
         raise ConfigError(f"{where}.role must name a configured role")
     url = table.get("url")
-    if _address(url) is None:
+    if not isinstance(url, str) or _address(url) is None:
         raise ConfigError(
             f"{where}.url must be an http(s) URL naming a host, with a valid port if any, and no credentials in it"
         )
@@ -139,6 +139,8 @@ def post(timeout: float) -> Post:
 
     def send(url: str, headers: dict[str, str], body: bytes) -> int:
         parts = urlsplit(url)
+        if parts.hostname is None:
+            raise ValueError("decision push URL must name a host")
         kind = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
         connection = kind(parts.hostname, parts.port, timeout=timeout)
         try:
@@ -287,7 +289,7 @@ class DecisionPush:
         return True
 
     @contextmanager
-    def _state(self) -> Iterator[dict[str, Any]]:
+    def _state(self) -> Generator[dict[str, Any]]:
         """Read, change and write the state file under an exclusive lock. It holds no message content."""
         directory = self.config.data_dir
         with datadir.opened(directory) as dir_fd:

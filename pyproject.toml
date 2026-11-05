@@ -56,10 +56,6 @@ quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
 
-[tool.ty]
-# Existing findings stay visible here; CI rejects diagnostics outside this baseline.
-baseline = "ty-baseline.json"
-
 [tool.ty.environment]
 python-version = "3.12"
 

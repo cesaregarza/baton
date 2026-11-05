@@ -42,7 +42,7 @@ def record(
     if kind not in KINDS:
         raise ValueError(f"unknown change kind {kind!r}")
     conn.execute("UPDATE conversations SET revision = revision + 1 WHERE id = ?", (conversation_id,))
-    revision = conn.execute("SELECT revision FROM conversations WHERE id = ?", (conversation_id,)).fetchone()[0]
+    revision = conn.execute("SELECT revision FROM conversations WHERE id = ?", (conversation_id,)).one()[0]
     now = datetime.now(UTC)
     conn.execute(
         "INSERT INTO change_log (conversation_id, revision, kind, message_id, role, at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -52,7 +52,7 @@ def record(
 
 
 def epoch(conn: Connection) -> str:
-    return conn.execute("SELECT value FROM log_meta WHERE key = 'log_epoch'").fetchone()[0]
+    return conn.execute("SELECT value FROM log_meta WHERE key = 'log_epoch'").one()[0]
 
 
 def read(conn: Connection, scope: Scope, *, cursor: str | None = None, limit: int = 100) -> dict[str, Any]:
@@ -84,7 +84,7 @@ def wait(
     while True:
         with conn.snapshot():
             after = _position(conn, cursor)
-            row = conn.execute("SELECT MIN(change_seq) FROM change_log WHERE change_seq > ?", (after,)).fetchone()
+            row = conn.execute("SELECT MIN(change_seq) FROM change_log WHERE change_seq > ?", (after,)).one()
         if row[0] is not None:
             return {"change_seq": row[0]}
         if time.monotonic() >= deadline:
@@ -98,7 +98,7 @@ def _require(scope: Scope) -> None:
 
 
 def _position(conn: Connection, cursor: str | None) -> int:
-    pruned = int(conn.execute("SELECT value FROM log_meta WHERE key = 'pruned_through'").fetchone()[0])
+    pruned = int(conn.execute("SELECT value FROM log_meta WHERE key = 'pruned_through'").one()[0])
     current = epoch(conn)
     if cursor is None:
         return pruned

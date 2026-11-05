@@ -32,7 +32,7 @@ def append(
 ) -> int:
     """Append one event; the caller holds the write lock. A job event without `seq` takes the job's next one."""
     if seq is None:
-        seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE job_id = ?", (job_id,)).fetchone()[0]
+        seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE job_id = ?", (job_id,)).one()[0]
     conn.execute(
         "INSERT INTO events (job_id, seq, at, actor, audience, kind, summary, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (job_id, seq, now(), actor, audience, kind, summary[:200], json.dumps(data or {})),

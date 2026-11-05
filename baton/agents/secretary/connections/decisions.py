@@ -99,6 +99,8 @@ def make_engine(settings: dict) -> DecisionEngine:
 
 def _jev_decision(response: object) -> AttentionDecision:
     """Validate JEV's reply by category, then return its selected decision."""
+    if not isinstance(response, dict):
+        raise transport.ModelUnavailable("decision engine returned an invalid response")
     answer = _jev_attention_answer(response)
     decision = _jev_choice(answer)
     _validate_jev_probabilities(answer["probabilities"], decision)
@@ -107,10 +109,8 @@ def _jev_decision(response: object) -> AttentionDecision:
     return decision
 
 
-def _jev_attention_answer(response: object) -> dict:
+def _jev_attention_answer(response: dict) -> dict:
     """Locate the single attention answer and require its four wire fields."""
-    if not isinstance(response, dict):
-        raise transport.ModelUnavailable("decision engine returned an invalid response")
     model = response.get("model")
     answers = response.get("answers")
     if (
@@ -172,4 +172,4 @@ def _validate_jev_usage(response: dict) -> None:
 
 def _is_probability(value: object) -> bool:
     # JSON booleans are not probabilities, even though Python treats bool as an int.
-    return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1
+    return (type(value) is int or type(value) is float) and math.isfinite(value) and 0 <= value <= 1

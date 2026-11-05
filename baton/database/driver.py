@@ -7,7 +7,7 @@ remain with the stores that open authoritative or private databases.
 from __future__ import annotations
 
 import sqlite3 as _sqlite3
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import Any
@@ -16,7 +16,7 @@ from urllib.parse import quote
 from sqlalchemy import create_engine
 from sqlalchemy.engine import URL, Engine
 from sqlalchemy.engine import Connection as _EngineConnection
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, NoResultFound
 from sqlalchemy.pool import NullPool, StaticPool
 
 OperationalError = _sqlite3.OperationalError
@@ -74,6 +74,12 @@ class _Result:
             return None
         row = self._result.fetchone()
         return None if row is None else Row(row)
+
+    def one(self) -> Row:
+        """Return exactly one row, refusing a missing or non-unique result."""
+        if self._result is None:
+            raise NoResultFound("expected exactly one row")
+        return Row(self._result.one())
 
     def fetchall(self) -> list[Row]:
         return [] if self._result is None else [Row(row) for row in self._result.fetchall()]
@@ -183,7 +189,7 @@ class Connection:
 
 
 @contextmanager
-def transaction(conn: Any) -> Iterator[Any]:
+def transaction(conn: Any) -> Generator[Any]:
     """Run one immediate write transaction on this connection."""
     if conn.in_transaction:
         raise RuntimeError("nested write transactions are not supported")
@@ -198,7 +204,7 @@ def transaction(conn: Any) -> Iterator[Any]:
 
 
 @contextmanager
-def snapshot(conn: Any) -> Iterator[None]:
+def snapshot(conn: Any) -> Generator[None]:
     """Use an existing transaction, or own one read snapshot for this block."""
     if conn.in_transaction:
         yield

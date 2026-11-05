@@ -125,7 +125,7 @@ class Conversation:
                 **({"topic": topic} if topic else {}),
                 **(
                     {"alias_id": identity["alias_id"]}
-                    if guest
+                    if guest and identity is not None
                     else {"participants": sorted(access._check_roles(config, participants))}
                 ),
             },
@@ -157,6 +157,7 @@ class Conversation:
                 return {**queries._summary(conn, existing), "request_id": request_id, "created": False}
             topics.note_path(conn, seen, topic)
             if guest:
+                assert topic is not None and identity is not None  # Validated before this transaction.
                 roles = topics.members_for_thread(conn, config, topic)
                 # Returned rather than raised: when the guest-wide cap is full this also stores the alert,
                 # which has to commit with the refusal rather than be rolled back by it.
@@ -186,7 +187,11 @@ class Conversation:
                         actor,
                         stamp,
                         topic,
-                        *((identity["alias_id"], identity["alias"], identity["code"]) if guest else (None, None, None)),
+                        *(
+                            (identity["alias_id"], identity["alias"], identity["code"])
+                            if guest and identity is not None
+                            else (None, None, None)
+                        ),
                     ),
                 )
                 conn.executemany(
@@ -295,7 +300,7 @@ class Conversation:
                 "sender": sender,
                 "conversation_id": conversation_id,
                 "text": text,
-                **({"alias_id": identity["alias_id"]} if guest else {}),
+                **({"alias_id": identity["alias_id"]} if guest and identity is not None else {}),
                 "job_id": job_id,
                 **({"relayed": relayed} if relayed else {}),
                 **({"reply_to": reply_to} if reply_to else {}),

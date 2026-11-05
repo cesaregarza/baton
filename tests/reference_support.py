@@ -38,8 +38,8 @@ from topic_grant_tools_support import Grantee, Scene, build_host, tool
 
 from baton import aliases
 from baton import app as app_module
-from baton.app import guard, tools
-from baton.database import store
+from baton.app import guard
+from baton.database import Connection, store
 from baton.errors import BatonError
 
 REFERENCE_TABLES = ("reference_docs", "reference_revisions")
@@ -510,7 +510,7 @@ class Staging:
                 conn.set_trace_callback(lambda sql: staging._trace(sql, conn))
                 return conn
 
-            for module in (app_module, guard, tools):
+            for module in (app_module, guard, store):
                 monkeypatch.setattr(module, "connect", traced_connect)
             return
 
@@ -569,10 +569,10 @@ class Staging:
         return found
 
 
-def second_connection(scene: Scene, timeout: float = 0.05) -> sqlite3.Connection:
-    """A plain connection to the same file with a short busy timeout, so a lock fails fast instead of hanging."""
-    conn = sqlite3.connect(scene.host.config.db_path, timeout=timeout, isolation_level=None, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+def second_connection(scene: Scene, timeout: float = 0.05) -> Connection:
+    """A Baton connection with a short busy timeout, so domain operations fail fast on a held lock."""
+    conn = store.connect(scene.host.config.db_path)
+    conn.execute(f"PRAGMA busy_timeout = {int(timeout * 1000)}")
     return conn
 
 

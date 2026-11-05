@@ -124,6 +124,7 @@ def search(
         ranked.sort(key=lambda pair: pair[1]["at"], reverse=True)  # newest first; UTC ISO times sort as text
     hits = [hit for _, hit in ranked]
     if profiles:
+        assert query_vector is not None and model is not None  # _query_profiles validates both together.
         hits = _rerank(conn, hits, query_vector, model, profiles)
     return {"hits": hits[:limit], "keyword_index": mode}
 

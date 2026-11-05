@@ -84,11 +84,13 @@ def test_listing_jobs_does_not_read_bodies_or_retry_fields(host, conn) -> None:
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
 
-    conn.set_authorizer(summaries_only)
+    # This SQLite-specific check observes the driver without exposing authorizers in Baton's domain API.
+    sqlite = conn._driver_connection()
+    sqlite.set_authorizer(summaries_only)
     try:
         [summary] = jobs.list_jobs(conn)
     finally:
-        conn.set_authorizer(None)
+        sqlite.set_authorizer(None)
     assert summary == {key: value for key, value in full.items() if key != "body"}
     assert list(summary) == ["id", "title", "state", "waiting_on", "revision", "created_by", "created_at", "updated_at"]
 

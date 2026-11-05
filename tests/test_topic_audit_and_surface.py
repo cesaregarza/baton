@@ -35,8 +35,10 @@ from test_aliases import (  # noqa: F401 -- `guest_host` is a pytest fixture
 from test_per_call_identity import audit, claim, enrol
 
 from baton import auth, conversations, topics
+from baton.agents import Agent
 from baton.config import Role
 from baton.database import store
+from baton.topics import catalog as topic_catalog
 
 BASE_KEYS = {"at", "role", "credential_role", "credential_id", "tool", "outcome"}
 TOPIC_TOOLS = (
@@ -750,8 +752,8 @@ INTERLEAVED = [
     (
         "create_conversation",
         {"title": "T", "participants": ["planner", "worker"], "topic": "baton/dev"},
-        conversations,
-        "create",
+        Agent,
+        "create_thread",
         "baton/dev",
         {},
     ),
@@ -915,7 +917,7 @@ def test_get_topic_answers_for_the_topic_whose_id_is_on_its_line(host, monkeypat
                 "create_conversation",
                 {"title": "A thread", "participants": ["planner", "worker"], "topic": topic},
             )
-        fired = interleave_after(monkeypatch, topics, "_row", host, "alpha")
+        fired = interleave_after(monkeypatch, topic_catalog, "_row", host, "alpha")
         answer = await call(client, host, "get_topic", {"path": "alpha"})
         assert "error" not in answer and fired, answer
         ids = topic_ids(host)

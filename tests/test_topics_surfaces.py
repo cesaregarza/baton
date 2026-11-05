@@ -120,7 +120,7 @@ def test_remote_cli_list_accepts_paged_and_legacy_host_responses(topic_host, cap
         code, listed = remote(topic_host, capsys, monkeypatch, "conversation", "list")
         assert code == 0 and listed == expected
     assert [tool for _, tool, _ in calls] == ["list_conversations", "list_conversations"]
-    assert all(arguments == {} for _, _, arguments in calls)
+    assert all(arguments == {"topic": None} for _, _, arguments in calls)
 
 
 # MCP ------------------------------------------------------------------------------------------------------

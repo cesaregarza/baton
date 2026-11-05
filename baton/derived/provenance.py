@@ -214,7 +214,7 @@ def _cannot_advance(conn: Connection, config: Config, conversation_id: str, curr
     row = conn.execute(
         "SELECT MIN(conversation_seq) FROM messages WHERE conversation_id = ? AND conversation_seq >= ?",
         (conversation_id, start),
-    ).fetchone()
+    ).one()
     return row[0] is not None and len(_merge(prior + [[row[0], row[0]]])) > config.indexer.max_input_segments
 
 

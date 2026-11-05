@@ -77,7 +77,7 @@ def generation_activate(conn: Connection, config: Config, producer: str, generat
             return {"generation": target["id"], "previous": previous, "mode": "unchanged"}
         vectors._require_one_signature(conn, producer, target)
         epoch, _ = _log_position(conn)
-        pruned = int(conn.execute("SELECT value FROM log_meta WHERE key = 'pruned_through'").fetchone()[0])
+        pruned = int(conn.execute("SELECT value FROM log_meta WHERE key = 'pruned_through'").one()[0])
         reconcile = (
             target["watermark_epoch"] != epoch or target["watermark_seq"] is None or target["watermark_seq"] < pruned
         )
@@ -247,7 +247,7 @@ def _met_at_watermark(version: Row | None, conversation: Row, added_after: int, 
 def _require_slot(conn: Connection, config: Config, producer: str) -> None:
     held = conn.execute(
         "SELECT COUNT(*) FROM generations WHERE producer = ? AND dropped_at IS NULL", (producer,)
-    ).fetchone()[0]
+    ).one()[0]
     if held >= config.indexer.max_generations:
         raise LimitExceeded(f"{producer} already has {held} generations; drop an inactive one first", "max_generations")
 
@@ -263,9 +263,9 @@ def _is_current(version: Row | None, conversation: Row) -> bool:
 
 def _log_position(conn: Connection) -> tuple[str, int]:
     """The change log's epoch and its newest position, retained or pruned."""
-    epoch = conn.execute("SELECT value FROM log_meta WHERE key = 'log_epoch'").fetchone()[0]
-    pruned = int(conn.execute("SELECT value FROM log_meta WHERE key = 'pruned_through'").fetchone()[0])
-    newest = conn.execute("SELECT MAX(change_seq) FROM change_log").fetchone()[0]
+    epoch = conn.execute("SELECT value FROM log_meta WHERE key = 'log_epoch'").one()[0]
+    pruned = int(conn.execute("SELECT value FROM log_meta WHERE key = 'pruned_through'").one()[0])
+    newest = conn.execute("SELECT MAX(change_seq) FROM change_log").one()[0]
     return epoch, max(pruned, newest or 0)
 
 

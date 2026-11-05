@@ -48,7 +48,7 @@ class InboxWindow:
     def read(cls, config: Config, policy: Policy, since: int, *, through: int | None = None) -> InboxWindow:
         with connect_read_only(config.db_path) as baton, baton.snapshot():
             epoch = sources._epoch(baton)
-            head = baton.execute("SELECT COALESCE(MAX(pos),0) FROM events").fetchone()[0]
+            head = baton.execute("SELECT COALESCE(MAX(pos),0) FROM events").one()[0]
             end = head if through is None else through
             if not 0 <= since <= end <= head:
                 raise InvalidRequest("secretary positions must belong to the retained event stream")

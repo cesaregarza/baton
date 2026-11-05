@@ -82,6 +82,7 @@ async def dispatch(instance: Instance, args) -> int:
 async def _run_worker(instance: Instance) -> int:
     """Keep the worker alive until the supervisor asks it to stop."""
     task = asyncio.current_task()
+    assert task is not None  # This coroutine runs inside asyncio.run's task.
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, task.cancel)

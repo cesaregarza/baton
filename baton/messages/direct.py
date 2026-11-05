@@ -34,6 +34,7 @@ class DirectMessage:
     def send(self, conn: Connection) -> dict[str, Any]:
         """Store this message as the recipient's next seq; retries are safe."""
         request_id = self.request_id
+        assert request_id is not None  # __post_init__ assigns one for every submission.
         created_at = request_time(request_id)
         relayed = check(self.text, self.relayed)
         # `relayed` joins the digest only when present, so older requests still replay.

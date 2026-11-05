@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 from baton import changes, events, messages
@@ -53,10 +54,10 @@ def _thread_cap_refusal(conn: Connection, config: Config, identity: dict[str, st
     mine = conn.execute(
         "SELECT COUNT(*) FROM conversations WHERE created_by_alias_id = ? AND created_at > ?",
         (identity["alias_id"], since),
-    ).fetchone()[0]
+    ).one()[0]
     everyone = conn.execute(
         "SELECT COUNT(*) FROM conversations WHERE created_by = 'guest' AND created_at > ?", (since,)
-    ).fetchone()[0]
+    ).one()[0]
     over_alias = mine >= settings.max_threads_per_alias_per_hour
     over_guests = everyone >= settings.max_threads_per_guest_per_hour
     if not over_alias and not over_guests:
@@ -114,7 +115,7 @@ def _fan_out(
     sender: str | None,
     text: str,
     relayed: list[dict] | None = None,
-    notice: dict[str, str] | None = None,
+    notice: Mapping[str, str | int | None] | None = None,
     job_id: str | None = None,
     message_id: str | None = None,
     author_kind: str | None = None,
@@ -166,7 +167,7 @@ def _sent_within_window(conn: Connection, conversation_id: str) -> int:
     return conn.execute(
         "SELECT COUNT(DISTINCT id) FROM messages WHERE conversation_id = ? AND sender IS NOT NULL AND at > ?",
         (conversation_id, since),
-    ).fetchone()[0]
+    ).one()[0]
 
 
 def _escalate(conn: Connection, settings: Conversations, conversation: Row, sender: str) -> None:

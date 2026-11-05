@@ -135,7 +135,7 @@ def _item_name(item: dict[str, str]) -> str:
 
 
 def _embedding(conn: Connection, generation: str) -> dict[str, Any] | None:
-    profile = conn.execute("SELECT profile FROM generations WHERE id = ?", (generation,)).fetchone()[0]
+    profile = conn.execute("SELECT profile FROM generations WHERE id = ?", (generation,)).one()[0]
     return json.loads(profile).get("embedding")
 
 
@@ -182,7 +182,7 @@ def _validate_empty_skip(conn: Connection, field: str, value: str, entry: dict, 
     text = (
         bodies[value]
         if field == "kind"
-        else conn.execute("SELECT text FROM messages WHERE id = ? LIMIT 1", (value,)).fetchone()[0]
+        else conn.execute("SELECT text FROM messages WHERE id = ? LIMIT 1", (value,)).one()[0]
     )
     if text.strip():
         raise InvalidRequest(f"{_item_name(entry['item'])} isn't empty, so it can't be skipped as empty_text")
@@ -215,7 +215,7 @@ def _required_message_vectors(conn: Connection, generation: str, given: dict, se
 
 def _check_vector_capacity(conn: Connection, generation: str, config: Config, owed: dict) -> None:
     adding = sum(1 for entry in owed.values() if entry is not None and "vector" in entry)
-    stored = conn.execute("SELECT COUNT(*) FROM vectors WHERE generation = ?", (generation,)).fetchone()[0]
+    stored = conn.execute("SELECT COUNT(*) FROM vectors WHERE generation = ?", (generation,)).one()[0]
     if stored + adding > config.indexer.max_vectors_per_generation:
         raise LimitExceeded(f"this generation would hold {stored + adding} vectors", "max_vectors_per_generation")
 

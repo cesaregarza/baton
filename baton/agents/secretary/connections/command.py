@@ -31,7 +31,7 @@ class Command:
                 output_task = asyncio.create_task(_read_output(process.stdout, self.max_output))
                 wait_task = asyncio.create_task(process.wait())
                 tasks = [input_task, output_task, wait_task]
-                _, output, returncode = await asyncio.gather(*tasks)
+                _, output, returncode = await asyncio.gather(input_task, output_task, wait_task)
                 return returncode, output
         except BaseException:
             if process is not None:

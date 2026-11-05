@@ -60,7 +60,7 @@ import socket
 import ssl
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -76,6 +76,7 @@ from mcp.shared.exceptions import MCPError
 
 from baton import aliases, auth, datadir
 from baton.config import Config, ConfigError
+from baton.database import Connection
 from baton.database.store import connect
 
 log = logging.getLogger("baton.integrations.openai_mcp_events")
@@ -123,7 +124,13 @@ Resolver = Callable[[str, int], list[str]]
 
 
 def system_resolver(host: str, port: int) -> list[str]:
-    return [info[4][0] for info in socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)]
+    addresses = []
+    for info in socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP):
+        address = info[4][0]
+        if not isinstance(address, str):
+            raise OSError("resolver returned an unsupported socket address")
+        addresses.append(address)
+    return addresses
 
 
 @dataclass(frozen=True)
@@ -633,7 +640,7 @@ class McpEvents:
         subscriptions and replaced secrets, as every delivery always has."""
         with self._state(), self._db() as conn:
             conn.execute("INSERT OR IGNORE INTO events_occurrences (wake_id, at) VALUES (?, ?)", (wake_id, time.time()))
-            at = conn.execute("SELECT at FROM events_occurrences WHERE wake_id = ?", (wake_id,)).fetchone()["at"]
+            at = conn.execute("SELECT at FROM events_occurrences WHERE wake_id = ?", (wake_id,)).one()["at"]
         return datetime.fromtimestamp(at, UTC).isoformat()
 
     def _outcomes(self, wake_id: str) -> dict[str, str]:
@@ -671,7 +678,7 @@ class McpEvents:
                 state["subscriptions"][sub_id] = {**state["subscriptions"][sub_id], "active": False}
 
     @contextmanager
-    def _db(self) -> Iterator[Any]:
+    def _db(self) -> Generator[Connection]:
         """One transaction on the host database. Always taken inside the state lock, never around it."""
         conn = connect(self.config.db_path)
         try:
@@ -687,7 +694,7 @@ class McpEvents:
         return _shape(json.loads(found[1]) if found else {})
 
     @contextmanager
-    def _state(self) -> Iterator[dict[str, Any]]:
+    def _state(self) -> Generator[dict[str, Any]]:
         """Read, change and write the state file under an exclusive lock; expired subscriptions and replaced secrets
         past their overlap are dropped."""
         directory = self.config.data_dir

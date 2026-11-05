@@ -117,7 +117,8 @@ def test_a_database_swapped_just_before_sqlite_opens_it_is_refused(tmp_path: Pat
     data = private_dir(tmp_path / "data")
     make_config(tmp_path, data_dir=data)
     assert run_cli(tmp_path, capsys, "job", "list")[0] == 0
-    real_connect = sqlite3.connect
+    # SQLAlchemy loads the DB-API module, whose connect attribute is separate from sqlite3.connect.
+    real_connect = sqlite3.dbapi2.connect
     swapped = []
 
     def connect_after_a_swap(path, *args, **kwargs):
@@ -128,7 +129,7 @@ def test_a_database_swapped_just_before_sqlite_opens_it_is_refused(tmp_path: Pat
             swapped.append(True)
         return real_connect(path, *args, **kwargs)
 
-    monkeypatch.setattr(sqlite3, "connect", connect_after_a_swap)
+    monkeypatch.setattr(sqlite3.dbapi2, "connect", connect_after_a_swap)
     code, out = run_cli(tmp_path, capsys, "job", "list")
     assert swapped
     refusal = out if isinstance(out, dict) else {}

@@ -111,13 +111,16 @@ class Worker:
                 datadir.replace_file(directory, self.instance.signal_path.name, raw)
 
     async def _queue(self, session: str) -> bool:
+        executable = self.instance.codex
+        if executable is None:
+            raise ValueError("Codex delivery requires a configured executable")
         message = (
             "Baton secretary has an attention summary. Receive it with "
             + invocation(self.instance, "receive")
             + ". Acknowledge only after reading it. If no summary remains, no action is needed."
         )
         process = await asyncio.create_subprocess_exec(
-            self.instance.codex,
+            executable,
             "queue",
             "--thread",
             session,

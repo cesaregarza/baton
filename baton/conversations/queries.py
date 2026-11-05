@@ -120,7 +120,7 @@ def list_readable_page(
         raise InvalidRequest("offset must be a non-negative integer")
     with conn.snapshot():
         if board_read.sees_all(config, role):
-            total = conn.execute(f"SELECT COUNT(*) FROM conversations WHERE 1 = 1{where}", values).fetchone()[0]
+            total = conn.execute(f"SELECT COUNT(*) FROM conversations WHERE 1 = 1{where}", values).one()[0]
             rows = conn.execute(
                 f"SELECT * FROM conversations WHERE 1 = 1{where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
                 (*values, limit, offset),
@@ -132,7 +132,7 @@ def list_readable_page(
                 "SELECT COUNT(*) FROM conversations c JOIN participants p "
                 "ON p.conversation_id = c.id WHERE p.role = ?" + where,
                 (role, *values),
-            ).fetchone()[0]
+            ).one()[0]
             rows = conn.execute(
                 "SELECT c.* FROM conversations c JOIN participants p "
                 "ON p.conversation_id = c.id WHERE p.role = ?"
