@@ -62,7 +62,7 @@ from . import policy as policy_module
 from . import sources
 from . import store as secretary_store
 from .expectations import EVIDENCE_LIMIT, Expectations, artifact_match
-from .rules import MessageRules, addressed, choose_disposition, result_kind, signals
+from .rules import NO_ACTION, MessageRules, addressed, choose_disposition, result_kind, signals
 
 REQUEST_VERSION = 1
 JUDGED = "judged"
@@ -82,6 +82,10 @@ class Verdict(NamedTuple):
     item: str | None
     opens_owed: float
     needs_now: float
+
+    @property
+    def relates_to_item(self) -> bool:
+        return self.relation != "none" and self.item is not None
 
 
 @dataclass
@@ -124,8 +128,8 @@ class Session:
         offered = [item["id"] for item in request["items"]]
         verdict, status = ask(policy.judge["command"], {**request, "timeout_seconds": round(timeout, 3)}, timeout,
                               offered)
-        if (verdict is not None and len(offered) < len(candidates)
-                and (verdict.relation == "none" or verdict.item is None)):
+        has_unoffered_candidates = len(offered) < len(candidates)
+        if verdict is not None and has_unoffered_candidates and not verdict.relates_to_item:
             # The judge saw only some of the open items this message could answer. Its "none" can't rule out one it
             # never saw, so the word lists decide, as on any fallback.
             verdict, status = None, FALLBACK + "unoffered"
@@ -174,7 +178,7 @@ def _apply(state: Connection, baton: Connection, config: Config, policy: policy_
         with _rolled_back(state):  # what the word lists would have decided, kept for review and then undone
             rules = message_rules.interpret(meta, text)[:2]
         kind, reason = _judged(state, baton, config, policy, meta, text, candidates, verdict)
-        answers = signals(text, policy)[0]  # a brief's blockers stay word-based
+        answers = signals(text, policy).answers  # a brief's blockers stay word-based
     secretary_store.put_judgment(state, policy.principal, meta["source_key"], status,
                                  tuple(verdict) if verdict else (None, None, None, None), rules)
     return kind, reason, answers
@@ -183,24 +187,30 @@ def _apply(state: Connection, baton: Connection, config: Config, policy: policy_
 def _judged(state: Connection, baton: Connection, config: Config, policy: policy_module.Policy,
             meta: dict, text: str, candidates: list[Row], verdict: Verdict) -> tuple[str, str]:
     """The mapping in the module docstring, applied in its order."""
-    principal, author, block = policy.principal, sources._actor(meta), policy.judge
+    principal = policy.principal
     ledger = Expectations(state, principal)
-    outcome = "retain", "no new principal action"
+    outcome = NO_ACTION
     chosen = next((row for row in candidates if row["id"] == verdict.item), None)
-    if chosen is not None and verdict.relation != "none":
+    if chosen is not None and verdict.relates_to_item:
         outcome = choose_disposition(outcome, _relation(ledger, meta, chosen, verdict.relation))
     if addressed(baton, config, principal, meta):
-        if verdict.opens_owed < ASKS:
-            owed = "digest", "addressed to the principal; asks nothing of it"
-        else:
-            room = (("digest", "principal owes a response that can wait")
-                    if verdict.needs_now < block["owed_digest_below"] else ("brief", "principal owes a response"))
-            owed = ledger.owe(meta, requester=author, artifact=sources._request_artifact(meta),
-                               opening_message_id=meta["message_id"], expected_kind=result_kind(text), outcome=room)
-        outcome = choose_disposition(outcome, owed)
-    if verdict.needs_now >= block["wake_at"] and outcome[0] in ("retain", "digest"):
-        outcome = "brief", "needs the principal now"
+        request = _owed_request(ledger, policy, meta, text, verdict)
+        outcome = choose_disposition(outcome, request)
+    # Urgency can promote quiet outcomes; it cannot override uncertain or bounded evidence.
+    if verdict.needs_now >= policy.judge["wake_at"] and outcome[0] in ("retain", "digest"):
+        return "brief", "needs the principal now"
     return outcome
+
+
+def _owed_request(ledger: Expectations, policy: policy_module.Policy, meta: dict, text: str,
+                  verdict: Verdict) -> tuple[str, str]:
+    if verdict.opens_owed < ASKS:
+        return "digest", "addressed to the principal; asks nothing of it"
+    attention = "brief", "principal owes a response"
+    if verdict.needs_now < policy.judge["owed_digest_below"]:
+        attention = "digest", "principal owes a response that can wait"
+    return ledger.owe(meta, requester=sources._actor(meta), artifact=sources._request_artifact(meta),
+                      opening_message_id=meta["message_id"], expected_kind=result_kind(text), outcome=attention)
 
 
 def _relation(ledger: Expectations, meta: dict, chosen: Row, relation: str) -> tuple[str, str]:
@@ -254,7 +264,9 @@ def _items(state: Connection, baton: Connection, config: Config, principal: str,
     def opened_at(row: Row) -> int:
         found = state.execute("SELECT event_pos FROM items WHERE principal=? AND source_key=?",
                               (principal, row["opening_source"])).fetchone()
-        return found["event_pos"] or 0 if found else 0
+        if found is None:
+            return 0
+        return found["event_pos"] or 0
 
     offered = []
     for row in sorted(candidates, key=opened_at, reverse=True):
@@ -295,12 +307,19 @@ def parse(output: bytes, offered: list[str]) -> tuple[Verdict | None, str]:
         value = json.loads(output)
     except ValueError:  # undecodable bytes too
         return None, FALLBACK + "invalid_json"
-    if isinstance(value, dict) and set(value) == {"declined"} and isinstance(value["declined"], str):
+    invalid = None, FALLBACK + "wrong_shape"
+    if not isinstance(value, dict):
+        return invalid
+    if set(value) == {"declined"} and isinstance(value["declined"], str):
         return None, FALLBACK + "declined"
-    if (not isinstance(value, dict) or set(value) != set(CALLS) or value["relation"] not in RELATIONS
-            or not (value["item"] is None or value["item"] in offered)
-            or not all(_probability(value[call]) for call in ("opens_owed", "needs_now"))):
-        return None, FALLBACK + "wrong_shape"
+    if set(value) != set(CALLS):
+        return invalid
+    if value["relation"] not in RELATIONS:
+        return invalid
+    if value["item"] is not None and value["item"] not in offered:
+        return invalid
+    if not _probability(value["opens_owed"]) or not _probability(value["needs_now"]):
+        return invalid
     return Verdict(value["relation"], value["item"], float(value["opens_owed"]), float(value["needs_now"])), JUDGED
 
 

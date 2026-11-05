@@ -53,8 +53,10 @@ class Expectations:
         count = self.state.execute(
             "SELECT COUNT(*) FROM expectation_evidence WHERE principal=? AND expectation_id=?",
             (self.principal, expected["id"])).fetchone()[0]
-        closure = kind in {"satisfied", "cancelled", "superseded"}
-        if count >= MAX_EVIDENCE - (0 if closure else 1):
+        limit = MAX_EVIDENCE
+        if kind not in {"satisfied", "cancelled", "superseded"}:
+            limit -= 1  # Leave the final row for evidence that closes the request.
+        if count >= limit:
             return False
         artifact = meta["artifacts"][0] if len(meta["artifacts"]) == 1 else None
         store.add_evidence(self.state, self.principal, expected["id"], meta["source_key"], kind, rule,
@@ -64,7 +66,9 @@ class Expectations:
     def record(self, expected: Row, meta: dict, kind: str, rule: str,
                outcome: tuple[str, str], observed_kind: str | None = None) -> tuple[str, str]:
         """Keep the intended disposition only when its evidence fits."""
-        return outcome if self.evidence(expected, meta, kind, rule, observed_kind) else EVIDENCE_LIMIT
+        if not self.evidence(expected, meta, kind, rule, observed_kind):
+            return EVIDENCE_LIMIT
+        return outcome
 
     def close(self, expected: Row, meta: dict, status: str, rule: str) -> bool:
         if not self.evidence(expected, meta, status, rule):
@@ -84,20 +88,33 @@ class Expectations:
         identity = {"direction": direction, "source": meta["source_key"], "responder": responder,
                     "artifact": artifact, "expected_kind": expected_kind}
         expectation_id = store.digest(identity)[:24]
-        predecessor = meta["supersedes"]
-        if (predecessor is not None and key == predecessor["key"]
-                and not revision_matches(revision, predecessor["rev"])):
-            candidates = self.state.execute(
-                "SELECT * FROM expectations WHERE principal=? AND state='open' AND direction=?"
-                " AND requester IS ? AND responder=? AND artifact_key=? AND expected_kind=?",
-                (self.principal, direction, requester, responder, key, expected_kind)).fetchall()
-            matching = [row for row in candidates if revision_matches(row["artifact_rev"], predecessor["rev"])]
-            if len(matching) == 1:
-                self.close(matching[0], meta, "superseded", "explicit-predecessor")
+        predecessor = self._predecessor(meta, artifact=artifact, direction=direction, requester=requester,
+                                        responder=responder, expected_kind=expected_kind)
+        if predecessor is not None:
+            self.close(predecessor, meta, "superseded", "explicit-predecessor")
         self.state.execute("INSERT OR IGNORE INTO expectations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL)",
                            (self.principal, expectation_id, direction, requester, responder, task_ref(meta), key,
                             revision, expected_kind, meta["source_key"], opening_message_id))
         return expectation_id
+
+    def _predecessor(self, meta: dict, *, artifact: dict | None, direction: str, requester: str | None,
+                     responder: str, expected_kind: str) -> Row | None:
+        """Only an explicit, unique request for a different revision can be replaced."""
+        previous = meta["supersedes"]
+        if previous is None or artifact is None:
+            return None
+        if artifact["key"] != previous["key"]:
+            return None
+        if revision_matches(artifact["rev"], previous["rev"]):
+            return None
+        candidates = self.state.execute(
+            "SELECT * FROM expectations WHERE principal=? AND state='open' AND direction=?"
+            " AND requester IS ? AND responder=? AND artifact_key=? AND expected_kind=?",
+            (self.principal, direction, requester, responder, artifact["key"], expected_kind)).fetchall()
+        matching = [row for row in candidates if revision_matches(row["artifact_rev"], previous["rev"])]
+        if len(matching) != 1:
+            return None
+        return matching[0]
 
     def owe(self, meta: dict, *, requester: str | None, artifact: dict | None,
             opening_message_id: str | None, expected_kind: str, outcome: tuple[str, str]) -> tuple[str, str]:

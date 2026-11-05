@@ -86,9 +86,10 @@ def _checked_budget(budget_seconds: float, since: int | None, floor: int | None,
     """Refuse bad arguments before anything is scanned."""
     if type(budget_seconds) not in (int, float) or not 0 < budget_seconds <= MAX_BUDGET_SECONDS:
         raise InvalidRequest(f"the budget must be more than 0 and at most {MAX_BUDGET_SECONDS:g} seconds")
-    if any(value is not None and type(value) is not int for value in (since, floor)) or (
-            (since is None) != (floor is None)) or (since is not None and not 0 <= floor <= since):
-        raise InvalidRequest("since and floor go together, as integers with 0 <= floor <= since")
+    if since is not None or floor is not None:
+        valid_positions = type(since) is int and type(floor) is int and 0 <= floor <= since
+        if not valid_positions:
+            raise InvalidRequest("since and floor go together, as integers with 0 <= floor <= since")
     if hourly and trigger is not None:
         raise InvalidRequest("the hourly digest has no triggering wake")
     if trigger is not None and TRIGGER.fullmatch(trigger) is None:
@@ -248,12 +249,16 @@ def _decision(items: list[dict], trigger: str | None, policy: policy_module.Poli
     if not items:
         return "keep", "keep:nothing-new", None
     first = min(items, key=lambda item: (RANK[item["decision"]], item["pos"]))
-    message_wake = trigger is None or trigger.startswith("message:")
-    if first["decision"] == "wake" and not (message_wake or (trigger.startswith("job:") and policy.job_events_wake)):
-        # By design, job events stay held unless job_events_wake lets them wake. Holding issues nothing, so the item
-        # still wakes the principal through its own message wake, or is listed in the hourly digest.
-        return "hold", "hold:non-message-trigger", first["source_key"]
-    return first["decision"], first["rule"], first["source_key"]
+    decision = first["decision"], first["rule"], first["source_key"]
+    if first["decision"] != "wake":
+        return decision
+    if trigger is None or trigger.startswith("message:"):
+        return decision
+    if trigger.startswith("job:") and policy.job_events_wake:
+        return decision
+    # A conversation trigger, or a job trigger without opt-in, holds the item for its own
+    # message wake or the hourly digest. Holding does not mark anything delivered.
+    return "hold", "hold:non-message-trigger", first["source_key"]
 
 
 def _now() -> str:

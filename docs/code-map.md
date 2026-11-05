@@ -142,6 +142,9 @@ read, or borrows an existing transaction.
 
 ### Secretary workflow
 
+The [secretary developer guide](../baton/agents/secretary/README.md) explains owed and awaited requests,
+rule order, judge behavior, and the scan/decision/delivery lifecycle with examples.
+
 `tracking.scan()` reads a page of visible events and commits its effects together with the scan position.
 `MessageRules.interpret()` matches a message to outstanding requests, records its result, then opens any new
 request addressed to the principal. Job events use `job_disposition()` instead. Both use an `Expectations`
