@@ -14,10 +14,10 @@ import time
 from contextlib import contextmanager
 
 from baton import datadir
-from baton.agents.secretary.policy import load_policy
-from baton.agents.secretary.read import read
-from baton.agents.secretary.runtime import DatabaseWorker
+from baton.agents.secretary.attention.runtime import DatabaseWorker
+from baton.agents.secretary.inbox.read import read
 from baton.config import ConfigError
+from baton.config.secretary import load_policy, require_hook_summary
 
 from .instance import Instance
 
@@ -55,8 +55,7 @@ class Worker:
             async with DatabaseWorker() as database:
                 policy = await database.call(load_policy, self.instance.secretary.config,
                                              self.instance.secretary.policy_path)
-                if policy.summary_bytes > 6000:
-                    raise ConfigError("hook integrations require summary_bytes <= 6000; update the policy")
+                require_hook_summary(policy)
                 retry_seconds = 5
                 while True:
                     try:

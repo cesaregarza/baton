@@ -7,6 +7,8 @@ import json
 
 import httpx
 
+from baton.config.secretary import MAX_COMMAND_RESPONSE_BYTES, MAX_MODEL_RESPONSE_BYTES
+
 from .command import Command
 
 
@@ -14,7 +16,8 @@ class ModelUnavailable(Exception):
     """A model or tool transport did not return a usable response."""
 
 
-async def post_json(url: str, api_key: str, body: dict, timeout: float, max_bytes: int = 1024 * 1024) -> dict:
+async def post_json(url: str, api_key: str, body: dict, timeout: float,
+                    max_bytes: int = MAX_MODEL_RESPONSE_BYTES) -> dict:
     try:
         async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
             async with client.stream("POST", url, json=body,
@@ -36,7 +39,8 @@ async def post_json(url: str, api_key: str, body: dict, timeout: float, max_byte
         raise ModelUnavailable("model request failed") from None
 
 
-async def command_json(settings: dict, request: dict, timeout: float, max_bytes: int = 64 * 1024) -> dict:
+async def command_json(settings: dict, request: dict, timeout: float,
+                       max_bytes: int = MAX_COMMAND_RESPONSE_BYTES) -> dict:
     argv = settings.get("command")
     if not isinstance(argv, list) or not argv or not all(isinstance(part, str) for part in argv):
         raise ModelUnavailable("model command is unavailable")

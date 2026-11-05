@@ -114,5 +114,8 @@ The skills in this directory guide installation. The installed Python runtime is
 and `hooks.py` delivers checked summaries to the bound session. `__main__.py` exposes these operations.
 Assessment prompting, the bounded model/tool harness, optional typed decision engine, and model transports live in
 [`baton/agents/secretary`](../../baton/agents/secretary/README.md). Both Codex and Claude Code integrations use
-that same assessment path. This runner is started separately; it is not enabled with a
+that same assessment path, split across `attention`, `inbox`, `harness`, and `connections` packages. Policy and
+installed-instance configuration code is centralized in `baton/config/secretary.py`; deployment TOML, policy
+JSON, and installed `integration.json` formats remain unchanged, so installed files require no migration. This
+runner is started separately; it is not enabled with a
 `[integrations.secretary]` Baton server table.

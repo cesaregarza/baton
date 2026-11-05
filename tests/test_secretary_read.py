@@ -312,7 +312,7 @@ def test_read_refuses_to_migrate_an_old_source_database(tmp_path) -> None:
     import sqlite3
     from dataclasses import replace
 
-    from baton.agents.secretary import read as secretary_read
+    from baton.agents.secretary.inbox import read as secretary_read
     with make_world(tmp_path) as world:
         old_dir = tmp_path / "old-schema"
         old_dir.mkdir(mode=0o700)

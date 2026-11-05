@@ -7,6 +7,8 @@ import os
 import signal
 from dataclasses import dataclass
 
+from baton.config.secretary import MAX_COMMAND_RESPONSE_BYTES
+
 _CHUNK_SIZE = 64 * 1024
 
 
@@ -15,7 +17,7 @@ class Command:
     """An argv command with a strict bound on captured stdout."""
 
     argv: list[str]
-    max_output: int = 64 * 1024
+    max_output: int = MAX_COMMAND_RESPONSE_BYTES
 
     async def run(self, payload: bytes, timeout: float) -> tuple[int, bytes]:
         """Run argv without a shell, concurrently streaming stdin and bounded stdout."""

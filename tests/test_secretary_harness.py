@@ -14,10 +14,10 @@ from test_secretary_model import Model, _decide, _positions
 
 from baton import messages
 from baton.agents.secretary import show
-from baton.agents.secretary.decide import SecretaryUnavailable
-from baton.agents.secretary.harness import SecretaryHarness
-from baton.agents.secretary.policy import load_policy
-from baton.agents.secretary.transport import ModelUnavailable
+from baton.agents.secretary.attention.decide import SecretaryUnavailable
+from baton.agents.secretary.connections.transport import ModelUnavailable
+from baton.agents.secretary.harness.run import SecretaryHarness
+from baton.config.secretary import load_policy
 
 
 def _context(*, event: str = "one", knowledge: str = "shared knowledge",

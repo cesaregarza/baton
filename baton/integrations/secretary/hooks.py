@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from baton.agents.secretary.runtime import DatabaseWorker
+from baton.agents.secretary.attention.runtime import DatabaseWorker
 from baton.config import ConfigError
 
 from .instance import Instance

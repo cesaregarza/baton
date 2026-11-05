@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 
-from .prompt import RESPONSE_SCHEMA
+from ..harness.prompt import RESPONSE_SCHEMA
 from .transport import ModelUnavailable, command_json, json_object, post_json
 
 
@@ -96,7 +96,7 @@ class SecretaryModel:
 
     @property
     def layered_cache(self) -> bool:
-        return self.settings["provider"] == "openai" and self.settings.get("cache_mode", "layered") == "layered"
+        return self.settings["provider"] == "openai" and self.settings["cache_mode"] == "layered"
 
     async def turn(self, messages: list[dict], tools: list[dict], timeout: float) -> ModelTurn:
         if self.settings["provider"] == "command":

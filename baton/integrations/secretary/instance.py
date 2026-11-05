@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +10,7 @@ from pathlib import Path
 from baton import config, datadir
 from baton.agents.secretary import Secretary
 from baton.config import ConfigError
+from baton.config.secretary import IntegrationConfig
 from baton.database.files import open_private
 
 
@@ -27,28 +27,10 @@ class Instance:
     @classmethod
     def load(cls, path: Path) -> Instance:
         path = datadir.canonical(path)
-        with datadir.opened(path.parent) as directory:
-            fd = datadir.open_file(directory, path.name, os.O_RDONLY, directory=path.parent)
-            with os.fdopen(fd) as source:
-                value = json.load(source)
-        if value.get("version") != 1 or value.get("product") not in {"codex", "claude-code"}:
-            raise ConfigError("unsupported secretary integration")
-        for name in ("project", "config", "policy", "state"):
-            if not isinstance(value.get(name), str) or not Path(value[name]).is_absolute():
-                raise ConfigError(f"integration {name} must be an absolute path")
-        if Path(value["state"]).parent != path.parent:
-            raise ConfigError("integration state must be in its private instance directory")
-        for name, maximum in (("poll_seconds", 60), ("budget_seconds", 60)):
-            if type(value.get(name)) not in (int, float) or not 0 < value[name] <= maximum:
-                raise ConfigError(f"{name} must be greater than zero and at most {maximum}")
-        executable = value.get("codex")
-        if value["product"] == "codex" and (
-                not isinstance(executable, str) or not Path(executable).is_absolute()
-                or not os.access(executable, os.X_OK)):
-            raise ConfigError("codex must name an absolute executable path")
-        return cls(path, value["product"], Path(value["project"]),
-                   Secretary(config.load(value["config"]), Path(value["state"]), Path(value["policy"])),
-                   value["poll_seconds"], value["budget_seconds"], executable)
+        integration = IntegrationConfig.load(path)
+        return cls(path, integration.product, integration.project,
+                   Secretary(config.load(integration.config), integration.state, integration.policy),
+                   integration.poll_seconds, integration.budget_seconds, integration.codex)
 
     @property
     def signal_path(self) -> Path:

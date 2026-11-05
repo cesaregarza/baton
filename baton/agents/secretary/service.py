@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from baton.config import Config
+from baton.config.secretary import load_policy
 from baton.errors import InvalidRequest
 
-from .policy import load_policy
-from .runtime import DatabaseWorker
+from .attention.runtime import DatabaseWorker
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ class Secretary:
     async def decide(self, *, budget_seconds: float, since: int | None = None, floor: int | None = None,
                      trigger: str | None = None, hourly: bool = False,
                      clock: Callable[[], float] = time.monotonic) -> dict:
-        from .decide import DecisionRun
+        from .attention.decide import DecisionRun
         return await DecisionRun(self, budget_seconds, since, floor, trigger, hourly, clock).run()
 
     async def acknowledge(self, decision_id: str) -> int:
@@ -38,8 +38,8 @@ class Secretary:
 
 
 def _pending(secretary: Secretary, decision_id: str) -> dict | None:
-    from .inbox import InboxWindow
-    from .state import AttentionLog
+    from .attention.state import AttentionLog
+    from .inbox.window import InboxWindow
     policy = load_policy(secretary.config, secretary.policy_path)
     log = AttentionLog(secretary.state_path, secretary.config.data_dir, policy.principal)
     result = log.get(decision_id)
@@ -53,8 +53,8 @@ def _pending(secretary: Secretary, decision_id: str) -> dict | None:
 
 
 def _acknowledge(secretary: Secretary, decision_id: str) -> int:
-    from .inbox import InboxWindow
-    from .state import AttentionLog
+    from .attention.state import AttentionLog
+    from .inbox.window import InboxWindow
     policy = load_policy(secretary.config, secretary.policy_path)
     log = AttentionLog(secretary.state_path, secretary.config.data_dir, policy.principal)
     result = log.get(decision_id)
@@ -69,8 +69,8 @@ def _acknowledge(secretary: Secretary, decision_id: str) -> int:
 
 def show(config: Config, state_path: Path, policy_path: Path, *, source_key: str | None = None) -> dict:
     policy = load_policy(config, policy_path)
-    from .inbox import InboxWindow
-    from .state import AttentionLog
+    from .attention.state import AttentionLog
+    from .inbox.window import InboxWindow
     log = AttentionLog(state_path, config.data_dir, policy.principal)
     visible, stale = [], 0
     for result in log.recent():

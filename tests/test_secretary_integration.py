@@ -15,7 +15,7 @@ import pytest
 from secretary_support import conversation, make_world, say, table_hashes
 from test_secretary_model import Model
 
-from baton.agents.secretary.state import AttentionLog
+from baton.agents.secretary.attention.state import AttentionLog
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSION = "synthetic_session"

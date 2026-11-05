@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-from .decisions import AttentionDecision, DecisionEngine, make_engine
-from .model import ToolCall
-from .transport import ModelUnavailable
+from ..connections.decisions import AttentionDecision, DecisionEngine, make_engine
+from ..connections.model import ToolCall
+from ..connections.transport import ModelUnavailable
 
 DECISION_TOOL = {
     "type": "function", "name": "decide_attention", "strict": True,

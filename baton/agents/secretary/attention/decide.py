@@ -16,20 +16,19 @@ from pathlib import Path
 from baton import config as config_module
 from baton import datadir
 from baton.config import Config, ConfigError
+from baton.config.secretary import MAX_BUDGET_SECONDS, Policy, fingerprint, load_policy
 from baton.errors import BatonError, InvalidRequest
 
+from ..connections.transport import ModelUnavailable
+from ..harness.prompt import HARNESS_VERSION, INSTRUCTIONS, RESPONSE_SCHEMA
+from ..harness.run import SecretaryHarness
+from ..harness.tools import DECISION_TOOL
+from ..inbox.window import InboxWindow
+from ..service import Secretary
 from .assessment import Assessment
-from .harness import SecretaryHarness
-from .inbox import InboxWindow
-from .model import ModelUnavailable
-from .policy import Policy, fingerprint, load_policy
-from .prompt import HARNESS_VERSION, INSTRUCTIONS, RESPONSE_SCHEMA
 from .runtime import DatabaseWorker
-from .service import Secretary
 from .state import AttentionLog
-from .tools import DECISION_TOOL
 
-MAX_BUDGET_SECONDS = 60.0
 TRIGGER = re.compile(r"message:[1-9][0-9]{0,17}|job:job_[0-9a-f]{16}:[1-9][0-9]{0,17}|conversation")
 
 

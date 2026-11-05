@@ -6,11 +6,12 @@ import asyncio
 import json
 import time
 
-from .model import SecretaryModel
-from .policy import Policy
+from baton.config.secretary import Policy
+
+from ..connections.model import SecretaryModel
+from ..connections.transport import ModelUnavailable
 from .prompt import PromptLayers
 from .tools import SecretaryTools
-from .transport import ModelUnavailable
 
 
 class SecretaryHarness:
@@ -54,7 +55,7 @@ class SecretaryHarness:
                 used_ids.update(ids)
                 messages.extend(turn.items)
                 for call in turn.calls:
-                    tool_timeout = min((self.policy.decision_engine or {}).get("timeout_seconds", 3),
+                    tool_timeout = min(self.policy.decision_timeout,
                                        (deadline - time.monotonic()) / 2)
                     result = await self.tools.call(call, context, tool_timeout)
                     messages.append({"type": "function_call_output", "call_id": call.id,

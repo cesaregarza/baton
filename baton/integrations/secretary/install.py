@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from baton import datadir
-from baton.agents.secretary.policy import load_policy
 from baton.config import load
+from baton.config.secretary import IntegrationConfig, load_policy, require_hook_summary
 
 
 def install(
@@ -32,8 +32,8 @@ def install(
     project = _existing(project, "project", directory=True)
     config = _existing(config, "config", directory=False)
     policy = _existing(policy, "policy", directory=False)
-    _check_summary_limit(policy)
-    load_policy(load(config), policy)
+    policy_config = load_policy(load(config), policy)
+    require_hook_summary(policy_config)
     python = _executable(python, "python")
     codex_path = (_executable(codex, "codex") if codex is not None else _find_codex()) if product == "codex" else None
     destination = datadir.canonical(destination)
@@ -59,18 +59,9 @@ def install(
         f"EnvironmentFile=-{_systemd_arg(str(destination / 'environment'), quote=False)}",
         "Restart=on-failure", "RestartSec=5", "UMask=0077", "", "[Install]", "WantedBy=default.target", "",
     ))
-    instance = {
-        "version": 1,
-        "product": product,
-        "project": str(project),
-        "config": str(config),
-        "policy": str(policy),
-        "state": str(destination / "attention.sqlite"),
-        "poll_seconds": 2,
-        "budget_seconds": 30,
-    }
-    if codex_path is not None:
-        instance["codex"] = str(codex_path)
+    instance = IntegrationConfig(product=product, project=project, config=config, policy=policy,
+                                 state=destination / "attention.sqlite",
+                                 codex=str(codex_path) if codex_path is not None else None).as_dict()
     _write_private(instance_path, json.dumps(instance, indent=2, sort_keys=True) + "\n")
     _write_private(destination / "hooks.json", json.dumps(hooks, indent=2, sort_keys=True) + "\n")
     if product == "claude-code":
@@ -109,16 +100,6 @@ def _existing(path: Path, label: str, *, directory: bool) -> Path:
     if not directory and not resolved.is_file():
         raise ValueError(f"{label} path must be a file: {path}")
     return resolved
-
-
-def _check_summary_limit(path: Path) -> None:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        raise ValueError("secretary policy must be readable JSON") from error
-    limit = value.get("summary_bytes") if isinstance(value, dict) else None
-    if type(limit) is not int or not 256 <= limit <= 6000:
-        raise ValueError("secretary policy summary_bytes must be an integer from 256 through 6000")
 
 
 def _executable(path: Path, label: str) -> Path:

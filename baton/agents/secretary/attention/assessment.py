@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .model import ModelUnavailable
+from ..connections.transport import ModelUnavailable
 
 
 @dataclass(frozen=True)

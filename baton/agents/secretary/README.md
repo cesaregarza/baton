@@ -185,18 +185,30 @@ assessments while retaining acknowledged delivery coverage.
 
 | Module | Responsibility |
 |---|---|
-| [service.py](service.py) | Async host API and delivery acknowledgment. |
-| [decide.py](decide.py) | Reads the authorized window, applies callback budget, caches identical assessments, and rechecks visibility. |
-| [inbox.py](inbox.py) | Builds the complete pending context and rejects over-limit windows. |
-| [harness.py](harness.py) | Runs bounded model/tool turns and aggregates model usage. |
-| [prompt.py](prompt.py) | Stable prompt layers, explicit cache breakpoints, and the strict assessment schema. |
-| [model.py](model.py) | OpenAI Responses and protocol version 3 command transports. |
-| [tools.py](tools.py) | Optional model-callable decision tool, per-assessment verdict reuse, and engine status. |
-| [decisions.py](decisions.py) | Typed decision protocol and JEV/command adapters. |
-| [transport.py](transport.py) | Bounded HTTP and command transport helpers. |
-| [assessment.py](assessment.py) | Validates decisions, summary bounds, and source references. |
-| [policy.py](policy.py) | Validates policy version 2, model/engine settings, and limits. |
-| [state.py](state.py) | Private assessment cache, activation/delivery positions, and acknowledgment. |
+| [service.py](service.py) | Async public host API and delivery acknowledgment. |
+| [attention/decide.py](attention/decide.py) | Assessment lifecycle: authorized window, callback budget, cache, and visibility recheck. |
+| [attention/assessment.py](attention/assessment.py) | Validates decisions, summary bounds, and source references. |
+| [attention/state.py](attention/state.py) | Private assessment cache, activation/delivery positions, and acknowledgment. |
+| [inbox/window.py](inbox/window.py) | Builds the complete pending context and rejects over-limit windows. |
+| [inbox/read.py](inbox/read.py), [inbox/sources.py](inbox/sources.py) | Read-only source access and current visibility checks. |
+| [harness/run.py](harness/run.py) | Runs bounded model/tool turns and aggregates model usage. |
+| [harness/prompt.py](harness/prompt.py) | Stable prompt layers, explicit cache breakpoints, and strict assessment schema. |
+| [harness/tools.py](harness/tools.py) | Optional model-callable decision tool, per-assessment verdict reuse, and engine status. |
+| [connections/model.py](connections/model.py) | OpenAI Responses and protocol version 3 command model transports. |
+| [connections/decisions.py](connections/decisions.py) | Typed decision protocol and JEV/command adapters. |
+| [connections/transport.py](connections/transport.py), [connections/command.py](connections/command.py) | Bounded HTTP and command transport helpers. |
+| [../../config/secretary.py](../../config/secretary.py) | Central policy validation and installed-instance configuration (`Policy`, `load_policy`, `fingerprint`, `IntegrationConfig`). |
+
+The secretary package is divided by lifecycle and responsibility: `attention` owns assessment state and validation,
+`inbox` owns authorized source context, `harness` owns prompts and bounded model/tool turns, and `connections`
+owns external transports. Child package `__init__.py` files are docstrings only; import from canonical modules,
+such as `from baton.agents.secretary.harness.run import SecretaryHarness`. The root package continues to expose
+`Secretary`, `show`, `Policy`, and `load_policy`. Policy and installed-instance configuration code is centralized
+in `baton.config.secretary`; deployment TOML, policy JSON, and integration JSON formats are unchanged, so existing
+files need no migration.
 
 The Codex and Claude Code integrations use the same secretary harness; principal host choice does not change policy
-or model behavior. Principal feedback remains a future direction; see the [roadmap](../../../docs/roadmap.md).
+or model behavior. Existing executable aliases `python -m baton.secretary_decide` and
+`python -m baton.secretary_read` remain; canonical module commands are
+`python -m baton.agents.secretary.attention.decide` and `python -m baton.agents.secretary.inbox.read`.
+Principal feedback remains a future direction; see the [roadmap](../../../docs/roadmap.md).

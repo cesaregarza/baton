@@ -10,14 +10,14 @@ baton/
   app/                 MCP server, authentication guard, tool schemas and adapters
   cli/                 Command parser and commands grouped by feature
   agents/              Agent, Permissions and thread access
-    secretary/         Model-driven inbox triage and summary delivery
+    secretary/         Model-driven inbox triage and summary delivery, split by responsibility
+  config/              Configuration values, loading, validation, including secretary policy/config
   messages/            DirectMessage, Inbox, Post and mailbox delivery
   conversations/       Conversation, membership, group delivery, history and listing
   topics/              Topic containers, paths, grants and reference documents
   jobs.py              Job creation, transitions, revisions and events
   database/            Connection driver, checked files, schema and migrations
   derived/             Index generations, batches, artifacts and vectors
-  config/              Configuration values, loading and validation
   integrations/        Outbound service integrations
   auth.py              Credentials, OAuth and token lifetime
   aliases.py           Guest aliases and role bindings
@@ -33,8 +33,8 @@ baton/
   errors.py            Domain errors and their public codes
 ```
 
-The top-level `secretary_decide.py` and `secretary_read.py` files are executable aliases for the current
-model-driven implementation. Their code lives in `agents/secretary/decide.py` and `agents/secretary/read.py`.
+The top-level `secretary_decide.py` and `secretary_read.py` files remain executable aliases. The canonical
+entrypoints are `agents/secretary/attention/decide.py` and `agents/secretary/inbox/read.py`.
 
 ## Where to make a change
 
@@ -56,13 +56,22 @@ model-driven implementation. Their code lives in `agents/secretary/decide.py` an
 | Change job transitions | `jobs.py` | `Job.move()` owns revision checks, retries and atomic event recording |
 | Change connection mechanics | `database/driver.py` | `files.py` checks private database files |
 | Change the authoritative schema | `database/schema.py`, `database/migrations.py` | `database/store.py` opens and initializes the database |
-| Change the supported secretary policy | `agents/secretary/policy.py`, `service.py` | Policy version 2 is the supported format |
-| Change the model's inbox context or size limits | `agents/secretary/inbox.py` | Reads currently visible pending events; refuses an oversized full window |
-| Change wake/hold/keep assessment and callback lifecycle | `agents/secretary/decide.py` | `DecisionRun` coordinates the window, model call, cache and visibility recheck |
-| Change model or optional advisory transport | `agents/secretary/model.py` | OpenAI Responses and host commands use `prompt.py`'s schema |
-| Change instructions or structured response shape | `agents/secretary/prompt.py`, `assessment.py` | Assessment validation checks decisions, summary bounds and cited source keys |
-| Change private assessment cache or delivery acknowledgment | `agents/secretary/state.py` | `service.py` advances coverage only after host delivery |
-| Change secretary source visibility or read output | `agents/secretary/read.py`, `sources.py` | Reads current authoritative data without advancing Baton inbox cursors |
+| Change secretary policy validation or installed-instance configuration | `config/secretary.py` | Owns `Policy`, `load_policy`, `fingerprint`, and `IntegrationConfig`; policy and integration JSON formats are unchanged |
+| Change the model's inbox context or size limits | `agents/secretary/inbox/window.py` | `inbox/read.py` and `inbox/sources.py` load visible records and source context; oversized full windows fail |
+| Change wake/hold/keep assessment and callback lifecycle | `agents/secretary/attention/decide.py` | Coordinates the window, model call, cache and visibility recheck |
+| Change model or optional decision-engine transport | `agents/secretary/connections/` | `connections/model.py` selects model transport; `connections/decisions.py` owns typed engine adapters; `connections/transport.py` bounds I/O |
+| Change instructions or structured response shape | `agents/secretary/harness/prompt.py`, `attention/assessment.py` | Assessment validation checks decisions, summary bounds and cited source keys |
+| Change bounded model/tool turns | `agents/secretary/harness/run.py`, `harness/tools.py` | `harness/prompt.py` builds ordered prompt layers; tool verdict reuse remains per assessment |
+| Change private assessment cache or delivery acknowledgment | `agents/secretary/attention/state.py`, `service.py` | Coverage advances only after host delivery |
+| Change secretary source visibility or read output | `agents/secretary/inbox/read.py`, `inbox/sources.py` | Reads current authoritative data without advancing Baton inbox cursors |
+
+Secretary packages are organized around assessment lifecycle (`attention`), authorized inbox context (`inbox`),
+model prompting and bounded turns (`harness`), and model/decision-engine I/O (`connections`). Their package
+`__init__.py` files contain docstrings only; import implementation from its canonical module, for example
+`from baton.agents.secretary.harness.run import SecretaryHarness`. The root package keeps the public
+`Secretary`, `show`, `Policy`, and `load_policy` API. Configuration code is centralized in `config/secretary.py`;
+deployment TOML, secretary policy JSON, and installed integration JSON retain their existing formats, so no
+file migration is required.
 
 ## Follow one message
 

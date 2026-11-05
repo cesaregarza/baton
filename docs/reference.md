@@ -225,8 +225,14 @@ events addressed to or authored by the principal and relevant job events in `del
 IDs and conversation IDs for opening the cited thread. A page holds at most `--limit` events or messages (default
 20, maximum 100) and aims for `--max-bytes` (default 256 KiB); one oversized entry may be returned alone.
 Position-based reads return `through_pos` for the next page; ID-based reads report any `not_read` IDs. `read` opens
-the database read-only, needs no `--state`, and writes nothing; `python -m baton.agents.secretary.read` (also
-available as `baton.secretary_read`) takes the same options.
+the database read-only, needs no `--state`, and writes nothing; the canonical module command is
+`python -m baton.agents.secretary.inbox.read`. The existing executable alias `python -m baton.secretary_read`
+(also available as `baton.secretary_read`) takes the same options. `python -m baton.agents.secretary.attention.decide`
+is the canonical module command for the decision entrypoint; `python -m baton.secretary_decide` remains available.
+
+Secretary policy and installed-instance configuration code lives in `baton.config.secretary`. Deployment TOML,
+secretary policy JSON, and installed integration JSON formats are unchanged; centralizing their code requires no
+file migration.
 
 ## Local indexing interface
 

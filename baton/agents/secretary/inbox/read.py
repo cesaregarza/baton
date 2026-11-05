@@ -15,10 +15,10 @@ from pathlib import Path
 from baton import config as config_module
 from baton import datadir, messages
 from baton.config import Config, ConfigError
+from baton.config import secretary as policy_module
 from baton.database import Connection, Row, store
 from baton.errors import BatonError, InvalidRequest
 
-from . import policy as policy_module
 from . import sources
 
 DEFAULT_LIMIT = 20

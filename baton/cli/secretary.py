@@ -20,8 +20,8 @@ def add_commands(commands: Any) -> None:
     acknowledge = actions.add_parser("acknowledge", help="record successful delivery of a version-2 summary")
     acknowledge.add_argument("decision_id")
     acknowledge.set_defaults(handler=lambda config, args: run(config, args, "acknowledge"))
-    from baton.agents.secretary import decide as secretary_decide
-    from baton.agents.secretary import read as secretary_read
+    from baton.agents.secretary.attention import decide as secretary_decide
+    from baton.agents.secretary.inbox import read as secretary_read
 
     decide = actions.add_parser("decide", help="decide wake, hold or keep for one wake, or digest for the hour")
     secretary_decide.add_arguments(decide)
@@ -33,8 +33,8 @@ def add_commands(commands: Any) -> None:
 
 def run(config: Config, args: argparse.Namespace, action: str) -> dict[str, Any]:
     from baton.agents import secretary
-    from baton.agents.secretary import decide as secretary_decide
-    from baton.agents.secretary import read as secretary_read
+    from baton.agents.secretary.attention import decide as secretary_decide
+    from baton.agents.secretary.inbox import read as secretary_read
 
     if action == "acknowledge":
         import asyncio

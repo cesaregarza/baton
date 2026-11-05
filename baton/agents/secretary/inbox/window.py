@@ -6,11 +6,11 @@ import json
 from dataclasses import dataclass
 
 from baton.config import Config
+from baton.config.secretary import Policy, fingerprint
 from baton.database.store import connect_read_only
 from baton.errors import BatonError, InvalidRequest
 
 from . import read, sources
-from .policy import Policy, fingerprint
 
 
 class InboxTooLarge(BatonError):

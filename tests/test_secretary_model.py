@@ -15,7 +15,7 @@ from secretary_support import conversation, make_world, say, table_hashes
 
 from baton import conversations, messages
 from baton.agents.secretary import Secretary, show
-from baton.agents.secretary.decide import SecretaryUnavailable
+from baton.agents.secretary.attention.decide import SecretaryUnavailable
 
 FAKE = Path(__file__).parent / "fixtures" / "secretary_fake_model.py"
 
@@ -69,7 +69,7 @@ def _decide(world, **options) -> dict:
 
 def _positions(world) -> tuple[int, int]:
     # The state starts with acknowledged positions at zero; this test reads them from the private state store.
-    from baton.agents.secretary.state import AttentionLog
+    from baton.agents.secretary.attention.state import AttentionLog
     log = AttentionLog(world.state_path, world.config.data_dir, "planner")
     return log.positions()
 
@@ -308,7 +308,7 @@ def test_hourly_digest_uses_the_model_and_inspection_does_not_infer_again(tmp_pa
 
 
 def test_context_overflow_is_explicit_and_does_not_infer_from_a_truncated_window(tmp_path) -> None:
-    from baton.agents.secretary.inbox import InboxTooLarge
+    from baton.agents.secretary.inbox.window import InboxTooLarge
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path)
         for index in range(2):
