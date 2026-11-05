@@ -186,7 +186,7 @@ and database device and inode after SQLite opens them, but a file swapped and sw
 and that check could still be used. That requires write access to the private directory, which is within
 the host-user trust boundary above.
 
-This revision uses database schema 21. Schemas 2–20 upgrade in one transaction; unsupported versions are
+This revision uses database schema 22. Schemas 2–21 upgrade in one transaction; unsupported versions are
 refused before journal-mode or schema changes. Back up the data before upgrading.
 
 <a name="integrations"></a>

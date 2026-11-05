@@ -84,7 +84,8 @@ async def dispatch(instance: Instance, args) -> int:
             result = {key: instance.receipts.get(key) for key in ("session", "pending", "queued", "health")}
             health = result["health"]
             result["heartbeat_stale"] = not health or time.time() - health["checked_at"] > max(
-                30, 2 * instance.budget_seconds + instance.poll_seconds
+                30,
+                2 * instance.budget_seconds + instance.poll_seconds + instance.delivery_timeout_seconds,
             )
     print(json.dumps(result, ensure_ascii=args.action == "receive"), flush=True)
     return 0

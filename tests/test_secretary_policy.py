@@ -79,6 +79,14 @@ def test_reasoning_effort_accepts_bounded_nonempty_provider_values(tmp_path) -> 
         _load(tmp_path, value)
 
 
+@pytest.mark.parametrize("effort", [" minimal", "minimal ", "min\x00imal", "low\nhigh", "\tminimal"])
+def test_reasoning_effort_rejects_surrounding_whitespace_and_controls(tmp_path, effort) -> None:
+    value = _raw()
+    value["model"]["reasoning_effort"] = effort
+    with pytest.raises(ConfigError, match="reasoning_effort"):
+        _load(tmp_path, value)
+
+
 @pytest.mark.parametrize(
     "field",
     [

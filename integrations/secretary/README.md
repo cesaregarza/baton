@@ -9,10 +9,10 @@ These project skills explain how a local secretary instance can deliver decision
 
 - Install and run the worker on the same host and as the same user as the local Baton data and model authentication. Remote delivery is unsupported; remote authenticated reads of archived summaries are supported.
 - The runner uses POSIX file locks (Linux/macOS). The supplied systemd unit is for Linux; use another supervisor on macOS.
-- Set integration `poll_seconds` and `budget_seconds` so `2 * budget_seconds + poll_seconds <= 60`; the examples use a 2-second poll and a 28-second budget. Set required `delivery_timeout_seconds` independently of the engine timeout. The engine timeout must be shorter than the assessment budget; install and startup validate this, as does standalone `decide` before work.
+- Set integration `poll_seconds` and `budget_seconds` so `2 * budget_seconds + poll_seconds <= 60`; the examples use a 2-second poll and a 28-second budget. Set required `delivery_timeout_seconds` independently of the engine timeout. The status heartbeat stale bound also includes this delivery timeout because a successful notification can extend a worker pass. The engine timeout must be shorter than the assessment budget; install and startup validate this, as does standalone `decide` before work.
 - Use a complete secretary v3 policy. Model ID, provider URL, API-key variable, timeout, reasoning effort, output limit, and cache mode are explicit policy values; there is no forced model ID. The independent decision engine is also required and can use JEV or a command adapter.
 - Set `summary_bytes` explicitly to 4000 (maximum 6000) for hook output limits.
-- Installation binds the activation floor to the current database head. The worker scans bounded, complete pages of visible events, including visible reply parents, with output space reserved for citations. It never truncates a page. Transport failures and timeouts retry indefinitely in their original mode; they do not split pages. Invalid model content/output and `InboxTooLarge` count toward `max_attempts` and may split pages.
+- Installation binds the activation floor to the current database head. The worker scans bounded, complete pages of visible events, including visible reply parents, with output space reserved for citations. It never truncates a page. Provider outages retry in their original mode. Invalid model content/output and `InboxTooLarge` count toward `max_attempts`; timeouts, rejected requests, and failed commands also count when another page has succeeded under the same policy since that page last failed. Saved results are recovered before invoking either provider again.
 - Each poll reserves one full configured budget for a fresh alert and one for scheduled work. It runs one eligible scheduled lane per poll, alternating retry and digest priority, so retries and digests never receive leftover slivers. Held contiguous pages are combined into one bounded digest at `digest_seconds` intervals. Digest failures remain digests and eventually produce a keep notice, never an alert or wake.
 - Run only one worker per instance. The generated user unit uses `Restart=on-failure`; standalone `run` may be managed by another supervisor.
 - systemd user-service enablement alone does not promise operation after logout or reboot. That depends on user-manager linger and host configuration.
@@ -23,7 +23,9 @@ the separate wire `confidence` is validated but not used as the threshold. The c
 and requires exactly `{"decision":"wake","wake_probability":0.91}`. The model may call a tool to retrieve the
 cached decision and wake probability; the engine cannot explain its choice. If model output is unavailable for a
 forced wake, the host receives a forced-wake notice. A model outage without a forced wake remains an outage, not
-an alert. Sanitized engine failures are retained in health/status even if model triage later holds or fails.
+an alert. Sanitized engine, model, and delivery failures are logged and retained separately in health/status.
+The worker checks missing model credentials at startup and distinguishes authentication, request rejection,
+timeout, and provider unavailability. A component recovers after a successful attempt, retaining failure history.
 
 Every summary, including a digest, accounts for and cites all events in its page; visible reply parents are
 optional citations. Validation checks source references, not the truth of summary claims. The prompt forbids
@@ -99,6 +101,11 @@ python -m baton.integrations.secretary --instance /absolute/private/secretary-in
 baton secretary --policy /absolute/path/to/secretary-policy-v3.json summaries --after 0 --limit 50
 ```
 
+The worker health receipt reports overall `running` or `degraded` status and separate `engine`, `model`, and
+`delivery` component states. A delivery timeout, unsuccessful Codex exit, launch failure, or missing executable
+records a safe failure category, keeps the worker polling, and retries the offer after the policy retry interval.
+Successful delivery clears the degraded delivery state while retaining the latest failure category and timestamp.
+
 The local `summaries` command pages archived deliverable summaries from `baton.db`; it does not require the private
 secretary state file. An authenticated remote token can read its own archive without a host-side policy file or
 host policy configuration:
@@ -151,6 +158,6 @@ that same assessment path, split across `attention`, `inbox`, `harness`, and `co
 installed-instance configuration code is centralized in `baton/config/secretary.py`. The Baton host TOML
 format is unchanged. Secretary policy version 3 is required. Private secretary state version 1 is refused and
 requires a new file; version 2 is preserved. The append-only `secretary_summaries` archive is in shared `baton.db`
-under schema version 21. The installed
+under schema version 22. The installed
 `integration.json` is a separate version 1 worker configuration. This runner is started separately; it is not enabled with a
 `[integrations.secretary]` Baton server table.

@@ -15,7 +15,13 @@ from baton.database.files import open_private
 from baton.errors import InvalidRequest
 
 _BASE_TABLES = {"attention_version", "principals", "assessments"}
-_KNOWN_TABLES = _BASE_TABLES | {"acknowledgments", "backlog_settings", "backlog_windows", "engine_health"}
+_KNOWN_TABLES = _BASE_TABLES | {
+    "acknowledgments",
+    "backlog_settings",
+    "backlog_windows",
+    "engine_health",
+    "model_health",
+}
 
 
 def _create_acknowledgments(conn: Connection) -> None:
@@ -69,6 +75,11 @@ class AttentionLog:
                         "CREATE INDEX IF NOT EXISTS acknowledgments_coverage ON acknowledgments"
                         "(principal, covered_through, since)"
                     )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS assessments_window ON assessments(principal,"
+                    "json_extract(result,'$.policy_digest'),json_extract(result,'$.since'),"
+                    "json_extract(result,'$.through_pos'),json_extract(result,'$.floor'),json_extract(result,'$.mode'))"
+                )
             yield conn
 
     def positions(self) -> tuple[int, int]:
@@ -118,6 +129,19 @@ class AttentionLog:
                     "SELECT result FROM assessments WHERE principal=? AND id=?", (self.principal, result["decision_id"])
                 ).one()[0]
             )
+
+    def for_window(self, policy_digest: str, since: int, through: int, floor: int, mode: str) -> list[dict]:
+        """Find completed results before retrying a page interrupted between persistence and queue completion."""
+        with self.connection() as conn:
+            return [
+                json.loads(row[0])
+                for row in conn.execute(
+                    "SELECT result FROM assessments WHERE principal=? AND json_extract(result,'$.policy_digest')=? "
+                    "AND json_extract(result,'$.since')=? AND json_extract(result,'$.through_pos')=? "
+                    "AND json_extract(result,'$.floor')=? AND json_extract(result,'$.mode')=? ORDER BY rowid",
+                    (self.principal, policy_digest, since, through, floor, mode),
+                )
+            ]
 
     def acknowledge(self, decision_id: str) -> int:
         with self.connection() as conn, conn.transaction():

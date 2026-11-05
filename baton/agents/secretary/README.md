@@ -30,9 +30,11 @@ notification itself or advances the principal's inbox.
    including a digest, must account for and cite every event in the page; it may cite visible reply parents too.
    The response's source references are checked against offered context and source visibility is rechecked, but
    Baton does not verify the truth of summary claims. The prompt forbids invented assignments or approvals.
-6. Scan progress and delivered coverage are separate. Transport failures and timeouts retry indefinitely in their
-   original mode with backoff; they do not split pages or consume `max_attempts`. Invalid model content/output and
-   `InboxTooLarge` failures count toward `max_attempts`; those pages may split. Each poll reserves one full budget
+6. Scan progress and delivered coverage are separate. Failed pages retry in their original mode with backoff.
+   Invalid model output and oversized windows count toward `max_attempts` and may split. Timeouts, rejected
+   requests, and failed commands count only when another page has received a valid model answer under the same
+   policy since this page last failed. A sustained model outage therefore keeps pages intact.
+   Each poll reserves one full budget
    for a fresh alert and one for scheduled work. It runs one eligible scheduled lane per poll, alternating retry
    and digest priority, so a lane never receives a sliver of the budget. Held contiguous pages are batched into a
    bounded digest after `digest_seconds`.
@@ -91,10 +93,10 @@ base URL, credential variable, timeout, reasoning effort, output-token limit, an
 requires its model ID, base URL, credential variable, and timeout; do not add model reasoning or output-token
 fields to its configuration. `wake_threshold` is the minimum independent-engine wake probability that forces a wake;
 the example's `0.8` is configurable, not a hard-coded cutoff.
-`model.reasoning_effort` must be a nonempty string of at most 100 characters; the provider determines accepted
-values, so values such as `minimal` are valid policy inputs.
-`retry_initial_seconds` and `retry_max_seconds` bound the retry backoff. Transport failures and timeouts retry
-indefinitely; `max_attempts` applies only to invalid model content/output and oversized windows, which may split.
+`model.reasoning_effort` must contain 1–100 printable characters without surrounding whitespace; the provider
+determines accepted values, so values such as `minimal` are valid policy inputs.
+`retry_initial_seconds` and `retry_max_seconds` bound the retry backoff. `max_attempts` limits failures that are
+specific to a page, using the evidence described above, before splitting that page.
 `digest_seconds` schedules held-page digests. `knowledge` and `instructions` are operator-authored text, each
 limited to 8 KiB; the full policy is limited to 16 KiB. `max_tool_calls` ranges from one to eight.
 `max_events` bounds page event/context entries, `context_bytes` bounds serialized input, and `summary_bytes`
@@ -181,7 +183,7 @@ from baton.agents.secretary import Secretary
 
 secretary = Secretary(config, Path("/private/secretary.sqlite"), Path("/private/policy.json"))
 result = await secretary.decide(budget_seconds=30, trigger="message:42")
-if result["decision"] == "wake":
+if result["brief"]:  # Deliver and acknowledge digest summaries and operational notices too.
     await deliver_to_principal(result["brief"])
     await secretary.acknowledge(result["decision_id"])
 ```
@@ -196,8 +198,10 @@ earlier unacknowledged gap.
 Use `hourly=True` for a digest of contiguous due held pages. The host chooses a callback budget greater than zero
 and at most 60 seconds; the engine timeout must be shorter than the assessment budget. Installed integrations check
 this at install and startup. Integration delivery has a separate required `delivery_timeout_seconds` setting; it
-does not inherit the engine timeout. Standalone decisions check due retries before scanning new work. A trigger
-matching a failed source page retries that page, while a page still in backoff remains eligible for a later retry.
+does not inherit the engine timeout. Standalone decisions process one due retry before scanning new work, even
+when called with a newer trigger. In that case the returned page has no newer trigger attached; handle its result,
+then call again for the newer event. An untriggered call while failed work is in backoff raises retryable
+`secretary_unavailable`. Calls for a different new event may still assess that fresh page during the backoff.
 
 Results contain a `brief`, cited `sources`, and `source_refs` resolving keys to current message/thread IDs or
 event positions. Every summary, including a digest, must account for and cite every event on its page; visible
@@ -216,18 +220,24 @@ Authorized message context is sent to the configured model provider or host comm
 engine receives context for each alert page. Host commands run as the Baton host user;
 their environment filtering does not sandbox access to files available to that user. A decision-engine transport
 or timeout failure is returned to the model as `decision_engine_unavailable`, allowing it to finish its own
-assessment. Sanitized engine failure status is retained with the assessment and exposed in worker health even if
-model triage later holds or fails. If a wake verdict forces attention but the model cannot summarize it, the worker
+assessment. Sanitized engine and model failures are logged and exposed independently in worker health, including
+`missing_credential`, `authentication`, `rejected`, `timeout`, and `unavailable` model categories. The worker checks
+for a missing model key at startup, even before an alert, and reports degraded health while a component is failing.
+Successful model answers clear its current failure status while retaining the last failure. If a wake verdict
+forces attention but the model cannot summarize it, the worker
 emits a forced-wake notice; a model outage without a forced wake remains an outage and does not become an alert.
 Digest failures retain digest mode and eventually produce a keep notice, never an alert or wake. Transport failures
-and timeouts retry indefinitely in their original mode without page splitting. Invalid model protocol/content and
-oversized windows count toward `max_attempts` and may split; exhausted callback budget is a timeout and remains
-retryable.
+and timeouts back off in their original mode. Invalid model protocol/content and oversized windows count toward
+`max_attempts` and may split. A timeout, rejected request, or failed command also counts when another page has
+received a valid model answer under the same policy since this page last failed. Without that evidence, the page
+continues backing off; elapsed time alone never turns a model outage into per-event wake notices.
+
+Before retrying, the queue checks for an already persisted result for the same policy, page, mode, activation floor,
+and current source content. It finishes that result without invoking the engine or model again. This closes the
+restart window between saving a summary or notice and recording queue completion.
 
 Pages use the configured `max_events`, `context_bytes`, `summary_bytes`, and citation budget. They are complete
-and never silently truncated. Transport and timeout failures retry in their original alert or digest mode using
-the configured backoff without splitting pages. Invalid model content/output and oversized windows count toward
-`max_attempts`; repeated eligible failures may split a page.
+and never silently truncated. Retried and split pages preserve their original alert or digest mode.
 No deterministic semantic fallback is used. Worker health is tracked separately from page retries. A held page
 does not produce an immediate alert; contiguous due held pages are combined into one bounded hourly digest.
 
@@ -249,9 +259,9 @@ remote summaries use the authenticated token's role and need no host-side policy
 The `show` command inspects saved
 assessments; `read` applies current visibility rules. Private state version 1 is refused; use a new file. State
 version 2 is preserved, concurrent initialization is serialized, and harness version 4 invalidates older
-unchecked cache entries. The shared database uses schema version 21
-for the append-only summary archive. `summaries` pages archive entries for the policy's principal without a
-private state file.
+unchecked cache entries. The shared database uses schema version 22; version 21 added the append-only summary
+archive, and version 22 indexes message identities for source visibility checks. `summaries` pages archive entries
+for the policy's principal without a private state file.
 
 ## Code map
 

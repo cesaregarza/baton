@@ -89,13 +89,16 @@ class SummaryArchive:
             ).fetchall()
             has_unscanned = len(rows) > MAX_SCAN_ROWS
             scanned = rows[:MAX_SCAN_ROWS]
-            entries = [
-                entry
-                for row in scanned
-                if (entry := _entry(row)) and _references_visible(conn, self.config, principal, entry["summary"])
-            ]
-        has_more = len(entries) > limit or has_unscanned
-        if len(entries) > limit:
+            entries = []
+            for row in scanned:
+                entry = _entry(row)
+                if _references_visible(conn, self.config, principal, entry["summary"]):
+                    entries.append(entry)
+                    if len(entries) > limit:
+                        break
+        has_extra_visible = len(entries) > limit
+        has_more = has_extra_visible or has_unscanned
+        if has_extra_visible:
             entries = entries[:limit]
             next_cursor = entries[-1]["cursor"]
         elif has_unscanned and scanned:
@@ -117,22 +120,44 @@ def _references_visible(conn: Connection, config: Config, principal: str, summar
     if not isinstance(refs, list):
         return False
     for ref in refs:
-        if not isinstance(ref, dict):
-            return False
-        message_id = ref.get("message_id")
-        if isinstance(message_id, str):
-            if sources._visible_message(conn, config, principal, message_id) is None:
-                return False
-            continue
-        pos = ref.get("pos")
-        if type(pos) is not int or pos < 1:
-            return False
-        # `_source_rows` applies the principal's event-stream selection; `visible_event` applies any
-        # conversation-level restriction for non-message events. The row must be the cited position.
-        events = sources._source_rows(conn, principal, pos - 1, 1)
-        if not events or events[0]["pos"] != pos or not sources.visible_event(conn, config, principal, events[0]):
+        if not _reference_visible(conn, config, principal, ref):
             return False
     return True
+
+
+def _reference_visible(conn: Connection, config: Config, principal: str, ref: object) -> bool:
+    """Resolve one source at its exact event position and verify its current message copy if present."""
+    if not isinstance(ref, dict) or "message_id" not in ref:
+        return False
+    pos = ref.get("pos")
+    message_id = ref.get("message_id")
+    if pos is None:
+        # Reply-context references predate an event-position link. `_visible_message` is backed by
+        # messages_by_id, so this compatibility path remains indexed while rechecking revocation.
+        return isinstance(message_id, str) and sources._visible_message(conn, config, principal, message_id) is not None
+    if type(pos) is not int or pos < 1:
+        return False
+    # `_source_rows` applies the principal's event-stream selection; `visible_event` applies any
+    # conversation-level restriction for non-message events. The row must be the cited position.
+    events = sources._source_rows(conn, principal, pos - 1, 1)
+    if not events or events[0]["pos"] != pos or not sources.visible_event(conn, config, principal, events[0]):
+        return False
+    if events[0]["kind"] != "message":
+        return message_id is None
+    if not isinstance(message_id, str):
+        return False
+    try:
+        data = json.loads(events[0]["data"])
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    seq = data.get("seq")
+    return (
+        data.get("message_id") == message_id
+        and type(seq) is int
+        and sources._event_message(conn, config, principal, message_id, seq, events[0]["audience"]) is not None
+    )
 
 
 def _entry(row: Row) -> dict:

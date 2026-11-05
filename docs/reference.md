@@ -20,6 +20,7 @@ Arguments ending in `?` are optional. Some tools are available only when their f
 | `bind_events(token)`, `unbind_events(token)` | Bind or unbind a guest OAuth grant's event subscriptions to an enrolled alias. See [MCP Events](integrations/openai-mcp-events.md#shared-guest-logins). |
 | `send_message(text, to? \| conversation_id?, job_id?, relayed?, reply_to?, attention?, needs_decision?, request_id?, token?)` | Send to a role or conversation. Reply and attention fields apply only to conversations. |
 | `read_messages(after_seq?, limit?)` | Read messages addressed to the caller. Without `after_seq`, return undelivered messages. |
+| `read_secretary_summaries(after?, limit?)` | Page the authenticated role's shared secretary summary archive; rechecks current visibility of every cited source. |
 | `wait(timeout_seconds?)` | Wait up to 30 seconds for messages or job changes addressed to the caller. |
 
 A plain guest has a smaller tool allowlist and must supply an alias proof to post; an enrolled alias can
@@ -220,13 +221,15 @@ may call a tool to retrieve the cached verdict, which contains no rationale.
 reply parents, and asks the independent engine and model for triage. The engine timeout must be shorter than the
 assessment budget; install, worker startup, and standalone decisions validate that relationship. Integration
 delivery uses a separate required `delivery_timeout_seconds`, independent of engine timeout. Standalone implicit
-mode checks due retries before scanning new work, then starts at the durable scan position; a trigger matching a
-failed source page retries that page. A page in backoff remains eligible for a later retry. Passing both `--since`
+mode handles one due retry before scanning new work, even for a newer trigger. Handle that returned page first,
+then call again for the new event. An untriggered call while failed work is in backoff raises retryable
+`secretary_unavailable`; a different new event can still be assessed during that backoff. Passing both `--since`
 and `--floor` requests an exact replay. An explicit trigger must
 belong to the bounded page or the call fails. Page size also reserves a citation budget from model output
-capacity. Pages are never silently truncated. Transport failures and timeouts retry indefinitely in their original
-mode with backoff and do not split pages. Invalid model content/output and `InboxTooLarge` count toward
-`max_attempts` and may split; other failures do not consume that limit. Each poll reserves one configured budget
+capacity. Pages are never silently truncated. Transport failures back off in their original mode. Invalid model
+content/output and `InboxTooLarge` count toward `max_attempts` and may split. Timeouts, rejected requests, and
+failed commands also count when another page has received a valid answer under the same policy since this page
+last failed; elapsed time alone never causes splitting. Each poll reserves one configured budget
 for a fresh alert and another for scheduled work. It runs one eligible scheduled lane per poll, alternating retry
 and digest priority, so a lane receives the full reserved budget rather than leftover time.
 
@@ -238,11 +241,14 @@ activation floor to the current database head. Scan progress is separate from th
 Every summary, including a digest, must account for and cite all events in its page; citing visible reply parents
 is optional. Source checks validate references against supplied context, not the truth of summary claims, and the
 prompt forbids invented assignments or approvals. `acknowledge DECISION_ID` is idempotent. Delivered ranges
-merge only when contiguous, so acknowledging a later wake cannot skip a held gap. Sanitized decision-engine
-failure state remains in assessment health/status even when model triage later holds or fails. A model outage
+merge only when contiguous, so acknowledging a later wake cannot skip a held gap. Deliver and acknowledge every
+nonempty brief, including digest results with decision `keep`. Sanitized engine, model, and delivery failures
+are reported separately in worker health/status and logged without provider response bodies or credentials. A model outage
 without a forced engine wake remains an outage, while an unavailable model after a forced wake produces a notice.
-Digest failures retain digest mode and eventually produce a keep notice, never an alert or wake. Transport/timeouts
-retry indefinitely; only invalid model output/content and oversized windows use the `max_attempts` split policy.
+Digest failures retain digest mode and eventually produce a keep notice, never an alert or wake. After a crash,
+the queue reuses a saved result for the same policy and current source window before invoking either provider.
+Model failures distinguish missing credentials, authentication rejection, invalid requests, timeouts, and outages.
+Delivery failures retry independently of assessment; heartbeat expiry includes the delivery timeout.
 
 `show` inspects saved assessments. Policy version 3 is required. Private state version 1 is refused and requires
 a new file; state version 2 is preserved. `--state` is a private SQLite sidecar for assessment work and positions.

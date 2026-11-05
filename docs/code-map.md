@@ -144,7 +144,8 @@ The MCP guard still validates credential scopes and binding proofs. `Permissions
 and guest/tool restrictions, while conversation membership and delegated topic grants are checked against
 current database state inside the operation. An agent's permissions are derived on access; thread handles
 do not cache membership. The secretary is an optional agent-side attention feature under `agents/secretary/`,
-with its existing private state and read-only access to authoritative records.
+with its existing private state and read-only access to authoritative records; deliverable summaries are also
+appended to the shared `secretary_summaries` archive.
 
 Conversation and job handles reload mutable state for each operation. Creation returns a receipt that
 says whether it created a record or replayed a previous request. The older `messages.send/read` and
@@ -163,10 +164,11 @@ and source references. The planned principal feedback loop is described in the [
 
 Installation binds the activation floor to the current database head. Standalone implicit decisions check due
 retries first and then resume from durable scan progress; explicit `since` and `floor` request an exact replay.
-Trigger IDs outside the current page fail; a trigger matching a failed source page retries that page, while a page
-in backoff remains eligible. The worker reads complete bounded pages and reserves model output space for citations.
-Transport failures and timeouts retry indefinitely in their original mode without splitting. Invalid model
-content/output and oversized windows count toward `max_attempts` and may split. Held contiguous pages combine into
+One due retry takes precedence over a newer trigger; the host handles its result then calls again for the new
+event. An untriggered call during failed-page backoff reports retryable unavailability. The worker reads complete bounded pages and reserves model output space for citations.
+Provider outages back off in their original mode. Invalid model content/output and oversized windows count
+toward `max_attempts`. Timeouts, rejected requests, and failed commands also count after another page succeeds
+under the same policy since that page last failed. Saved results recover before either provider runs again. Held contiguous pages combine into
 bounded digests; digest failures remain digest work and eventually yield a keep notice. Worker health is tracked
 separately from page retry state. Each poll reserves one full budget for a fresh alert and one for scheduled work;
 one eligible scheduled lane receives the full reserved budget per poll, with retry and digest priority alternating.
@@ -174,8 +176,8 @@ one eligible scheduled lane receives the full reserved budget per poll, with ret
 An independent decision engine evaluates each alert page. A `wake` with `wake_probability` at or above
 `wake_threshold` overrides model hold, keep, or failure. JEV uses `probabilities["wake"]`, not its separate wire
 `confidence`; command engines use protocol 3 with exactly `decision` and `wake_probability`. The model can call a
-tool to read the already-computed verdict, without engine reasoning. Sanitized engine failures remain in health
-and status even when model triage holds or fails; model outage only becomes a notice when the engine forced a wake.
+tool to read the already-computed verdict, without engine reasoning. Engine, model, and delivery health have
+separate sanitized failure categories and warnings; model outage only becomes a notice when the engine forced a wake.
 Every deliverable summary cites and accounts for each page event; parent citations are
 optional. Validation checks source references, not claim truth, and instructions prohibit invented assignments
 or approvals. Pending receipts retain all decision IDs, surface wakes first, and announce newly pending IDs even

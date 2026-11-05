@@ -139,7 +139,7 @@ class SecretaryModel:
             return ModelTurn.command(value)
         api_key = os.environ.get(self.settings["api_key_env"])
         if not api_key:
-            raise ModelUnavailable("model credential is unavailable")
+            raise ModelUnavailable("model credential is unavailable", category="missing_credential")
         body = {
             "model": self.settings["model"],
             "store": False,

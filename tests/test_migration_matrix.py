@@ -214,6 +214,47 @@ def test_the_upgrade_steps_cover_every_version_there_is_a_fixture_for() -> None:
     assert min(FIXTURE_VERSIONS) < min(store._STEPS), "nothing climbs from the oldest version baton accepts"
 
 
+def test_schema_22_adds_message_identity_index_to_old_and_fresh_databases(tmp_path: Path) -> None:
+    """The v21 upgrade retains messages and gains the lookup index; fresh databases declare it too."""
+    old = tmp_path / "old"
+    old.mkdir(mode=0o700)
+    config = group_config(old)
+    config.data_dir.mkdir(mode=0o700)
+    raw = sqlite3.connect(config.db_path)
+    raw.executescript((FIXTURES / "schema_v21.sql").read_text())
+    raw.execute(
+        "INSERT INTO messages (id,sender,recipient,seq,text,at) VALUES (?,?,?,?,?,?)",
+        ("msg_v21", "reviewer", "assistant", 1, "saved before v22", "2026-11-05T12:00:00+00:00"),
+    )
+    raw.commit()
+    raw.close()
+    config.db_path.chmod(0o600)
+
+    db = connect(config.db_path)
+    try:
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION == 22
+        assert tuple(db.execute("SELECT id, recipient, seq, text FROM messages").fetchone()) == (
+            "msg_v21",
+            "assistant",
+            1,
+            "saved before v22",
+        )
+        assert db.execute("PRAGMA index_info(messages_by_id)").fetchone()[2] == "id"
+    finally:
+        db.close()
+
+    fresh_root = tmp_path / "fresh"
+    fresh_root.mkdir(mode=0o700)
+    fresh = group_config(fresh_root)
+    fresh.data_dir.mkdir(mode=0o700)
+    db = connect(fresh.db_path)
+    try:
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+        assert db.execute("PRAGMA index_info(messages_by_id)").fetchone()[2] == "id"
+    finally:
+        db.close()
+
+
 # The tables each step adds whole, written out so a step's declared list can't quietly stand in for them.
 WHOLE_TABLES = {
     8: {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"},  # the browser seat

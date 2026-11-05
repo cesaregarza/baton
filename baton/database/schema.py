@@ -122,6 +122,7 @@ _SCHEMA = (
     _MESSAGE_REQUESTS,
     _MESSAGES,
     "CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation_id, conversation_seq)",
+    "CREATE INDEX IF NOT EXISTS messages_by_id ON messages (id)",
     # Delivered secretary summaries live in the shared Baton database, outside each secretary's private
     # working state. Rows are append-only; the cursor is stable for principal-scoped paging.
     """CREATE TABLE IF NOT EXISTS secretary_summaries (

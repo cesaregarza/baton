@@ -17,6 +17,8 @@ class Page:
     mode: str = "alert"
     attempts: int = 0
     content_failures: int = 0
+    model_successes: int = 0
+    model_policy: str = ""
 
 
 class Backlog:
@@ -40,6 +42,8 @@ class Backlog:
             "status": "TEXT NOT NULL DEFAULT 'retry'",
             "error": "TEXT",
             "content_failures": "INTEGER NOT NULL DEFAULT 0",
+            "model_successes": "INTEGER NOT NULL DEFAULT 0",
+            "model_policy": "TEXT NOT NULL DEFAULT ''",
         }
         for name, declaration in additions.items():
             if name not in columns:
@@ -83,9 +87,19 @@ class Backlog:
     def _insert(self, conn: Connection, page: Page, now: float) -> None:
         conn.execute(
             "INSERT OR IGNORE INTO backlog_windows"
-            "(principal,since,through,next_attempt,mode,attempts,content_failures,status) "
-            "VALUES (?,?,?,?,?,?,?,'retry')",
-            (self.log.principal, page.since, page.through, now, page.mode, page.attempts, page.content_failures),
+            "(principal,since,through,next_attempt,mode,attempts,content_failures,model_successes,model_policy,status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,'retry')",
+            (
+                self.log.principal,
+                page.since,
+                page.through,
+                now,
+                page.mode,
+                page.attempts,
+                page.content_failures,
+                page.model_successes,
+                page.model_policy,
+            ),
         )
 
     def finish(self, page: Page, result: dict, now: float, digest_seconds: float) -> None:
@@ -101,13 +115,22 @@ class Backlog:
                 status, mode, due, decision = "held", "digest", scheduled or now + digest_seconds, None
             conn.execute(
                 "UPDATE backlog_windows SET status=?,mode=?,next_attempt=?,decision=?,"
-                "attempts=0,content_failures=0,error=NULL "
+                "attempts=0,content_failures=0,model_successes=0,model_policy='',error=NULL "
                 "WHERE principal=? AND since=? AND through=?",
                 (status, mode, due, decision, self.log.principal, page.since, page.through),
             )
 
     def failed(
-        self, page: Page, now: float, error: str, *, initial: float, maximum: float, content: bool = False
+        self,
+        page: Page,
+        now: float,
+        error: str,
+        *,
+        initial: float,
+        maximum: float,
+        content: bool = False,
+        model_successes: int = 0,
+        model_policy: str = "",
     ) -> Page:
         attempts = page.attempts + 1
         content_failures = page.content_failures + int(content)
@@ -115,11 +138,22 @@ class Backlog:
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
             conn.execute(
-                "UPDATE backlog_windows SET status='retry',attempts=?,content_failures=?,next_attempt=?,error=? "
+                "UPDATE backlog_windows SET status='retry',attempts=?,content_failures=?,next_attempt=?,error=?,"
+                "model_successes=?,model_policy=? "
                 "WHERE principal=? AND since=? AND through=?",
-                (attempts, content_failures, now + delay, error, self.log.principal, page.since, page.through),
+                (
+                    attempts,
+                    content_failures,
+                    now + delay,
+                    error,
+                    model_successes,
+                    model_policy,
+                    self.log.principal,
+                    page.since,
+                    page.through,
+                ),
             )
-        return Page(page.since, page.through, page.mode, attempts, content_failures)
+        return Page(page.since, page.through, page.mode, attempts, content_failures, model_successes, model_policy)
 
     def due(
         self, now: float, *, held: bool = False, limit: int = 1, position: int | None = None, mode: str | None = None
@@ -127,7 +161,7 @@ class Backlog:
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
             rows = conn.execute(
-                "SELECT since,through,mode,attempts,content_failures FROM backlog_windows "
+                "SELECT since,through,mode,attempts,content_failures,model_successes,model_policy FROM backlog_windows "
                 "WHERE principal=? AND status=? "
                 "AND next_attempt<=? AND (? IS NULL OR (since<? AND through>=?)) "
                 "AND (? IS NULL OR mode=?) ORDER BY next_attempt,since LIMIT ?",
@@ -135,15 +169,15 @@ class Backlog:
             )
             return [Page(*row) for row in rows]
 
-    def waiting_retry(self, position: int) -> bool:
+    def waiting_retry(self, position: int | None = None) -> bool:
         """Whether this trigger belongs to retained failed work, even during its backoff."""
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
             return (
                 conn.execute(
                     "SELECT 1 FROM backlog_windows WHERE principal=? AND status='retry' "
-                    "AND since<? AND through>=? LIMIT 1",
-                    (self.log.principal, position, position),
+                    "AND (? IS NULL OR (since<? AND through>=?)) LIMIT 1",
+                    (self.log.principal, position, position, position),
                 ).fetchone()
                 is not None
             )
@@ -187,7 +221,8 @@ class Backlog:
             self._initialize(conn)
             self._prune(conn)
             conn.execute(
-                "UPDATE backlog_windows SET decision=NULL,status='retry',attempts=0,content_failures=0,next_attempt=? "
+                "UPDATE backlog_windows SET decision=NULL,status='retry',attempts=0,content_failures=0,"
+                "model_successes=0,model_policy='',next_attempt=? "
                 "WHERE principal=? AND decision=?",
                 (now, self.log.principal, decision),
             )

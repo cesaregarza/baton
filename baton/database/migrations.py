@@ -8,9 +8,9 @@ from collections.abc import Callable
 
 from .driver import Connection
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21)
 
 
 # The version-2 tables a migration rebuilds, with the columns they keep.
@@ -84,6 +84,7 @@ _BACKFILL = {
         "UPDATE generations SET activated_at = created_at WHERE active = 1 AND activated_at IS NULL",
         "UPDATE generations SET last_write_at = created_at WHERE last_write_at IS NULL",
     ),
+    22: ("CREATE INDEX IF NOT EXISTS messages_by_id ON messages (id)",),
 }
 # Tables a version adds whole. `_SCHEMA` creates them (IF NOT EXISTS) during initialization, so an upgrade needs no
 # statement of its own for them; naming them here makes the version a step, and the tests check each exists.

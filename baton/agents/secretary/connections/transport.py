@@ -16,9 +16,17 @@ from .command import Command, OutputLimitExceeded
 class ModelUnavailable(Exception):
     """A model or tool transport did not return a usable response."""
 
+    category = "unavailable"
+
+    def __init__(self, message: str, *, category: str | None = None):
+        super().__init__(message)
+        self.category = category or type(self).category
+
 
 class ModelResponseInvalid(ModelUnavailable):
     """A received response was invalid or truncated; retrying a smaller page may help."""
+
+    category = "invalid_response"
 
 
 async def post_json(
@@ -30,7 +38,7 @@ async def post_json(
                 "POST", url, json=body, headers={"Authorization": f"Bearer {api_key}"}
             ) as response:
                 if not 200 <= response.status_code < 300:
-                    raise ModelUnavailable("model request failed")
+                    raise ModelUnavailable("model request failed", category=_http_failure(response.status_code))
                 chunks, size = [], 0
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
@@ -42,6 +50,8 @@ async def post_json(
         raise
     except ModelUnavailable:
         raise
+    except httpx.TimeoutException:
+        raise ModelUnavailable("model request timed out", category="timeout") from None
     except Exception:
         raise ModelUnavailable("model request failed") from None
 
@@ -61,11 +71,24 @@ async def command_json(
         raise
     except OutputLimitExceeded:
         raise ModelResponseInvalid("model response exceeds its size limit") from None
+    except TimeoutError:
+        raise ModelUnavailable("model command timed out", category="timeout") from None
     except Exception:
         raise ModelUnavailable("model command failed") from None
     if code != 0:
-        raise ModelUnavailable("model command failed")
+        raise ModelUnavailable("model command failed", category="command_failed")
     return json_object(output)
+
+
+def _http_failure(status: int) -> str:
+    """Classify the status without copying provider errors, URLs, or credentials."""
+    if status == 408:
+        return "timeout"
+    if status in {401, 403}:
+        return "authentication"
+    if 400 <= status < 500 and status != 429:
+        return "rejected"
+    return "unavailable"
 
 
 def json_object(raw: str | bytes) -> dict:

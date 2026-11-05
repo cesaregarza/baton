@@ -268,10 +268,12 @@ def _model(value: object) -> dict:
         raise ConfigError("model.cache_mode must be implicit or layered")
     if (
         not isinstance(settings["reasoning_effort"], str)
-        or not settings["reasoning_effort"].strip()
+        or not settings["reasoning_effort"]
+        or settings["reasoning_effort"] != settings["reasoning_effort"].strip()
+        or not settings["reasoning_effort"].isprintable()
         or len(settings["reasoning_effort"]) > 100
     ):
-        raise ConfigError("model.reasoning_effort must be a nonempty string of at most 100 characters")
+        raise ConfigError("model.reasoning_effort must be 1-100 printable characters without surrounding whitespace")
     settings["max_output_tokens"] = _integer(settings["max_output_tokens"], "max_output_tokens", 256, 32768)
     return _http_settings(settings, "model")
 

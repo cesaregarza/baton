@@ -14,9 +14,10 @@ import time
 from contextlib import contextmanager
 
 from baton import datadir
-from baton.agents.secretary.attention.health import EngineHealth
+from baton.agents.secretary.attention.health import EngineHealth, ModelHealth
 from baton.agents.secretary.attention.queue import AttentionQueue
 from baton.agents.secretary.attention.runtime import DatabaseWorker
+from baton.agents.secretary.attention.state import AttentionLog
 from baton.config import ConfigError
 from baton.config.secretary import load_policy, require_hook_summary
 
@@ -51,6 +52,21 @@ class Worker:
         self.failed_pages = 0
         self.digest_first = False
         self.engine_health = {"status": "not_used", "last_failure": None, "checked_at": None}
+        self.model_health = {"status": "not_used", "last_failure": None, "checked_at": None}
+        self.delivery_health = {"status": "not_used", "last_failure": None, "checked_at": None}
+
+    def _health_status(self, *, worker_status: str = "running") -> dict:
+        components = {
+            "engine": self.engine_health,
+            "model": self.model_health,
+            "delivery": self.delivery_health,
+        }
+        return {
+            "status": "degraded"
+            if any(component["status"] == "unavailable" for component in components.values())
+            else worker_status,
+            **components,
+        }
 
     async def run(self) -> None:
         with exclusive(self.instance):
@@ -59,6 +75,10 @@ class Worker:
                     load_policy, self.instance.secretary.config, self.instance.secretary.policy_path
                 )
                 require_hook_summary(policy)
+                if policy.model["provider"] != "command" and not os.environ.get(policy.model["api_key_env"]):
+                    secretary = self.instance.secretary
+                    attention = AttentionLog(secretary.state_path, secretary.config.data_dir, policy.principal)
+                    await database.call(ModelHealth(attention, policy.digest).failed, "missing_credential")
                 retry_seconds = policy.retry_initial_seconds
                 while True:
                     try:
@@ -66,12 +86,7 @@ class Worker:
                         await database.call(
                             self.instance.receipts.set,
                             "health",
-                            {
-                                "status": "degraded" if self.engine_health["status"] == "unavailable" else "running",
-                                "failed_pages": self.failed_pages,
-                                "engine": self.engine_health,
-                                "checked_at": time.time(),
-                            },
+                            {**self._health_status(), "failed_pages": self.failed_pages, "checked_at": time.time()},
                         )
                         retry_seconds = policy.retry_initial_seconds
                     except Exception as error:
@@ -80,9 +95,8 @@ class Worker:
                             self.instance.receipts.set,
                             "health",
                             {
-                                "status": "retrying",
+                                **self._health_status(worker_status="retrying"),
                                 "error": type(error).__name__,
-                                "engine": self.engine_health,
                                 "checked_at": time.time(),
                             },
                         )
@@ -98,6 +112,7 @@ class Worker:
             pending = await queue.poll(self.instance.budget_seconds, digest_first=self.digest_first)
         finally:
             self.engine_health = await database.call(EngineHealth(queue.backlog.log).read)
+            self.model_health = await database.call(ModelHealth(queue.backlog.log, queue.policy.digest).read)
         self.digest_first = not self.digest_first
         self.failed_pages = await database.call(queue.backlog.failures)
         decisions = [result["decision_id"] for result in pending]
@@ -136,29 +151,47 @@ class Worker:
     async def _queue(self, session: str, timeout: float) -> bool:
         executable = self.instance.codex
         if executable is None:
-            raise ValueError("Codex delivery requires a configured executable")
+            self._record_delivery_failure("configuration")
+            return False
         message = (
             "Baton secretary has an attention summary. Receive it with "
             + invocation(self.instance, "receive", "--text")
             + ". Acknowledge only after reading it. If no summary remains, no action is needed."
         )
-        process = await asyncio.create_subprocess_exec(
-            executable,
-            "queue",
-            "--thread",
-            session,
-            "--message",
-            message,
-            "--resume",
-            cwd=self.instance.project,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                executable,
+                "queue",
+                "--thread",
+                session,
+                "--message",
+                message,
+                "--resume",
+                cwd=self.instance.project,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            self._record_delivery_failure("launch")
+            return False
         try:
             async with asyncio.timeout(timeout):
-                return await process.wait() == 0
+                exit_code = await process.wait()
+            if exit_code == 0:
+                self.delivery_health = {
+                    "status": "available",
+                    "last_failure": self.delivery_health.get("last_failure"),
+                    "last_failure_at": self.delivery_health.get("last_failure_at"),
+                    "checked_at": time.time(),
+                }
+                return True
+            self._record_delivery_failure("nonzero_exit")
+            return False
+        except TimeoutError:
+            self._record_delivery_failure("timeout")
+            return False
         finally:
             if process.returncode is None:
                 try:
@@ -166,3 +199,13 @@ class Worker:
                 except ProcessLookupError:
                     pass
                 await process.wait()
+
+    def _record_delivery_failure(self, category: str) -> None:
+        now = time.time()
+        self.delivery_health = {
+            "status": "unavailable",
+            "last_failure": category,
+            "last_failure_at": now,
+            "checked_at": now,
+        }
+        log.warning("secretary delivery failed: %s", category)

@@ -13,6 +13,7 @@ import pytest
 from secretary_support import make_world
 
 from baton.agents.agent import Agent
+from baton.agents.secretary.attention import archive as archive_module
 from baton.agents.secretary.attention.archive import SummaryArchive
 from baton.database.store import SCHEMA_VERSION, connect
 from baton.errors import Forbidden, InvalidRequest
@@ -253,6 +254,155 @@ def test_archive_pages_past_conversation_revocation_without_skipping_visible_row
             board.close()
 
 
+def test_archive_continues_after_more_than_500_hidden_rows(tmp_path) -> None:
+    with make_world(tmp_path) as world:
+        from baton import conversations
+
+        board = connect(world.config.db_path)
+        try:
+            room = conversations.create(
+                board,
+                world.config,
+                actor="planner",
+                title="Long visibility test",
+                participants=["planner", "worker", "reviewer"],
+            )["conversation_id"]
+            sent = conversations.send(
+                board, world.config, sender="worker", conversation_id=room, text="source later revoked"
+            )
+            message_id = sent["message_id"]
+            event = board.execute(
+                "SELECT pos FROM events WHERE kind='message' AND json_extract(data,'$.message_id')=? LIMIT 1",
+                (message_id,),
+            ).one()
+            archive = SummaryArchive(world.config)
+            reference = {
+                "source_key": f"message:{message_id}",
+                "pos": event[0],
+                "message_id": message_id,
+                "conversation_id": room,
+                "job_id": None,
+            }
+            for index in range(501):
+                archive.save("secretary-a", _result("planner", f"hidden-{index:03}", source_refs=[reference]))
+            archive.save("secretary-a", _result("planner", "visible-first"))
+            archive.save("secretary-a", _result("planner", "visible-second"))
+            conversations.remove(board, world.config, room, "planner", actor="planner")
+
+            after = 0
+            visible = []
+            for _ in range(5):
+                page = archive.page_for_host("planner", after=after, limit=1)
+                visible.extend(item["decision_id"] for item in page["items"])
+                if not page["has_more"]:
+                    break
+                assert isinstance(page["next"], int) and page["next"] > after
+                after = page["next"]
+            assert visible == ["visible-first", "visible-second"]
+        finally:
+            board.close()
+
+
+def test_archive_checks_only_limit_plus_one_sources_with_indexed_message_lookup(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        from baton import board_read, conversations
+
+        board = connect(world.config.db_path)
+        try:
+            room = conversations.create(
+                board,
+                world.config,
+                actor="planner",
+                title="Lookup plan test",
+                participants=["planner", "worker", "reviewer"],
+            )["conversation_id"]
+            sent = conversations.send(board, world.config, sender="worker", conversation_id=room, text="source")
+            event = board.execute(
+                "SELECT pos,seq,audience FROM events WHERE kind='message'"
+                " AND json_extract(data,'$.message_id')=? LIMIT 1",
+                (sent["message_id"],),
+            ).one()
+            archive = SummaryArchive(world.config)
+            reference = {
+                "source_key": f"message:{sent['message_id']}",
+                "pos": event["pos"],
+                "message_id": sent["message_id"],
+                "conversation_id": room,
+                "job_id": None,
+            }
+            for index in range(50):
+                archive.save("secretary-a", _result("planner", f"visible-{index:02}", source_refs=[reference]))
+
+            condition, params = board_read.message_condition(world.config, "planner")
+            plan = board.execute(
+                "EXPLAIN QUERY PLAN SELECT m.* FROM messages m WHERE m.id=:message_id AND m.seq=:seq"
+                " AND m.recipient=:recipient AND " + condition,
+                {
+                    **params,
+                    "message_id": sent["message_id"],
+                    "seq": event["seq"],
+                    "recipient": event["audience"],
+                },
+            ).fetchall()
+            plan_text = " ".join(str(row[3]).upper() for row in plan)
+            assert "SEARCH M USING INDEX SQLITE_AUTOINDEX_MESSAGES_1" in plan_text
+            assert "SCAN M" not in plan_text
+
+            calls = 0
+            original = archive_module._references_visible
+
+            def count_reference_checks(conn, config, principal, summary):
+                nonlocal calls
+                calls += 1
+                return original(conn, config, principal, summary)
+
+            monkeypatch.setattr(archive_module, "_references_visible", count_reference_checks)
+            page = archive.page_for_host("planner", limit=1)
+            assert [item["decision_id"] for item in page["items"]] == ["visible-00"]
+            assert calls == 2
+        finally:
+            board.close()
+
+
+def test_archive_keeps_actual_reply_parent_citation_visible_until_revoked(tmp_path) -> None:
+    from secretary_support import conversation, say
+
+    from baton.agents.secretary.attention.assessment import Assessment
+    from baton.agents.secretary.attention.outcome import Outcome
+    from baton.agents.secretary.inbox.window import InboxWindow
+    from baton.config.secretary import load_policy
+
+    with make_world(tmp_path) as world:
+        room = conversation(world)
+        parent = say(world, room, "planner", "Please check the rollout", attention=["worker"])
+        _, before_reply = InboxWindow.head(world.config)
+        reply = say(world, room, "worker", "The rollout is ready", reply_to=parent["message_id"])
+        policy = load_policy(world.config, world.policy_path)
+        board = connect(world.config.db_path)
+        window = InboxWindow.read(world.config, policy, before_reply)
+        assert [item["message"]["id"] for item in window.reply_context] == [parent["message_id"]]
+
+        parent_key = f"message:{parent['message_id']}"
+        reply_key = f"message:{reply['message_id']}"
+        result = Outcome(policy, window, floor=0, mode="alert").build(
+            Assessment("wake", "ready", "The rollout is ready for review.", [reply_key, parent_key]),
+            decision_id="reply-parent-archive",
+        )
+        parent_ref = next(ref for ref in result["source_refs"] if ref["source_key"] == parent_key)
+        assert parent_ref["pos"] is None
+        archive = SummaryArchive(world.config)
+        archive.save(policy.secretary_id, result)
+
+        before_revocation = archive.page_for_host("planner")
+        assert [item["decision_id"] for item in before_revocation["items"]] == ["reply-parent-archive"]
+        from baton import conversations
+
+        conversations.remove(board, world.config, room, "planner", actor="planner")
+        after_revocation = archive.page_for_host("planner")
+        assert after_revocation["items"] == []
+        board.close()
+
+
 def test_archive_validates_page_bounds_and_rejects_untrusted_roles(host) -> None:
     archive = SummaryArchive(host.config)
     conn = connect(host.config.db_path)
@@ -278,7 +428,7 @@ def test_version_20_database_migrates_without_losing_existing_data(tmp_path) -> 
 
     conn = connect(path)
     try:
-        assert conn.execute("SELECT version FROM schema_version").one()[0] == SCHEMA_VERSION == 21
+        assert conn.execute("SELECT version FROM schema_version").one()[0] == SCHEMA_VERSION == 22
         assert conn.execute("SELECT value FROM preserved").one()[0] == "unchanged"
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(secretary_summaries)")}
         assert columns == {"cursor", "secretary_id", "principal", "decision_id", "result", "created_at"}

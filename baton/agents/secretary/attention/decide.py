@@ -26,7 +26,7 @@ from ..inbox import sources
 from ..inbox.window import InboxWindow
 from ..service import Secretary
 from .assessment import Assessment
-from .health import EngineHealth
+from .health import EngineHealth, ModelHealth
 from .outcome import Outcome, persist
 from .runtime import DatabaseWorker
 from .state import AttentionLog
@@ -37,10 +37,17 @@ TRIGGER = re.compile(r"message:[1-9][0-9]{0,17}|job:job_[0-9a-f]{16}:[1-9][0-9]{
 class SecretaryUnavailable(BatonError):
     code = "secretary_unavailable"
     extra = {"retryable": True}
+    category = "unavailable"
+
+    def __init__(self, message: str, *, category: str | None = None):
+        super().__init__(message)
+        self.category = category or type(self).category
 
 
 class SecretaryResponseInvalid(SecretaryUnavailable):
     """The page received an unusable model answer, rather than a transport outage."""
+
+    category = "invalid_response"
 
 
 @dataclass
@@ -63,11 +70,15 @@ class DecisionRun:
             try:
                 return await self._assess(database, policy)
             except TimeoutError as error:
-                raise SecretaryUnavailable("secretary budget expired; no delivery position advanced") from error
+                raise SecretaryUnavailable(
+                    "secretary budget expired; no delivery position advanced", category="timeout"
+                ) from error
             except ModelResponseInvalid as error:
                 raise SecretaryResponseInvalid(f"{error}; no delivery position advanced") from error
             except ModelUnavailable as error:
-                raise SecretaryUnavailable(f"{error}; no delivery position advanced") from error
+                raise SecretaryUnavailable(
+                    f"{error}; no delivery position advanced", category=error.category
+                ) from error
 
     async def _assess(self, database: DatabaseWorker, policy: Policy) -> dict:
         config = self.secretary.config
@@ -105,7 +116,7 @@ class DecisionRun:
             await database.call(persist, self.secretary, policy, cached)
             return {**cached, "cached": True}
         outcome = Outcome(policy, window, self.floor, context["mode"], self.trigger)
-        result = await self._infer(harness, context, outcome, key, forced)
+        result = await self._infer(database, harness, context, outcome, key, forced)
         if not window.events:
             return result
         current = await database.call(InboxWindow.read, config, policy, self.since, through=window.through)
@@ -130,21 +141,22 @@ class DecisionRun:
             "reply_context": window.reply_context,
         }
 
-    async def _infer(self, harness: SecretaryHarness, context: dict, outcome: Outcome, key: str, forced: bool) -> dict:
+    async def _infer(
+        self,
+        database: DatabaseWorker,
+        harness: SecretaryHarness,
+        context: dict,
+        outcome: Outcome,
+        key: str,
+        forced: bool,
+    ) -> dict:
         window = outcome.window
         assert isinstance(window, InboxWindow)
         if not window.events:
             assessment = Assessment("keep", "No pending visible events.", "", [])
         else:
             try:
-                answer = await harness.assess(context, self._remaining())
-                assessment = Assessment.parse(
-                    answer,
-                    offered=window.source_keys,
-                    required={event["source_key"] for event in window.events},
-                    summary_bytes=outcome.policy.summary_bytes,
-                    digest=self.hourly,
-                )
+                assessment = await self._model_assessment(database, harness, context, window)
             except (ModelUnavailable, TimeoutError):
                 if not forced:
                     raise
@@ -166,6 +178,28 @@ class DecisionRun:
             engine_verdict=harness.tools.verdict,
             harness=harness.metrics,
         )
+
+    async def _model_assessment(
+        self, database: DatabaseWorker, harness: SecretaryHarness, context: dict, window: InboxWindow
+    ) -> Assessment:
+        policy = harness.policy
+        log = AttentionLog(self.secretary.state_path, self.secretary.config.data_dir, policy.principal)
+        health = ModelHealth(log, policy.digest)
+        try:
+            answer = await harness.assess(context, self._remaining())
+            assessment = Assessment.parse(
+                answer,
+                offered=window.source_keys,
+                required={event["source_key"] for event in window.events},
+                summary_bytes=policy.summary_bytes,
+                digest=self.hourly,
+            )
+        except (ModelUnavailable, TimeoutError) as error:
+            category = "timeout" if isinstance(error, TimeoutError) else error.category
+            await database.call(health.failed, category)
+            raise
+        await database.call(health.succeeded)
+        return assessment
 
     def _check_trigger(self, window: InboxWindow) -> None:
         if self.trigger is None or self.trigger == "conversation":
