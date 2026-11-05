@@ -9,7 +9,7 @@ import pytest
 from secretary_support import conversation, make_world, policy, say
 
 from baton import cli, conversations, jobs, messages
-from baton.agents.secretary import sources
+from baton.agents.secretary import expectations, sources
 from baton.agents.secretary import store as secretary_store
 from baton.agents.secretary import tracking as secretary
 from baton.app import Tools
@@ -289,7 +289,7 @@ def test_evidence_bound_reserves_a_closure_row(tmp_path, monkeypatch) -> None:
     with make_world(tmp_path) as world:
         room = conversation(world)
         ask, expected_id = _awaited(world, room)
-        monkeypatch.setattr(secretary, "MAX_EVIDENCE", 2)
+        monkeypatch.setattr(expectations, "MAX_EVIDENCE", 2)
         say(world, room, "worker", "claimed", reply_to=ask)
         say(world, room, "worker", "starting", reply_to=ask)
         secretary.scan(world.config, world.state_path, world.policy_path)
@@ -304,7 +304,7 @@ def test_cancel_refuses_a_legacy_full_evidence_record(tmp_path, monkeypatch, cap
     with make_world(tmp_path) as world:
         room = conversation(world)
         _, expected_id = _awaited(world, room)
-        monkeypatch.setattr(secretary, "MAX_EVIDENCE", 1)
+        monkeypatch.setattr(expectations, "MAX_EVIDENCE", 1)
         state = secretary_store.open_state(world.state_path, world.config.data_dir)
         try:
             secretary_store.add_evidence(state, "planner", expected_id, "fixture:full", "ack", "fixture",
@@ -596,7 +596,7 @@ def test_dispositions_follow_the_five_way_policy_mapping(tmp_path) -> None:
 
 def test_limit_outcome_is_recorded_and_the_request_is_not_dropped(tmp_path, monkeypatch) -> None:
     with make_world(tmp_path) as world:
-        monkeypatch.setattr(secretary, "MAX_OPEN", 1)
+        monkeypatch.setattr(expectations, "MAX_OPEN", 1)
         messages.send(world.baton, sender="worker", recipient="planner", text="First request")
         messages.send(world.baton, sender="worker", recipient="planner", text="Second request")
         secretary.scan(world.config, world.state_path, world.policy_path)
@@ -819,7 +819,7 @@ def test_same_actor_guard_avoids_false_reconcile_for_legacy_full_evidence(tmp_pa
         worker = next(row for row in secretary.show(world.config, world.state_path, world.policy_path)[
             "expectations"] if row["task_ref"] == f"job:{made['job_id']}" and row["responder"] == "worker")
         # A valid sidecar from a version without closure reserve can contain a fully used evidence budget.
-        monkeypatch.setattr(secretary, "MAX_EVIDENCE", 2)
+        monkeypatch.setattr(expectations, "MAX_EVIDENCE", 2)
         state = secretary_store.open_state(world.state_path, world.config.data_dir)
         try:
             for index in range(2):

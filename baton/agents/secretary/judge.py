@@ -59,8 +59,10 @@ from baton.config import Config
 from baton.database import Connection, Row
 
 from . import policy as policy_module
-from . import sources, tracking
+from . import sources
 from . import store as secretary_store
+from .expectations import EVIDENCE_LIMIT, Expectations, artifact_match
+from .rules import MessageRules, addressed, choose_disposition, result_kind, signals
 
 REQUEST_VERSION = 1
 JUDGED = "judged"
@@ -112,7 +114,7 @@ class Session:
 
     def outcome(self, state: Connection, baton: Connection, config: Config,
                 policy: policy_module.Policy, meta: dict, text: str) -> tuple[str, str, list[str]]:
-        candidates = tracking._candidates(state, policy.principal, meta)
+        candidates = Expectations(state, policy.principal).candidates(meta)
         if self._spent():
             self.fallbacks += 1
             return _apply(state, baton, config, policy, meta, text, candidates, None, FALLBACK + "budget")
@@ -148,7 +150,7 @@ class Stored:
         row = self.rows[meta["source_key"]]
         verdict = (Verdict(row["relation"], row["item"], row["opens_owed"], row["needs_now"])
                    if row["status"] == JUDGED else None)
-        return _apply(state, baton, config, policy, meta, text, tracking._candidates(state, policy.principal, meta),
+        return _apply(state, baton, config, policy, meta, text, Expectations(state, policy.principal).candidates(meta),
                       verdict, row["status"])
 
 
@@ -164,14 +166,15 @@ def _apply(state: Connection, baton: Connection, config: Config, policy: policy_
            meta: dict, text: str, candidates: list[Row], verdict: Verdict | None,
            status: str) -> tuple[str, str, list[str]]:
     """Decide one message from its verdict, or by the word lists without one, and record both verdicts."""
+    message_rules = MessageRules(Expectations(state, policy.principal), baton, config, policy)
     if verdict is None:
-        kind, reason, answers = tracking._message_disposition(state, baton, config, policy, meta, text)
+        kind, reason, answers = message_rules.interpret(meta, text)
         rules = kind, reason
     else:
         with _rolled_back(state):  # what the word lists would have decided, kept for review and then undone
-            rules = tracking._message_disposition(state, baton, config, policy, meta, text)[:2]
+            rules = message_rules.interpret(meta, text)[:2]
         kind, reason = _judged(state, baton, config, policy, meta, text, candidates, verdict)
-        answers = tracking._signals(text, policy)[0]  # a brief's blockers stay word-based
+        answers = signals(text, policy)[0]  # a brief's blockers stay word-based
     secretary_store.put_judgment(state, policy.principal, meta["source_key"], status,
                                  tuple(verdict) if verdict else (None, None, None, None), rules)
     return kind, reason, answers
@@ -181,43 +184,41 @@ def _judged(state: Connection, baton: Connection, config: Config, policy: policy
             meta: dict, text: str, candidates: list[Row], verdict: Verdict) -> tuple[str, str]:
     """The mapping in the module docstring, applied in its order."""
     principal, author, block = policy.principal, sources._actor(meta), policy.judge
+    ledger = Expectations(state, principal)
     outcome = "retain", "no new principal action"
     chosen = next((row for row in candidates if row["id"] == verdict.item), None)
     if chosen is not None and verdict.relation != "none":
-        outcome = tracking._choose_disposition(outcome, _relation(state, principal, meta, chosen, verdict.relation))
-    if tracking._addressed(baton, config, principal, meta):
+        outcome = choose_disposition(outcome, _relation(ledger, meta, chosen, verdict.relation))
+    if addressed(baton, config, principal, meta):
         if verdict.opens_owed < ASKS:
             owed = "digest", "addressed to the principal; asks nothing of it"
         else:
             room = (("digest", "principal owes a response that can wait")
                     if verdict.needs_now < block["owed_digest_below"] else ("brief", "principal owes a response"))
-            owed = tracking._owe(state, policy, meta, author, sources._request_artifact(meta), meta["message_id"],
-                                  tracking._result_kind(text), room)
-        outcome = tracking._choose_disposition(outcome, owed)
+            owed = ledger.owe(meta, requester=author, artifact=sources._request_artifact(meta),
+                               opening_message_id=meta["message_id"], expected_kind=result_kind(text), outcome=room)
+        outcome = choose_disposition(outcome, owed)
     if verdict.needs_now >= block["wake_at"] and outcome[0] in ("retain", "digest"):
         outcome = "brief", "needs the principal now"
     return outcome
 
 
-def _relation(state: Connection, principal: str, meta: dict, chosen: Row,
-              relation: str) -> tuple[str, str]:
-    limit = "reconcile", "expectation evidence limit reached"
-
-    def recorded(kind: str, rule: str, outcome: tuple[str, str]) -> tuple[str, str]:
-        return outcome if tracking._evidence(state, principal, chosen, meta, kind, rule) else limit
-
-    artifact = tracking._artifact_match(chosen, meta["artifacts"])
+def _relation(ledger: Expectations, meta: dict, chosen: Row, relation: str) -> tuple[str, str]:
+    artifact = artifact_match(chosen, meta["artifacts"])
     if artifact == "stale":
-        return recorded("stale", "artifact-revision", ("retain", "stale artifact revision retained"))
+        return ledger.record(chosen, meta, "stale", "artifact-revision", ("retain", "stale artifact revision retained"))
     if artifact == "uncertain":
-        return recorded("uncertain", "conflicting-result", ("reconcile", "result is uncertain"))
+        return ledger.record(chosen, meta, "uncertain", "conflicting-result", ("reconcile", "result is uncertain"))
     if relation == "answers":
-        closed = tracking._close(state, principal, chosen, meta, "satisfied", "judge:answers")
-        return ("brief", "expected result reported") if closed else limit
+        if ledger.close(chosen, meta, "satisfied", "judge:answers"):
+            return "brief", "expected result reported"
+        return EVIDENCE_LIMIT
     if relation == "acknowledges":
-        return recorded("ack", "judge:acknowledges", ("digest", "acknowledgment; result still outstanding"))
+        return ledger.record(chosen, meta, "ack", "judge:acknowledges",
+                             ("digest", "acknowledgment; result still outstanding"))
     # A change or cancellation is evidence only: one reading must never close what the principal still awaits.
-    return recorded("changed", "judge:changes-or-cancels", ("digest", "open item changed or cancelled"))
+    return ledger.record(chosen, meta, "changed", "judge:changes-or-cancels",
+                         ("digest", "open item changed or cancelled"))
 
 
 @contextmanager

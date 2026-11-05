@@ -10,6 +10,7 @@ from secretary_support import conversation, make_world, policy, say, table_hashe
 
 from baton import cli, conversations, events, jobs, messages
 from baton.agents.secretary import decide as secretary_decide
+from baton.agents.secretary import digest as secretary_digest
 from baton.agents.secretary import store as secretary_store
 from baton.agents.secretary import tracking as secretary
 from baton.config import ConfigError
@@ -79,8 +80,8 @@ def test_new_owed_message_wakes_with_a_bounded_brief_and_no_message_text(tmp_pat
         brief = result["brief"]
         assert brief.split("\n")[2] == (f"New since position {result['since']}: 1 needing you, 0 can wait, 0 kept"
                                         " without waking. Open: 1 owed by you, 0 awaited by you.")
-        assert brief.startswith("\n" + secretary_decide.BRIEF_START + "\n")
-        assert brief.endswith("\n" + secretary_decide.BRIEF_END)
+        assert brief.startswith("\n" + secretary_digest.BRIEF_START + "\n")
+        assert brief.endswith("\n" + secretary_digest.BRIEF_END)
         assert len(brief.encode()) <= 2048
         assert sent["message_id"] in brief and SECRET not in brief
         assert [(item["source_key"], item["decision"], item["rule"]) for item in result["new"]] == [
@@ -98,7 +99,7 @@ def test_acknowledgment_is_held_and_listed_in_the_hourly_digest(tmp_path) -> Non
         assert result["evidence"] == f"message:{ack['message_id']}"
         digest = _decide(world, **_after(result, hourly=True))
         assert digest["mode"] == "hourly" and digest["decision"] is None
-        assert digest["brief"].startswith("\n" + secretary_decide.DIGEST_START + "\n")
+        assert digest["brief"].startswith("\n" + secretary_digest.DIGEST_START + "\n")
         held = [line for line in _lines(digest["brief"]) if ack["message_id"] in line]
         assert len(held) == 1 and held[0].startswith("- hold")
         assert digest["brief"].split("\n")[2] == (

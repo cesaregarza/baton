@@ -56,8 +56,11 @@ entrypoints. Their implementations live in `agents/secretary/decide.py` and `age
 | Change job transitions | `jobs.py` | `Job.move()` owns revision checks, retries and atomic event recording |
 | Change connection mechanics | `database/driver.py` | `files.py` checks private database files |
 | Change the authoritative schema | `database/schema.py`, `database/migrations.py` | `database/store.py` opens and initializes the database |
-| Change secretary tracking rules | `agents/secretary/tracking.py` | `policy.py` validates rules; `sources.py` reads visible source records |
-| Change wake/hold/digest decisions | `agents/secretary/decide.py` | `judge.py` handles optional external judgments; `store.py` owns private state |
+| Change secretary message matching or job handoffs | `agents/secretary/rules.py` | `MessageRules` interprets messages; `job_disposition` follows job actors |
+| Change expectation lifecycle or evidence limits | `agents/secretary/expectations.py` | `Expectations` opens, records and closes requests for one principal |
+| Change secretary scan or replay | `agents/secretary/tracking.py` | `sources.py` reads visible records; `store.py` owns the private schema |
+| Change wake/hold decisions | `agents/secretary/decide.py` | `policy.py` validates configuration; `judge.py` handles optional external judgments |
+| Change brief or digest text | `agents/secretary/digest.py` | Rendering checks visibility and returns the position covered by the byte bound |
 | Change secretary read output | `agents/secretary/read.py` | It reads authoritative data without advancing delivery cursors |
 
 ## Follow one message
@@ -136,6 +139,22 @@ A `DirectMessage` is an independent submission: retain it, or retain its request
 Inboxes, conversations and jobs use a live connection and stay within its lifetime. Closing a connection
 rolls back unfinished work. `db.transaction()` owns a write transaction; `db.snapshot()` owns a consistent
 read, or borrows an existing transaction.
+
+### Secretary workflow
+
+`tracking.scan()` reads a page of visible events and commits its effects together with the scan position.
+`MessageRules.interpret()` matches a message to outstanding requests, records its result, then opens any new
+request addressed to the principal. Job events use `job_disposition()` instead. Both use an `Expectations`
+ledger bound to the principal and the scan's connection; the ledger owns opening, evidence and closure limits.
+
+When a judge is configured, `judge.Session` interprets eligible messages through the same ledger. It also
+records what the word rules would have decided, rolling back that trial before applying the judgment.
+`tracking.replay()` uses recorded verdicts and an in-memory ledger, so it neither calls the judge again nor
+rewrites stored state.
+
+`decide.decide()` scans within its budget, chooses wake/hold/keep, and calls `digest.render()` when text is
+needed. Rendering returns both the text and the position it actually covered. The caller supplies that
+position on the next call only after delivering the text; an undelivered brief is therefore retried.
 
 ## Organization rules
 

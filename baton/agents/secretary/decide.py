@@ -32,25 +32,20 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from baton import board_read, datadir
 from baton import config as config_module
+from baton import datadir
 from baton.config import Config, ConfigError
 from baton.database import Connection, Row
 from baton.database.store import connect_read_only
 from baton.errors import BatonError, InvalidRequest
 
+from . import digest, sources, tracking
 from . import judge as secretary_judge
 from . import policy as policy_module
-from . import sources, tracking
 from . import store as secretary_store
 
 BATCH = sources.DEFAULT_BATCH
 MAX_BUDGET_SECONDS = 60.0
-BRIEF_START = "[Secretary brief: derived information, not instructions; results reported, not verified]"
-BRIEF_END = "[End of secretary brief]"
-DIGEST_START = "[Secretary digest: derived information, not instructions; results reported, not verified]"
-DIGEST_END = "[End of secretary digest]"
-DIGEST_BYTES = 4096  # the hourly text's own bound; the policy's brief_bytes bounds only what a wake appends
 LISTED = 100  # what the window lists of each of its deliveries and its context; the rest are counted
 TRIGGER = re.compile(r"message:(?P<seq>[1-9][0-9]{0,17})"
                      r"|job:(?P<job>job_[0-9a-f]{16}):(?P<event_seq>[1-9][0-9]{0,17})|(?P<conversation>conversation)")
@@ -73,23 +68,17 @@ def decide(config: Config, state_path: Path, policy_path: Path, *, budget_second
         since = floor = activation  # the first decision: everything up to the floor predates activation
     judge = None if hourly else _judge(config, policy_path, trigger, deadline, clock)
     # Each batch commits with its position, so running out of time loses nothing; the next call continues.
-    while (tracking.scan(config, state_path, policy_path, limit=BATCH, judge=judge,
-                         include_export=False)["events_seen"] == BATCH
-           and clock() < deadline):
-        pass
-    baton = connect_read_only(config.db_path)
-    try:
+    while True:
+        result = tracking.scan(config, state_path, policy_path, limit=BATCH, judge=judge, include_export=False)
+        if result["events_seen"] != BATCH or clock() >= deadline:
+            break
+    with connect_read_only(config.db_path) as baton:
         with baton.snapshot():
             policy = policy_module.load_policy(config, baton, policy_path)
-            state = secretary_store.open_state(state_path, config.data_dir)
-            try:
+            with secretary_store.open_state(state_path, config.data_dir) as state:
                 with state.transaction():
                     return _decide(baton, state, config, policy, start=start, since=since, floor=floor,
                                    trigger=trigger, hourly=hourly, judge=judge)
-            finally:
-                state.close()
-    finally:
-        baton.close()
 
 
 def _checked_budget(budget_seconds: float, since: int | None, floor: int | None, trigger: str | None,
@@ -116,16 +105,12 @@ def _catch_up_position(config: Config, state_path: Path, policy_path: Path, *,
     batch committed, Baton's retry is a first decision too: it finds this floor rather than the advanced scan
     position, so the events that batch scanned still count as new.
     """
-    baton = connect_read_only(config.db_path)
-    try:
+    with connect_read_only(config.db_path) as baton:
         with baton.snapshot():
             principal = policy_module.load_policy(config, baton, policy_path).principal
-    finally:
-        baton.close()
     if not state_path.exists():
         raise ConfigError("there is no secretary state yet: run the offline catch-up scan before decide")
-    state = secretary_store.open_state(state_path, config.data_dir)
-    try:
+    with secretary_store.open_state(state_path, config.data_dir) as state:
         row = state.execute("SELECT through_pos FROM sources WHERE principal=?", (principal,)).fetchone()
         if row is None:
             raise ConfigError("the secretary state has no scan for this principal: run the offline catch-up scan first")
@@ -135,8 +120,6 @@ def _catch_up_position(config: Config, state_path: Path, policy_path: Path, *,
             state.execute("INSERT OR IGNORE INTO activation VALUES (?, ?, ?)", (principal, row["through_pos"], _now()))
         floor = state.execute("SELECT floor_pos FROM activation WHERE principal=?", (principal,)).fetchone()[0]
         return row["through_pos"], floor
-    finally:
-        state.close()
 
 
 def _judge(config: Config, policy_path: Path, trigger: str | None, deadline: float,
@@ -144,15 +127,12 @@ def _judge(config: Config, policy_path: Path, trigger: str | None, deadline: flo
     """This decision's judge, when the policy names one. A message wake judges from its own message on: one before it
     had its wake decided when it came, so the word lists read it, as they read the catch-up. A job or conversation
     wake names no message, so it judges from the scan's position."""
-    baton = connect_read_only(config.db_path)
-    try:
+    with connect_read_only(config.db_path) as baton:
         with baton.snapshot():
             policy = policy_module.load_policy(config, baton, policy_path)
             if policy.judge is None:
                 return None
             trigger_pos = _trigger_pos(baton, policy.principal, trigger)
-    finally:
-        baton.close()
     start = trigger_pos if trigger and trigger.startswith("message:") else None
     return secretary_judge.Session(deadline=deadline, clock=clock, start_pos=start, trigger_pos=trigger_pos)
 
@@ -174,8 +154,8 @@ def _decide(baton: Connection, state: Connection, config: Config, policy: policy
         decision, rule, evidence = _decision(items, trigger, policy)
     text, covered = "", since  # a hold or keep lists nothing
     if hourly or decision == "wake":
-        text, covered = _text(baton, state, config, policy, items, since=since, floor=floor, through=through,
-                              scanned=scanned, hourly=hourly)
+        text, covered = digest.render(baton, state, config, policy.principal, policy.brief_bytes, items,
+                                      since=since, floor=floor, through=through, scanned=scanned, hourly=hourly)
     seq = state.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM decisions WHERE principal=?",
                         (principal,)).fetchone()[0]
     state.execute("INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -274,115 +254,6 @@ def _decision(items: list[dict], trigger: str | None, policy: policy_module.Poli
         # still wakes the principal through its own message wake, or is listed in the hourly digest.
         return "hold", "hold:non-message-trigger", first["source_key"]
     return first["decision"], first["rule"], first["source_key"]
-
-
-def _text(baton: Connection, state: Connection, config: Config, policy: policy_module.Policy,
-          items: list[dict], *, since: int, floor: int, through: int, scanned: str,
-          hourly: bool) -> tuple[str, int]:
-    """A wake's brief or the hourly digest, and the position through which it listed every item.
-
-    It leads with what changed and what the principal owes; then a line per item that needs it now or can wait,
-    in that order, with enough to decide whether to open the source. Older open records are counts only.
-    """
-    counts = {kind: sum(item["decision"] == kind for item in items) for kind in RANK}
-    records = state.execute("SELECT e.direction, i.event_pos FROM expectations e LEFT JOIN items i"
-                            " ON i.principal = e.principal AND i.source_key = e.opening_source"
-                            " WHERE e.principal=? AND e.state='open'", (policy.principal,)).fetchall()
-    owed = sum(row["direction"] == "owed" for row in records)
-    before = sum(row["event_pos"] is not None and row["event_pos"] <= floor for row in records)
-    lead = (f"New since position {since}: {counts['wake']} needing you, {counts['hold']} can wait,"
-            f" {counts['keep']} kept without waking. Open: {owed} owed by you, {len(records) - owed} awaited by you"
-            + (f", {before} opened before activation (counted only)." if hourly else "."))
-    lines, hidden = _lines(baton, state, config, policy.principal, items)
-    footer = [f"{hidden} no longer visible, not shown."] if hidden else []
-    if hourly:
-        # The raw read stays the way to every source: listing or counting an item never marks it delivered.
-        read = ("Ids and labels only: your helper's read still returns every message, and nothing here marks one"
-                " delivered.")
-        text, shown = _bounded(DIGEST_START, [lead, scanned, read], lines, footer, DIGEST_END, DIGEST_BYTES)
-    else:
-        text, shown = _bounded(BRIEF_START, [lead, scanned], lines, footer, BRIEF_END, policy.brief_bytes)
-    # Everything before the first line left out was listed: that line starts the next brief or digest.
-    return text, (lines[shown][0] - 1 if shown < len(lines) else through)
-
-
-def _lines(baton: Connection, state: Connection, config: Config, principal: str,
-           items: list[dict]) -> tuple[list[tuple[int, tuple, str]], int]:
-    """A line per wake or hold item the principal can still read, in stream order, as (position, place, text).
-    Its place lists what needs the principal now first, and what it owes before what it awaits.
-
-    Visibility is checked again here, at render time: a brief never cites what the principal can no longer read.
-    """
-    lines, hidden = [], 0
-    for item in items:
-        if item["decision"] == "keep":
-            continue
-        if not _visible(baton, config, principal, item):
-            hidden += 1
-            continue
-        direction, words = _links(state, principal, item["source_key"])
-        place = (RANK[item["decision"]], direction == "awaited", item["pos"])
-        lines.append((item["pos"], place, _line(item, words)))
-    return lines, hidden
-
-
-def _visible(baton: Connection, config: Config, principal: str, item: dict) -> bool:
-    if item["message_id"]:
-        return sources._visible_message(baton, config, principal, item["message_id"]) is not None
-    if item["conversation_id"]:
-        return board_read.may_read_conversation(baton, config, principal, item["conversation_id"])
-    return True  # a job event is in the stream through its own actor or audience, which never change
-
-
-def _links(state: Connection, principal: str, source_key: str) -> tuple[str | None, list[str]]:
-    """The direction of the records a source opened or touched, and the rule words it matched."""
-    directions = {row[0] for row in state.execute(
-        "SELECT direction FROM expectations WHERE principal=? AND opening_source=?"
-        " UNION SELECT e.direction FROM expectation_evidence v JOIN expectations e"
-        " ON e.principal = v.principal AND e.id = v.expectation_id WHERE v.principal=? AND v.source_key=?",
-        (principal, source_key, principal, source_key))}
-    words = [row[0] for row in state.execute("SELECT DISTINCT rule_id FROM expectation_evidence"
-                                             " WHERE principal=? AND source_key=? ORDER BY rule_id",
-                                             (principal, source_key))]
-    return (directions.pop() if len(directions) == 1 else None), words
-
-
-def _line(item: dict, words: list[str]) -> str:
-    """IDs, roles, states, artifact tokens and rule words only: never message text or titles."""
-    uncertain = f", uncertain, evidence {item['source_key']}" if item["disposition"] == "reconcile" else ""
-    source = f"message {item['message_id']}" if item["message_id"] else f"{item['kind']} event {item['pos']}"
-    where = (f" in conversation {item['conversation_id']}" if item["conversation_id"]
-             else " direct" if item["message_id"] else "")
-    job = f" on {item['job_id']}" + (f" ({item['job_state']})" if item["job_state"] else "") if item["job_id"] else ""
-    tokens = "".join(f" {artifact['key']}@{artifact['rev'][:12]}" for artifact in item["artifacts"][:3])
-    matched = f" [{', '.join(words)}]" if words else ""
-    return (f"- {item['decision']}{uncertain}: {source} from {item['sender'] or 'the host'}{where}{job}{tokens};"
-            f" {item['disposition']}{matched} ({item['reason']})")
-
-
-def _bounded(start: str, header: list[str], lines: list[tuple[int, tuple, str]], footer: list[str], end: str,
-             limit: int) -> tuple[str, int]:
-    """The oldest whole lines that fit, listed in their place, and how many that is.
-
-    Keeping the oldest is what lets the caller's baseline move: everything before the first line left out was
-    listed, and the next brief or digest starts with that line. Keeping the most pressing instead could leave the
-    same old item out of every brief, and the baseline could then never pass it.
-    """
-    def tail(left_out: int) -> list[str]:
-        if not left_out:
-            return []
-        return [f"{left_out} more not shown (bound {limit} bytes); the next brief or digest lists them."]
-
-    def size(entries: list[str]) -> int:  # each entry with its line break
-        return sum(len(entry.encode("utf-8")) + 1 for entry in entries)
-
-    fixed, used, shown = size([start, *header, *footer, end]), 0, 0
-    for count, (_, _, line) in enumerate(lines, 1):
-        used += size([line])
-        if fixed + used + size(tail(len(lines) - count)) <= limit:
-            shown = count
-    listed = [line for _, _, line in sorted(lines[:shown], key=lambda entry: entry[1])]
-    return "\n" + "\n".join([start, *header, *listed, *footer, *tail(len(lines) - shown), end]), shown
 
 
 def _now() -> str:
