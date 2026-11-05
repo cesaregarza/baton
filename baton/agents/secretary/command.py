@@ -139,6 +139,3 @@ async def _cleanup(process: asyncio.subprocess.Process, tasks: list[asyncio.Task
         if not wait_task.done():
             wait_task.cancel()
         await asyncio.gather(wait_task, return_exceptions=True)
-
-
-JudgeCommand = Command  # Version-1 host imports.

@@ -6,10 +6,10 @@ then asks a model whether the more expensive principal needs attention now. A wa
 summary and source references. The host delivers it; the principal can then decide which threads to open.
 The secretary itself never sends that notification or advances the principal's Baton inbox.
 
-The model is the default interpreter. It weighs meaning and actionability across the whole pending window; there
-is no rule-word fallback in version 2. An optional decision engine can provide extra advice to the model. If that
-advisory command fails, the model still assesses the inbox without it. Version 1 is retained under `legacy/` and
-runs only when a version 1 policy explicitly selects it.
+The model is the interpreter. It weighs meaning and actionability across the whole pending window; there is no
+deterministic rule-word fallback. An optional decision engine can provide extra advice to the model. If that
+advisory command fails, the model still assesses the inbox without it. Policy version 2 is the only supported
+policy format; older policies are unsupported and require a current policy and a new state file.
 
 ## What happens on an alert
 
@@ -36,8 +36,8 @@ contains an answer word, or summarize only the last alert. These are model instr
 
 ## First setup
 
-Create a **new private state file** for version 2. Do not point it at the state file used by version 1: the formats
-and behavior are separate. A minimal policy names the principal:
+Choose a private state path; the secretary creates the file on first use. State from the retired rules-based
+workflow cannot be reused. A minimal policy names the principal:
 
 ```json
 {
@@ -99,7 +99,7 @@ An async host can call the public service directly:
 from pathlib import Path
 from baton.agents.secretary import Secretary
 
-secretary = Secretary(config, Path("/private/secretary-v2.sqlite"), Path("/private/policy-v2.json"))
+secretary = Secretary(config, Path("/private/secretary.sqlite"), Path("/private/policy.json"))
 result = await secretary.decide(budget_seconds=30, trigger="message:42")
 if result["decision"] == "wake":
     await deliver_to_principal(result["brief"])
@@ -107,7 +107,7 @@ if result["decision"] == "wake":
 ```
 
 On its first call, the secretary uses its saved activation floor and delivery position (initially zero) and reads
-the full pending visible window. There is no offline catch-up scan requirement. For a host that owns positions,
+the full pending visible window. For a host that owns positions,
 pass `since` and `floor` together on every call. After successfully delivering a non-empty `brief`, either call
 `acknowledge(decision_id)` or pass that result's `covered_through` as `since` with the same `floor` next time.
 Advance only after delivery succeeds. A `hold`, `keep`, error, or empty inbox does not advance coverage. Retries
@@ -156,8 +156,7 @@ An optional command can provide a separate advisory input before the primary mod
 It receives `{ "version": 2, "task": "advise_secretary", "context": ... }` and must return a JSON object.
 That object is passed to the configured model as `context.engine_advice`; it does not make the final decision. If
 the advisory command times out, exits unsuccessfully, or returns unusable JSON, the model proceeds without advice.
-The old version 1 Jev adapter speaks a different protocol and is not directly compatible; it needs a version 2
-adapter. Baton does not bundle a Jev SDK.
+An adapter can provide advice in this protocol; Baton does not bundle a decision-engine SDK.
 
 The model command's response is the decision itself, for example (replace the illustrative source IDs):
 
@@ -174,38 +173,37 @@ The model command's response is the decision itself, for example (replace the il
 supplied events or reply parents; a wake or nonempty digest needs a summary and at least one citation. A normal
 hold/keep alert has an empty summary. The optional engine's JSON is advice, not this final assessment.
 
-## CLI and version 1 compatibility
+## CLI
 
-Use a separate policy and state path for each workflow:
+Run against the principal's policy and private state:
 
 ```sh
-baton secretary --state /private/secretary-v2.sqlite --policy /private/policy-v2.json decide \
+baton secretary --state /private/secretary.sqlite --policy /private/policy.json decide \
   --budget-seconds 30 --trigger message:42
-baton secretary --state /private/secretary-v2.sqlite --policy /private/policy-v2.json show
-baton secretary --state /private/secretary-v2.sqlite --policy /private/policy-v2.json acknowledge DECISION_ID
-baton secretary --policy /private/policy-v2.json read --ids msg_0123456789abcdef
+baton secretary --state /private/secretary.sqlite --policy /private/policy.json show
+baton secretary --state /private/secretary.sqlite --policy /private/policy.json acknowledge DECISION_ID
+baton secretary --policy /private/policy.json read --ids msg_0123456789abcdef
 ```
 
-`show` and `replay` inspect saved v2 assessments; replay reports recorded results and does not infer again. `read`
-uses the same current visibility rules for either policy version. `scan` and `cancel` are version 1 compatibility
-operations; version 2 reads its inbox during `decide` and has no inferred request ledger to cancel. Existing
-version 1 data remains available only with its version 1 policy and old state file. To migrate, create a version 2
-policy and a new, separate private state file; version 1 state is not converted in place. The
-[legacy guide](legacy/README.md) describes the previous workflow.
+The CLI supports `decide`, `show`, `acknowledge`, and `read`. `show` inspects saved assessments. `read` uses
+current visibility rules to return source messages. An older policy is unsupported; create a policy version 2
+and a new private state file rather than reusing old state. The short Python modules `baton.secretary_decide` and
+`baton.secretary_read` remain aliases for the current model-driven implementation when run with `python -m`, with no deterministic fallback.
 
 ## Code map
 
 | Module | Responsibility |
 |---|---|
-| [service.py](service.py) | Async host API, version dispatch, and delivery acknowledgment. |
+| [service.py](service.py) | Async host API and delivery acknowledgment. |
 | [decide.py](decide.py) | Reads the window, enforces the callback budget, caches identical assessments, and rechecks visibility. |
 | [inbox.py](inbox.py) | Builds the complete pending context and rejects over-limit windows. |
 | [model.py](model.py) | OpenAI Responses and host-command transports; optional advisory command. |
 | [prompt.py](prompt.py) | Model instructions and structured response schema. |
 | [assessment.py](assessment.py) | Validates decisions, summary bounds, and source references. |
-| [policy.py](policy.py) | Validates version 2 configuration and dispatches version 1 policies. |
+| [policy.py](policy.py) | Validates the supported version 2 configuration. |
 | [state.py](state.py) | Private v2 assessment cache, activation/delivery positions, and acknowledgment. |
-| [legacy/](legacy/README.md) | Isolated version 1 rule interpreter, request ledger, judge protocol, and state. |
 
 For the OpenAI transport, see the [Responses API structured outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs)
 and [GPT-6 Luna model reference](https://developers.openai.com/api/docs/models/gpt-6-luna).
+
+Principal feedback for the secretary is a future direction; see the [roadmap](../../../docs/roadmap.md).

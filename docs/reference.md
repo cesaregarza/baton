@@ -189,8 +189,7 @@ configuration problem exits with status 2.
 | `baton alias arm-enrol\|arm-rekey\|map\|unmap` | Manage enrolled aliases on the host. |
 | `baton events status\|unbind` | Inspect event subscriptions and receipts, or unbind a guest grant's event target. |
 | `baton seat logout-all` | End all browser-seat sessions. |
-| `baton secretary --state FILE --policy FILE decide\|acknowledge\|show\|replay` | Run model triage, record delivered summaries, and inspect saved assessments. |
-| `baton secretary --state FILE --policy FILE scan\|cancel` | Version 1 compatibility operations. |
+| `baton secretary --state FILE --policy FILE decide\|read\|show\|acknowledge` | Run model triage, record delivered summaries, and inspect saved assessments. |
 | `baton secretary --policy FILE read --after POS\|--ids IDS` | Read what the principal was delivered, of any kind, text included, for a secretary thread. |
 
 `--as` defaults to `BATON_ROLE` in local mode and cannot select a human role. `--config` defaults to
@@ -209,17 +208,16 @@ its JSON object is advisory context to the model, and a failed advisory call doe
 `decide --budget-seconds N` reads the pending visible window and asks the model once for wake, hold, or keep and
 a semantic summary. `--hourly` uses the same model to generate a digest. It accepts an optional `--trigger` and
 paired `--since`/`--floor` positions. The first call without positions uses the saved activation floor and
-delivery position; no catch-up `scan` is required. After the host successfully delivers a non-empty summary,
+delivery position. After the host successfully delivers a non-empty summary,
 `acknowledge DECISION_ID` records coverage, or the host may pass the result's `covered_through` as the next
 `--since` with the same `--floor`. Hold, keep, empty inbox and failed calls do not advance coverage. Identical
 policy and input reuse the recorded assessment. Each callback budget is at most 60 seconds; oversized windows
 fail instead of being silently truncated. Model failures return retryable `secretary_unavailable` errors.
 
-`show` inspects saved assessments, and `replay` shows cached results without calling the model. `scan` and
-`cancel` are version 1 compatibility operations only. Version 1 policy selects the isolated legacy request-ledger
-workflow; migration requires a version 2 policy and a new, separate `--state` file. Never reuse a version 1 state
-file for version 2. `--state` is a private SQLite sidecar for generated assessments and positions; message bodies
-are not archived there. The secretary reads Baton records read-only and does not deliver or modify Baton work.
+`show` inspects saved assessments. Policy version 2 is the only supported format; older policies are unsupported
+and require a current policy and a new `--state` file. `--state` is a private SQLite sidecar for generated
+assessments and positions; message bodies are not archived there. The secretary reads Baton records read-only
+and does not deliver or modify Baton work.
 
 `read` returns currently visible source text for the principal. After an event position (`--after`), it pages
 events addressed to or authored by the principal and relevant job events in `deliveries` and `context`; with

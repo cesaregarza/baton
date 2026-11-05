@@ -21,7 +21,7 @@ from baton.errors import BatonError, InvalidRequest
 from .assessment import Assessment
 from .inbox import InboxWindow
 from .model import DecisionEngine, ModelUnavailable, SecretaryModel
-from .policy import Policy, fingerprint, read_policy
+from .policy import Policy, fingerprint, load_policy
 from .prompt import INSTRUCTIONS, RESPONSE_SCHEMA
 from .runtime import DatabaseWorker
 from .service import Secretary
@@ -49,11 +49,7 @@ class DecisionRun:
     async def run(self) -> dict:
         self._check()
         async with DatabaseWorker() as database:
-            policy = await database.call(read_policy, self.secretary.config, self.secretary.policy_path)
-            if not isinstance(policy, Policy):
-                from .legacy.decide import DecisionRun as LegacyRun
-                return await LegacyRun(self.secretary, self.budget_seconds, self.since, self.floor,
-                                       self.trigger, self.hourly, self.clock).run()
+            policy = await database.call(load_policy, self.secretary.config, self.secretary.policy_path)
             self.deadline = self.clock() + self.budget_seconds
             try:
                 async with asyncio.timeout(self.budget_seconds):
@@ -138,7 +134,7 @@ class DecisionRun:
 def decide(config: Config, state_path: Path, policy_path: Path, *, budget_seconds: float,
            since: int | None = None, floor: int | None = None, trigger: str | None = None,
            hourly: bool = False, clock: Callable[[], float] = time.monotonic) -> dict:
-    """Blocking CLI/legacy boundary. Async hosts await Secretary.decide directly."""
+    """Synchronous CLI boundary. Async hosts await Secretary.decide directly."""
     secretary = Secretary(config, state_path, policy_path)
     return asyncio.run(secretary.decide(budget_seconds=budget_seconds, since=since, floor=floor,
                                        trigger=trigger, hourly=hourly, clock=clock))

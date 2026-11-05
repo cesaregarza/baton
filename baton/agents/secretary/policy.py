@@ -11,8 +11,6 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from baton.config import Config, ConfigError
-from baton.database import Connection
-from baton.database.store import connect_read_only
 
 POLICY_VERSION = 2
 MAX_POLICY_BYTES = 16 * 1024
@@ -36,12 +34,7 @@ class Policy:
     digest: str
 
 
-def read_policy(config: Config, path: Path):
-    with connect_read_only(config.db_path) as baton:
-        return load_policy(config, baton, path)
-
-
-def load_policy(config: Config, baton: Connection, path: Path):
+def load_policy(config: Config, path: Path) -> Policy:
     try:
         data = path.read_bytes()
         if len(data) > MAX_POLICY_BYTES:
@@ -50,12 +43,9 @@ def load_policy(config: Config, baton: Connection, path: Path):
     except (OSError, ValueError) as error:
         raise ConfigError("cannot read secretary policy JSON") from error
     if not isinstance(raw, dict) or type(raw.get("version")) is not int:
-        raise ConfigError("secretary policy must name version 2 (or legacy version 1)")
-    if raw["version"] == 1:
-        from .legacy.policy import load_policy as load_legacy
-        return load_legacy(config, baton, path)
+        raise ConfigError("secretary policy must name version 2")
     if raw["version"] != POLICY_VERSION:
-        raise ConfigError("unsupported secretary policy version")
+        raise ConfigError("unsupported secretary policy version; use version 2 with a model configuration")
     fields = {"version", "principal", "model", "decision_engine", "instructions", "max_events",
               "context_bytes", "summary_bytes"}
     if "principal" not in raw or raw.keys() - fields:

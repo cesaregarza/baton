@@ -1,8 +1,8 @@
-"""The secretary thread's read path: everything delivered to one principal, whatever its kind, and the context
+"""The secretary read path: everything delivered to one principal, whatever its kind, and the context
 beside it, after a position; or the messages it can see by id. Message text is included.
 
-It reads through the kernel's read-only opener with the kernel's own visibility rule, and writes nothing. Every
-read here goes through `baton secretary read` or `python -m baton.secretary_read`, as the thread runs it.
+It reads through the read-only opener with the policy's visibility rule, and writes nothing. Every read here goes
+through `baton secretary read` or `python -m baton.secretary_read`.
 """
 
 from __future__ import annotations
@@ -18,8 +18,6 @@ from secretary_support import ALIAS_ID, conversation, make_world, say, table_has
 
 import baton
 from baton import cli, conversations, events, jobs, messages
-from baton.agents.secretary.legacy import store as secretary_store
-from baton.agents.secretary.legacy import tracking as secretary
 from baton.database import store
 from baton.database.store import transaction
 
@@ -78,17 +76,6 @@ def _stream_end(world, principal: str = "planner") -> int:
                                (principal, principal)).fetchone()[0]
 
 
-def _kernel_message_ids(world) -> set[str]:
-    """What the kernel's own scan records for the principal, the visibility rule the read path must match."""
-    secretary.scan(world.config, world.state_path, world.policy_path, limit=1000)
-    state = secretary_store.open_state(world.state_path, world.config.data_dir)
-    try:
-        envelopes = [json.loads(row["envelope"]) for row in state.execute("SELECT envelope FROM items")]
-    finally:
-        state.close()
-    return {envelope["message_id"] for envelope in envelopes if envelope["event_kind"] == "message"}
-
-
 def test_after_a_position_lists_each_message_the_principal_sees_once_with_its_text(tmp_path, capsys) -> None:
     with make_world(tmp_path) as world:
         room = conversation(world)
@@ -115,7 +102,7 @@ def test_after_a_position_lists_each_message_the_principal_sees_once_with_its_te
         assert _stream_end(world) < world.baton.execute("SELECT MAX(pos) FROM events").fetchone()[0]  # guest copies
 
 
-def test_visibility_is_exactly_the_kernels_and_another_principals_items_never_appear(tmp_path, capsys) -> None:
+def test_visibility_matches_the_principals_visible_messages_and_others_never_appear(tmp_path, capsys) -> None:
     with make_world(tmp_path) as world:
         room, left = conversation(world), conversation(world)
         seen = [messages.send(world.baton, sender="worker", recipient="planner", text="To the principal"),
@@ -132,7 +119,7 @@ def test_visibility_is_exactly_the_kernels_and_another_principals_items_never_ap
         code, page = _read(world, capsys, "--after", "0")
         assert code == 0
         expected = {sent["message_id"] for sent in seen} | {notice}
-        assert set(_ids(page)) == expected == _kernel_message_ids(world)
+        assert set(_ids(page)) == expected
         assert not {sent["message_id"] for sent in hidden} & set(_ids(page))
         assert SECRET not in json.dumps(page)
         code, by_id = _read(world, capsys, "--ids", ",".join(sent["message_id"] for sent in hidden))
@@ -233,11 +220,11 @@ def test_a_read_outside_its_bounds_is_refused_before_anything_is_read(tmp_path, 
         assert (code, out.get("error")) == (1, "invalid_request")
 
 
-def test_the_other_secretary_actions_still_require_their_state(tmp_path, capsys) -> None:
+def test_stateful_secretary_actions_require_their_state(tmp_path, capsys) -> None:
     with make_world(tmp_path) as world:
         code, page = _read(world, capsys, "--after", "0")
         assert (code, page.get("deliveries"), page.get("context")) == (0, [], [])
-        for action in (["scan"], ["replay"], ["show"], ["decide", "--budget-seconds", "5"]):
+        for action in (["show"], ["decide", "--budget-seconds", "5"], ["acknowledge", "dec_0000000000000000"]):
             with pytest.raises(SystemExit) as absent:
                 cli.main(["--config", str(world.config_path), "secretary", "--policy", str(world.policy_path),
                           *action])
@@ -280,7 +267,7 @@ def test_own_sends_and_job_context_come_out_as_context_and_never_as_deliveries(t
         assert all(entry["audience"] != "planner" for entry in page["context"])
 
 
-def test_pages_over_mixed_kinds_keep_their_position_and_replay_the_same(tmp_path, capsys) -> None:
+def test_pages_over_mixed_kinds_keep_their_position_and_repeat_the_same(tmp_path, capsys) -> None:
     with make_world(tmp_path) as world:
         room = conversation(world)
         for number in range(3):
@@ -295,7 +282,7 @@ def test_pages_over_mixed_kinds_keep_their_position_and_replay_the_same(tmp_path
         while True:
             code, page = _read(world, capsys, "--after", str(after), "--limit", "3")
             assert code == 0 and len(_entries(page)) <= 3 and page["through_pos"] > after
-            assert _read(world, capsys, "--after", str(after), "--limit", "3")[1] == page  # a replay reads the same
+            assert _read(world, capsys, "--after", str(after), "--limit", "3")[1] == page  # same query, same page
             pages.append(page)
             after = page["through_pos"]
             if not page["more"]:
@@ -319,3 +306,22 @@ def test_a_delivery_of_any_kind_stays_within_the_principals_visibility(tmp_path,
         positions = [entry["pos"] for entry in _entries(page)]
         assert theirs not in positions and limited not in positions and hidden["message_id"] not in _ids(page)
         assert SECRET not in json.dumps(page)
+
+
+def test_read_refuses_to_migrate_an_old_source_database(tmp_path) -> None:
+    import sqlite3
+    from dataclasses import replace
+
+    from baton.agents.secretary import read as secretary_read
+    with make_world(tmp_path) as world:
+        old_dir = tmp_path / "old-schema"
+        old_dir.mkdir(mode=0o700)
+        old_path = old_dir / "baton.db"
+        with sqlite3.connect(old_path) as old:
+            old.executescript((Path(__file__).parent / "fixtures" / "schema_v16.sql").read_text())
+        old_path.chmod(0o600)
+        before = old_path.read_bytes()
+        config = replace(world.config, data_dir=old_dir)
+        with pytest.raises(store.SchemaMismatch, match="schema"):
+            secretary_read.read(config, world.policy_path, after=0)
+        assert old_path.read_bytes() == before and not world.state_path.exists()

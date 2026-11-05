@@ -10,7 +10,7 @@ baton/
   app/                 MCP server, authentication guard, tool schemas and adapters
   cli/                 Command parser and commands grouped by feature
   agents/              Agent, Permissions and thread access
-    secretary/         Model-driven inbox triage, summary delivery and isolated v1 compatibility
+    secretary/         Model-driven inbox triage and summary delivery
   messages/            DirectMessage, Inbox, Post and mailbox delivery
   conversations/       Conversation, membership, group delivery, history and listing
   topics/              Topic containers, paths, grants and reference documents
@@ -33,8 +33,8 @@ baton/
   errors.py            Domain errors and their public codes
 ```
 
-The two top-level `secretary_decide.py` and `secretary_read.py` files are executable compatibility
-entrypoints. Their implementations live in `agents/secretary/decide.py` and `agents/secretary/read.py`.
+The top-level `secretary_decide.py` and `secretary_read.py` files are executable aliases for the current
+model-driven implementation. Their code lives in `agents/secretary/decide.py` and `agents/secretary/read.py`.
 
 ## Where to make a change
 
@@ -56,7 +56,7 @@ entrypoints. Their implementations live in `agents/secretary/decide.py` and `age
 | Change job transitions | `jobs.py` | `Job.move()` owns revision checks, retries and atomic event recording |
 | Change connection mechanics | `database/driver.py` | `files.py` checks private database files |
 | Change the authoritative schema | `database/schema.py`, `database/migrations.py` | `database/store.py` opens and initializes the database |
-| Change version 2 secretary policy or version dispatch | `agents/secretary/policy.py`, `service.py` | Version 1 behavior is isolated under `agents/secretary/legacy/` |
+| Change the supported secretary policy | `agents/secretary/policy.py`, `service.py` | Policy version 2 is the supported format |
 | Change the model's inbox context or size limits | `agents/secretary/inbox.py` | Reads currently visible pending events; refuses an oversized full window |
 | Change wake/hold/keep assessment and callback lifecycle | `agents/secretary/decide.py` | `DecisionRun` coordinates the window, model call, cache and visibility recheck |
 | Change model or optional advisory transport | `agents/secretary/model.py` | OpenAI Responses and host commands use `prompt.py`'s schema |
@@ -144,7 +144,7 @@ read, or borrows an existing transaction.
 ### Secretary workflow
 
 The [secretary developer guide](../baton/agents/secretary/README.md) documents model setup, host delivery,
-source references and the version 1 compatibility path.
+and source references. The planned principal feedback loop is described in the [roadmap](roadmap.md).
 
 For a version 2 policy, `Secretary.decide()` asks `InboxWindow` for the complete pending visible context, then
 `SecretaryModel` returns one semantic wake/hold/keep decision with a summary when needed. The optional
@@ -153,8 +153,9 @@ source keys. The service rechecks source visibility after inference and caches a
 identical policy and input. The host delivers the returned `brief`, then acknowledges its `decision_id` or
 supplies `covered_through` as the next `since`; a hold, keep or failed call does not advance coverage.
 
-Version 1 policy dispatches to the isolated `legacy/` interpreter and request ledger. Its scan, rules, judge,
-replay and cancel behavior are compatibility support, not the version 2 workflow.
+The secretary accepts policy version 2 and uses the configured model to interpret the pending window. Older
+policy versions are unsupported; operators must provide a current policy and a new state file. The
+`baton.secretary_decide` and `baton.secretary_read` modules are aliases to the current implementation.
 
 ## Organization rules
 

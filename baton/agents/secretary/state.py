@@ -27,8 +27,8 @@ class AttentionLog:
         with open_private(path) as conn:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if tables and not {"attention_version", "principals", "assessments"} <= tables:
-                raise ConfigError("model secretary needs a separate version-2 state file; "
-                                  "this file is legacy or unrelated")
+                raise ConfigError("secretary state has an obsolete or unrelated schema; "
+                                  "use a new private state file")
             if not tables:
                 with conn.transaction():
                     conn.execute("CREATE TABLE attention_version (version INTEGER NOT NULL)")

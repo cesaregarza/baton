@@ -14,7 +14,7 @@ import pytest
 from secretary_support import conversation, make_world, say, table_hashes
 
 from baton import conversations, messages
-from baton.agents.secretary import Secretary, replay, show
+from baton.agents.secretary import Secretary, show
 from baton.agents.secretary.decide import SecretaryUnavailable
 
 FAKE = Path(__file__).parent / "fixtures" / "secretary_fake_model.py"
@@ -275,7 +275,7 @@ def test_cancelling_model_reaps_child_and_retry_keeps_the_same_pending_window(tm
         assert len(model.requests) == 2
 
 
-def test_hourly_digest_uses_the_model_and_replay_does_not_infer_again(tmp_path) -> None:
+def test_hourly_digest_uses_the_model_and_inspection_does_not_infer_again(tmp_path) -> None:
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path, plan={"steps": [
             {"decision": "hold", "summary": "", "sources": []},
@@ -286,8 +286,8 @@ def test_hourly_digest_uses_the_model_and_replay_does_not_infer_again(tmp_path) 
         digest = _decide(world, hourly=True)
         assert digest["brief"] == "The worker has started the requested review."
         assert model.requests[-1]["context"]["mode"] == "digest"
-        recorded = replay(world.config, world.state_path, world.policy_path)
-        assert recorded["model_called"] is False and len(recorded["assessments"]) == 2
+        recorded = show(world.config, world.state_path, world.policy_path)
+        assert len(recorded["assessments"]) == 2
         assert len(model.requests) == 2
         asyncio.run(Secretary(world.config, world.state_path, world.policy_path).acknowledge(digest["decision_id"]))
         assert _positions(world)[0] == digest["through_pos"]
@@ -307,3 +307,32 @@ def test_context_overflow_is_explicit_and_does_not_infer_from_a_truncated_window
         world.policy_path.write_text(json.dumps({**policy, "max_events": 2}))
         result = _decide(world)
         assert len(result["sources"]) == 2
+
+
+def test_old_policy_is_rejected_before_model_or_state_access(tmp_path) -> None:
+    from baton.config import ConfigError
+    with make_world(tmp_path) as world:
+        model = Model(world, tmp_path)
+        messages.send(world.baton, sender="worker", recipient="planner", text="A new request")
+        before = table_hashes(world.baton)
+        world.policy_path.write_text(json.dumps({"version": 1, "principal": "planner"}))
+        with pytest.raises(ConfigError, match="unsupported secretary policy version"):
+            _decide(world)
+        assert not world.state_path.exists() and model.requests == []
+        assert table_hashes(world.baton) == before
+
+
+def test_obsolete_state_is_rejected_without_conversion_or_inference(tmp_path) -> None:
+    import sqlite3
+
+    from baton.config import ConfigError
+    with make_world(tmp_path) as world:
+        model = Model(world, tmp_path)
+        with sqlite3.connect(world.state_path) as old:
+            old.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+            old.execute("INSERT INTO schema_version VALUES (2)")
+        world.state_path.chmod(0o600)
+        before = world.state_path.read_bytes()
+        with pytest.raises(ConfigError, match="obsolete or unrelated schema"):
+            _decide(world)
+        assert world.state_path.read_bytes() == before and model.requests == []

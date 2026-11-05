@@ -1,4 +1,4 @@
-"""Synthetic Baton records for the offline attention tests; the alias comes from an existing schema fixture."""
+"""Synthetic Baton messages and private state for secretary integration checks."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from pathlib import Path
 
 from baton import config as config_module
 from baton import conversations
-from baton.agents.secretary.legacy import store as secretary_store
 from baton.config import Config
 from baton.database import store
 
@@ -77,14 +76,14 @@ next = ["done", "working"]
     config.db_path.chmod(0o600)
     baton = store.connect(config.db_path)  # migrate only this synthetic test fixture, before any secretary call
     policy_path = tmp_path / "policy.json"
-    policy_path.write_text(json.dumps({"version": 1, "principal": principal, "secretary_alias_id": ALIAS_ID}))
+    policy_path.write_text(json.dumps({"version": 2, "principal": principal}))
     return World(config, config_path, policy_path, data_dir / "secretary.db", baton)
 
 
 def policy(world: World, **changes: object) -> Path:
     value = json.loads(world.policy_path.read_text())
     value.update(changes)
-    world.policy_path.write_text(secretary_store.canonical(value))
+    world.policy_path.write_text(json.dumps(value))
     return world.policy_path
 
 

@@ -36,7 +36,7 @@ def read(config: Config, policy_path: Path, *, after: int | None = None, ids: li
     baton = store.connect_read_only(config.db_path)
     try:
         with store.snapshot(baton):
-            principal = policy_module.load_policy(config, baton, policy_path).principal
+            principal = policy_module.load_policy(config, policy_path).principal
             if ids is not None:
                 return {"principal": principal, **_by_id(baton, config, principal, ids, limit, max_bytes)}
             return {"principal": principal, "after": after,
@@ -87,14 +87,13 @@ def _after(baton: Connection, config: Config, principal: str, after: int, limit:
 def _entry(baton: Connection, config: Config, principal: str, event: Row,
            listed: set[str]) -> dict | None:
     """One stream event as the thread reads it, whatever its kind; None where the principal can't see it, or for a
-    later copy of a message already listed. Visibility is the kernel's own: the copy a message event names, and for
-    every other kind what `sources._envelope` would record."""
+    later copy of a message already listed. Message copies and event context use the principal's current visibility."""
     message = None
     if event["kind"] == "message":
         message = _message(baton, config, principal, event)
         if message is None or message["id"] in listed:
             return None
-    elif sources._envelope(baton, config, principal, event) is None:
+    elif not sources.visible_event(baton, config, principal, event):
         return None
     return {"pos": event["pos"], "kind": event["kind"], "at": event["at"], "actor": event["actor"],
             "audience": event["audience"], "job_id": event["job_id"], "seq": event["seq"],
@@ -102,7 +101,7 @@ def _entry(baton: Connection, config: Config, principal: str, event: Row,
 
 
 def _message(baton: Connection, config: Config, principal: str, event: Row) -> dict | None:
-    """The message a stream event carries, when the principal can read the copy it names: the kernel's own rule."""
+    """Read the event's message copy only while it remains visible to the principal."""
     data = json.loads(event["data"])
     message_id, seq = data.get("message_id"), data.get("seq")
     if not isinstance(message_id, str) or type(seq) is not int:
