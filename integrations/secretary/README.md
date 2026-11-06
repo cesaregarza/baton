@@ -153,6 +153,37 @@ systemctl --user daemon-reload
 
 Remove only this integration's hook entries from the project settings, preserving all unrelated configuration. Retain or remove the private instance directory according to the owner's data-retention choice; do not discard pending decisions implicitly.
 
+## Retained-thread bridge
+
+[`thread/secretary_bridge.py`](thread/secretary_bridge.py) lets a long-lived agent thread act as a secretary
+policy's command model, protocol version 4. Baton runs `secretary_bridge.py model` once per model turn; the thread
+loops `receive`, `read` and `reply` against the same file. [`thread/GUIDANCE.md`](thread/GUIDANCE.md) is the
+thread's standing guidance, versioned with the bridge: it names the `BRIDGE_VERSION` it matches.
+
+Host contract:
+
+- The bridge runs under the system interpreter with `-I` and never imports `baton`. It sits beside a host-provided
+  `secretary_gate` module that supplies the names listed in `GATE_NAMES`, including the spool's root, `GATE_DIR`;
+  a gate lacking one stops the bridge at import, naming it.
+- The policy's model command, the spool, the deadlines and every answer check are the host's existing ones.
+- Each output that hands the thread a live turn includes `reply_form`: a command ending in a quoted heredoc opener,
+  and its closing line, unique to the turn. The thread submits the command, a newline, its serializer's one-line
+  JSON, a newline and the closing line, so the shell evaluates nothing in the answer. A reply whose stdin is a
+  terminal or empty is refused and the turn stays open.
+- Each turn's first page carries the three trusted developer layers, so Baton's instructions, including the
+  full-page summary rule, are present on every turn.
+
+To adopt a new version, install the bridge file at the host's existing bridge path, then resume the thread with the
+guidance, preceded by one line naming the host's command:
+
+```sh
+{ printf 'BRIDGE: %s\n\n' "$BRIDGE_COMMAND"; cat integrations/secretary/thread/GUIDANCE.md; } > resume-message.txt
+```
+
+`BRIDGE_COMMAND` is the interpreter, `-I` and the installed bridge's path. The thread acknowledges with the
+version; the next `receive` header shows `bridge_version` and `reply_form`. To roll back, reinstall the previous
+bridge file and its guidance.
+
 ## Where the behavior lives
 
 The skills in this directory guide installation. The installed Python runtime is

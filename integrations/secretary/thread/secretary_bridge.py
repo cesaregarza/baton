@@ -11,6 +11,12 @@ counts. The thread, a persistent runtime session, runs:
     read REQUEST_ID [--after POS] [--layers] one page of that turn's events, or its three developer layers
     reply REQUEST_ID                        its answer on stdin: an assessment or {"tool_calls": [...]}
 
+Every output that hands the thread a live turn prints that turn's exact `reply` command, a quoted heredoc opener
+included, and the line that closes it (`reply_form`): the thread submits the command, a newline, its serializer's
+JSON, a newline and the closing line, so no answer is ever quoted by hand. The turn's first page also carries the
+three trusted layers, so the contract is in front of the thread when it decides, on every turn. BRIDGE_VERSION names
+this behavior for the thread's guidance.
+
 One deadline covers every turn of an assessment: the secretary host sets it in SECRETARY_DEADLINE_AT, which the
 policy's model.env passes through, and Baton kills a turn's process at that deadline. The bridge never gives up
 first, so a turn the thread doesn't answer in time ends as Baton's timeout. A turn lives as long as its bridge
@@ -39,6 +45,7 @@ import math
 import os
 import re
 import secrets
+import shlex
 import sys
 import time
 import unicodedata
@@ -47,11 +54,18 @@ from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+BRIDGE_PATH = Path(__file__).resolve()
+HERE = BRIDGE_PATH.parent
 sys.path.insert(0, str(HERE))  # `python -I` leaves the script's own directory off the path
-secretary_gate = importlib.import_module("secretary_gate")  # GATE_DIR, the policy's name and the private-file helpers
+# Everything this file takes from the host's gate module, which sits beside it: the spool's root, the policy file's
+# name and the private-file helpers. A gate lacking one is refused at import, by name.
+GATE_NAMES = ("GATE_DIR", "POLICY_FILE", "_open_private", "_private_dir", "_read_private", "_write_private")
+secretary_gate = importlib.import_module("secretary_gate")
+if _missing := [name for name in GATE_NAMES if not hasattr(secretary_gate, name)]:
+    raise ImportError(f"secretary_gate lacks {', '.join(_missing)}")
 
 PROTOCOL = 4
+BRIDGE_VERSION = "4.1"  # protocol 4 with the printed reply form and the every-turn contract; the guidance names it
 DEADLINE_ENV = "SECRETARY_DEADLINE_AT"
 TURN_SECONDS = 60  # Baton's longest turn: no deadline lies further out than this
 MAX_REQUEST = 16 * 1024 * 1024
@@ -69,6 +83,10 @@ ANSWER_KEYS = {"decision", "reason", "summary", "sources"}
 DECISIONS = ("wake", "hold", "keep")
 REQUEST_ID = re.compile(r"thr_[0-9a-f]{32}")
 MARKERS = ("[secretary", "[end of secretary", "[automated baton")  # compared case-folded; the principal's own follows
+COVERAGE = (  # beside required_sources, because the bridge checks citations and never the prose
+    "Citing every source in required_sources is required and is not coverage: the summary's prose must account for "
+    "every event on the page, as the trusted layers on the turn's first page require."
+)
 UNPRINTABLE = ("Cc", "Cf", "Cs", "Zl", "Zp")  # controls, format and bidi marks, surrogates, line separators
 CITED = re.compile(r"\b[a-z]{2,8}_[0-9a-f]{8,}\b")  # anything shaped like a Baton id
 
@@ -240,6 +258,9 @@ def header(held: dict) -> dict:
         "first_pos": events[0].get("pos") if events else None,
         "last_pos": events[-1].get("pos") if events else None,
         "required_sources": [entry["source_key"] for entry in events],
+        "coverage": COVERAGE,
+        "bridge_version": BRIDGE_VERSION,
+        "reply_form": reply_form(held["request_id"]),
         "optional_sources": [entry["source_key"] for entry in event["reply_context"]],
         "summary_bytes": held["summary_bytes"],
         "wake_required": event.get("wake_required"),
@@ -261,6 +282,18 @@ def header(held: dict) -> dict:
     }
 
 
+def reply_form(request_id: str) -> dict:
+    """The exact command that submits this turn's answer, and the line that closes its heredoc.
+
+    The closing line comes from the turn's id, 128 random bits drawn when the turn is offered, after every event on
+    the page was written, so no event's author can have known it. The opener is quoted, so the shell evaluates
+    nothing in the body. A one-line serialized answer holds no physical line break to end it early.
+    """
+    closing = f"END_{request_id}"
+    command = shlex.join([sys.executable, "-I", str(BRIDGE_PATH), "reply", request_id])
+    return {"command": f"{command} <<'{closing}'", "closing_line": closing}
+
+
 def read(spool: Path, request_id: str, after: int | None, layers: bool) -> tuple[dict, int]:
     """One page of the live turn's events after `after`, in the thread's view, or its developer layers."""
     with _locked(spool):
@@ -268,7 +301,7 @@ def read(spool: Path, request_id: str, after: int | None, layers: bool) -> tuple
     if held is None or held["request_id"] != request_id:
         return {"error": "not_outstanding"}, 1
     if layers:
-        return {"request_id": request_id, "layers": held["layers"]}, 0
+        return {"request_id": request_id, "layers": held["layers"], "reply_form": reply_form(request_id)}, 0
     events = held["event"]["events"]
     chosen, size = [], 0
     for entry in events:
@@ -283,7 +316,7 @@ def read(spool: Path, request_id: str, after: int | None, layers: bool) -> tuple
     last = chosen[-1]["pos"] if chosen else after
     more = bool(chosen) and any(entry.get("pos") is not None and entry["pos"] > last for entry in events)
     _record(spool, request_id, "read", events=len(chosen))
-    return {
+    page = {
         "request_id": request_id,
         "after": after,
         "through_pos": last,
@@ -294,7 +327,11 @@ def read(spool: Path, request_id: str, after: int | None, layers: bool) -> tuple
         ]
         if after is None
         else [],
-    }, 0
+        "reply_form": reply_form(request_id),
+    }
+    if after is None:
+        page["layers"] = held["layers"]  # the trusted contract, in front of the thread on every turn
+    return page, 0
 
 
 def view(entry: dict) -> dict:
@@ -310,18 +347,19 @@ def view(entry: dict) -> dict:
     return shown
 
 
-def reply(spool: Path, request_id: str, raw: bytes) -> tuple[dict, int]:
-    """The thread's answer for the live turn, and only for it. A refused answer leaves the turn open for a fix."""
+def reply(spool: Path, request_id: str, raw: bytes, refusal: str | None) -> tuple[dict, int]:
+    """The thread's answer for the live turn, and only for it. A refused answer leaves the turn open for a fix.
+    `refusal` is why stdin could not be an answer, judged before the lock and weighed after the turn is known."""
     known = request_id if REQUEST_ID.fullmatch(request_id) else None  # only an id goes on record
     with _locked(spool):
         held = _live(spool)
         if held is None or held["request_id"] != request_id:
             _record(spool, known, "replied", outcome="not_outstanding")
             return {"status": "not_outstanding"}, 1
-        answer, detail = check(held, raw)
+        answer, detail = (None, refusal) if refusal else check(held, raw)
         if answer is None:
             _record(spool, known, "replied", outcome="invalid", detail=detail)
-            return {"status": "invalid", "detail": detail}, 1
+            return {"status": "invalid", "detail": detail, "reply_form": reply_form(request_id)}, 1
         if time.time() > held["deadline"] - RETURN_SECONDS:
             _record(spool, known, "replied", outcome="late")
             return {"status": "late"}, 1
@@ -673,6 +711,16 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def stdin_answer() -> tuple[bytes, str | None]:
+    """The reply's stdin, or why it can't be an answer. A terminal is refused unread: a read would wait on typing
+    that never comes, and the turn's time would run out."""
+    stream = sys.stdin
+    if stream is not None and stream.isatty():
+        return b"", "stdin_terminal"
+    raw = b"" if stream is None else stream.buffer.read(MAX_ANSWER + 1)
+    return raw, None if raw.strip() else "stdin_empty"
+
+
 def main(argv: list[str]) -> int:
     os.umask(0o077)
     parser = _parser()
@@ -691,7 +739,7 @@ def main(argv: list[str]) -> int:
         elif args.command == "read":
             result, code = read(spool, args.request_id, args.after, args.layers)
         elif args.command == "reply":
-            result, code = reply(spool, args.request_id, sys.stdin.buffer.read(MAX_ANSWER + 1))
+            result, code = reply(spool, args.request_id, *stdin_answer())
         elif args.command == "status":
             result, code = status(spool), 0
         else:
