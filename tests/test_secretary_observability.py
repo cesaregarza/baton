@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import json
 import sys
-import time
 from dataclasses import replace
 
 import pytest
@@ -25,6 +24,22 @@ async def _run_until_engine_health(worker: Worker) -> dict:
             while True:
                 health = worker.instance.receipts.get("health")
                 if isinstance(health, dict) and isinstance(health.get("engine"), dict):
+                    return health
+                await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def _run_until_delivery(worker: Worker) -> dict:
+    task = asyncio.create_task(worker.run())
+    try:
+        async with asyncio.timeout(10):
+            while True:
+                queued = worker.instance.receipts.get("queued")
+                health = worker.instance.receipts.get("health")
+                if queued and health and health.get("delivery", {}).get("status") == "available":
                     return health
                 await asyncio.sleep(0.01)
     finally:
@@ -96,8 +111,8 @@ def test_engine_timeout_does_not_limit_delayed_codex_delivery(tmp_path) -> None:
         codex.write_text(
             f"#!{sys.executable}\n"
             "import pathlib,sys,time\n"
-            f"pathlib.Path({str(delivery_log)!r}).write_text('queued')\n"
             "time.sleep(0.8)\n"
+            f"pathlib.Path({str(delivery_log)!r}).write_text('queued')\n"
         )
         codex.chmod(0o700)
         worker = Worker(replace(worker.instance, codex=str(codex)))
@@ -105,15 +120,14 @@ def test_engine_timeout_does_not_limit_delayed_codex_delivery(tmp_path) -> None:
         asyncio.run(worker.instance.secretary.activate())
         say(world, room, "worker", "A synthetic update to deliver")
 
-        started = time.monotonic()
-        health = asyncio.run(_run_until_engine_health(worker))
-        elapsed = time.monotonic() - started
+        health = asyncio.run(_run_until_delivery(worker))
 
-        assert elapsed >= 0.75
         assert delivery_log.read_text() == "queued"
         assert health["status"] == "degraded"
         assert health["engine"]["status"] == "unavailable"
         assert health["engine"]["last_failure"] == "timeout"
+        assert health["delivery"]["status"] == "available"
+        assert health["delivery"]["last_failure"] is None
         assert len(model.requests) == 1
         assert model.engine_requests[0]["version"] == 3
         assert worker.instance.receipts.get("pending")
