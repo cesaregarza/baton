@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -79,3 +81,35 @@ def test_file_engine_cache_is_bounded(tmp_path: Path) -> None:
         with store.connect(tmp_path / f"db-{index}.sqlite"):
             pass
     assert len(driver._ENGINE_CACHE) == driver._ENGINE_CACHE_SIZE
+
+
+def test_opening_another_connection_preserves_sqlite_process_locks(tmp_path: Path) -> None:
+    path = tmp_path / "baton.db"
+    probe = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(0)
+sys.exit(1)
+"""
+    with store.connect(path) as first:
+        first.execute("SELECT count(*) FROM messages").one()
+        before = subprocess.run([sys.executable, "-c", probe, str(path)], timeout=10, check=False)
+        assert before.returncode == 0, "SQLite must hold its file lock before the second open"
+        with store.connect_read_only(path) as second:
+            second.execute("SELECT count(*) FROM messages").one()
+            after = subprocess.run([sys.executable, "-c", probe, str(path)], timeout=10, check=False)
+            assert after.returncode == 0, "opening another connection released SQLite's existing file lock"
+
+
+@pytest.mark.parametrize("boundary", ["transaction", "snapshot"])
+def test_automatic_sqlite_rollback_preserves_original_failure(boundary: str) -> None:
+    with driver.memory() as conn:
+        conn.execute("CREATE TABLE unique_values (value INTEGER UNIQUE)")
+        conn.execute("INSERT INTO unique_values VALUES (1)")
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+            with getattr(conn, boundary)():
+                conn.execute("INSERT OR ROLLBACK INTO unique_values VALUES (1)")
+        assert conn.execute("SELECT value FROM unique_values").one()[0] == 1

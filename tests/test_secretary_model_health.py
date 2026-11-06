@@ -84,7 +84,10 @@ def _model_api(world, behavior: dict, requests: list):
         thread.join()
 
 
-@pytest.mark.parametrize(("status", "category"), [(401, "authentication"), (400, "rejected"), (503, "unavailable")])
+@pytest.mark.parametrize(
+    ("status", "category"),
+    [(401, "authentication"), (400, "rejected"), (408, "timeout"), (504, "timeout"), (503, "unavailable")],
+)
 def test_rejected_or_unavailable_model_is_reported_then_recovers(tmp_path, monkeypatch, caplog, status, category):
     with make_world(tmp_path) as world:
         room = conversation(world)

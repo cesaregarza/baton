@@ -67,8 +67,10 @@ class AttentionQueue:
         if due:
             page = due[0]
             matches = page.mode == "alert" and position is not None and page.since < position <= page.through
-            return await self._attempt(page, budget, trigger=trigger if matches else None)
-        if await self.database.call(self.backlog.waiting_retry, position):
+            result = await self._attempt(page, budget, trigger=trigger if matches else None)
+            if result is not None or self.last_error is not None:
+                return result
+        if await self.database.call(self.backlog.waiting_retry, position, mode="digest" if hourly else None):
             raise SecretaryUnavailable("the retained page is waiting for retry backoff")
         return await self.digest(budget) if hourly else await self.scan(budget, trigger=trigger)
 
@@ -126,7 +128,8 @@ class AttentionQueue:
     async def _attempt(self, page: Page, budget: float, *, trigger: str | None = None) -> dict | None:
         restored = await self._restore_result(page)
         if restored is not None:
-            return restored
+            acknowledged = await self.database.call(self.backlog.log.is_acknowledged, restored["decision_id"])
+            return None if acknowledged else restored
         try:
             result = await DecisionRun(
                 self.secretary,
@@ -146,7 +149,6 @@ class AttentionQueue:
         return result
 
     async def _failed(self, page: Page, error: Exception) -> dict | None:
-        self.last_error = error
         health = await self.database.call(ModelHealth(self.backlog.log, self.policy.digest).read)
         category = error.category if isinstance(error, SecretaryUnavailable) else "oversized"
         failed = await self.database.call(
@@ -161,6 +163,9 @@ class AttentionQueue:
             model_successes=health["successes"],
             model_policy=self.policy.digest,
         )
+        if failed is None:
+            return None  # A concurrent answer or callback already changed this page.
+        self.last_error = error
         if failed.content_failures < self.policy.max_attempts:
             return None
         split = await self.database.call(

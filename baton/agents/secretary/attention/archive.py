@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 
 MAX_PAGE_SIZE = 100
 MAX_SCAN_ROWS = 500
+# Citation checks can each resolve an event and a message copy. Cap that work per page even when
+# the SQL row scan is sparse; one oversized first summary is completed so pagination always moves.
+MAX_CITATION_CHECKS = 256
 _DELIVERABLE_FIELDS = (
     "decision",
     "brief",
@@ -90,20 +93,35 @@ class SummaryArchive:
             has_unscanned = len(rows) > MAX_SCAN_ROWS
             scanned = rows[:MAX_SCAN_ROWS]
             entries = []
+            checked_citations = 0
+            fully_checked = 0
             for row in scanned:
                 entry = _entry(row)
-                if _references_visible(conn, self.config, principal, entry["summary"]):
+                if fully_checked and checked_citations >= MAX_CITATION_CHECKS:
+                    break
+                # Finish a row before advancing the cursor. The first row is always completed,
+                # even when its citation list alone exceeds the budget.
+                budget = None if fully_checked == 0 else MAX_CITATION_CHECKS - checked_citations
+                visible, checked, complete = _references_visible_bounded(
+                    conn, self.config, principal, entry["summary"], budget
+                )
+                checked_citations += checked
+                if not complete:
+                    break
+                fully_checked += 1
+                if visible:
                     entries.append(entry)
                     if len(entries) > limit:
                         break
         has_extra_visible = len(entries) > limit
-        has_more = has_extra_visible or has_unscanned
+        has_unchecked_rows = fully_checked < len(scanned) or has_unscanned
+        has_more = has_extra_visible or has_unchecked_rows
         if has_extra_visible:
             entries = entries[:limit]
             next_cursor = entries[-1]["cursor"]
-        elif has_unscanned and scanned:
-            # An all-hidden SQL batch must still advance so repeated calls cannot loop on the same rows.
-            next_cursor = scanned[-1]["cursor"]
+        elif has_unchecked_rows and fully_checked:
+            # Advance only over rows whose full citation lists were checked.
+            next_cursor = scanned[fully_checked - 1][0]
         else:
             next_cursor = None
         return {
@@ -116,13 +134,25 @@ class SummaryArchive:
 
 def _references_visible(conn: Connection, config: Config, principal: str, summary: dict) -> bool:
     """Recheck every archived source identity using the inbox's current visibility rules."""
+    visible, _, complete = _references_visible_bounded(conn, config, principal, summary, None)
+    return visible and complete
+
+
+def _references_visible_bounded(
+    conn: Connection, config: Config, principal: str, summary: dict, budget: int | None
+) -> tuple[bool, int, bool]:
+    """Check references in order, stopping at a per-page budget without partially advancing a row."""
     refs = summary.get("source_refs", [])
     if not isinstance(refs, list):
-        return False
+        return False, 0, True
+    checked = 0
     for ref in refs:
+        if budget is not None and checked >= budget:
+            return False, checked, False
+        checked += 1
         if not _reference_visible(conn, config, principal, ref):
-            return False
-    return True
+            return False, checked, True
+    return True, checked, True
 
 
 def _reference_visible(conn: Connection, config: Config, principal: str, ref: object) -> bool:

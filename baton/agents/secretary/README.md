@@ -202,6 +202,10 @@ does not inherit the engine timeout. Standalone decisions process one due retry 
 when called with a newer trigger. In that case the returned page has no newer trigger attached; handle its result,
 then call again for the newer event. An untriggered call while failed work is in backoff raises retryable
 `secretary_unavailable`. Calls for a different new event may still assess that fresh page during the backoff.
+Hourly calls consider only digest retries, so an alert waiting for retry cannot block a due digest.
+Concurrent callbacks may assess the same retained page; a late failure cannot reopen a completed page or count
+that page's own answer as evidence for splitting. Recovery finishes acknowledged results without returning their
+brief again.
 
 Results contain a `brief`, cited `sources`, and `source_refs` resolving keys to current message/thread IDs or
 event positions. Every summary, including a digest, must account for and cite every event on its page; visible
@@ -215,7 +219,9 @@ source message bodies. It is protected by the private-file checks and remains un
 is no automatic assessment cleanup. Deliverable summaries are also written to the append-only `secretary_summaries`
 table in `baton.db`, tagged with stable secretary ID and principal. `baton secretary --policy FILE summaries`
 pages this shared archive without `--state`; it accepts `--after` and `--limit` and returns `items`, `next`, and
-`has_more`.
+`has_more`. Each archive call has a budget of 256 citation checks; its first row is always completed even if it
+exceeds that budget so the cursor can advance. A page may contain fewer than `limit` entries, including zero,
+while `has_more` is true. Follow `next` until it is false; the cursor only passes fully checked rows.
 Authorized message context is sent to the configured model provider or host command, and the configured decision
 engine receives context for each alert page. Host commands run as the Baton host user;
 their environment filtering does not sandbox access to files available to that user. A decision-engine transport
@@ -223,6 +229,8 @@ or timeout failure is returned to the model as `decision_engine_unavailable`, al
 assessment. Sanitized engine and model failures are logged and exposed independently in worker health, including
 `missing_credential`, `authentication`, `rejected`, `timeout`, and `unavailable` model categories. The worker checks
 for a missing model key at startup, even before an alert, and reports degraded health while a component is failing.
+On restart with that key present, the current missing-key failure becomes `not_used` until the model is called;
+its failure history remains. This local credential check does not establish that the provider accepts the key.
 Successful model answers clear its current failure status while retaining the last failure. If a wake verdict
 forces attention but the model cannot summarize it, the worker
 emits a forced-wake notice; a model outage without a forced wake remains an outage and does not become an alert.
@@ -231,6 +239,8 @@ and timeouts back off in their original mode. Invalid model protocol/content and
 `max_attempts` and may split. A timeout, rejected request, or failed command also counts when another page has
 received a valid model answer under the same policy since this page last failed. Without that evidence, the page
 continues backing off; elapsed time alone never turns a model outage into per-event wake notices.
+Connection and connection-pool timeouts are always outages. Read/write timeouts and HTTP 408/504 responses use
+the page-specific failure rule above.
 
 Before retrying, the queue checks for an already persisted result for the same policy, page, mode, activation floor,
 and current source content. It finishes that result without invoking the engine or model again. This closes the

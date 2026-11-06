@@ -26,6 +26,7 @@ from ..inbox import sources
 from ..inbox.window import InboxWindow
 from ..service import Secretary
 from .assessment import Assessment
+from .backlog import Page
 from .health import EngineHealth, ModelHealth
 from .outcome import Outcome, persist
 from .runtime import DatabaseWorker
@@ -198,7 +199,7 @@ class DecisionRun:
             category = "timeout" if isinstance(error, TimeoutError) else error.category
             await database.call(health.failed, category)
             raise
-        await database.call(health.succeeded)
+        await database.call(health.succeeded, Page(window.since, window.through, context["mode"]))
         return assessment
 
     def _check_trigger(self, window: InboxWindow) -> None:

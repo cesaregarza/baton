@@ -7,6 +7,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+from .backlog import Backlog, Page
 from .state import AttentionLog
 
 _LOGGER = logging.getLogger(__name__)
@@ -72,14 +73,23 @@ class ModelHealth:
         with self.log.connection() as conn:
             return self._read(conn)
 
-    def succeeded(self) -> dict:
-        return self._record(None)
+    def succeeded(self, page: Page | None = None) -> dict:
+        return self._record(None, page=page)
+
+    def credentials_present(self) -> dict:
+        """Clear a missing local credential without claiming the provider has answered."""
+        with self.log.connection() as conn, conn.transaction():
+            previous = self._read(conn)
+            if previous["status"] == "unavailable" and previous["last_failure"] == "missing_credential":
+                previous = {**previous, "status": "not_used", "checked_at": time.time()}
+                self._write(conn, previous)
+            return previous
 
     def failed(self, category: str) -> dict:
         _LOGGER.warning("secretary model unavailable: %s", category)
         return self._record(category)
 
-    def _record(self, failure: str | None) -> dict:
+    def _record(self, failure: str | None, *, page: Page | None = None) -> dict:
         with self.log.connection() as conn, conn.transaction():
             previous = self._read(conn)
             now = time.time()
@@ -90,13 +100,18 @@ class ModelHealth:
                 "checked_at": now,
                 "successes": previous["successes"] + int(failure is None),
             }
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS model_health "
-                "(principal TEXT PRIMARY KEY, policy_digest TEXT NOT NULL, result TEXT NOT NULL)"
-            )
-            conn.execute(
-                "INSERT INTO model_health VALUES (?,?,?) ON CONFLICT(principal) DO UPDATE SET "
-                "policy_digest=excluded.policy_digest,result=excluded.result",
-                (self.log.principal, self.policy_digest, json.dumps(result)),
-            )
+            self._write(conn, result)
+            if page is not None and failure is None:
+                Backlog(self.log).model_succeeded(conn, page, result["successes"], self.policy_digest)
         return result
+
+    def _write(self, conn, result: dict) -> None:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_health "
+            "(principal TEXT PRIMARY KEY, policy_digest TEXT NOT NULL, result TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO model_health VALUES (?,?,?) ON CONFLICT(principal) DO UPDATE SET "
+            "policy_digest=excluded.policy_digest,result=excluded.result",
+            (self.log.principal, self.policy_digest, json.dumps(result)),
+        )

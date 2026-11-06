@@ -116,9 +116,19 @@ class Backlog:
             conn.execute(
                 "UPDATE backlog_windows SET status=?,mode=?,next_attempt=?,decision=?,"
                 "attempts=0,content_failures=0,model_successes=0,model_policy='',error=NULL "
-                "WHERE principal=? AND since=? AND through=?",
+                "WHERE principal=? AND since=? AND through=? AND status='retry'",
                 (status, mode, due, decision, self.log.principal, page.since, page.through),
             )
+            self._prune(conn)
+
+    def model_succeeded(self, conn: Connection, page: Page, successes: int, policy: str) -> None:
+        """A page's own answer cannot provide evidence that another page works."""
+        self._initialize(conn)
+        conn.execute(
+            "UPDATE backlog_windows SET model_successes=?,model_policy=? "
+            "WHERE principal=? AND since=? AND through=? AND mode=? AND status='retry'",
+            (successes, policy, self.log.principal, page.since, page.through, page.mode),
+        )
 
     def failed(
         self,
@@ -131,16 +141,17 @@ class Backlog:
         content: bool = False,
         model_successes: int = 0,
         model_policy: str = "",
-    ) -> Page:
+    ) -> Page | None:
         attempts = page.attempts + 1
         content_failures = page.content_failures + int(content)
         delay = min(maximum, initial * 2 ** min(attempts - 1, 20))
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
-            conn.execute(
+            changed = conn.execute(
                 "UPDATE backlog_windows SET status='retry',attempts=?,content_failures=?,next_attempt=?,error=?,"
                 "model_successes=?,model_policy=? "
-                "WHERE principal=? AND since=? AND through=?",
+                "WHERE principal=? AND since=? AND through=? AND mode=? AND status='retry' "
+                "AND attempts=? AND model_successes=? AND model_policy=?",
                 (
                     attempts,
                     content_failures,
@@ -151,8 +162,14 @@ class Backlog:
                     self.log.principal,
                     page.since,
                     page.through,
+                    page.mode,
+                    page.attempts,
+                    page.model_successes,
+                    page.model_policy,
                 ),
-            )
+            ).rowcount
+        if not changed:
+            return None
         return Page(page.since, page.through, page.mode, attempts, content_failures, model_successes, model_policy)
 
     def due(
@@ -169,15 +186,15 @@ class Backlog:
             )
             return [Page(*row) for row in rows]
 
-    def waiting_retry(self, position: int | None = None) -> bool:
+    def waiting_retry(self, position: int | None = None, *, mode: str | None = None) -> bool:
         """Whether this trigger belongs to retained failed work, even during its backoff."""
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
             return (
                 conn.execute(
                     "SELECT 1 FROM backlog_windows WHERE principal=? AND status='retry' "
-                    "AND (? IS NULL OR (since<? AND through>=?)) LIMIT 1",
-                    (self.log.principal, position, position, position),
+                    "AND (? IS NULL OR (since<? AND through>=?)) AND (? IS NULL OR mode=?) LIMIT 1",
+                    (self.log.principal, position, position, position, mode, mode),
                 ).fetchone()
                 is not None
             )

@@ -50,6 +50,10 @@ async def post_json(
         raise
     except ModelUnavailable:
         raise
+    except (httpx.ConnectTimeout, httpx.PoolTimeout):
+        # No response was received, so this does not show that a particular page
+        # is too large or otherwise invalid.
+        raise ModelUnavailable("model request failed") from None
     except httpx.TimeoutException:
         raise ModelUnavailable("model request timed out", category="timeout") from None
     except Exception:
@@ -82,7 +86,7 @@ async def command_json(
 
 def _http_failure(status: int) -> str:
     """Classify the status without copying provider errors, URLs, or credentials."""
-    if status == 408:
+    if status in {408, 504}:
         return "timeout"
     if status in {401, 403}:
         return "authentication"

@@ -239,6 +239,8 @@ def test_schema_22_adds_message_identity_index_to_old_and_fresh_databases(tmp_pa
             1,
             "saved before v22",
         )
+        index_names = {row[1] for row in db.execute("PRAGMA index_list(messages)")}
+        assert "messages_by_id" in index_names, "schema v22 migration omitted messages_by_id"
         assert db.execute("PRAGMA index_info(messages_by_id)").fetchone()[2] == "id"
     finally:
         db.close()
@@ -250,6 +252,8 @@ def test_schema_22_adds_message_identity_index_to_old_and_fresh_databases(tmp_pa
     db = connect(fresh.db_path)
     try:
         assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+        index_names = {row[1] for row in db.execute("PRAGMA index_list(messages)")}
+        assert "messages_by_id" in index_names, "fresh schema omitted messages_by_id"
         assert db.execute("PRAGMA index_info(messages_by_id)").fetchone()[2] == "id"
     finally:
         db.close()

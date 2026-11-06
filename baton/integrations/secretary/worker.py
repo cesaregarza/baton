@@ -12,6 +12,7 @@ import signal
 import sys
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from baton import datadir
 from baton.agents.secretary.attention.health import EngineHealth, ModelHealth
@@ -19,11 +20,19 @@ from baton.agents.secretary.attention.queue import AttentionQueue
 from baton.agents.secretary.attention.runtime import DatabaseWorker
 from baton.agents.secretary.attention.state import AttentionLog
 from baton.config import ConfigError
-from baton.config.secretary import load_policy, require_hook_summary
+from baton.config.secretary import Policy, load_policy, require_hook_summary
 
 from .instance import Instance
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class DeliveryOffer:
+    session: str
+    decisions: tuple[str, ...]
+    retry_initial_seconds: float
+    retry_max_seconds: float
 
 
 def invocation(instance: Instance, *action: str) -> str:
@@ -48,12 +57,15 @@ def exclusive(instance: Instance):
 class Worker:
     def __init__(self, instance: Instance):
         self.instance = instance
-        self.retry_at = 0.0
         self.failed_pages = 0
         self.digest_first = False
         self.engine_health = {"status": "not_used", "last_failure": None, "checked_at": None}
         self.model_health = {"status": "not_used", "last_failure": None, "checked_at": None}
         self.delivery_health = {"status": "not_used", "last_failure": None, "checked_at": None}
+        self.delivery_offer: DeliveryOffer | None = None
+        self.delivery_task: asyncio.Task[None] | None = None
+        self.delivery_retry_at = 0.0
+        self.delivery_retry_seconds: float | None = None
 
     def _health_status(self, *, worker_status: str = "running") -> dict:
         components = {
@@ -79,30 +91,43 @@ class Worker:
                     secretary = self.instance.secretary
                     attention = AttentionLog(secretary.state_path, secretary.config.data_dir, policy.principal)
                     await database.call(ModelHealth(attention, policy.digest).failed, "missing_credential")
+                elif policy.model["provider"] != "command":
+                    secretary = self.instance.secretary
+                    attention = AttentionLog(secretary.state_path, secretary.config.data_dir, policy.principal)
+                    await database.call(ModelHealth(attention, policy.digest).credentials_present)
                 retry_seconds = policy.retry_initial_seconds
-                while True:
-                    try:
-                        await self.step(database)
-                        await database.call(
-                            self.instance.receipts.set,
-                            "health",
-                            {**self._health_status(), "failed_pages": self.failed_pages, "checked_at": time.time()},
-                        )
-                        retry_seconds = policy.retry_initial_seconds
-                    except Exception as error:
-                        log.warning("secretary pass failed: %s", type(error).__name__)
-                        await database.call(
-                            self.instance.receipts.set,
-                            "health",
-                            {
-                                **self._health_status(worker_status="retrying"),
-                                "error": type(error).__name__,
-                                "checked_at": time.time(),
-                            },
-                        )
-                        await asyncio.sleep(retry_seconds)
-                        retry_seconds = min(policy.retry_max_seconds, retry_seconds * 2)
-                    await asyncio.sleep(self.instance.poll_seconds)
+                self.delivery_retry_seconds = policy.retry_initial_seconds
+                try:
+                    while True:
+                        try:
+                            await self.step(database)
+                            await database.call(
+                                self.instance.receipts.set,
+                                "health",
+                                {
+                                    **self._health_status(),
+                                    "failed_pages": self.failed_pages,
+                                    "checked_at": time.time(),
+                                },
+                            )
+                            retry_seconds = policy.retry_initial_seconds
+                        except Exception as error:
+                            log.warning("secretary pass failed: %s", type(error).__name__)
+                            await database.call(
+                                self.instance.receipts.set,
+                                "health",
+                                {
+                                    **self._health_status(worker_status="retrying"),
+                                    "error": type(error).__name__,
+                                    "checked_at": time.time(),
+                                },
+                            )
+                            await asyncio.sleep(retry_seconds)
+                            retry_seconds = min(policy.retry_max_seconds, retry_seconds * 2)
+                        await self._start_delivery_if_due()
+                        await asyncio.sleep(self.instance.poll_seconds)
+                finally:
+                    await self._stop_delivery()
 
     async def step(self, database: DatabaseWorker) -> None:
         queue = await AttentionQueue.open(
@@ -121,20 +146,96 @@ class Worker:
         await database.call(self._signal, decisions)
         session = await database.call(receipts.get, "session")
         if decisions and session and self.instance.product == "codex":
-            await self._announce(database, session, decisions, queue.policy)
+            await self._capture_delivery(database, session, decisions, queue.policy)
+        else:
+            self.delivery_offer = None
 
-    async def _announce(self, database: DatabaseWorker, session: str, decisions: list[str], policy) -> None:
+    async def _capture_delivery(
+        self, database: DatabaseWorker, session: str, decisions: list[str], policy: Policy
+    ) -> None:
         previous = await database.call(self.instance.receipts.get, "queued")
         offered = (
             previous.get("decisions", []) if isinstance(previous, dict) and previous.get("session") == session else []
         )
-        if not set(decisions).difference(offered) or time.monotonic() < self.retry_at:
-            return
-        if await self._queue(session, self.instance.delivery_timeout_seconds):
-            await database.call(self.instance.receipts.set, "queued", {"session": session, "decisions": decisions})
-            self.retry_at = 0.0
+        if set(decisions).difference(offered):
+            self.delivery_offer = DeliveryOffer(
+                session, tuple(decisions), policy.retry_initial_seconds, policy.retry_max_seconds
+            )
         else:
-            self.retry_at = time.monotonic() + policy.retry_initial_seconds
+            self.delivery_offer = None
+
+    async def _start_delivery_if_due(self) -> None:
+        task = self.delivery_task
+        if task is not None and task.done():
+            self.delivery_task = None
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                log.warning("secretary delivery task failed: %s", type(error).__name__)
+        offer = self.delivery_offer
+        if offer is None or self.delivery_task is not None or time.monotonic() < self.delivery_retry_at:
+            return
+        async with DatabaseWorker() as database:
+            queued = await database.call(self.instance.receipts.get, "queued")
+        offered = (
+            queued.get("decisions", []) if isinstance(queued, dict) and queued.get("session") == offer.session else []
+        )
+        remaining = tuple(decision for decision in offer.decisions if decision not in offered)
+        if not remaining:
+            self.delivery_offer = None
+            return
+        self.delivery_task = asyncio.create_task(self._deliver(offer), name="secretary-delivery")
+
+    async def _deliver(self, offer: DeliveryOffer) -> None:
+        success = await self._queue(offer.session, self.instance.delivery_timeout_seconds)
+        async with DatabaseWorker() as database:
+            if success:
+                await database.call(
+                    self.instance.receipts.set,
+                    "queued",
+                    {"session": offer.session, "decisions": list(offer.decisions)},
+                )
+                self._remove_delivered_offer(offer)
+                self.delivery_retry_at = 0.0
+                self.delivery_retry_seconds = offer.retry_initial_seconds
+            else:
+                self._schedule_delivery_retry(offer, time.monotonic())
+            health = self._health_status()
+            await database.call(
+                self.instance.receipts.set,
+                "health",
+                {**health, "failed_pages": self.failed_pages, "checked_at": time.time()},
+            )
+
+    def _schedule_delivery_retry(self, offer: DeliveryOffer, now: float) -> None:
+        delay = self.delivery_retry_seconds or offer.retry_initial_seconds
+        self.delivery_retry_at = now + delay
+        self.delivery_retry_seconds = min(offer.retry_max_seconds, delay * 2)
+
+    def _remove_delivered_offer(self, delivered: DeliveryOffer) -> None:
+        current = self.delivery_offer
+        if current is None or current.session != delivered.session:
+            return
+        # Keep the full pending snapshot when new decisions arrived during delivery. The queued
+        # receipt must retain earlier offers too, or each pass would announce alternating subsets.
+        if set(current.decisions) <= set(delivered.decisions):
+            self.delivery_offer = None
+
+    async def _stop_delivery(self) -> None:
+        task = self.delivery_task
+        self.delivery_task = None
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            log.warning("secretary delivery task failed: %s", type(error).__name__)
 
     def _signal(self, decisions: list[str]) -> None:
         # Only a pointer is watched; summaries are read through current authorization checks.
@@ -202,10 +303,12 @@ class Worker:
 
     def _record_delivery_failure(self, category: str) -> None:
         now = time.time()
+        previous = self.delivery_health
         self.delivery_health = {
             "status": "unavailable",
             "last_failure": category,
             "last_failure_at": now,
             "checked_at": now,
         }
-        log.warning("secretary delivery failed: %s", category)
+        if previous.get("status") != "unavailable" or previous.get("last_failure") != category:
+            log.warning("secretary delivery failed: %s", category)

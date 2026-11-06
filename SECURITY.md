@@ -181,6 +181,10 @@ commands, and when the database, OAuth state, or audit log is accessed.
   symlinks and checked again. OAuth state is written to a unique exclusive temporary file, synced, and
   renamed into place. SQLite's WAL and shared-memory files inherit the database's permissions.
 
+Existing database files are checked with non-following, descriptor-relative stat calls. Baton does not open and
+close extra descriptors on them, which could release SQLite's process-wide locks. New files are exclusively
+created with private permissions before SQLite opens them.
+
 SQLite opens files by path rather than through the checked directory descriptor. Baton checks the directory
 and database device and inode after SQLite opens them, but a file swapped and swapped back between the open
 and that check could still be used. That requires write access to the private directory, which is within

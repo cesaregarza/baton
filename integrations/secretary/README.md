@@ -9,7 +9,7 @@ These project skills explain how a local secretary instance can deliver decision
 
 - Install and run the worker on the same host and as the same user as the local Baton data and model authentication. Remote delivery is unsupported; remote authenticated reads of archived summaries are supported.
 - The runner uses POSIX file locks (Linux/macOS). The supplied systemd unit is for Linux; use another supervisor on macOS.
-- Set integration `poll_seconds` and `budget_seconds` so `2 * budget_seconds + poll_seconds <= 60`; the examples use a 2-second poll and a 28-second budget. Set required `delivery_timeout_seconds` independently of the engine timeout. The status heartbeat stale bound also includes this delivery timeout because a successful notification can extend a worker pass. The engine timeout must be shorter than the assessment budget; install and startup validate this, as does standalone `decide` before work.
+- Set integration `poll_seconds` and `budget_seconds` so `2 * budget_seconds + poll_seconds <= 60`; the examples use a 2-second poll and a 28-second budget. Set required `delivery_timeout_seconds` independently of the engine timeout. Delivery runs in one supervised background task while assessment continues; the status heartbeat retains a conservative allowance for its timeout. The engine timeout must be shorter than the assessment budget; install and startup validate this, as does standalone `decide` before work.
 - Use a complete secretary v3 policy. Model ID, provider URL, API-key variable, timeout, reasoning effort, output limit, and cache mode are explicit policy values; there is no forced model ID. The independent decision engine is also required and can use JEV or a command adapter.
 - Set `summary_bytes` explicitly to 4000 (maximum 6000) for hook output limits.
 - Installation binds the activation floor to the current database head. The worker scans bounded, complete pages of visible events, including visible reply parents, with output space reserved for citations. It never truncates a page. Provider outages retry in their original mode. Invalid model content/output and `InboxTooLarge` count toward `max_attempts`; timeouts, rejected requests, and failed commands also count when another page has succeeded under the same policy since that page last failed. Saved results are recovered before invoking either provider again.
@@ -26,6 +26,9 @@ forced wake, the host receives a forced-wake notice. A model outage without a fo
 an alert. Sanitized engine, model, and delivery failures are logged and retained separately in health/status.
 The worker checks missing model credentials at startup and distinguishes authentication, request rejection,
 timeout, and provider unavailability. A component recovers after a successful attempt, retaining failure history.
+If a missing model credential is supplied before restart, that current failure clears to `not_used` without
+claiming the provider has accepted the key. Connection/pool timeouts remain outages; read/write timeouts and
+HTTP 408/504 responses can count toward splitting only after another page has answered successfully.
 
 Every summary, including a digest, accounts for and cites all events in its page; visible reply parents are
 optional citations. Validation checks source references, not the truth of summary claims. The prompt forbids
@@ -103,7 +106,9 @@ baton secretary --policy /absolute/path/to/secretary-policy-v3.json summaries --
 
 The worker health receipt reports overall `running` or `degraded` status and separate `engine`, `model`, and
 `delivery` component states. A delivery timeout, unsuccessful Codex exit, launch failure, or missing executable
-records a safe failure category, keeps the worker polling, and retries the offer after the policy retry interval.
+records a safe failure category and keeps the worker polling. One delivery task runs at a time; failures back off
+from `retry_initial_seconds` up to `retry_max_seconds`, and repeated failures in the same category do not repeat
+the warning. Shutdown cancels and joins the task, killing and reaping any in-flight command.
 Successful delivery clears the degraded delivery state while retaining the latest failure category and timestamp.
 
 The local `summaries` command pages archived deliverable summaries from `baton.db`; it does not require the private

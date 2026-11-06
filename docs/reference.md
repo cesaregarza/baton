@@ -248,12 +248,18 @@ without a forced engine wake remains an outage, while an unavailable model after
 Digest failures retain digest mode and eventually produce a keep notice, never an alert or wake. After a crash,
 the queue reuses a saved result for the same policy and current source window before invoking either provider.
 Model failures distinguish missing credentials, authentication rejection, invalid requests, timeouts, and outages.
-Delivery failures retry independently of assessment; heartbeat expiry includes the delivery timeout.
+Connection/pool timeouts remain outages; read/write timeouts and HTTP 408/504 responses can count toward
+splitting only after another page answers. A supplied key clears a current missing-credential failure to
+`not_used` at startup while preserving its history. Delivery runs in one supervised task alongside assessment;
+its retries double from `retry_initial_seconds` to `retry_max_seconds`, with warnings on failure-state changes.
+Hourly host calls wait only on digest retries, and acknowledged saved results are not returned for delivery again.
 
 `show` inspects saved assessments. Policy version 3 is required. Private state version 1 is refused and requires
 a new file; state version 2 is preserved. `--state` is a private SQLite sidecar for assessment work and positions.
 Deliverable summaries are also appended to shared `baton.db` table `secretary_summaries`, tagged with
 `secretary_id` and principal and uniquely recorded by decision ID. `summaries` pages that archive without `--state`.
+Archive reads budget 256 citation checks per call, completing at least the first row even if it exceeds that
+budget. Follow `next` while `has_more` is true, including when a page returns no visible entries.
 
 `read` returns currently visible source text for the principal. After an event position (`--after`), it pages
 events addressed to or authored by the principal and relevant job events in `deliveries` and `context`; with

@@ -305,7 +305,8 @@ def test_archive_continues_after_more_than_500_hidden_rows(tmp_path) -> None:
 
 def test_archive_checks_only_limit_plus_one_sources_with_indexed_message_lookup(tmp_path, monkeypatch) -> None:
     with make_world(tmp_path) as world:
-        from baton import board_read, conversations
+        from baton import conversations
+        from baton.database import connect_read_only, snapshot
 
         board = connect(world.config.db_path)
         try:
@@ -333,33 +334,46 @@ def test_archive_checks_only_limit_plus_one_sources_with_indexed_message_lookup(
             for index in range(50):
                 archive.save("secretary-a", _result("planner", f"visible-{index:02}", source_refs=[reference]))
 
-            condition, params = board_read.message_condition(world.config, "planner")
-            plan = board.execute(
-                "EXPLAIN QUERY PLAN SELECT m.* FROM messages m WHERE m.id=:message_id AND m.seq=:seq"
-                " AND m.recipient=:recipient AND " + condition,
-                {
-                    **params,
-                    "message_id": sent["message_id"],
-                    "seq": event["seq"],
-                    "recipient": event["audience"],
-                },
-            ).fetchall()
-            plan_text = " ".join(str(row[3]).upper() for row in plan)
-            assert "SEARCH M USING INDEX SQLITE_AUTOINDEX_MESSAGES_1" in plan_text
-            assert "SCAN M" not in plan_text
-
             calls = 0
-            original = archive_module._references_visible
+            original = archive_module._reference_visible
 
-            def count_reference_checks(conn, config, principal, summary):
+            def count_reference_checks(conn, config, principal, reference):
                 nonlocal calls
                 calls += 1
-                return original(conn, config, principal, summary)
+                return original(conn, config, principal, reference)
 
-            monkeypatch.setattr(archive_module, "_references_visible", count_reference_checks)
+            monkeypatch.setattr(archive_module, "_reference_visible", count_reference_checks)
             page = archive.page_for_host("planner", limit=1)
             assert [item["decision_id"] for item in page["items"]] == ["visible-00"]
             assert calls == 2
+
+            # Capture the SQL executed by the compatibility fallback itself, then explain that exact
+            # statement. This pins the index relied on by `_visible_message`, not a similar hand query.
+            from baton.agents.secretary.inbox import sources
+
+            statements = []
+            original_visible_message = sources._visible_message
+
+            def trace_visible_message(conn, config, principal, message_id):
+                conn.set_trace_callback(statements.append)
+                try:
+                    return original_visible_message(conn, config, principal, message_id)
+                finally:
+                    conn.set_trace_callback(None)
+
+            monkeypatch.setattr(sources, "_visible_message", trace_visible_message)
+            fallback_summary = _result(
+                "planner",
+                "reply-context-fallback",
+                source_refs=[{**reference, "pos": None}],
+            )
+            with connect_read_only(world.config.db_path) as readonly, snapshot(readonly):
+                assert archive_module._references_visible(readonly, world.config, "planner", fallback_summary)
+            actual_query = next(sql for sql in statements if "FROM messages m WHERE m.id=" in sql)
+            plan = board.execute("EXPLAIN QUERY PLAN " + actual_query).fetchall()
+            plan_text = " ".join(str(row[3]).upper() for row in plan)
+            assert "MESSAGES_BY_ID" in plan_text
+            assert "SCAN M" not in plan_text
         finally:
             board.close()
 
@@ -401,6 +415,180 @@ def test_archive_keeps_actual_reply_parent_citation_visible_until_revoked(tmp_pa
         after_revocation = archive.page_for_host("planner")
         assert after_revocation["items"] == []
         board.close()
+
+
+def test_archive_rechecks_reply_parent_when_view_all_is_revoked(tmp_path, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from secretary_support import policy
+
+    from baton import conversations
+    from baton.agents.secretary.attention.assessment import Assessment
+    from baton.agents.secretary.attention.outcome import Outcome
+    from baton.agents.secretary.inbox import sources
+    from baton.agents.secretary.inbox.window import InboxWindow
+    from baton.config.secretary import load_policy
+
+    with make_world(tmp_path) as world:
+        room = conversations.create(
+            world.baton,
+            world.config,
+            actor="planner",
+            title="Parent visibility changes",
+            participants=["planner", "worker"],
+        )["conversation_id"]
+        parent = conversations.send(
+            world.baton,
+            world.config,
+            sender="planner",
+            conversation_id=room,
+            text="Please check the rollout",
+        )
+        reviewer_role = replace(world.config.roles["reviewer"], can_view_all_conversations=True)
+        world.config = replace(
+            world.config,
+            roles={**world.config.roles, "reviewer": reviewer_role},
+        )
+        conversations.add(world.baton, world.config, room, "reviewer", actor="planner")
+        _, before_reply = InboxWindow.head(world.config)
+        reply = conversations.send(
+            world.baton,
+            world.config,
+            sender="worker",
+            conversation_id=room,
+            text="The rollout is ready",
+            reply_to=parent["message_id"],
+        )
+        policy_path = policy(world, principal="reviewer", secretary_id="reviewer-secretary")
+        secretary_policy = load_policy(world.config, policy_path)
+        window = InboxWindow.read(world.config, secretary_policy, before_reply)
+        parent_key = f"message:{parent['message_id']}"
+        reply_key = f"message:{reply['message_id']}"
+        assert [item["message"]["id"] for item in window.reply_context] == [parent["message_id"]]
+        result = Outcome(secretary_policy, window, floor=0, mode="alert").build(
+            Assessment("wake", "ready", "The rollout is ready for review.", [reply_key, parent_key]),
+            decision_id="revoked-parent-archive",
+        )
+        parent_ref = next(ref for ref in result["source_refs"] if ref["source_key"] == parent_key)
+        assert parent_ref["pos"] is None
+        archive = SummaryArchive(world.config)
+        archive.save(secretary_policy.secretary_id, result)
+        assert [item["decision_id"] for item in archive.page_for_host("reviewer")["items"]] == [
+            "revoked-parent-archive"
+        ]
+
+        # The role stays in the conversation and can read its reply, but no longer has a message copy
+        # of the parent. Trace the actual fallback query used for that now-hidden parent citation.
+        world.config = replace(
+            world.config,
+            roles={
+                **world.config.roles,
+                "reviewer": replace(world.config.roles["reviewer"], can_view_all_conversations=False),
+            },
+        )
+        archive = SummaryArchive(world.config)
+        statements = []
+        original_visible_message = sources._visible_message
+
+        def trace_visible_message(conn, config, principal, message_id):
+            conn.set_trace_callback(statements.append)
+            try:
+                return original_visible_message(conn, config, principal, message_id)
+            finally:
+                conn.set_trace_callback(None)
+
+        monkeypatch.setattr(sources, "_visible_message", trace_visible_message)
+        hidden_page = archive.page_for_host("reviewer")
+        assert hidden_page["items"] == []
+        actual_query = next(sql for sql in statements if "FROM messages m WHERE m.id=" in sql)
+        plan = world.baton.execute("EXPLAIN QUERY PLAN " + actual_query).fetchall()
+        plan_text = " ".join(str(row[3]).upper() for row in plan)
+        assert "MESSAGES_BY_ID" in plan_text
+        assert "SCAN M" not in plan_text
+
+
+def test_archive_citation_budget_stops_before_advancing_a_partial_row(tmp_path, monkeypatch) -> None:
+    from baton import conversations
+
+    with make_world(tmp_path) as world:
+        room = conversations.create(
+            world.baton,
+            world.config,
+            actor="planner",
+            title="Citation budget",
+            participants=["planner", "worker", "reviewer"],
+        )["conversation_id"]
+        visible = conversations.send(world.baton, world.config, sender="worker", conversation_id=room, text="visible")
+        hidden_room = conversations.create(
+            world.baton,
+            world.config,
+            actor="planner",
+            title="Citation to revoke",
+            participants=["planner", "worker", "reviewer"],
+        )["conversation_id"]
+        hidden = conversations.send(
+            world.baton, world.config, sender="worker", conversation_id=hidden_room, text="hidden"
+        )
+        visible_pos = world.baton.execute(
+            "SELECT pos FROM events WHERE kind='message' AND json_extract(data,'$.message_id')=?",
+            (visible["message_id"],),
+        ).fetchone()[0]
+        hidden_pos = world.baton.execute(
+            "SELECT pos FROM events WHERE kind='message' AND json_extract(data,'$.message_id')=?",
+            (hidden["message_id"],),
+        ).fetchone()[0]
+
+        def ref(message_id: str, pos: int, conversation_id: str) -> dict:
+            return {
+                "source_key": f"message:{message_id}",
+                "pos": pos,
+                "message_id": message_id,
+                "conversation_id": conversation_id,
+                "job_id": None,
+            }
+
+        archive = SummaryArchive(world.config)
+        archive.save(
+            "secretary-a",
+            _result("planner", "first-visible", source_refs=[ref(visible["message_id"], visible_pos, room)]),
+        )
+        archive.save(
+            "secretary-a",
+            _result(
+                "planner",
+                "many-citations-then-hidden",
+                source_refs=[ref(visible["message_id"], visible_pos, room)] * (archive_module.MAX_CITATION_CHECKS + 272)
+                + [ref(hidden["message_id"], hidden_pos, hidden_room)],
+            ),
+        )
+        archive.save("secretary-a", _result("planner", "last-visible"))
+        conversations.remove(world.baton, world.config, hidden_room, "planner", actor="planner")
+
+        checks = 0
+        original_reference_visible = archive_module._reference_visible
+
+        def count_reference_checks(*args, **kwargs):
+            nonlocal checks
+            checks += 1
+            return original_reference_visible(*args, **kwargs)
+
+        monkeypatch.setattr(archive_module, "_reference_visible", count_reference_checks)
+        first = archive.page_for_host("planner", limit=10)
+        assert checks == archive_module.MAX_CITATION_CHECKS
+        assert [item["decision_id"] for item in first["items"]] == ["first-visible"]
+        assert first["next"] == first["items"][0]["cursor"]
+        assert first["has_more"] is True
+
+        checks = 0
+        second = archive.page_for_host("planner", after=first["next"], limit=10)
+        assert checks == archive_module.MAX_CITATION_CHECKS + 273
+        assert second["items"] == []
+        assert second["next"] > first["next"]
+        assert second["has_more"] is True
+
+        third = archive.page_for_host("planner", after=second["next"], limit=10)
+        assert [item["decision_id"] for item in third["items"]] == ["last-visible"]
+        assert third["has_more"] is False
 
 
 def test_archive_validates_page_bounds_and_rejects_untrusted_roles(host) -> None:

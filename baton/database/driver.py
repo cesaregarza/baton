@@ -201,7 +201,8 @@ def transaction(conn: Any) -> Generator[Any]:
     try:
         yield conn
     except BaseException:
-        conn.execute("ROLLBACK")
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
         raise
     else:
         conn.execute("COMMIT")
@@ -217,7 +218,8 @@ def snapshot(conn: Any) -> Generator[None]:
     try:
         yield
     except BaseException:
-        conn.execute("ROLLBACK")
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
         raise
     else:
         conn.execute("COMMIT")
