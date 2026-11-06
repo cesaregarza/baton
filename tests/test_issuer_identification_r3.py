@@ -30,32 +30,43 @@ def issuer_host(tmp_path: Path, request) -> Iterator[IssuerHost]:
 
 
 def config_with(public_url: str):
-    return parse({"host": {"public_url": public_url}, "roles": {"planner": {}},
-                  "auth": {"oauth": {"enabled": True, "passphrase_hash": "scrypt$00$00", "roles": ["planner"]}}})
+    return parse(
+        {
+            "host": {"public_url": public_url},
+            "roles": {"planner": {}},
+            "auth": {"oauth": {"enabled": True, "passphrase_hash": "scrypt$00$00", "roles": ["planner"]}},
+        }
+    )
 
 
 # 1. One canonical issuer -----------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("public_url", [
-    "https://BATON.example.test",            # a host in upper case: metadata would lowercase it
-    "https://Baton.Example.Test/baton",
-    "https://baton.example.test:443",        # a default port: metadata would drop it
-    "http://baton.example.test:80/baton",
-    "https://baton.example.test/café",  # a non-ASCII path: metadata would percent-encode it
-    "https://baton.example.test/a%20b",      # an already-encoded path
-])
+@pytest.mark.parametrize(
+    "public_url",
+    [
+        "https://BATON.example.test",  # a host in upper case: metadata would lowercase it
+        "https://Baton.Example.Test/baton",
+        "https://baton.example.test:443",  # a default port: metadata would drop it
+        "http://baton.example.test:80/baton",
+        "https://baton.example.test/café",  # a non-ASCII path: metadata would percent-encode it
+        "https://baton.example.test/a%20b",  # an already-encoded path
+    ],
+)
 def test_a_public_url_that_metadata_would_rewrite_is_refused(public_url: str) -> None:
     with pytest.raises(ConfigError, match="public_url"):
         config_with(public_url)
 
 
-@pytest.mark.parametrize("public_url, kept", [
-    ("https://baton.example.test", "https://baton.example.test"),
-    ("https://baton.example.test/", "https://baton.example.test"),  # the trailing slash is stripped, as before
-    ("https://baton.example.test:8443/baton", "https://baton.example.test:8443/baton"),
-    ("http://127.0.0.1:8765", "http://127.0.0.1:8765"),
-])
+@pytest.mark.parametrize(
+    "public_url, kept",
+    [
+        ("https://baton.example.test", "https://baton.example.test"),
+        ("https://baton.example.test/", "https://baton.example.test"),  # the trailing slash is stripped, as before
+        ("https://baton.example.test:8443/baton", "https://baton.example.test:8443/baton"),
+        ("http://127.0.0.1:8765", "http://127.0.0.1:8765"),
+    ],
+)
 def test_a_canonical_public_url_is_accepted(public_url: str, kept: str) -> None:
     assert config_with(public_url).public_url == kept
 
@@ -63,15 +74,16 @@ def test_a_canonical_public_url_is_accepted(public_url: str, kept: str) -> None:
 def test_the_issuer_is_identical_in_metadata_and_every_redirect(issuer_host: IssuerHost) -> None:
     host = issuer_host
     server = httpx.get(host.base + "/.well-known/oauth-authorization-server").json()
-    resource = httpx.get(host.base + "/.well-known/oauth-protected-resource"
-                         + urlparse(host.config.resource_url).path).json()
+    resource = httpx.get(
+        host.base + "/.well-known/oauth-protected-resource" + urlparse(host.config.resource_url).path
+    ).json()
     client_id = register(host).json()["client_id"]
     refused = httpx.get(host.base + "/authorize", params=authorize_params(host, client_id, response_type="token"))
     started = httpx.get(host.base + "/authorize", params=authorize_params(host, client_id))
-    approved = httpx.post(host.base + "/login", data={"id": query_of(started)["id"][0], "passphrase": PASSPHRASE,
-                                                      "role": "planner"})
-    seen = {server["issuer"], *resource["authorization_servers"], *query_of(refused)["iss"],
-            *query_of(approved)["iss"]}
+    approved = httpx.post(
+        host.base + "/login", data={"id": query_of(started)["id"][0], "passphrase": PASSPHRASE, "role": "planner"}
+    )
+    seen = {server["issuer"], *resource["authorization_servers"], *query_of(refused)["iss"], *query_of(approved)["iss"]}
     assert seen == {host.config.public_url}
 
 
@@ -83,11 +95,21 @@ STORED_CALLBACK = "http://127.0.0.1:43123/callback?iss=https://attacker.example.
 
 def persist_client(host: IssuerHost, client_id: str, redirect: str) -> None:
     """Write a client into the OAuth state file, as an older baton would have stored it."""
-    state = {"clients": {client_id: {"client_id": client_id, "redirect_uris": [redirect],
-                                     "token_endpoint_auth_method": "none", "grant_types": ["authorization_code",
-                                                                                          "refresh_token"],
-                                     "response_types": ["code"], "client_name": "Stored before the guard"}},
-             "access": {}, "refresh": {}, "unused": {}}
+    state = {
+        "clients": {
+            client_id: {
+                "client_id": client_id,
+                "redirect_uris": [redirect],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "client_name": "Stored before the guard",
+            }
+        },
+        "access": {},
+        "refresh": {},
+        "unused": {},
+    }
     path = host.config.oauth_state_path
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as out:
@@ -103,21 +125,32 @@ def test_a_stored_client_whose_callback_carries_iss_is_unusable(issuer_host: Iss
     host = issuer_host
     persist_client(host, "stored-client", STORED_CALLBACK)
     for overrides in ({}, {"resource": "https://elsewhere.example.test/mcp"}, {"response_type": "token"}):
-        response = httpx.get(host.base + "/authorize", params=authorize_params(host, "stored-client", STORED_CALLBACK,
-                                                                               **overrides))
+        response = httpx.get(
+            host.base + "/authorize", params=authorize_params(host, "stored-client", STORED_CALLBACK, **overrides)
+        )
         assert response.status_code == 400 and "location" not in response.headers, overrides
         assert iss_counts(response) == 0
 
 
 def test_the_consent_page_never_redirects_to_a_callback_carrying_iss(tmp_path: Path) -> None:
-    config = parse({"host": {"public_url": "https://baton.example.test", "data_dir": str(tmp_path / "data")},
-                    "roles": {"planner": {}},
-                    "auth": {"oauth": {"enabled": True, "passphrase_hash": auth.hash_passphrase(PASSPHRASE),
-                                       "roles": ["planner"]}}})
+    config = parse(
+        {
+            "host": {"public_url": "https://baton.example.test", "data_dir": str(tmp_path / "data")},
+            "roles": {"planner": {}},
+            "auth": {
+                "oauth": {"enabled": True, "passphrase_hash": auth.hash_passphrase(PASSPHRASE), "roles": ["planner"]}
+            },
+        }
+    )
     config.data_dir.mkdir(mode=0o700)
     provider = auth.PassphraseProvider(config)
-    params = auth.AuthorizationParams(state="s1", scopes=None, code_challenge="x" * 43,
-                                      redirect_uri=STORED_CALLBACK, redirect_uri_provided_explicitly=True)
+    params = auth.AuthorizationParams(
+        state="s1",
+        scopes=None,
+        code_challenge="x" * 43,
+        redirect_uri=STORED_CALLBACK,
+        redirect_uri_provided_explicitly=True,
+    )
     provider.pending["login-1"] = auth.PendingLogin("stored-client", params, ["baton.read"], 9e18)
     assert provider.complete_login("login-1", PASSPHRASE, "planner") is None
 
@@ -126,8 +159,13 @@ def test_no_redirect_leaves_carrying_a_second_iss() -> None:
     sent: list[dict] = []
 
     async def app(scope, receive, send) -> None:  # an SDK error redirect to a callback that already has iss
-        await send({"type": "http.response.start", "status": 302,
-                    "headers": [(b"location", (STORED_CALLBACK + "&error=invalid_request").encode())]})
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 302,
+                "headers": [(b"location", (STORED_CALLBACK + "&error=invalid_request").encode())],
+            }
+        )
         await send({"type": "http.response.body", "body": b""})
 
     class Provider:
@@ -152,11 +190,14 @@ def test_no_redirect_leaves_carrying_a_second_iss() -> None:
 # 3. The refusal log carries no path characters at all ------------------------------------------------------
 
 
-@pytest.mark.parametrize("uri", [
-    "https://client.example.test/reset/abc123def456",
-    "https://client.example.test/connector/oauth/abc_123-XYZ",
-    "https://client.example.test/abc123def456",
-])
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://client.example.test/reset/abc123def456",
+        "https://client.example.test/connector/oauth/abc_123-XYZ",
+        "https://client.example.test/abc123def456",
+    ],
+)
 def test_no_path_characters_are_logged(uri: str) -> None:
     shown = auth.loggable_uri(uri)
     path = urlparse(uri).path

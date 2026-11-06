@@ -20,7 +20,8 @@ from test_topic_containers import ALIAS, OTHER_ALIAS, seed_aliases
 from topic_backing import back_topics
 from topic_grant_support import Clock, every_cell, grants_module
 
-from baton import cli, store
+from baton import cli
+from baton.database import store
 
 
 @pytest.fixture
@@ -76,9 +77,11 @@ def owner(host, capsys):
 
 # 1. The round trip ---------------------------------------------------------------------------------------
 
+
 def test_propose_prints_the_proposal_the_owner_must_read_before_authorizing(owner):
-    proposal = owner.propose("lane-a", "job-hunt", "--capability", "thread.organise", "--capability", "reference.edit",
-                             "--inherit")
+    proposal = owner.propose(
+        "lane-a", "job-hunt", "--capability", "thread.organise", "--capability", "reference.edit", "--inherit"
+    )
     assert re.fullmatch(r"tgr_[0-9a-f]{16}", proposal["id"])
     assert (proposal["alias_name"], proposal["topic_path"]) == ("lane-a", "job-hunt")
     assert proposal["capabilities"] == ["reference.edit", "thread.organise"]
@@ -114,8 +117,11 @@ def test_the_whole_round_trip_propose_authorize_list_revoke(owner):
     assert [out.count(key) for out in owner.printed] == [0, 1, 0, 0, 0, 0]
     with owner.db() as conn:
         assert not [cell for cell in every_cell(conn) if key in cell]
-        assert [(e["event"], e["actor"]) for e in conn.execute("SELECT * FROM topic_grant_events ORDER BY seq")] == \
-            [("propose", "owner"), ("authorize", "owner"), ("revoke", "owner")]
+        assert [(e["event"], e["actor"]) for e in conn.execute("SELECT * FROM topic_grant_events ORDER BY seq")] == [
+            ("propose", "owner"),
+            ("authorize", "owner"),
+            ("revoke", "owner"),
+        ]
         row = conn.execute("SELECT * FROM topic_grants").fetchone()
         assert (row["revoked_by"], row["revoke_reason"]) == ("owner", "the lane is finished")
 
@@ -126,10 +132,15 @@ def test_list_shows_pending_and_active_grants_and_all_shows_the_rest(owner):
     owner.ok("topic-grant", "authorize", active["id"], active["digest"])
     cancelled = owner.propose("lane-a", "reviews")
     owner.ok("topic-grant", "revoke", cancelled["id"], "--reason", "wrong topic")
-    assert {one["id"]: one["state"] for one in owner.ok("topic-grant", "list")} == \
-        {pending["id"]: "pending", active["id"]: "active"}
-    assert {one["id"]: one["state"] for one in owner.ok("topic-grant", "list", "--all")} == \
-        {pending["id"]: "pending", active["id"]: "active", cancelled["id"]: "revoked"}
+    assert {one["id"]: one["state"] for one in owner.ok("topic-grant", "list")} == {
+        pending["id"]: "pending",
+        active["id"]: "active",
+    }
+    assert {one["id"]: one["state"] for one in owner.ok("topic-grant", "list", "--all")} == {
+        pending["id"]: "pending",
+        active["id"]: "active",
+        cancelled["id"]: "revoked",
+    }
 
 
 def test_a_listing_carries_neither_the_proof_nor_the_nonce(owner):
@@ -143,6 +154,7 @@ def test_a_listing_carries_neither_the_proof_nor_the_nonce(owner):
 
 # 2. Refusals ---------------------------------------------------------------------------------------------
 
+
 def test_authorize_with_the_wrong_digest_exits_1_prints_no_key_and_leaves_it_pending(owner):
     proposal = owner.propose()
     refused = owner.refused("topic-grant", "authorize", proposal["id"], "0" * 64)
@@ -153,15 +165,17 @@ def test_authorize_with_the_wrong_digest_exits_1_prints_no_key_and_leaves_it_pen
 
 @pytest.mark.parametrize("days", ["0", "31"])
 def test_propose_refuses_days_outside_1_to_30(owner, days):
-    refused = owner.refused("topic-grant", "propose", "lane-a", "job-hunt", "--capability", "reference.edit",
-                            "--days", days)
+    refused = owner.refused(
+        "topic-grant", "propose", "lane-a", "job-hunt", "--capability", "reference.edit", "--days", days
+    )
     assert refused["error"] == "invalid_request"
     assert owner.ok("topic-grant", "list", "--all") == []
 
 
 def test_propose_refuses_an_unknown_capability(owner):
-    refused = owner.refused("topic-grant", "propose", "lane-a", "job-hunt", "--capability", "reference.delete",
-                            "--days", "7")
+    refused = owner.refused(
+        "topic-grant", "propose", "lane-a", "job-hunt", "--capability", "reference.delete", "--days", "7"
+    )
     assert refused["error"] == "invalid_request"
 
 
@@ -174,8 +188,9 @@ def test_propose_without_a_capability_or_without_days_is_refused(owner):
 
 def test_propose_names_a_missing_alias_or_topic(owner):
     owner.refused("topic-grant", "propose", "nobody", "job-hunt", "--capability", "reference.edit", "--days", "7")
-    refused = owner.refused("topic-grant", "propose", "lane-a", "nowhere", "--capability", "reference.edit",
-                            "--days", "7")
+    refused = owner.refused(
+        "topic-grant", "propose", "lane-a", "nowhere", "--capability", "reference.edit", "--days", "7"
+    )
     assert refused["error"] == "unknown_topic"
 
 
@@ -192,6 +207,7 @@ def test_authorize_and_revoke_refuse_an_unknown_grant(owner):
 
 
 # 3. arm-rekey and topic grants ---------------------------------------------------------------------------
+
 
 def test_arm_rekey_prints_what_it_always_has_when_the_alias_has_no_grants(owner):  # GUARD
     code, armed = owner.run("alias", "arm-rekey", "lane-a")
@@ -219,8 +235,9 @@ def test_arm_rekey_names_the_aliass_active_topic_grants_and_only_those(owner, mo
 
     armed = owner.ok("alias", "arm-rekey", "lane-a")
     assert {"armed", "target", "expires_at"} <= set(armed)
-    assert sorted(armed["active_topic_grants"]) == sorted([mine["id"], mine_too["id"]]), \
+    assert sorted(armed["active_topic_grants"]) == sorted([mine["id"], mine_too["id"]]), (
         "pending, revoked, expired and another alias's grants are not listed"
+    )
     assert pending["id"] not in armed["active_topic_grants"]
 
 

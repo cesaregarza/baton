@@ -12,7 +12,7 @@ from .models import Response, _Session
 
 HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'self'; "
-                               "frame-ancestors 'none'",
+    "frame-ancestors 'none'",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Cache-Control": "no-store",
@@ -80,15 +80,21 @@ nav button.quiet { min-height: 0; padding: .2rem .6rem; font-weight: 400; font-s
 def _banner(unread: int) -> str:
     if unread < WARN_UNREAD:
         return ""
-    return (f'<p class="banner">{unread} unread. Conversations you\'re in stop accepting messages at '
-            f'{messages.MAX_UNREAD} unread. <a href="/seat/inbox">Mark messages as seen</a> to keep them open.</p>')
+    return (
+        f'<p class="banner">{unread} unread. Conversations you\'re in stop accepting messages at '
+        f'{messages.MAX_UNREAD} unread. <a href="/seat/inbox">Mark messages as seen</a> to keep them open.</p>'
+    )
 
 
 def _inbox_item(entry: dict[str, Any], session: _Session) -> str:
     if entry.get("placeholder"):
         return '<li class="placeholder">A message from a conversation you\'re no longer in.</li>'
-    where = (f'<p class="actions"><a href="{_link(entry["conversation_id"], entry["conversation_seq"])}">'
-             'Open in conversation</a></p>' if entry["conversation_id"] else "")
+    where = (
+        f'<p class="actions"><a href="{_link(entry["conversation_id"], entry["conversation_seq"])}">'
+        "Open in conversation</a></p>"
+        if entry["conversation_id"]
+        else ""
+    )
     title = f'<p class="in">{_e(entry["title"])}</p>' if entry.get("title") else ""
     return _message(entry, session, where, before=title)
 
@@ -111,12 +117,20 @@ def _history_item(conversation_id: str, item: dict[str, Any], shown: set[int], s
     parent = item.get("reply_to")
     marker = ""
     if parent:
-        marker = ('<p class="reply-to">in reply to a message you can\'t see</p>' if parent.get("seq") is None else
-                  "" if int(parent["seq"]) in shown else
-                  f'<p class="reply-to">in reply to <a href="{_link(conversation_id, int(parent["seq"]))}">'
-                  f'an earlier message</a></p>')
-    actions = (f'<p class="actions"><a href="/seat/c/{_e(conversation_id)}?reply={_e(item["message_id"])}#compose">'
-               'Reply</a></p>' if item.get("from_role") and item.get("from_role") != session.role else "")
+        marker = (
+            '<p class="reply-to">in reply to a message you can\'t see</p>'
+            if parent.get("seq") is None
+            else ""
+            if int(parent["seq"]) in shown
+            else f'<p class="reply-to">in reply to <a href="{_link(conversation_id, int(parent["seq"]))}">'
+            f"an earlier message</a></p>"
+        )
+    actions = (
+        f'<p class="actions"><a href="/seat/c/{_e(conversation_id)}?reply={_e(item["message_id"])}#compose">'
+        "Reply</a></p>"
+        if item.get("from_role") and item.get("from_role") != session.role
+        else ""
+    )
     return _message(item, session, actions, anchor=f"m-{int(item['seq'])}", before=marker)
 
 
@@ -132,22 +146,36 @@ def _message(item: dict[str, Any], session: _Session, after: str, *, anchor: str
     if not item.get("from_role"):
         return f'<li{ident}><p class="notice">{_e(item["text"])}</p></li>'
     asked = role in (item.get("attention") or [])
-    label = ("Asks you to decide" if asked and item.get("needs_decision") else
-             "Asks for a decision" if item.get("needs_decision") else "Asks you to look" if asked else "")
+    label = (
+        "Asks you to decide"
+        if asked and item.get("needs_decision")
+        else "Asks for a decision"
+        if item.get("needs_decision")
+        else "Asks you to look"
+        if asked
+        else ""
+    )
     css = ' class="ask"' if asked and item.get("needs_decision") else ""
-    relayed = "".join(f'<blockquote class="relayed"><p class="muted">relayed from {_e(quote.get("source", ""))}</p>'
-                      f'<p>{_e(quote.get("text", ""))}</p></blockquote>' for quote in item.get("relayed") or [])
+    relayed = "".join(
+        f'<blockquote class="relayed"><p class="muted">relayed from {_e(quote.get("source", ""))}</p>'
+        f"<p>{_e(quote.get('text', ''))}</p></blockquote>"
+        for quote in item.get("relayed") or []
+    )
     flag = f'<p class="ask-label">{label}</p>' if label else ""
     sent = '<p class="sent">Sent</p>' if item["from_role"] == role else ""
-    return (f'<li{ident}{css}>{before}{flag}{sent}{_meta(item, session)}<p class="text">{_e(item["text"])}</p>{relayed}'
-            f'{after}</li>')
+    return (
+        f'<li{ident}{css}>{before}{flag}{sent}{_meta(item, session)}<p class="text">{_e(item["text"])}</p>{relayed}'
+        f"{after}</li>"
+    )
 
 
 def _meta(item: dict[str, Any], session: _Session) -> str:
     who = "You" if item["from_role"] == session.role else messages.author_label(item)
     person = ' <span class="person">person</span>' if item.get("author_kind") == "human" else ""
-    return (f'<p class="meta"><span class="role">{_e(who)}</span>{person}'
-            f'<time datetime="{_e(item.get("at", ""))}">{_e(_when(item.get("at", ""), session.zone))}</time></p>')
+    return (
+        f'<p class="meta"><span class="role">{_e(who)}</span>{person}'
+        f'<time datetime="{_e(item.get("at", ""))}">{_e(_when(item.get("at", ""), session.zone))}</time></p>'
+    )
 
 
 def _when(at: str, zone: tzinfo) -> str:
@@ -165,8 +193,10 @@ def _short(text: str, limit: int = 160) -> str:
 
 
 def _nav(session: _Session) -> str:
-    return (f'<nav><a href="/seat/">Conversations</a><a href="/seat/inbox">Inbox</a><a href="/seat/needs">Needs you</a>'
-            f'{_logout_form(session)}</nav>')
+    return (
+        f'<nav><a href="/seat/">Conversations</a><a href="/seat/inbox">Inbox</a><a href="/seat/needs">Needs you</a>'
+        f"{_logout_form(session)}</nav>"
+    )
 
 
 def _topic(topic: str | None) -> str:
@@ -178,25 +208,35 @@ def _csrf(session: _Session) -> str:
 
 
 def _logout_form(session: _Session) -> str:
-    return (f'<form class="inline" method="post" action="/seat/logout">{_csrf(session)}'
-            '<button class="quiet" type="submit">Log out</button></form>')
+    return (
+        f'<form class="inline" method="post" action="/seat/logout">{_csrf(session)}'
+        '<button class="quiet" type="submit">Log out</button></form>'
+    )
 
 
 def _not_in(status: int = 403, words: str = "You're not in this conversation.") -> Response:
-    return _page(status, "Not available", f'<h1>Not available</h1><p>{_e(words)}</p>'
-                                          '<p><a href="/seat/">Your conversations</a></p>')
+    return _page(
+        status,
+        "Not available",
+        f'<h1>Not available</h1><p>{_e(words)}</p><p><a href="/seat/">Your conversations</a></p>',
+    )
 
 
 def _redirect(location: str) -> Response:
-    return Response(303, f'<p><a href="{_e(location)}">Continue</a></p>'.encode(),
-                    {**HEADERS, "Location": location, "Content-Type": "text/html; charset=utf-8"})
+    return Response(
+        303,
+        f'<p><a href="{_e(location)}">Continue</a></p>'.encode(),
+        {**HEADERS, "Location": location, "Content-Type": "text/html; charset=utf-8"},
+    )
 
 
 def _page(status: int, title: str, body: str) -> Response:
-    document = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
-                '<meta name="viewport" content="width=device-width, initial-scale=1">'
-                f'<title>{_e(title)} · baton</title><link rel="stylesheet" href="/seat/style.css"></head>'
-                f'<body>{body}</body></html>')
+    document = (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>{_e(title)} · baton</title><link rel="stylesheet" href="/seat/style.css"></head>'
+        f"<body>{body}</body></html>"
+    )
     return Response(status, document.encode(), {**HEADERS, "Content-Type": "text/html; charset=utf-8"})
 
 

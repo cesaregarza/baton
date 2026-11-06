@@ -157,11 +157,15 @@ class ProvenanceLimitExceeded(BatonError):
 
     code = "provenance_limit_exceeded"
 
-    def __init__(self, detail: str, *, limit: str, conversation_id: str, kind: str, segments: int,
-                 items: int) -> None:
+    def __init__(self, detail: str, *, limit: str, conversation_id: str, kind: str, segments: int, items: int) -> None:
         super().__init__(detail)
-        self.extra = {"limit": limit, "conversation_id": conversation_id, "kind": kind, "segments": segments,
-                      "items": items}
+        self.extra = {
+            "limit": limit,
+            "conversation_id": conversation_id,
+            "kind": kind,
+            "segments": segments,
+            "items": items,
+        }
 
 
 class NothingToIndex(BatonError):

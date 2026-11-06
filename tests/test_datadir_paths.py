@@ -64,8 +64,9 @@ def test_a_dot_dot_after_a_symlink_cannot_redirect_the_database(tmp_path: Path, 
     assert sorted(p.name for p in permissive.iterdir()) == ["baton.db"]
 
 
-def test_a_parent_swapped_for_a_writable_one_mid_check_gets_nothing_created_in_it(tmp_path: Path, capsys,
-                                                                                  monkeypatch) -> None:
+def test_a_parent_swapped_for_a_writable_one_mid_check_gets_nothing_created_in_it(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     parent = private_dir(tmp_path / "parent")
     make_config(tmp_path, data_dir=parent / "data")
     real_mkdir = os.mkdir
@@ -116,7 +117,8 @@ def test_a_database_swapped_just_before_sqlite_opens_it_is_refused(tmp_path: Pat
     data = private_dir(tmp_path / "data")
     make_config(tmp_path, data_dir=data)
     assert run_cli(tmp_path, capsys, "job", "list")[0] == 0
-    real_connect = sqlite3.connect
+    # SQLAlchemy loads the DB-API module, whose connect attribute is separate from sqlite3.connect.
+    real_connect = sqlite3.dbapi2.connect
     swapped = []
 
     def connect_after_a_swap(path, *args, **kwargs):
@@ -127,7 +129,7 @@ def test_a_database_swapped_just_before_sqlite_opens_it_is_refused(tmp_path: Pat
             swapped.append(True)
         return real_connect(path, *args, **kwargs)
 
-    monkeypatch.setattr(sqlite3, "connect", connect_after_a_swap)
+    monkeypatch.setattr(sqlite3.dbapi2, "connect", connect_after_a_swap)
     code, out = run_cli(tmp_path, capsys, "job", "list")
     assert swapped
     refusal = out if isinstance(out, dict) else {}

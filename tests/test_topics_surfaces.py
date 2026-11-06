@@ -30,7 +30,7 @@ from baton import config as config_module
 from baton import conversations
 from baton import remote as remote_module
 from baton.auth import new_token
-from baton.store import connect
+from baton.database.store import connect
 
 GROUP = "operator,orchestrator,reviewer,assistant"
 
@@ -43,14 +43,17 @@ def topic_host(tmp_path: Path) -> Iterator[SeatHost]:
 
     port = free_port()
     tokens = {role: new_token() for role in ("operator", "reviewer", "assistant")}
-    entries = "".join(f'[[auth.tokens]]\nname = "{role}-token"\nrole = "{role}"\nsha256 = "{digest}"\n'
-                      for role, (_, digest) in tokens.items())
+    entries = "".join(
+        f'[[auth.tokens]]\nname = "{role}-token"\nrole = "{role}"\nsha256 = "{digest}"\n'
+        for role, (_, digest) in tokens.items()
+    )
     path = tmp_path / "baton.toml"
-    path.write_text(textwrap.dedent(f"""
+    path.write_text(
+        textwrap.dedent(f"""
         [host]
         public_url = "http://127.0.0.1:{port}"
         listen_port = {port}
-        data_dir = "{tmp_path / 'data'}"
+        data_dir = "{tmp_path / "data"}"
 
         [roles.operator]
         description = "The person running this host"
@@ -72,7 +75,9 @@ def topic_host(tmp_path: Path) -> Iterator[SeatHost]:
 
         [conversations]
         enabled = true
-    """) + entries)
+    """)
+        + entries
+    )
     config = config_module.load(path)
     server = uvicorn.Server(uvicorn.Config(create_app(config), host="127.0.0.1", port=port, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
@@ -91,8 +96,7 @@ def client(host: SeatHost, role: str) -> Client:
 
 
 def opened(host: SeatHost, capsys, title: str, *extra: str) -> str:
-    code, made = local(host, capsys, "assistant", "conversation", "new", "--title", title, "--with", GROUP,
-                       *extra)
+    code, made = local(host, capsys, "assistant", "conversation", "new", "--title", title, "--with", GROUP, *extra)
     assert code == 0, made
     return made["conversation_id"]
 
@@ -116,7 +120,7 @@ def test_remote_cli_list_accepts_paged_and_legacy_host_responses(topic_host, cap
         code, listed = remote(topic_host, capsys, monkeypatch, "conversation", "list")
         assert code == 0 and listed == expected
     assert [tool for _, tool, _ in calls] == ["list_conversations", "list_conversations"]
-    assert all(arguments == {} for _, _, arguments in calls)
+    assert all(arguments == {"topic": None} for _, _, arguments in calls)
 
 
 # MCP ------------------------------------------------------------------------------------------------------
@@ -132,38 +136,65 @@ def test_the_tools_carry_a_topic_and_filter_by_it(topic_host, capsys) -> None:
             schema = {t.name: t for t in (await operator.list_tools()).tools}["create_conversation"].input_schema
             assert "topic" in schema["properties"]
 
-            made = payload(await operator.call_tool("create_conversation", {
-                "title": "the project", "participants": ["operator", "reviewer"], "topic": "project"}))
-            sub = payload(await operator.call_tool("create_conversation", {
-                "title": "a subtopic", "participants": ["operator", "reviewer"], "topic": "project/alpha"}))
-            payload(await operator.call_tool("create_conversation", {
-                "title": "a longer word", "participants": ["operator", "reviewer"], "topic": "projectile"}))
-            payload(await operator.call_tool("create_conversation", {
-                "title": "untagged", "participants": ["operator", "reviewer"]}))
+            made = payload(
+                await operator.call_tool(
+                    "create_conversation",
+                    {"title": "the project", "participants": ["operator", "reviewer"], "topic": "project"},
+                )
+            )
+            sub = payload(
+                await operator.call_tool(
+                    "create_conversation",
+                    {"title": "a subtopic", "participants": ["operator", "reviewer"], "topic": "project/alpha"},
+                )
+            )
+            payload(
+                await operator.call_tool(
+                    "create_conversation",
+                    {"title": "a longer word", "participants": ["operator", "reviewer"], "topic": "projectile"},
+                )
+            )
+            payload(
+                await operator.call_tool(
+                    "create_conversation", {"title": "untagged", "participants": ["operator", "reviewer"]}
+                )
+            )
             assert made["topic"] == "project" and sub["topic"] == "project/alpha"
 
-            renamed = payload(await operator.call_tool("set_topic", {
-                "conversation_id": made["conversation_id"], "topic": "project/renamed"}))
-            assert (renamed["conversation_id"], renamed["topic"]) == (made["conversation_id"],
-                                                                      "project/renamed")
-            cleared = payload(await operator.call_tool("set_topic", {
-                "conversation_id": sub["conversation_id"], "topic": None}))
+            renamed = payload(
+                await operator.call_tool(
+                    "set_topic", {"conversation_id": made["conversation_id"], "topic": "project/renamed"}
+                )
+            )
+            assert (renamed["conversation_id"], renamed["topic"]) == (made["conversation_id"], "project/renamed")
+            cleared = payload(
+                await operator.call_tool("set_topic", {"conversation_id": sub["conversation_id"], "topic": None})
+            )
             assert cleared["topic"] is None
 
-            return {"all": payload(await reviewer.call_tool("list_conversations", {})),
-                    "filtered": payload(await reviewer.call_tool("list_conversations", {"topic": "project"})),
-                    "forbidden": payload(await reviewer.call_tool("set_topic", {
-                        "conversation_id": made["conversation_id"], "topic": "mine"})),
-                    "malformed": payload(await operator.call_tool("set_topic", {
-                        "conversation_id": made["conversation_id"], "topic": "Bad"})),
-                    # Leaving the argument out is not a way to clear a topic: it has no default, so an
-                    # omission is a bad call rather than a quiet erasure.
-                    "omitted": (await operator.call_tool("set_topic", {
-                        "conversation_id": made["conversation_id"]})).is_error}
+            return {
+                "all": payload(await reviewer.call_tool("list_conversations", {})),
+                "filtered": payload(await reviewer.call_tool("list_conversations", {"topic": "project"})),
+                "forbidden": payload(
+                    await reviewer.call_tool("set_topic", {"conversation_id": made["conversation_id"], "topic": "mine"})
+                ),
+                "malformed": payload(
+                    await operator.call_tool("set_topic", {"conversation_id": made["conversation_id"], "topic": "Bad"})
+                ),
+                # Leaving the argument out is not a way to clear a topic: it has no default, so an
+                # omission is a bad call rather than a quiet erasure.
+                "omitted": (
+                    await operator.call_tool("set_topic", {"conversation_id": made["conversation_id"]})
+                ).is_error,
+            }
 
     seen = anyio.run(run)
-    assert topics(seen["all"]["conversations"]) == [("a longer word", "projectile"), ("a subtopic", None),
-                                                      ("the project", "project/renamed"), ("untagged", None)]
+    assert topics(seen["all"]["conversations"]) == [
+        ("a longer word", "projectile"),
+        ("a subtopic", None),
+        ("the project", "project/renamed"),
+        ("untagged", None),
+    ]
     assert seen["all"]["next_cursor"] is None
     assert topics(seen["filtered"]["conversations"]) == [("the project", "project/renamed")]
     assert seen["filtered"]["next_cursor"] is None
@@ -183,13 +214,19 @@ def test_the_local_command_opens_filters_and_changes_a_topic(topic_host, capsys)
     opened(host, capsys, "untagged")
 
     code, listed = local(host, capsys, "reviewer", "conversation", "list")
-    assert (code, topics(listed)) == (0, [("a longer word", "projectile"), ("a subtopic", "project/alpha"),
-                                          ("the project", "project"), ("untagged", None)])
+    assert (code, topics(listed)) == (
+        0,
+        [
+            ("a longer word", "projectile"),
+            ("a subtopic", "project/alpha"),
+            ("the project", "project"),
+            ("untagged", None),
+        ],
+    )
     code, filtered = local(host, capsys, "reviewer", "conversation", "list", "--topic", "project")
     assert (code, topics(filtered)) == (0, [("a subtopic", "project/alpha"), ("the project", "project")])
 
-    code, set_ = local(host, capsys, "orchestrator", "conversation", "topic", first, "--set",
-                       "project/renamed")
+    code, set_ = local(host, capsys, "orchestrator", "conversation", "topic", first, "--set", "project/renamed")
     assert (code, set_["topic"], set_["conversation_id"]) == (0, "project/renamed", first), set_
     code, cleared = local(host, capsys, "orchestrator", "conversation", "topic", first, "--clear")
     assert (code, cleared["topic"]) == (0, None), cleared
@@ -204,20 +241,56 @@ def test_the_local_command_opens_filters_and_changes_a_topic(topic_host, capsys)
 
 def test_the_remote_command_carries_a_topic_as_far_as_the_local_one(topic_host, capsys, monkeypatch) -> None:
     host = topic_host
-    code, made = remote(host, capsys, monkeypatch, "conversation", "new", "--title", "the project",
-                        "--with", GROUP, "--topic", "project")
+    code, made = remote(
+        host,
+        capsys,
+        monkeypatch,
+        "conversation",
+        "new",
+        "--title",
+        "the project",
+        "--with",
+        GROUP,
+        "--topic",
+        "project",
+    )
     assert code == 0 and made["topic"] == "project", made
-    code, sub = remote(host, capsys, monkeypatch, "conversation", "new", "--title", "a subtopic",
-                       "--with", GROUP, "--topic", "project/alpha")
+    code, sub = remote(
+        host,
+        capsys,
+        monkeypatch,
+        "conversation",
+        "new",
+        "--title",
+        "a subtopic",
+        "--with",
+        GROUP,
+        "--topic",
+        "project/alpha",
+    )
     assert code == 0 and sub["topic"] == "project/alpha", sub
-    code, other = remote(host, capsys, monkeypatch, "conversation", "new", "--title", "a longer word",
-                         "--with", GROUP, "--topic", "projectile")
+    code, other = remote(
+        host,
+        capsys,
+        monkeypatch,
+        "conversation",
+        "new",
+        "--title",
+        "a longer word",
+        "--with",
+        GROUP,
+        "--topic",
+        "projectile",
+    )
     assert code == 0, other
 
     db = connect(host.config.db_path)
     try:
-        assert sorted(row["topic"] for row in db.execute("SELECT topic FROM conversations")) == \
-            ["project", "project/alpha", "projectile"]
+        assert sorted(row["topic"] for row in db.execute("SELECT topic FROM conversations")) == [
+            "project",
+            "project/alpha",
+            "projectile",
+        ]
     finally:
         db.close()
 
@@ -226,30 +299,59 @@ def test_the_remote_command_carries_a_topic_as_far_as_the_local_one(topic_host, 
     code, every = remote(host, capsys, monkeypatch, "conversation", "list")
     assert (code, len(every)) == (0, 3)
 
-    code, renamed = remote(host, capsys, monkeypatch, "conversation", "topic", made["conversation_id"],
-                           "--set", "project/renamed")
-    assert (code, renamed["topic"], renamed["conversation_id"]) == (0, "project/renamed",
-                                                                    made["conversation_id"])
-    code, cleared = remote(host, capsys, monkeypatch, "conversation", "topic", made["conversation_id"],
-                           "--clear")
+    code, renamed = remote(
+        host, capsys, monkeypatch, "conversation", "topic", made["conversation_id"], "--set", "project/renamed"
+    )
+    assert (code, renamed["topic"], renamed["conversation_id"]) == (0, "project/renamed", made["conversation_id"])
+    code, cleared = remote(host, capsys, monkeypatch, "conversation", "topic", made["conversation_id"], "--clear")
     assert (code, cleared["topic"]) == (0, None)
-    code, refused = remote(host, capsys, monkeypatch, "conversation", "topic", made["conversation_id"],
-                           "--set", "Bad")
+    code, refused = remote(host, capsys, monkeypatch, "conversation", "topic", made["conversation_id"], "--set", "Bad")
     assert (code, refused["error"]) == (1, "invalid_request")
-    code, forbidden = remote(host, capsys, monkeypatch, "conversation", "topic", sub["conversation_id"],
-                             "--set", "mine", token=host.tokens["reviewer"])
+    code, forbidden = remote(
+        host,
+        capsys,
+        monkeypatch,
+        "conversation",
+        "topic",
+        sub["conversation_id"],
+        "--set",
+        "mine",
+        token=host.tokens["reviewer"],
+    )
     assert (code, forbidden["error"]) == (1, "forbidden")
 
 
-def test_the_host_judges_a_remote_caller_by_the_same_rules_as_a_local_one(topic_host, capsys,
-                                                                         monkeypatch) -> None:
+def test_the_host_judges_a_remote_caller_by_the_same_rules_as_a_local_one(topic_host, capsys, monkeypatch) -> None:
     """Opening a conversation remotely is still the host's decision: the permission and membership hold."""
     host = topic_host
-    code, forbidden = remote(host, capsys, monkeypatch, "conversation", "new", "--title", "not mine to open",
-                             "--with", GROUP, "--topic", "project", token=host.tokens["reviewer"])
+    code, forbidden = remote(
+        host,
+        capsys,
+        monkeypatch,
+        "conversation",
+        "new",
+        "--title",
+        "not mine to open",
+        "--with",
+        GROUP,
+        "--topic",
+        "project",
+        token=host.tokens["reviewer"],
+    )
     assert (code, forbidden["error"]) == (1, "forbidden"), forbidden
-    code, outside = remote(host, capsys, monkeypatch, "conversation", "new", "--title", "without me",
-                           "--with", "orchestrator,reviewer,assistant", "--topic", "project")
+    code, outside = remote(
+        host,
+        capsys,
+        monkeypatch,
+        "conversation",
+        "new",
+        "--title",
+        "without me",
+        "--with",
+        "orchestrator,reviewer,assistant",
+        "--topic",
+        "project",
+    )
     assert (code, outside["error"]) == (1, "invalid_request"), outside
     db = connect(host.config.db_path)
     try:
@@ -266,10 +368,20 @@ def test_the_dashboard_groups_by_topic_and_still_shows_the_untagged(tmp_path) ->
     conn = connect(config.db_path)
     try:
         back_topics(conn, "project", "project/alpha", "projectile")
-        for title, topic in (("the project", "project"), ("a subtopic", "project/alpha"),
-                             ("a longer word", "projectile"), ("untagged", None)):
-            conversations.create(conn, config, actor="orchestrator", title=title,
-                                 participants=["orchestrator", "reviewer", "operator"], topic=topic)
+        for title, topic in (
+            ("the project", "project"),
+            ("a subtopic", "project/alpha"),
+            ("a longer word", "projectile"),
+            ("untagged", None),
+        ):
+            conversations.create(
+                conn,
+                config,
+                actor="orchestrator",
+                title=title,
+                participants=["orchestrator", "reviewer", "operator"],
+                topic=topic,
+            )
     finally:
         conn.close()
 

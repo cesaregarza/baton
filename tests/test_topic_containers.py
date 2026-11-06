@@ -19,8 +19,8 @@ import pytest
 from baton import config as config_module
 from baton import conversations, messages
 from baton.config import Config
+from baton.database.store import SCHEMA_VERSION, connect
 from baton.errors import BatonError
-from baton.store import SCHEMA_VERSION, connect
 
 try:
     from baton import topics
@@ -29,8 +29,13 @@ except ImportError:  # written before the module: each test then fails on its ow
 
 WAKE = {"wake": {"command": ["true"]}}
 MEMBERS = ["orchestrator", "reviewer"]
-ALIAS = {"alias_id": "al_0000000000000001", "alias": "lane-a", "badge": "guest", "code": "ab12",
-         "effective_role": "guest"}
+ALIAS = {
+    "alias_id": "al_0000000000000001",
+    "alias": "lane-a",
+    "badge": "guest",
+    "code": "ab12",
+    "effective_role": "guest",
+}
 OTHER_ALIAS = {**ALIAS, "alias_id": "al_0000000000000002", "alias": "lane-b", "code": "cd34"}
 
 
@@ -40,19 +45,32 @@ def topic_config(tmp_path: Path, *, data_dir: str = "data", **settings: Any) -> 
     The guest role reads the board, which is what a guest thread requires, and the thread caps are
     low so a cap test needs few rows.
     """
-    aliases = {"max_threads_per_alias_per_hour": 2, "max_threads_per_guest_per_hour": 3,
-               "guest_cap_alert_role": "orchestrator", **settings.pop("aliases", {})}
-    return config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / data_dir)},
-        "roles": {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True,
-                                   "can_create_topics": True, "can_view_all_conversations": True, **WAKE},
-                  "reviewer": {"can_create_conversations": True, **WAKE},
-                  "assistant": WAKE,
-                  "outsider": WAKE,
-                  "guest": {"can_view_all_conversations": True, **WAKE}},
-        "conversations": {"enabled": True, **settings},
-        "aliases": aliases,
-    })
+    aliases = {
+        "max_threads_per_alias_per_hour": 2,
+        "max_threads_per_guest_per_hour": 3,
+        "guest_cap_alert_role": "orchestrator",
+        **settings.pop("aliases", {}),
+    }
+    return config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / data_dir)},
+            "roles": {
+                "orchestrator": {
+                    "can_create_conversations": True,
+                    "can_manage_participants": True,
+                    "can_create_topics": True,
+                    "can_view_all_conversations": True,
+                    **WAKE,
+                },
+                "reviewer": {"can_create_conversations": True, **WAKE},
+                "assistant": WAKE,
+                "outsider": WAKE,
+                "guest": {"can_view_all_conversations": True, **WAKE},
+            },
+            "conversations": {"enabled": True, **settings},
+            "aliases": aliases,
+        }
+    )
 
 
 @pytest.fixture
@@ -67,17 +85,18 @@ def seed_aliases(conn: sqlite3.Connection, *identities: dict) -> None:
     a synthetic identity needs its row: the foreign key is the thing that stops attribution pointing
     at an alias nobody ever claimed.
     """
-    with conn:
-        conn.executemany("INSERT OR IGNORE INTO aliases (id, name, skeleton, verifier, created_at)"
-                         " VALUES (?, ?, ?, 'synthetic-verifier', 0.0)",
-                         [(one["alias_id"], one["alias"], one["alias"]) for one in identities])
+    with conn.transaction():
+        conn.executemany(
+            "INSERT OR IGNORE INTO aliases (id, name, skeleton, verifier, created_at)"
+            " VALUES (?, ?, ?, 'synthetic-verifier', 0.0)",
+            [(one["alias_id"], one["alias"], one["alias"]) for one in identities],
+        )
 
 
 @pytest.fixture
 def db(config: Config) -> sqlite3.Connection:
     connection = connect(config.db_path)
-    seed_aliases(connection, ALIAS, OTHER_ALIAS,
-                 {"alias_id": "al_0000000000000003", "alias": "lane-c"})
+    seed_aliases(connection, ALIAS, OTHER_ALIAS, {"alias_id": "al_0000000000000003", "alias": "lane-c"})
     yield connection
     connection.close()
 
@@ -89,20 +108,39 @@ def refused(code: str, operation: Callable[..., Any], *args: Any, **kwargs: Any)
     return str(raised.value)
 
 
-def make_topic(db: sqlite3.Connection, config: Config, path: str = "baton", *, actor: str = "orchestrator",
-               members: list[str] | None = MEMBERS, **kwargs: Any) -> dict[str, Any]:
+def make_topic(
+    db: sqlite3.Connection,
+    config: Config,
+    path: str = "baton",
+    *,
+    actor: str = "orchestrator",
+    members: list[str] | None = MEMBERS,
+    **kwargs: Any,
+) -> dict[str, Any]:
     return topics.create(db, config, actor=actor, path=path, members=members, **kwargs)
 
 
-def guest_thread(db: sqlite3.Connection, config: Config, *, topic: str | None = "baton",
-                 identity: dict | None = ALIAS, title: str = "A guest thread", **kwargs: Any) -> dict[str, Any]:
-    return conversations.create(db, config, actor="guest", title=title, participants=None, topic=topic,
-                                identity=identity, **kwargs)
+def guest_thread(
+    db: sqlite3.Connection,
+    config: Config,
+    *,
+    topic: str | None = "baton",
+    identity: dict | None = ALIAS,
+    title: str = "A guest thread",
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return conversations.create(
+        db, config, actor="guest", title=title, participants=None, topic=topic, identity=identity, **kwargs
+    )
 
 
 def participants_of(db: sqlite3.Connection, conversation_id: str) -> list[str]:
-    return [row[0] for row in db.execute("SELECT role FROM participants WHERE conversation_id = ? ORDER BY role",
-                                         (conversation_id,))]
+    return [
+        row[0]
+        for row in db.execute(
+            "SELECT role FROM participants WHERE conversation_id = ? ORDER BY role", (conversation_id,)
+        )
+    ]
 
 
 def row_for(db: sqlite3.Connection, conversation_id: str) -> sqlite3.Row:
@@ -111,8 +149,11 @@ def row_for(db: sqlite3.Connection, conversation_id: str) -> sqlite3.Row:
 
 def alerts(db: sqlite3.Connection, role: str = "orchestrator") -> list[sqlite3.Row]:
     """The cap alerts in a role's mailbox, identified by their notice rather than by being senderless."""
-    return db.execute("SELECT * FROM messages WHERE recipient = ? AND sender IS NULL"
-                      " AND notice LIKE '%guest_threads.cap_reached%' ORDER BY seq", (role,)).fetchall()
+    return db.execute(
+        "SELECT * FROM messages WHERE recipient = ? AND sender IS NULL"
+        " AND notice LIKE '%guest_threads.cap_reached%' ORDER BY seq",
+        (role,),
+    ).fetchall()
 
 
 def fill_guest_cap(db: sqlite3.Connection, config: Config) -> None:
@@ -122,6 +163,7 @@ def fill_guest_cap(db: sqlite3.Connection, config: Config) -> None:
 
 
 # 1. A core role creates a topic; a guest is refused; an enrolled alias is judged by its mapped role.
+
 
 def test_a_core_role_creates_a_topic(db, config):
     made = make_topic(db, config, "baton", title="Baton", description="The board")
@@ -135,8 +177,10 @@ def test_a_core_role_creates_a_topic(db, config):
 
 def test_a_topic_title_defaults_to_its_last_segment(db, config):
     make_topic(db, config, "baton")
-    assert topics.create(db, config, actor="orchestrator", path="baton/development",
-                         members=MEMBERS)["title"] == "development"
+    assert (
+        topics.create(db, config, actor="orchestrator", path="baton/development", members=MEMBERS)["title"]
+        == "development"
+    )
 
 
 def test_a_role_without_the_flag_may_not_create_a_topic(db, config):
@@ -177,6 +221,7 @@ def test_a_member_must_be_a_known_non_guest_role(db, config):
 
 # 2. A subtopic is refused while its parent is missing and accepted once it exists.
 
+
 def test_a_subtopic_needs_its_parent(db, config):
     detail = refused("invalid_request", make_topic, db, config, "baton/development")
     assert "baton" in detail
@@ -185,6 +230,7 @@ def test_a_subtopic_needs_its_parent(db, config):
 
 
 # 3. An aliased guest starts a thread: participants copy the topic's members, and it carries the alias.
+
 
 def test_an_aliased_guest_starts_a_thread_in_a_topic(db, config):
     make_topic(db, config, "baton")
@@ -209,31 +255,46 @@ def test_a_guest_thread_copies_members_rather_than_referring_to_them(db, config)
 
 # 4. An anonymous guest is refused, and so is a guest whose role cannot read the board.
 
+
 def test_an_anonymous_guest_is_refused(db, config):
     make_topic(db, config, "baton")
     refused("forbidden", guest_thread, db, config, identity=None)
 
 
 def test_a_guest_that_cannot_read_the_board_is_refused(tmp_path):
-    blind = config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "blind")},
-        "roles": {"orchestrator": {"can_create_conversations": True, "can_create_topics": True, **WAKE},
-                  "reviewer": {"can_create_conversations": True, **WAKE},
-                  "guest": WAKE},
-        "conversations": {"enabled": True},
-    })
+    blind = config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "blind")},
+            "roles": {
+                "orchestrator": {"can_create_conversations": True, "can_create_topics": True, **WAKE},
+                "reviewer": {"can_create_conversations": True, **WAKE},
+                "guest": WAKE,
+            },
+            "conversations": {"enabled": True},
+        }
+    )
     connection = connect(blind.db_path)
     seed_aliases(connection, ALIAS)
     try:
         topics.create(connection, blind, actor="orchestrator", path="baton", members=MEMBERS)
-        detail = refused("forbidden", conversations.create, connection, blind, actor="guest", title="Blind",
-                         participants=None, topic="baton", identity=ALIAS)
+        detail = refused(
+            "forbidden",
+            conversations.create,
+            connection,
+            blind,
+            actor="guest",
+            title="Blind",
+            participants=None,
+            topic="baton",
+            identity=ALIAS,
+        )
         assert "can_view_all_conversations" in detail
     finally:
         connection.close()
 
 
 # 5. A guest create is refused with no topic, a missing topic, too few members, or an unknown member.
+
 
 def test_a_guest_thread_requires_a_topic(db, config):
     detail = refused("invalid_request", guest_thread, db, config, topic=None)
@@ -257,23 +318,39 @@ def test_a_guest_thread_is_refused_when_a_member_role_is_gone(tmp_path):
     first = topic_config(tmp_path)
     connection = connect(first.db_path)
     try:
-        topics.create(connection, first, actor="orchestrator", path="baton",
-                      members=["orchestrator", "assistant"])
+        topics.create(connection, first, actor="orchestrator", path="baton", members=["orchestrator", "assistant"])
     finally:
         connection.close()
-    shrunk = config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": {"orchestrator": {"can_create_conversations": True, "can_create_topics": True,
-                                   "can_view_all_conversations": True, **WAKE},
-                  "reviewer": {"can_create_conversations": True, **WAKE},
-                  "guest": {"can_view_all_conversations": True, **WAKE}},
-        "conversations": {"enabled": True},
-    })
+    shrunk = config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": {
+                "orchestrator": {
+                    "can_create_conversations": True,
+                    "can_create_topics": True,
+                    "can_view_all_conversations": True,
+                    **WAKE,
+                },
+                "reviewer": {"can_create_conversations": True, **WAKE},
+                "guest": {"can_view_all_conversations": True, **WAKE},
+            },
+            "conversations": {"enabled": True},
+        }
+    )
     connection = connect(shrunk.db_path)
     seed_aliases(connection, ALIAS)
     try:
-        detail = refused("invalid_request", conversations.create, connection, shrunk, actor="guest",
-                         title="Gone", participants=None, topic="baton", identity=ALIAS)
+        detail = refused(
+            "invalid_request",
+            conversations.create,
+            connection,
+            shrunk,
+            actor="guest",
+            title="Gone",
+            participants=None,
+            topic="baton",
+            identity=ALIAS,
+        )
         assert "assistant" in detail
     finally:
         connection.close()
@@ -281,9 +358,18 @@ def test_a_guest_thread_is_refused_when_a_member_role_is_gone(tmp_path):
 
 # 6. A core role's create with a missing topic is refused; with no topic it is accepted.
 
+
 def test_a_core_create_refuses_a_missing_topic(db, config):
-    detail = refused("invalid_request", conversations.create, db, config, actor="orchestrator",
-                     title="Plan", participants=MEMBERS, topic="absent")
+    detail = refused(
+        "invalid_request",
+        conversations.create,
+        db,
+        config,
+        actor="orchestrator",
+        title="Plan",
+        participants=MEMBERS,
+        topic="absent",
+    )
     assert "absent" in detail
 
 
@@ -295,34 +381,52 @@ def test_a_core_create_without_a_topic_is_accepted(db, config):
 
 def test_a_core_create_in_an_existing_topic_is_accepted(db, config):
     make_topic(db, config, "baton")
-    made = conversations.create(db, config, actor="orchestrator", title="Plan", participants=MEMBERS,
-                                topic="baton")
+    made = conversations.create(db, config, actor="orchestrator", title="Plan", participants=MEMBERS, topic="baton")
     assert row_for(db, made["conversation_id"])["topic"] == "baton"
 
 
 # 7. A guest naming participants is refused.
 
+
 def test_a_guest_may_not_name_participants(db, config):
     make_topic(db, config, "baton")
-    detail = refused("invalid_request", conversations.create, db, config, actor="guest", title="Mine",
-                     participants=["orchestrator", "reviewer"], topic="baton", identity=ALIAS)
+    detail = refused(
+        "invalid_request",
+        conversations.create,
+        db,
+        config,
+        actor="guest",
+        title="Mine",
+        participants=["orchestrator", "reviewer"],
+        topic="baton",
+        identity=ALIAS,
+    )
     assert "participants" in detail
 
 
 # 7b. `participants` became optional for the guest path, so what each role owes is pinned here.
 
+
 def test_a_core_role_that_omits_participants_is_refused(db, config):
     """Optional in the schema, still required of a role: the guest path is the only one without it."""
-    detail = refused("invalid_request", conversations.create, db, config, actor="orchestrator",
-                     title="No participants", participants=None)
+    detail = refused(
+        "invalid_request",
+        conversations.create,
+        db,
+        config,
+        actor="orchestrator",
+        title="No participants",
+        participants=None,
+    )
     assert "participants" in detail
 
 
 def test_a_guests_empty_participants_list_reads_as_omitting_it(db, config):
     """An empty list asks for nobody, which is what leaving it out means, so it is not a refusal."""
     make_topic(db, config, "baton")
-    made = conversations.create(db, config, actor="guest", title="Empty list", participants=[],
-                                topic="baton", identity=ALIAS)
+    made = conversations.create(
+        db, config, actor="guest", title="Empty list", participants=[], topic="baton", identity=ALIAS
+    )
     assert made["created"] is True
     assert participants_of(db, made["conversation_id"]) == sorted(MEMBERS)
 
@@ -330,12 +434,22 @@ def test_a_guests_empty_participants_list_reads_as_omitting_it(db, config):
 def test_a_guests_non_empty_participants_list_is_refused(db, config):
     """Naming even one role is the guest choosing its own audience, which the topic decides."""
     make_topic(db, config, "baton")
-    detail = refused("invalid_request", conversations.create, db, config, actor="guest", title="One role",
-                     participants=["orchestrator"], topic="baton", identity=ALIAS)
+    detail = refused(
+        "invalid_request",
+        conversations.create,
+        db,
+        config,
+        actor="guest",
+        title="One role",
+        participants=["orchestrator"],
+        topic="baton",
+        identity=ALIAS,
+    )
     assert "participants" in detail
 
 
 # 8. Caps.
+
 
 def test_the_per_alias_cap_holds(db, config):
     make_topic(db, config, "baton")
@@ -364,8 +478,9 @@ def test_concurrent_creates_at_the_limit_cannot_both_succeed(config):
     seed_aliases(setup, ALIAS)
     try:
         topics.create(setup, config, actor="orchestrator", path="baton", members=MEMBERS)
-        conversations.create(setup, config, actor="guest", title="one", participants=None, topic="baton",
-                             identity=ALIAS)
+        conversations.create(
+            setup, config, actor="guest", title="one", participants=None, topic="baton", identity=ALIAS
+        )
     finally:
         setup.close()
     outcomes: list[str] = []
@@ -375,8 +490,9 @@ def test_concurrent_creates_at_the_limit_cannot_both_succeed(config):
         connection = connect(config.db_path)
         try:
             barrier.wait(timeout=10)
-            conversations.create(connection, config, actor="guest", title="race", participants=None,
-                                 topic="baton", identity=ALIAS)
+            conversations.create(
+                connection, config, actor="guest", title="race", participants=None, topic="baton", identity=ALIAS
+            )
             outcomes.append("created")
         except BatonError as error:
             outcomes.append(error.code)
@@ -393,6 +509,7 @@ def test_concurrent_creates_at_the_limit_cannot_both_succeed(config):
 
 
 # 9. The guest-wide alert.
+
 
 def test_a_guest_wide_refusal_stores_one_host_message(db, config):
     fill_guest_cap(db, config)
@@ -423,8 +540,9 @@ def test_the_alert_wakes_its_recipient_as_an_ordinary_message(db, config):
     fill_guest_cap(db, config)
     refused("limit_exceeded", guest_thread, db, config, identity=OTHER_ALIAS)
     stored = alerts(db)[0]
-    event = db.execute("SELECT * FROM events WHERE audience = ? AND kind = 'message' ORDER BY seq DESC LIMIT 1",
-                       ("orchestrator",)).fetchone()
+    event = db.execute(
+        "SELECT * FROM events WHERE audience = ? AND kind = 'message' ORDER BY seq DESC LIMIT 1", ("orchestrator",)
+    ).fetchone()
     assert event is not None, "store_copy must have appended a message event"
     assert event["kind"] == "message"
     assert messages.first_unread_seq(db, "orchestrator") is not None
@@ -433,17 +551,26 @@ def test_the_alert_wakes_its_recipient_as_an_ordinary_message(db, config):
 
 def test_the_alert_reports_the_configured_limit_not_a_constant(tmp_path):
     """The text reports the configured guest-wide limit, never a constant."""
-    config = topic_config(tmp_path, aliases={"max_threads_per_guest_per_hour": 7,
-                                             "max_threads_per_alias_per_hour": 7})
+    config = topic_config(tmp_path, aliases={"max_threads_per_guest_per_hour": 7, "max_threads_per_alias_per_hour": 7})
     connection = connect(config.db_path)
     seed_aliases(connection, ALIAS, OTHER_ALIAS)
     try:
         topics.create(connection, config, actor="orchestrator", path="baton", members=MEMBERS)
         for index in range(7):
-            conversations.create(connection, config, actor="guest", title=f"t{index}", participants=None,
-                                 topic="baton", identity=ALIAS)
-        refused("limit_exceeded", conversations.create, connection, config, actor="guest", title="over",
-                participants=None, topic="baton", identity=ALIAS)
+            conversations.create(
+                connection, config, actor="guest", title=f"t{index}", participants=None, topic="baton", identity=ALIAS
+            )
+        refused(
+            "limit_exceeded",
+            conversations.create,
+            connection,
+            config,
+            actor="guest",
+            title="over",
+            participants=None,
+            topic="baton",
+            identity=ALIAS,
+        )
         stored = alerts(connection)
         assert len(stored) == 1
         assert '"limit": 7' in stored[0]["notice"] or '"limit":7' in stored[0]["notice"]
@@ -465,8 +592,17 @@ def test_the_dedup_survives_a_restart(db, config):
     refused("limit_exceeded", guest_thread, db, config, identity=OTHER_ALIAS)
     fresh = connect(config.db_path)
     try:
-        refused("limit_exceeded", conversations.create, fresh, config, actor="guest", title="again",
-                participants=None, topic="baton", identity=OTHER_ALIAS)
+        refused(
+            "limit_exceeded",
+            conversations.create,
+            fresh,
+            config,
+            actor="guest",
+            title="again",
+            participants=None,
+            topic="baton",
+            identity=OTHER_ALIAS,
+        )
         assert len(alerts(fresh)) == 1
     finally:
         fresh.close()
@@ -475,13 +611,17 @@ def test_the_dedup_survives_a_restart(db, config):
 def test_a_full_alert_mailbox_stores_nothing_and_leaves_the_timestamp_unset(db, config):
     """Nothing is stored, and because the timestamp stays unset the next refusal tries again."""
     fill_guest_cap(db, config)
-    with db:
-        db.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES ('orchestrator', ?, 0)"
-                   " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq, read_seq = 0",
-                   (messages.MAX_UNREAD,))
+    with db.transaction():
+        db.execute(
+            "INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES ('orchestrator', ?, 0)"
+            " ON CONFLICT (recipient) DO UPDATE SET last_seq = excluded.last_seq, read_seq = 0",
+            (messages.MAX_UNREAD,),
+        )
         for seq in range(1, messages.MAX_UNREAD + 1):
-            db.execute("INSERT INTO messages (id, recipient, seq, text, at) VALUES (?, 'orchestrator', ?, 'x', ?)",
-                       (f"msg_{seq:016x}", seq, "2026-11-01T00:00:00+00:00"))
+            db.execute(
+                "INSERT INTO messages (id, recipient, seq, text, at) VALUES (?, 'orchestrator', ?, 'x', ?)",
+                (f"msg_{seq:016x}", seq, "2026-11-01T00:00:00+00:00"),
+            )
     refused("limit_exceeded", guest_thread, db, config, identity=OTHER_ALIAS)
     assert alerts(db) == []
     assert db.execute("SELECT value FROM log_meta WHERE key = 'guest_thread_cap_alerted_at'").fetchone() is None
@@ -494,16 +634,27 @@ def test_no_alert_role_means_no_alert(tmp_path):
     try:
         topics.create(connection, config, actor="orchestrator", path="baton", members=MEMBERS)
         for identity in (ALIAS, ALIAS, OTHER_ALIAS):
-            conversations.create(connection, config, actor="guest", title="t", participants=None,
-                                 topic="baton", identity=identity)
-        refused("limit_exceeded", conversations.create, connection, config, actor="guest", title="over",
-                participants=None, topic="baton", identity=OTHER_ALIAS)
+            conversations.create(
+                connection, config, actor="guest", title="t", participants=None, topic="baton", identity=identity
+            )
+        refused(
+            "limit_exceeded",
+            conversations.create,
+            connection,
+            config,
+            actor="guest",
+            title="over",
+            participants=None,
+            topic="baton",
+            identity=OTHER_ALIAS,
+        )
         assert alerts(connection) == []
     finally:
         connection.close()
 
 
 # 10. Replay.
+
 
 def test_a_replay_under_the_same_alias_returns_the_original(db, config):
     make_topic(db, config, "baton")
@@ -540,8 +691,9 @@ def test_a_replay_returns_the_thread_as_it_now_stands(db, config):
 def test_another_alias_reusing_a_request_id_gets_a_generic_conflict(db, config):
     make_topic(db, config, "baton")
     guest_thread(db, config, identity=ALIAS, request_id="20261101T120000Z-dddd")
-    detail = refused("idempotency_conflict", guest_thread, db, config, identity=OTHER_ALIAS,
-                     request_id="20261101T120000Z-dddd")
+    detail = refused(
+        "idempotency_conflict", guest_thread, db, config, identity=OTHER_ALIAS, request_id="20261101T120000Z-dddd"
+    )
     assert "lane-a" not in detail
     assert "conv_" not in detail
 
@@ -552,26 +704,40 @@ def test_a_replay_is_refused_once_the_role_lost_its_flag(tmp_path):
     connection = connect(config.db_path)
     seed_aliases(connection, ALIAS, OTHER_ALIAS)
     try:
-        topics.create(connection, config, actor="orchestrator", path="baton", members=MEMBERS,
-                      request_id="20261101T120000Z-eeee")
+        topics.create(
+            connection, config, actor="orchestrator", path="baton", members=MEMBERS, request_id="20261101T120000Z-eeee"
+        )
     finally:
         connection.close()
-    stripped = config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": {"orchestrator": {"can_create_conversations": True, **WAKE},
-                  "reviewer": {"can_create_conversations": True, **WAKE},
-                  "guest": {"can_view_all_conversations": True, **WAKE}},
-        "conversations": {"enabled": True},
-    })
+    stripped = config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": {
+                "orchestrator": {"can_create_conversations": True, **WAKE},
+                "reviewer": {"can_create_conversations": True, **WAKE},
+                "guest": {"can_view_all_conversations": True, **WAKE},
+            },
+            "conversations": {"enabled": True},
+        }
+    )
     connection = connect(stripped.db_path)
     try:
-        refused("forbidden", topics.create, connection, stripped, actor="orchestrator", path="baton",
-                members=MEMBERS, request_id="20261101T120000Z-eeee")
+        refused(
+            "forbidden",
+            topics.create,
+            connection,
+            stripped,
+            actor="orchestrator",
+            path="baton",
+            members=MEMBERS,
+            request_id="20261101T120000Z-eeee",
+        )
     finally:
         connection.close()
 
 
 # 11. A create_topic replay after a rename returns the renamed topic.
+
 
 def test_a_create_topic_replay_after_a_rename_returns_the_renamed_topic(db, config):
     make_topic(db, config, "baton", request_id="20261101T120000Z-ffff")
@@ -583,10 +749,10 @@ def test_a_create_topic_replay_after_a_rename_returns_the_renamed_topic(db, conf
 
 # 12. update_topic leaves existing threads' participants unchanged.
 
+
 def test_update_topic_changes_no_existing_thread(db, config):
     make_topic(db, config, "baton")
-    thread = conversations.create(db, config, actor="orchestrator", title="Plan", participants=MEMBERS,
-                                  topic="baton")
+    thread = conversations.create(db, config, actor="orchestrator", title="Plan", participants=MEMBERS, topic="baton")
     topics.update(db, config, actor="orchestrator", path="baton", members=["orchestrator", "assistant"])
     assert participants_of(db, thread["conversation_id"]) == sorted(MEMBERS)
 
@@ -605,13 +771,14 @@ def test_update_topic_needs_the_flag(db, config):
 
 # 13. rename_topic.
 
+
 def test_rename_carries_subtopics_and_threads_with_ids_unchanged(db, config):
     make_topic(db, config, "baton")
     make_topic(db, config, "baton/development")
-    thread = conversations.create(db, config, actor="orchestrator", title="Plan", participants=MEMBERS,
-                                  topic="baton/development")
-    under = conversations.create(db, config, actor="orchestrator", title="Top", participants=MEMBERS,
-                                 topic="baton")
+    thread = conversations.create(
+        db, config, actor="orchestrator", title="Plan", participants=MEMBERS, topic="baton/development"
+    )
+    under = conversations.create(db, config, actor="orchestrator", title="Top", participants=MEMBERS, topic="baton")
     topics.rename(db, config, actor="orchestrator", path="baton", new_path="relay")
     assert topics.get(db, config, reader="orchestrator", path="relay")["path"] == "relay"
     assert topics.get(db, config, reader="orchestrator", path="relay/development")["path"] == "relay/development"
@@ -624,14 +791,17 @@ def test_rename_refuses_and_changes_nothing(db, config):
     make_topic(db, config, "baton")
     make_topic(db, config, "baton/development")
     make_topic(db, config, "other")
-    for new_path, why in (("baton", "itself"), ("baton/development", "its own subtree"), ("other", "a collision"),
-                          ("absent/child", "a missing parent"), ("Baton", "an invalid path")):
-        refused("invalid_request", topics.rename, db, config, actor="orchestrator", path="baton",
-                new_path=new_path)
+    for new_path, why in (
+        ("baton", "itself"),
+        ("baton/development", "its own subtree"),
+        ("other", "a collision"),
+        ("absent/child", "a missing parent"),
+        ("Baton", "an invalid path"),
+    ):
+        refused("invalid_request", topics.rename, db, config, actor="orchestrator", path="baton", new_path=new_path)
         assert topics.get(db, config, reader="orchestrator", path="baton")["path"] == "baton", why
     # A topic that has subtopics may not move under another topic: that would make three levels.
-    refused("invalid_request", topics.rename, db, config, actor="orchestrator", path="baton",
-            new_path="other/moved")
+    refused("invalid_request", topics.rename, db, config, actor="orchestrator", path="baton", new_path="other/moved")
     assert topics.get(db, config, reader="orchestrator", path="baton/development")["path"] == "baton/development"
 
 
@@ -642,17 +812,24 @@ def test_rename_needs_the_flag(db, config):
 
 # 14. set_topic.
 
+
 def test_set_topic_refuses_a_missing_topic(db, config):
     thread = conversations.create(db, config, actor="orchestrator", title="Plan", participants=MEMBERS)
-    refused("invalid_request", conversations.set_topic, db, config, thread["conversation_id"], "absent",
-            actor="orchestrator")
+    refused(
+        "invalid_request",
+        conversations.set_topic,
+        db,
+        config,
+        thread["conversation_id"],
+        "absent",
+        actor="orchestrator",
+    )
 
 
 def test_set_topic_keeps_its_existing_permission_and_participants(db, config):
     make_topic(db, config, "baton")
     thread = conversations.create(db, config, actor="orchestrator", title="Plan", participants=MEMBERS)
-    refused("forbidden", conversations.set_topic, db, config, thread["conversation_id"], "baton",
-            actor="reviewer")
+    refused("forbidden", conversations.set_topic, db, config, thread["conversation_id"], "baton", actor="reviewer")
     conversations.set_topic(db, config, thread["conversation_id"], "baton", actor="orchestrator")
     assert row_for(db, thread["conversation_id"])["topic"] == "baton"
     assert participants_of(db, thread["conversation_id"]) == sorted(MEMBERS)
@@ -660,19 +837,20 @@ def test_set_topic_keeps_its_existing_permission_and_participants(db, config):
 
 def test_set_topic_can_still_clear_a_topic(db, config):
     make_topic(db, config, "baton")
-    thread = conversations.create(db, config, actor="orchestrator", title="Plan", participants=MEMBERS,
-                                  topic="baton")
+    thread = conversations.create(db, config, actor="orchestrator", title="Plan", participants=MEMBERS, topic="baton")
     conversations.set_topic(db, config, thread["conversation_id"], None, actor="orchestrator")
     assert row_for(db, thread["conversation_id"])["topic"] is None
 
 
 # 15. list_topics counts only the threads the caller can read.
 
+
 def test_list_topics_counts_only_readable_threads(db, config):
     make_topic(db, config, "baton")
     conversations.create(db, config, actor="orchestrator", title="Seen", participants=MEMBERS, topic="baton")
-    conversations.create(db, config, actor="reviewer", title="Unseen", participants=["reviewer", "assistant"],
-                         topic="baton")
+    conversations.create(
+        db, config, actor="reviewer", title="Unseen", participants=["reviewer", "assistant"], topic="baton"
+    )
     listed = {entry["path"]: entry for entry in topics.listing(db, config, reader="orchestrator")}
     assert listed["baton"]["threads"] == 2, "orchestrator views all conversations"
     outsiders = {entry["path"]: entry for entry in topics.listing(db, config, reader="assistant")}
@@ -683,8 +861,9 @@ def test_list_topics_filters_by_parent(db, config):
     make_topic(db, config, "baton")
     make_topic(db, config, "baton/development")
     make_topic(db, config, "other")
-    assert [e["path"] for e in topics.listing(db, config, reader="orchestrator", parent="baton")] == \
-        ["baton/development"]
+    assert [e["path"] for e in topics.listing(db, config, reader="orchestrator", parent="baton")] == [
+        "baton/development"
+    ]
 
 
 def test_get_topic_is_open_to_a_guest(db, config):
@@ -700,6 +879,7 @@ def test_get_an_absent_topic_is_not_found(db, config):
 
 # The schema assertion is against the constant, never a literal.
 
+
 def test_the_topics_table_is_part_of_the_current_schema(db, config):
     assert db.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     columns = {row["name"] for row in db.execute("PRAGMA table_info(topics)")}
@@ -707,12 +887,14 @@ def test_the_topics_table_is_part_of_the_current_schema(db, config):
     conversation_columns = {row["name"] for row in db.execute("PRAGMA table_info(conversations)")}
     assert {"created_by_alias_id", "created_by_alias", "created_by_alias_code"} <= conversation_columns
 
+
 # A count and a timestamp must be taken over the same threads: the reader's own.
+
 
 def dated(db: sqlite3.Connection, conversation_id: str, when: str) -> None:
     """Set a thread's activity time directly. What is under test is which rows are aggregated, not how
     the column comes to be written, and a fixed value keeps the assertion off the clock."""
-    with db:
+    with db.transaction():
         db.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?", (when, conversation_id))
 
 
@@ -723,25 +905,30 @@ def test_the_listed_activity_time_covers_only_the_readable_threads(db, config):
     something had happened in a conversation the reader is not in, and when.
     """
     make_topic(db, config, "baton")
-    mine = conversations.create(db, config, actor="orchestrator", title="Mine",
-                                participants=["orchestrator", "reviewer"], topic="baton")
-    theirs = conversations.create(db, config, actor="orchestrator", title="Not mine",
-                                  participants=["orchestrator", "assistant"], topic="baton")
+    mine = conversations.create(
+        db, config, actor="orchestrator", title="Mine", participants=["orchestrator", "reviewer"], topic="baton"
+    )
+    theirs = conversations.create(
+        db, config, actor="orchestrator", title="Not mine", participants=["orchestrator", "assistant"], topic="baton"
+    )
     dated(db, mine["conversation_id"], "2026-11-01T10:00:00+00:00")
-    dated(db, theirs["conversation_id"], "2026-11-02T10:00:00+00:00")   # newer, and unreadable
+    dated(db, theirs["conversation_id"], "2026-11-02T10:00:00+00:00")  # newer, and unreadable
 
     [entry] = topics.listing(db, config, reader="reviewer")
     assert entry["threads"] == 1, "the count was already the reader's own"
-    assert entry["last_activity_at"] == "2026-11-01T10:00:00+00:00", \
+    assert entry["last_activity_at"] == "2026-11-01T10:00:00+00:00", (
         "the time must come from the same threads the count did"
+    )
 
 
 def test_a_board_reader_still_sees_the_newest_of_everything(db, config):
     make_topic(db, config, "baton")
-    mine = conversations.create(db, config, actor="orchestrator", title="Mine",
-                                participants=["orchestrator", "reviewer"], topic="baton")
-    theirs = conversations.create(db, config, actor="orchestrator", title="Theirs",
-                                  participants=["orchestrator", "assistant"], topic="baton")
+    mine = conversations.create(
+        db, config, actor="orchestrator", title="Mine", participants=["orchestrator", "reviewer"], topic="baton"
+    )
+    theirs = conversations.create(
+        db, config, actor="orchestrator", title="Theirs", participants=["orchestrator", "assistant"], topic="baton"
+    )
     dated(db, mine["conversation_id"], "2026-11-01T10:00:00+00:00")
     dated(db, theirs["conversation_id"], "2026-11-02T10:00:00+00:00")
     [entry] = topics.listing(db, config, reader="orchestrator")
@@ -751,39 +938,64 @@ def test_a_board_reader_still_sees_the_newest_of_everything(db, config):
 
 def test_a_topic_the_reader_sees_nothing_in_reports_no_activity(db, config):
     make_topic(db, config, "baton")
-    theirs = conversations.create(db, config, actor="orchestrator", title="Not mine",
-                                  participants=["orchestrator", "assistant"], topic="baton")
+    theirs = conversations.create(
+        db, config, actor="orchestrator", title="Not mine", participants=["orchestrator", "assistant"], topic="baton"
+    )
     dated(db, theirs["conversation_id"], "2026-11-02T10:00:00+00:00")
     [entry] = topics.listing(db, config, reader="reviewer")
     assert entry["threads"] == 0
     assert entry["last_activity_at"] is None, "no readable thread means nothing to report"
+
 
 def test_get_topic_lists_only_the_subtopics_the_reader_can_open(db, config):
     """The tool is the other way a subtopic could be named, so it filters the same way the page does."""
     make_topic(db, config, "work")
     make_topic(db, config, "work/open")
     make_topic(db, config, "work/shut")
-    conversations.create(db, config, actor="orchestrator", title="Readable",
-                         participants=["orchestrator", "reviewer"], topic="work/open")
-    conversations.create(db, config, actor="orchestrator", title="Hidden",
-                         participants=["orchestrator", "assistant"], topic="work/shut")
+    conversations.create(
+        db, config, actor="orchestrator", title="Readable", participants=["orchestrator", "reviewer"], topic="work/open"
+    )
+    conversations.create(
+        db, config, actor="orchestrator", title="Hidden", participants=["orchestrator", "assistant"], topic="work/shut"
+    )
     assert topics.get(db, config, reader="reviewer", path="work")["subtopics"] == ["work/open"]
-    assert topics.get(db, config, reader="orchestrator", path="work")["subtopics"] == \
-        ["work/open", "work/shut"], "a board reader sees both"
+    assert topics.get(db, config, reader="orchestrator", path="work")["subtopics"] == ["work/open", "work/shut"], (
+        "a board reader sees both"
+    )
+
 
 # A topic's count is what its page lists, which is the whole subtree: the page has always filtered by
 # whole-segment prefix, so a count of only the threads filed exactly there contradicted it.
+
 
 def nested(db: sqlite3.Connection, config: Config) -> None:
     """`work` with one unreadable thread of its own, `work/open` with one readable and one unreadable."""
     make_topic(db, config, "work")
     make_topic(db, config, "work/open")
-    conversations.create(db, config, actor="orchestrator", title="Parent, hidden",
-                         participants=["orchestrator", "assistant"], topic="work")
-    conversations.create(db, config, actor="orchestrator", title="Child, readable",
-                         participants=["orchestrator", "reviewer"], topic="work/open")
-    conversations.create(db, config, actor="orchestrator", title="Child, hidden",
-                         participants=["orchestrator", "assistant"], topic="work/open")
+    conversations.create(
+        db,
+        config,
+        actor="orchestrator",
+        title="Parent, hidden",
+        participants=["orchestrator", "assistant"],
+        topic="work",
+    )
+    conversations.create(
+        db,
+        config,
+        actor="orchestrator",
+        title="Child, readable",
+        participants=["orchestrator", "reviewer"],
+        topic="work/open",
+    )
+    conversations.create(
+        db,
+        config,
+        actor="orchestrator",
+        title="Child, hidden",
+        participants=["orchestrator", "assistant"],
+        topic="work/open",
+    )
 
 
 def listed_by_path(db: sqlite3.Connection, config: Config, reader: str) -> dict[str, dict]:
@@ -810,20 +1022,21 @@ def test_the_subtree_activity_time_comes_from_the_same_threads(db, config):
     """The count and the time are one query, so widening one widens the other and no more."""
     nested(db, config)
     rows = db.execute("SELECT id, title FROM conversations ORDER BY title").fetchall()
-    stamps = {"Child, hidden": "2026-11-03T10:00:00+00:00", "Child, readable": "2026-11-02T10:00:00+00:00",
-              "Parent, hidden": "2026-11-01T10:00:00+00:00"}
-    with db:
+    stamps = {
+        "Child, hidden": "2026-11-03T10:00:00+00:00",
+        "Child, readable": "2026-11-02T10:00:00+00:00",
+        "Parent, hidden": "2026-11-01T10:00:00+00:00",
+    }
+    with db.transaction():
         for row in rows:
-            db.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?",
-                       (stamps[row["title"]], row["id"]))
-    assert listed_by_path(db, config, "reviewer")["work"]["last_activity_at"] == \
-        "2026-11-02T10:00:00+00:00", "the readable child's time, not the newer hidden one"
-    assert listed_by_path(db, config, "orchestrator")["work"]["last_activity_at"] == \
-        "2026-11-03T10:00:00+00:00"
+            db.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?", (stamps[row["title"]], row["id"]))
+    assert listed_by_path(db, config, "reviewer")["work"]["last_activity_at"] == "2026-11-02T10:00:00+00:00", (
+        "the readable child's time, not the newer hidden one"
+    )
+    assert listed_by_path(db, config, "orchestrator")["work"]["last_activity_at"] == "2026-11-03T10:00:00+00:00"
 
 
 def test_get_topic_counts_the_same_subtree_its_page_lists(db, config):
     nested(db, config)
     assert topics.get(db, config, reader="reviewer", path="work")["threads"] == 1
     assert topics.get(db, config, reader="orchestrator", path="work")["threads"] == 3
-

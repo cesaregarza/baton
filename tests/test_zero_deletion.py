@@ -23,8 +23,8 @@ from test_vectors import commit as commit_in_generation
 from test_vectors import fill as fill_generation
 
 from baton import changes, conversations, derived, jobs, messages, search
+from baton.database.store import connect
 from baton.errors import BatonError, RequestTooOld
-from baton.store import connect
 
 LONG_AGO = timedelta(days=40)  # past the old 30-day read retention and the 31-day retry-record retention
 
@@ -153,14 +153,18 @@ def test_guard_a_retry_with_an_old_request_id_is_still_refused(host, conn, recor
     if record == "message":
         messages.send(conn, sender="planner", recipient="worker", text="once", request_id=rid("retry"))
         old_id = aged_request(conn, "message_requests")
-        retry = lambda: messages.send(conn, sender="planner", recipient="worker",  # noqa: E731
-                                      text="once", request_id=old_id)
+
+        def retry():
+            return messages.send(conn, sender="planner", recipient="worker", text="once", request_id=old_id)
+
         messages.read(conn, "worker")  # the read that used to delete it
     else:
         jobs.move(conn, graph, job["job_id"], "working", actor="worker", request_id=rid("move"))
         old_id = aged_request(conn, "job_moves")
-        retry = lambda: jobs.move(conn, graph, job["job_id"], "working", actor="worker",  # noqa: E731
-                                  request_id=old_id)
+
+        def retry():
+            return jobs.move(conn, graph, job["job_id"], "working", actor="worker", request_id=old_id)
+
         other = jobs.create(conn, graph, request_id="job-2", actor="planner", title="t2")
         jobs.move(conn, graph, other["job_id"], "working", actor="worker")  # the move that used to delete it
 
@@ -179,10 +183,10 @@ def test_the_change_log_keeps_old_rows_and_old_cursors_stay_valid(db, config) ->
 
     say(db, config, conversation_id, "a change that would prune the old ones")  # record() prunes
 
-    assert [row[0] for row in db.execute("SELECT change_seq FROM change_log ORDER BY change_seq")][:len(seqs)] == seqs
+    assert [row[0] for row in db.execute("SELECT change_seq FROM change_log ORDER BY change_seq")][: len(seqs)] == seqs
     assert db.execute("SELECT value FROM log_meta WHERE key = 'pruned_through'").fetchone()[0] == "0"
     page = changes.read(db, changes.Scope.ALL, cursor=cursor, limit=100)
-    assert [entry["change_seq"] for entry in page["entries"]][:len(seqs)] == seqs
+    assert [entry["change_seq"] for entry in page["entries"]][: len(seqs)] == seqs
 
 
 # Summaries and vectors ----------------------------------------------------------------------------------------
@@ -192,15 +196,26 @@ def stored(db, generation: str) -> dict[str, int]:
     """How much of `generation` is stored, table by table."""
     return {
         "versions": count(db, "SELECT COUNT(*) FROM artifact_versions WHERE generation = ?", generation),
-        "inputs": count(db, "SELECT COUNT(*) FROM artifact_inputs WHERE version_id IN"
-                            " (SELECT id FROM artifact_versions WHERE generation = ?)", generation),
-        "depends_on": count(db, "SELECT COUNT(*) FROM artifact_depends_on WHERE version_id IN"
-                                " (SELECT id FROM artifact_versions WHERE generation = ?)", generation),
+        "inputs": count(
+            db,
+            "SELECT COUNT(*) FROM artifact_inputs WHERE version_id IN"
+            " (SELECT id FROM artifact_versions WHERE generation = ?)",
+            generation,
+        ),
+        "depends_on": count(
+            db,
+            "SELECT COUNT(*) FROM artifact_depends_on WHERE version_id IN"
+            " (SELECT id FROM artifact_versions WHERE generation = ?)",
+            generation,
+        ),
         "vectors": count(db, "SELECT COUNT(*) FROM vectors WHERE generation = ?", generation),
         "vector_skips": count(db, "SELECT COUNT(*) FROM vector_skips WHERE generation = ?", generation),
         "batches": count(db, "SELECT COUNT(*) FROM batches WHERE generation = ?", generation),
-        "batch_pages": count(db, "SELECT COUNT(*) FROM batch_pages WHERE batch_id IN"
-                                 " (SELECT id FROM batches WHERE generation = ?)", generation),
+        "batch_pages": count(
+            db,
+            "SELECT COUNT(*) FROM batch_pages WHERE batch_id IN (SELECT id FROM batches WHERE generation = ?)",
+            generation,
+        ),
     }
 
 
@@ -212,13 +227,23 @@ def replaced_generation(db, config) -> tuple[str, str, str, dict[str, int], dict
     old = embedding_generation(db, config)
     manifest = begin_in_generation(db, config, conversation_id, old, kinds=derived.KINDS)
     first = {**{("kind", kind): UNIT["x"] for kind in manifest["kinds"]}, ("message_id", sent[1]): UNIT["y"]}
-    commit_in_generation(db, config, manifest, payload(
-        manifest, request_id="r-old-1", vectors=first,
-        skips=[{"item": {"message_id": sent[0]}, "reason": "over_token_limit"}]))
+    commit_in_generation(
+        db,
+        config,
+        manifest,
+        payload(
+            manifest,
+            request_id="r-old-1",
+            vectors=first,
+            skips=[{"item": {"message_id": sent[0]}, "reason": "over_token_limit"}],
+        ),
+    )
     say(db, config, conversation_id, "a later note")
     manifest = begin_in_generation(db, config, conversation_id, old, kinds=derived.KINDS)
-    later = {**{("kind", kind): UNIT["x"] for kind in manifest["kinds"]},
-             **{("message_id", message_id): UNIT["y"] for message_id in items(manifest)}}
+    later = {
+        **{("kind", kind): UNIT["x"] for kind in manifest["kinds"]},
+        **{("message_id", message_id): UNIT["y"] for message_id in items(manifest)},
+    }
     commit_in_generation(db, config, manifest, payload(manifest, request_id="r-old-2", vectors=later))
     derived.generation_activate(db, config, "alpha", old)
     new = embedding_generation(db, config)
@@ -236,7 +261,10 @@ def test_a_replaced_generations_versions_inputs_and_dependencies_are_kept(db, co
 
     assert before["versions"] == 6 and before["depends_on"] > 0  # the setup built what is to be kept
     assert (after["versions"], after["inputs"], after["depends_on"]) == (
-        before["versions"], before["inputs"], before["depends_on"])
+        before["versions"],
+        before["inputs"],
+        before["depends_on"],
+    )
 
 
 def test_a_replaced_generations_vectors_and_skips_are_kept(db, config) -> None:
@@ -296,8 +324,9 @@ def test_expired_work_sessions_and_their_pages_are_kept(db, config) -> None:
     other, _ = converse_in(db, config, 1)
     derived.begin_batch(db, config, "alpha", other, ["summary"])  # a writer call sweeps
 
-    assert count(db, "SELECT COUNT(*) FROM batches WHERE id IN (?, ?)", manifest["batch_id"],
-                 abandoned["batch_id"]) == 2
+    assert (
+        count(db, "SELECT COUNT(*) FROM batches WHERE id IN (?, ?)", manifest["batch_id"], abandoned["batch_id"]) == 2
+    )
     assert pages > 0 and count(db, "SELECT COUNT(*) FROM batch_pages") >= pages
 
 

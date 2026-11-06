@@ -16,11 +16,14 @@ except ImportError:  # written before the module: each test then fails on its ow
     seat = None  # type: ignore[assignment]
 
 
-@pytest.mark.parametrize(("at", "zone", "shown"), [
-    ("2026-10-30T01:14:00+00:00", "America/Chicago", "29 Oct, 8:14 pm CDT"),
-    ("2026-12-01T18:05:00+00:00", "America/Chicago", "1 Dec, 12:05 pm CST"),
-    ("2026-10-30T01:14:00+00:00", "UTC", "30 Oct, 1:14 am UTC"),
-])
+@pytest.mark.parametrize(
+    ("at", "zone", "shown"),
+    [
+        ("2026-10-30T01:14:00+00:00", "America/Chicago", "29 Oct, 8:14 pm CDT"),
+        ("2026-12-01T18:05:00+00:00", "America/Chicago", "1 Dec, 12:05 pm CST"),
+        ("2026-10-30T01:14:00+00:00", "UTC", "30 Oct, 1:14 am UTC"),
+    ],
+)
 def test_a_time_reads_in_the_configured_zone(at: str, zone: str, shown: str) -> None:
     assert seat._when(at, ZoneInfo(zone)) == shown
 

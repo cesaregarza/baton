@@ -70,8 +70,16 @@ from baton.errors import BatonError
 
 build_scene = refs.build_scene  # the fixture, under the name the tests ask for
 
-READERS = ["bound alias", "grantee for thread.organise only", "revoked grantee", "expired grantee", "pending grantee",
-           "invalid grantee", "core role with no flags", "core role with both flags"]
+READERS = [
+    "bound alias",
+    "grantee for thread.organise only",
+    "revoked grantee",
+    "expired grantee",
+    "pending grantee",
+    "invalid grantee",
+    "core role with no flags",
+    "core role with both flags",
+]
 
 
 async def reader(kind, client, scene):
@@ -102,13 +110,18 @@ class ReadStaging(Staging):
     def _trace(self, sql, conn):
         previous = self.statements[-1][0] if self.statements else None
         self.statements.append((sql, conn.in_transaction))
-        if (self.moment == "select" and not self.fired and sql.lstrip().upper().startswith("SELECT")
-                and self.fragment in sql.upper()):
+        if (
+            self.moment == "select"
+            and not self.fired
+            and sql.lstrip().upper().startswith("SELECT")
+            and self.fragment in sql.upper()
+        ):
             self.fired, self.landed_after = True, previous
             self.outcome = self.action()
 
 
 # 1. Who may read ---------------------------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("kind", READERS)
 def test_every_identified_reader_can_list_read_the_current_text_an_old_revision_and_the_history(build_scene, kind):
@@ -148,9 +161,12 @@ def test_a_guest_with_no_valid_binding_is_refused_as_an_unbound_post_is_and_sees
         await write_revisions(client, scene, BOARDS, NAME, 2)
         expiring = await bound_guest(client, scene)
         monkeypatch.setattr(aliases, "time", SimpleNamespace(time=lambda: real() + 25 * 3600))
-        calls = [("read_reference", {"topic": BOARDS}), ("read_reference", {"topic": BOARDS, "name": NAME}),
-                 ("read_reference", {"topic": BOARDS, "name": NAME, "revision": 1}),
-                 ("reference_history", {"topic": BOARDS, "name": NAME})]
+        calls = [
+            ("read_reference", {"topic": BOARDS}),
+            ("read_reference", {"topic": BOARDS, "name": NAME}),
+            ("read_reference", {"topic": BOARDS, "name": NAME, "revision": 1}),
+            ("reference_history", {"topic": BOARDS, "name": NAME}),
+        ]
         for name, arguments in calls:
             for who in (Anonymous(scene.host), expiring):
                 result = await who.call(client, name, **arguments)
@@ -190,6 +206,7 @@ def test_reads_consult_no_grant_and_write_no_row_anywhere(build_scene, monkeypat
 
 # 2. The three modes --------------------------------------------------------------------------------------------
 
+
 def test_the_list_of_an_empty_topic_is_empty_and_documents_are_listed_by_name_with_their_current_revision(build_scene):
     """R3. A topic with no references lists as `references: []`. With documents it lists them ordered by name, each
     described by its current revision: that revision's number, size, time, author and grant. Documents in the
@@ -214,16 +231,35 @@ def test_the_list_of_an_empty_topic_is_empty_and_documents_are_listed_by_name_wi
         assert (listing["topic"], listing["topic_id"]) == (BOARDS, scene.topic_id(BOARDS))
         assert all(set(entry) == LISTED_KEYS for entry in listing["references"])
         expected = [
-            {"name": "alpha-list", "current_revision": 1, "at": alpha["at"], "size": len(b"alpha"),
-             "author": {"role": "planner"}, "grant_id": None},
-            {"name": "mid-1", "current_revision": 1, "at": mid["at"], "size": len(b"mid"),
-             "author": {"role": "planner"}, "grant_id": None},
-            {"name": "zeta-list", "current_revision": 2, "at": zeta_2["at"], "size": len(second.encode()),
-             "author": author_of(held), "grant_id": held.grant_id},
+            {
+                "name": "alpha-list",
+                "current_revision": 1,
+                "at": alpha["at"],
+                "size": len(b"alpha"),
+                "author": {"role": "planner"},
+                "grant_id": None,
+            },
+            {
+                "name": "mid-1",
+                "current_revision": 1,
+                "at": mid["at"],
+                "size": len(b"mid"),
+                "author": {"role": "planner"},
+                "grant_id": None,
+            },
+            {
+                "name": "zeta-list",
+                "current_revision": 2,
+                "at": zeta_2["at"],
+                "size": len(second.encode()),
+                "author": author_of(held),
+                "grant_id": held.grant_id,
+            },
         ]
         assert listing["references"] == expected
         assert [entry["name"] for entry in succeeded(await read_reference(client, who, ROOT))["references"]] == [
-            "in-the-parent"]
+            "in-the-parent"
+        ]
 
     play(scene.host, scenario)
 
@@ -243,19 +279,28 @@ def test_the_current_revision_and_an_old_one_each_return_their_own_text_and_prov
         topic = {"topic": BOARDS, "topic_id": scene.topic_id(BOARDS), "name": NAME, "current_revision": 3}
 
         def expected(made, body):
-            return {**topic, "revision": made["revision"], "body": body, "size": len(body.encode()),
-                    "base_revision": made["base_revision"], "at": made["at"], "author": made["author"],
-                    "grant_id": made["grant_id"]}
+            return {
+                **topic,
+                "revision": made["revision"],
+                "body": body,
+                "size": len(body.encode()),
+                "base_revision": made["base_revision"],
+                "at": made["at"],
+                "author": made["author"],
+                "grant_id": made["grant_id"],
+            }
 
         assert succeeded(await read_reference(client, who, BOARDS, NAME)) == expected(third, "the third")
         assert succeeded(await read_reference(client, who, BOARDS, NAME, 3)) == expected(third, "the third")
         assert succeeded(await read_reference(client, who, BOARDS, NAME, 1)) == expected(first, "the first text")
         assert succeeded(await read_reference(client, who, BOARDS, NAME, 2)) == expected(
-            second, "the second text, longer caf\u00e9")
+            second, "the second text, longer caf\u00e9"
+        )
         history = succeeded(await reference_history(client, who, BOARDS, NAME))
         assert history["revisions"] == [
             {key: made[key] for key in ("revision", "base_revision", "at", "size", "author", "grant_id")}
-            for made in (first, second, third)]
+            for made in (first, second, third)
+        ]
 
     play(scene.host, scenario)
 
@@ -290,6 +335,7 @@ def test_text_comes_back_byte_for_byte(build_scene):
 
 # 3. What is not there ---------------------------------------------------------------------------------------
 
+
 def test_an_unknown_topic_an_unknown_reference_and_an_unknown_revision_are_three_different_refusals(build_scene):
     """R4. All three tools say `unknown_topic` for a path with no topic. In a known topic, a name with no document is
     `unknown_reference` for the current text, the history and a revision request alike, and never an empty body.
@@ -302,19 +348,26 @@ def test_an_unknown_topic_an_unknown_reference_and_an_unknown_revision_are_three
         await write_revisions(client, scene, BOARDS, NAME, 6)
         who = Core(scene.host, "worker")
         ghost = "job-hunt/ghost"
-        for result in (await read_reference(client, who, ghost), await read_reference(client, who, ghost, NAME),
-                       await read_reference(client, who, ghost, NAME, 1),
-                       await reference_history(client, who, ghost, NAME)):
+        for result in (
+            await read_reference(client, who, ghost),
+            await read_reference(client, who, ghost, NAME),
+            await read_reference(client, who, ghost, NAME, 1),
+            await reference_history(client, who, ghost, NAME),
+        ):
             assert result == {"error": "unknown_topic", "detail": f9(ghost)}
         missing = {"error": "unknown_reference", "detail": f10("no-such", BOARDS)}
         assert await read_reference(client, who, BOARDS, "no-such") == missing
         assert await read_reference(client, who, BOARDS, "no-such", 1) == missing
         assert await reference_history(client, who, BOARDS, "no-such") == missing
         assert await read_reference(client, who, LEADS, NAME) == {
-            "error": "unknown_reference", "detail": f10(NAME, LEADS)}
+            "error": "unknown_reference",
+            "detail": f10(NAME, LEADS),
+        }
         for revision in (7, 8, 1000):
             assert await read_reference(client, who, BOARDS, NAME, revision) == {
-                "error": "unknown_reference", "detail": f11(NAME, BOARDS, revision, 6)}
+                "error": "unknown_reference",
+                "detail": f11(NAME, BOARDS, revision, 6),
+            }
         assert await read_reference(client, who, BOARDS, NAME, 6) != await read_reference(client, who, BOARDS, NAME, 7)
 
     play(scene.host, scenario)
@@ -355,8 +408,15 @@ def test_the_module_does_not_read_revision_zero_as_the_current_one(build_scene, 
 
 # 3a. Past the schema, and one view per call -----------------------------------------------------------------
 
-PAGING = [("limit", 0), ("limit", 101), ("limit", True), ("limit", "5"),
-          ("after_revision", -1), ("after_revision", True), ("after_revision", "0")]
+PAGING = [
+    ("limit", 0),
+    ("limit", 101),
+    ("limit", True),
+    ("limit", "5"),
+    ("after_revision", -1),
+    ("after_revision", True),
+    ("after_revision", "0"),
+]
 
 
 @pytest.mark.parametrize("argument,value", PAGING, ids=[f"{argument}={value!r}" for argument, value in PAGING])
@@ -370,14 +430,17 @@ def test_the_module_refuses_a_limit_or_a_cursor_the_schema_would_have_refused(bu
         await write_revisions(client, scene, BOARDS, NAME, 2)
         with pytest.raises(BatonError) as raised:
             direct(scene, "reference_history", "worker", topic=BOARDS, name=NAME, **{argument: value})
-        assert (raised.value.code, str(raised.value)) == ("invalid_request",
-                                                          "limit is 1-100 and after_revision at least 0")
+        assert (raised.value.code, str(raised.value)) == (
+            "invalid_request",
+            "limit is 1-100 and after_revision at least 0",
+        )
 
     play(scene.host, scenario)
 
 
 def test_a_history_page_ends_at_the_current_revision_it_reports_when_a_write_lands_between_its_reads(
-        build_scene, monkeypatch):
+    build_scene, monkeypatch
+):
     """R6. `history` reads the document's current revision and its page from one view, so a revision committed between
     the two is in neither: the page ends at the `current_revision` it reports, and `next_revision` is that revision."""
     scene = build_scene()
@@ -387,7 +450,8 @@ def test_a_history_page_ends_at_the_current_revision_it_reports_when_a_write_lan
         await write_revisions(client, scene, BOARDS, NAME, 3)
         # A writer commits revision 4 after the call has read that the document is at 3, and before it reads the page.
         staging = ReadStaging(monkeypatch).before(
-            "ORDER BY revision LIMIT", other_writer_adds_revision(scene, BOARDS, NAME, 4))
+            "ORDER BY revision LIMIT", other_writer_adds_revision(scene, BOARDS, NAME, 4)
+        )
         page = direct(scene, "reference_history", "worker", topic=BOARDS, name=NAME)
         assert staging.fired and staging.outcome == "landed", (staging.fired, staging.outcome)
         assert "reference_docs" in staging.landed_after, staging.landed_after
@@ -401,7 +465,8 @@ def test_a_history_page_ends_at_the_current_revision_it_reports_when_a_write_lan
 
 
 def test_a_read_answers_from_the_state_it_began_with_when_a_write_lands_after_its_first_statement(
-        build_scene, monkeypatch):
+    build_scene, monkeypatch
+):
     """`read_reference` answers from one view, so a revision committed after the call has begun is not in its answer:
     it names the revision and the text the document had when the call began."""
     scene = build_scene()
@@ -411,7 +476,8 @@ def test_a_read_answers_from_the_state_it_began_with_when_a_write_lands_after_it
         await write_revisions(client, scene, BOARDS, NAME, 3)
         # A writer commits revision 4 after the call's first read (the topic) and before its second (the document).
         staging = ReadStaging(monkeypatch).before(
-            "FROM reference_docs", other_writer_adds_revision(scene, BOARDS, NAME, 4))
+            "FROM reference_docs", other_writer_adds_revision(scene, BOARDS, NAME, 4)
+        )
         answer = direct(scene, "read_reference", "worker", topic=BOARDS, name=NAME)
         assert staging.fired and staging.outcome == "landed", (staging.fired, staging.outcome)
         assert "FROM topics" in staging.landed_after, staging.landed_after
@@ -423,6 +489,7 @@ def test_a_read_answers_from_the_state_it_began_with_when_a_write_lands_after_it
 
 
 # 4. The history ---------------------------------------------------------------------------------------------
+
 
 def test_history_pages_forward_oldest_first_with_no_bodies_and_a_cursor_that_continues_it(build_scene):
     """R6. Ten revisions, three to a page: 1-3, 4-6, 7-9, then 10, then nothing. `next_revision` is the last one
@@ -439,7 +506,11 @@ def test_history_pages_forward_oldest_first_with_no_bodies_and_a_cursor_that_con
             page = succeeded(await reference_history(client, who, BOARDS, NAME, after_revision=after, limit=3))
             assert set(page) == HISTORY_KEYS
             assert (page["topic"], page["topic_id"], page["name"], page["current_revision"]) == (
-                BOARDS, scene.topic_id(BOARDS), NAME, 10)
+                BOARDS,
+                scene.topic_id(BOARDS),
+                NAME,
+                10,
+            )
             assert [entry["revision"] for entry in page["revisions"]] == expected_page
             assert page["next_revision"] == (expected_page[-1] if expected_page else after)
             assert all(set(entry) == HISTORY_ENTRY_KEYS for entry in page["revisions"])
@@ -464,8 +535,11 @@ def test_history_arguments_outside_their_bounds_are_refused_by_the_schema(build_
         await support.stage(client, scene.host)
         await write_revisions(client, scene, BOARDS, NAME, 2)
         who = Core(scene.host, "worker")
-        for paging, argument in (({"limit": 0}, "limit"), ({"limit": 101}, "limit"),
-                                 ({"after_revision": -1}, "after_revision")):
+        for paging, argument in (
+            ({"limit": 0}, "limit"),
+            ({"limit": 101}, "limit"),
+            ({"after_revision": -1}, "after_revision"),
+        ):
             refused_by_schema(await reference_history(client, who, BOARDS, NAME, **paging), argument)
         edge = succeeded(await reference_history(client, who, BOARDS, NAME, limit=100, after_revision=0))
         assert len(edge["revisions"]) == 2
@@ -481,8 +555,15 @@ def test_a_document_has_no_cap_on_revisions_and_its_history_pages_past_the_page_
     async def scenario(client):
         await support.stage(client, scene.host)
         for number in range(1, 106):
-            made = direct(scene, "edit_reference", "planner", topic=BOARDS, name=NAME, body=body_of(number),
-                          expected_revision=number - 1)
+            made = direct(
+                scene,
+                "edit_reference",
+                "planner",
+                topic=BOARDS,
+                name=NAME,
+                body=body_of(number),
+                expected_revision=number - 1,
+            )
             assert made["revision"] == number
         who = Core(scene.host, "worker")
         default = succeeded(await reference_history(client, who, BOARDS, NAME))
@@ -491,7 +572,9 @@ def test_a_document_has_no_cap_on_revisions_and_its_history_pages_past_the_page_
         assert (len(first["revisions"]), first["next_revision"], first["current_revision"]) == (100, 100, 105)
         rest = succeeded(await reference_history(client, who, BOARDS, NAME, after_revision=100, limit=100))
         assert ([entry["revision"] for entry in rest["revisions"]], rest["next_revision"]) == (
-            [101, 102, 103, 104, 105], 105)
+            [101, 102, 103, 104, 105],
+            105,
+        )
         current = succeeded(await read_reference(client, who, BOARDS, NAME))
         assert (current["revision"], current["body"]) == (105, body_of(105))
 

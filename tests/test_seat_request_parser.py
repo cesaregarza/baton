@@ -9,15 +9,16 @@ import pytest
 from seat_helpers import FORM, SEAT_HOST, SEAT_ORIGIN, SESSION_COOKIE, get, hidden, log_in, make_seat_host, post
 
 from baton import conversations
-from baton.store import connect
+from baton.database.store import connect
 
 
 @pytest.fixture
 def signed_in(tmp_path: Path):
     host = make_seat_host(tmp_path)
     conn = connect(host.config.db_path)
-    conversation = conversations.create(conn, host.config, actor="orchestrator", title="Example",
-                                        participants=["orchestrator", "operator"])["conversation_id"]
+    conversation = conversations.create(
+        conn, host.config, actor="orchestrator", title="Example", participants=["orchestrator", "operator"]
+    )["conversation_id"]
     conn.close()
     _, cookies = log_in(host.config, host.seat_token)
     page = get(host.config, f"/seat/c/{conversation}", cookies=cookies)
@@ -36,11 +37,13 @@ def test_a_well_formed_send_is_stored_as_the_person(signed_in) -> None:
     assert response.status == 303
     conn = sqlite3.connect(host.config.db_path)
     assert conn.execute("SELECT DISTINCT sender, author_kind FROM messages WHERE sender = 'operator'").fetchall() == [
-        ("operator", "human")]
+        ("operator", "human")
+    ]
 
 
-@pytest.mark.parametrize("origin", [None, "https://elsewhere.example.test", "http://127.0.0.1:8766",
-                                    SEAT_ORIGIN + ":444", "null"])
+@pytest.mark.parametrize(
+    "origin", [None, "https://elsewhere.example.test", "http://127.0.0.1:8766", SEAT_ORIGIN + ":444", "null"]
+)
 def test_a_wrong_or_missing_origin_is_refused(signed_in, origin) -> None:
     host, conversation, cookies, fields = signed_in
     assert post(host.config, f"/seat/c/{conversation}/send", fields, cookies=cookies, origin=origin).status == 403
@@ -49,8 +52,9 @@ def test_a_wrong_or_missing_origin_is_refused(signed_in, origin) -> None:
 
 def test_a_cross_site_fetch_is_refused_even_with_the_right_origin(signed_in) -> None:
     host, conversation, cookies, fields = signed_in
-    response = post(host.config, f"/seat/c/{conversation}/send", fields, cookies=cookies,
-                    extra=[("Sec-Fetch-Site", "cross-site")])
+    response = post(
+        host.config, f"/seat/c/{conversation}/send", fields, cookies=cookies, extra=[("Sec-Fetch-Site", "cross-site")]
+    )
     assert response.status == 403 and _stored(host) == 0
 
 
@@ -74,22 +78,36 @@ def test_another_sessions_csrf_token_is_refused(signed_in) -> None:
 @pytest.mark.parametrize("name", ["Host", "Origin", "Cookie", "Content-Type", "Content-Length", "Sec-Fetch-Site"])
 def test_a_duplicated_header_is_refused(signed_in, name: str) -> None:
     host, conversation, cookies, fields = signed_in
-    values = {"Host": SEAT_HOST, "Origin": SEAT_ORIGIN, "Cookie": f"{SESSION_COOKIE}={cookies[SESSION_COOKIE]}",
-              "Content-Type": FORM, "Sec-Fetch-Site": "same-origin"}
+    values = {
+        "Host": SEAT_HOST,
+        "Origin": SEAT_ORIGIN,
+        "Cookie": f"{SESSION_COOKIE}={cookies[SESSION_COOKIE]}",
+        "Content-Type": FORM,
+        "Sec-Fetch-Site": "same-origin",
+    }
     if name == "Content-Length":
         from urllib.parse import urlencode
 
         values[name] = str(len(urlencode(fields)))
-    response = post(host.config, f"/seat/c/{conversation}/send", fields, cookies=cookies,
-                    extra=[(name, values[name])] + ([("Sec-Fetch-Site", "same-origin")]
-                                                    if name == "Sec-Fetch-Site" else []))
+    response = post(
+        host.config,
+        f"/seat/c/{conversation}/send",
+        fields,
+        cookies=cookies,
+        extra=[(name, values[name])] + ([("Sec-Fetch-Site", "same-origin")] if name == "Sec-Fetch-Site" else []),
+    )
     assert response.status in (400, 421) and _stored(host) == 0
 
 
 def test_two_session_cookies_are_refused(signed_in) -> None:
     host, conversation, cookies, fields = signed_in
-    response = post(host.config, f"/seat/c/{conversation}/send", fields, cookies=cookies,
-                    extra=[("Cookie", f"{SESSION_COOKIE}=seat_another")])
+    response = post(
+        host.config,
+        f"/seat/c/{conversation}/send",
+        fields,
+        cookies=cookies,
+        extra=[("Cookie", f"{SESSION_COOKIE}=seat_another")],
+    )
     assert response.status == 400 and _stored(host) == 0
 
 
@@ -101,16 +119,32 @@ def test_a_repeated_form_field_is_refused(signed_in, field: str) -> None:
     assert _stored(host) == 0
 
 
-@pytest.mark.parametrize("field", ["from_role", "author_kind", "author", "sender", "from", "role", "on_behalf_of",
-                                   "relayed", "attention", "needs_decision", "job_id", "unexpected"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "from_role",
+        "author_kind",
+        "author",
+        "sender",
+        "from",
+        "role",
+        "on_behalf_of",
+        "relayed",
+        "attention",
+        "needs_decision",
+        "job_id",
+        "unexpected",
+    ],
+)
 def test_a_field_outside_the_form_is_refused(signed_in, field: str) -> None:
     host, conversation, cookies, fields = signed_in
     assert post(host.config, f"/seat/c/{conversation}/send", fields | {field: "x"}, cookies=cookies).status == 400
     assert _stored(host) == 0
 
 
-@pytest.mark.parametrize("framing", ["chunked", "chunked-and-length", "no-length", "bad-length", "short-body",
-                                     "oversized"])
+@pytest.mark.parametrize(
+    "framing", ["chunked", "chunked-and-length", "no-length", "bad-length", "short-body", "oversized"]
+)
 def test_ambiguous_or_oversized_framing_is_refused(signed_in, framing: str) -> None:
     from urllib.parse import urlencode
 
@@ -118,10 +152,15 @@ def test_ambiguous_or_oversized_framing_is_refused(signed_in, framing: str) -> N
 
     host, conversation, cookies, fields = signed_in
     body = urlencode(fields | ({"text": "x" * 17 * 1024} if framing == "oversized" else {})).encode()
-    headers = [("Host", SEAT_HOST), ("Origin", SEAT_ORIGIN), ("Content-Type", FORM),
-               ("Cookie", f"{SESSION_COOKIE}={cookies[SESSION_COOKIE]}")]
+    headers = [
+        ("Host", SEAT_HOST),
+        ("Origin", SEAT_ORIGIN),
+        ("Content-Type", FORM),
+        ("Cookie", f"{SESSION_COOKIE}={cookies[SESSION_COOKIE]}"),
+    ]
     length = {"chunked": None, "no-length": None, "bad-length": "12abc", "short-body": str(len(body) + 10)}.get(
-        framing, str(len(body)))
+        framing, str(len(body))
+    )
     if length is not None:
         headers.append(("Content-Length", length))
     if framing.startswith("chunked"):
@@ -130,8 +169,10 @@ def test_ambiguous_or_oversized_framing_is_refused(signed_in, framing: str) -> N
     assert response.status in (400, 411, 413) and _stored(host) == 0
 
 
-@pytest.mark.parametrize("content_type", ["application/json", "multipart/form-data; boundary=x", "text/plain",
-                                          FORM + "; charset=utf-8, text/plain"])
+@pytest.mark.parametrize(
+    "content_type",
+    ["application/json", "multipart/form-data; boundary=x", "text/plain", FORM + "; charset=utf-8, text/plain"],
+)
 def test_only_a_plain_form_body_is_accepted(signed_in, content_type: str) -> None:
     host, conversation, cookies, fields = signed_in
     response = post(host.config, f"/seat/c/{conversation}/send", fields, cookies=cookies, content_type=content_type)
@@ -143,8 +184,13 @@ def test_invalid_utf8_is_refused(signed_in) -> None:
 
     host, conversation, cookies, fields = signed_in
     body = b"text=%FF%FE&csrf=" + fields["csrf"].encode() + b"&request_id=" + fields["request_id"].encode()
-    headers = [("Host", SEAT_HOST), ("Origin", SEAT_ORIGIN), ("Content-Type", FORM),
-               ("Content-Length", str(len(body))), ("Cookie", f"{SESSION_COOKIE}={cookies[SESSION_COOKIE]}")]
+    headers = [
+        ("Host", SEAT_HOST),
+        ("Origin", SEAT_ORIGIN),
+        ("Content-Type", FORM),
+        ("Content-Length", str(len(body))),
+        ("Cookie", f"{SESSION_COOKIE}={cookies[SESSION_COOKIE]}"),
+    ]
     assert seat.respond(host.config, "POST", f"/seat/c/{conversation}/send", headers, body).status == 400
     assert _stored(host) == 0
 
@@ -175,7 +221,10 @@ def test_body_rules_apply_only_to_post(signed_in) -> None:
     from baton import seat
 
     host, conversation, cookies, _ = signed_in
-    headers = [("Host", SEAT_HOST), ("Cookie", f"{SESSION_COOKIE}={cookies[SESSION_COOKIE]}"),
-               ("Content-Type", "application/json")]
+    headers = [
+        ("Host", SEAT_HOST),
+        ("Cookie", f"{SESSION_COOKIE}={cookies[SESSION_COOKIE]}"),
+        ("Content-Type", "application/json"),
+    ]
     assert seat.respond(host.config, "GET", f"/seat/c/{conversation}", headers, b"").status == 200
     assert seat.respond(host.config, "HEAD", "/seat/", headers, b"").status == 200

@@ -45,7 +45,6 @@ import hmac
 import json
 import logging
 import os
-import sqlite3
 import subprocess
 import threading
 import time
@@ -56,7 +55,8 @@ import httpx
 
 from baton import events, messages
 from baton.config import Config, Wake
-from baton.store import connect, transaction
+from baton.database import Connection, Row
+from baton.database.store import connect
 
 log = logging.getLogger("baton.wakes")
 
@@ -95,8 +95,9 @@ def deliver(wake: Wake, wake_id: str, body: bytes) -> bool:
     try:
         if wake.webhook:
             return _post(wake, wake_id, body)
-        completed = subprocess.run(list(wake.command), input=body, capture_output=True,
-                                   timeout=wake.timeout_seconds, check=False)
+        completed = subprocess.run(
+            list(wake.command), input=body, capture_output=True, timeout=wake.timeout_seconds, check=False
+        )
         if completed.returncode != 0:
             log.warning("wake command for %s exited %d", wake_id, completed.returncode)
         return completed.returncode == 0
@@ -124,8 +125,7 @@ def _post(wake: Wake, wake_id: str, body: bytes) -> bool:
 class Dispatcher:
     """Turns events into wakes and delivers them. One runs beside the MCP server, on its own thread."""
 
-    def __init__(self, config: Config, deliver: Deliver = deliver,
-                 integrations: dict[str, Any] | None = None) -> None:
+    def __init__(self, config: Config, deliver: Deliver = deliver, integrations: dict[str, Any] | None = None) -> None:
         self._config = config
         self._deliver = deliver
         # Roles whose wake names an integration hand it the last step; see baton.integrations.
@@ -145,23 +145,27 @@ class Dispatcher:
         conn = connect(self._config.db_path)
         try:
             tried = 0
-            for row in conn.execute("SELECT role, key FROM wakes WHERE status = 'pending' AND lease_until <= ?"
-                                    " ORDER BY lease_until LIMIT ?", (_now(), PAGE)).fetchall():
+            for row in conn.execute(
+                "SELECT role, key FROM wakes WHERE status = 'pending' AND lease_until <= ?"
+                " ORDER BY lease_until LIMIT ?",
+                (_now(), PAGE),
+            ).fetchall():
                 tried += self._attempt(conn, row["role"], row["key"])
             tried += self._due_reminders(conn)
-            while rows := conn.execute("SELECT * FROM events WHERE pos > ? ORDER BY pos LIMIT ?",
-                                       (events.cursor(conn, CURSOR), PAGE)).fetchall():
+            while rows := conn.execute(
+                "SELECT * FROM events WHERE pos > ? ORDER BY pos LIMIT ?", (events.cursor(conn, CURSOR), PAGE)
+            ).fetchall():
                 for event in rows:
                     claimed = self._claim(conn, event)
                     if claimed is not None:
                         tried += self._attempt(conn, *claimed)
-                    with transaction(conn):
+                    with conn.transaction():
                         events.set_cursor(conn, CURSOR, event["pos"])
             return tried
         finally:
             conn.close()
 
-    def _claim(self, conn: sqlite3.Connection, event: sqlite3.Row) -> tuple[str, str] | None:
+    def _claim(self, conn: Connection, event: Row) -> tuple[str, str] | None:
         """Record the wake an event calls for, if its audience has a hook; None if there is nothing new to send."""
         role = self._config.roles.get(event["audience"] or "")
         if role is None or not role.wake.enabled:
@@ -178,10 +182,12 @@ class Dispatcher:
             key = f"event:{event['pos']}"
             payload = {"reason": event["kind"], "conversation_id": json.loads(event["data"])["conversation_id"]}
         else:
-            key, payload = (f"job:{event['job_id']}:{event['seq']}",
-                            {"reason": event["kind"], "job_id": event["job_id"], "event_seq": event["seq"]})
+            key, payload = (
+                f"job:{event['job_id']}:{event['seq']}",
+                {"reason": event["kind"], "job_id": event["job_id"], "event_seq": event["seq"]},
+            )
         body = {"type": "baton.wake", "role": role.name, "host": self._config.public_url, **payload}
-        with transaction(conn):
+        with conn.transaction():
             inserted = conn.execute(
                 "INSERT INTO wakes (role, key, payload, status, lease_until, attempts, created_at)"
                 " VALUES (?, ?, ?, 'pending', 0, 0, ?) ON CONFLICT (role, key) DO NOTHING",
@@ -189,8 +195,8 @@ class Dispatcher:
             ).rowcount
         return (role.name, key) if inserted else None
 
-    def _attempt(self, conn: sqlite3.Connection, role: str, key: str) -> int:
-        with transaction(conn):
+    def _attempt(self, conn: Connection, role: str, key: str) -> int:
+        with conn.transaction():
             row = conn.execute("SELECT * FROM wakes WHERE role = ? AND key = ?", (role, key)).fetchone()
             if row is None or row["status"] != "pending":
                 return 0
@@ -202,8 +208,11 @@ class Dispatcher:
                 # claim refuses one that has not gone yet, but a retry arrives here instead, and
                 # there is still nothing to send to: a deliverer handed an empty target raises on
                 # the way out and ends the pass.
-                conn.execute("UPDATE wakes SET status = 'skipped', finished_at = ? WHERE role = ?"
-                             " AND key = ? AND status = 'pending'", (events.now(), role, key))
+                conn.execute(
+                    "UPDATE wakes SET status = 'skipped', finished_at = ? WHERE role = ?"
+                    " AND key = ? AND status = 'pending'",
+                    (events.now(), role, key),
+                )
                 log.info("wake %s %s skipped: the role has no wake to send to", role, key)
                 return 0
             if row["attempts"] >= MAX_ATTEMPTS:
@@ -212,21 +221,23 @@ class Dispatcher:
                 # retiring the row here would record a delivered wake as failed and lose its
                 # reminders, because the callback lands on a row that is no longer pending.
                 if conn.execute(
-                        "UPDATE wakes SET status = 'failed', finished_at = ? WHERE role = ? AND key = ?"
-                        " AND status = 'pending' AND lease_until <= ?",
-                        (events.now(), role, key, _now())).rowcount:
+                    "UPDATE wakes SET status = 'failed', finished_at = ? WHERE role = ? AND key = ?"
+                    " AND status = 'pending' AND lease_until <= ?",
+                    (events.now(), role, key, _now()),
+                ).rowcount:
                     log.error("wake %s %s gave up after %d attempts", role, key, row["attempts"])
                 return 0
             # Taking the lease is the claim to send, so it is one conditional update: a worker that
             # lost the race finds the row leased and does nothing. Checking the status and writing
             # the lease separately would let two workers that both read it as pending both send.
             if not conn.execute(
-                    "UPDATE wakes SET attempts = attempts + 1, lease_until = ? WHERE role = ? AND key = ?"
-                    " AND status = 'pending' AND lease_until <= ?",
-                    (_now() + LEASE_SECONDS, role, key, _now())).rowcount:
+                "UPDATE wakes SET attempts = attempts + 1, lease_until = ? WHERE role = ? AND key = ?"
+                " AND status = 'pending' AND lease_until <= ?",
+                (_now() + LEASE_SECONDS, role, key, _now()),
+            ).rowcount:
                 return 0
         delivered = self._send(role, wake_id(role, key), row["payload"].encode())
-        with transaction(conn):
+        with conn.transaction():
             if delivered:
                 # Only a wake that was still pending becomes delivered, and only that wake gets
                 # reminders. The callback is made outside the transaction, so the role can read
@@ -234,17 +245,19 @@ class Dispatcher:
                 # must not come back with reminders scheduled for it.
                 landed = conn.execute(
                     "UPDATE wakes SET status = 'delivered', finished_at = ? WHERE role = ? AND key = ?"
-                    " AND status = 'pending'", (events.now(), role, key)).rowcount
+                    " AND status = 'pending'",
+                    (events.now(), role, key),
+                ).rowcount
                 if landed:
                     self._schedule_reminders(conn, role, key, row)
             else:
                 backoff = min(MAX_BACKOFF_SECONDS, LEASE_SECONDS * 2 ** row["attempts"])
-                conn.execute("UPDATE wakes SET lease_until = ? WHERE role = ? AND key = ?",
-                             (_now() + backoff, role, key))
+                conn.execute(
+                    "UPDATE wakes SET lease_until = ? WHERE role = ? AND key = ?", (_now() + backoff, role, key)
+                )
         return 1
 
-    def _schedule_reminders(self, conn: sqlite3.Connection, role: str, key: str,
-                            row: sqlite3.Row) -> None:
+    def _schedule_reminders(self, conn: Connection, role: str, key: str, row: Row) -> None:
         """Set both reminders for a message batch whose original wake has just been delivered.
 
         Anchored here, at durable delivery, so a restart needs no reconstruction and a later message
@@ -260,10 +273,10 @@ class Dispatcher:
                 "INSERT INTO wakes (role, key, payload, status, lease_until, attempts, created_at,"
                 " due_at, baseline_seq, ordinal) VALUES (?, ?, ?, 'scheduled', 0, 0, ?, ?, ?, ?)"
                 " ON CONFLICT (role, key) DO NOTHING",
-                (role, f"{key}:r{ordinal}", row["payload"], events.now(),
-                 delivered_at + offset, batch - 1, ordinal))
+                (role, f"{key}:r{ordinal}", row["payload"], events.now(), delivered_at + offset, batch - 1, ordinal),
+            )
 
-    def _due_reminders(self, conn: sqlite3.Connection) -> int:
+    def _due_reminders(self, conn: Connection) -> int:
         """Claim and send every reminder that has come due; return how many were tried.
 
         Runs on the ordinary pass rather than a loop of its own, so the original wakes keep their
@@ -293,13 +306,14 @@ class Dispatcher:
             " ORDER BY (w.claimed_at IS NULL AND (SELECT COUNT(*) FROM wakes AS c"
             "           WHERE c.role = w.role AND c.ordinal IS NOT NULL AND c.claimed_at IS NOT NULL"
             "           AND c.claimed_at > ?) >= ?), w.due_at LIMIT ?",
-            (_now(), _now(), _now() - REMINDER_WINDOW_SECONDS, REMINDER_CAP, PAGE)).fetchall()
+            (_now(), _now(), _now() - REMINDER_WINDOW_SECONDS, REMINDER_CAP, PAGE),
+        ).fetchall()
         for row in due:
             if self._claim_reminder(conn, row["role"], row["key"], row["ordinal"], row["baseline_seq"]):
                 tried += self._attempt(conn, row["role"], row["key"])
         return tried
 
-    def _reminder_is_spent(self, conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    def _reminder_is_spent(self, conn: Connection, row: Row) -> bool:
         """Whether a pending reminder has lost its turn, retiring it if so. Checked before each send.
 
         Retries run before the due scan in a pass, so without this an earlier ordinal could be sent
@@ -307,18 +321,23 @@ class Dispatcher:
         A read landing since the claim retires it here too.
         """
         role, key = row["role"], row["key"]
-        later_is_due = conn.execute(
-            "SELECT 1 FROM wakes WHERE role = ? AND baseline_seq = ? AND ordinal > ?"
-            " AND status IN ('scheduled', 'capped', 'pending') AND due_at <= ?",
-            (role, row["baseline_seq"], row["ordinal"], _now())).fetchone() is not None
+        later_is_due = (
+            conn.execute(
+                "SELECT 1 FROM wakes WHERE role = ? AND baseline_seq = ? AND ordinal > ?"
+                " AND status IN ('scheduled', 'capped', 'pending') AND due_at <= ?",
+                (role, row["baseline_seq"], row["ordinal"], _now()),
+            ).fetchone()
+            is not None
+        )
         if not later_is_due and messages.read_seq(conn, role) <= row["baseline_seq"]:
             return False
-        conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ? AND key = ?"
-                     " AND status = 'pending'", (events.now(), role, key))
+        conn.execute(
+            "UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ? AND key = ? AND status = 'pending'",
+            (events.now(), role, key),
+        )
         return True
 
-    def _claim_reminder(self, conn: sqlite3.Connection, role: str, key: str, ordinal: int,
-                        baseline: int) -> bool:
+    def _claim_reminder(self, conn: Connection, role: str, key: str, ordinal: int, baseline: int) -> bool:
         """Take an exclusive claim on one due reminder, charging its cap slot once. True if won.
 
         Everything that decides whether it may go happens in one transaction: the role must not have
@@ -327,7 +346,7 @@ class Dispatcher:
         finds it no longer `scheduled` and stands down.
         """
         batch = key.rsplit(":r", 1)[0]
-        with transaction(conn):
+        with conn.transaction():
             if ordinal == max(range(1, len(REMINDER_OFFSETS) + 1)):
                 # The last ordinal has come due, so anything earlier has had its turn. This is about
                 # the chain reaching its end, not about this reminder going out, so it happens before
@@ -335,43 +354,56 @@ class Dispatcher:
                 # with the hook gone would otherwise leave the earlier ordinal scheduled and overdue,
                 # and send it once the hook returned. Unsent work is skipped and work still retrying
                 # is retired, but a delivered record is left alone.
-                conn.execute("UPDATE wakes SET status = 'skipped', finished_at = ? WHERE role = ?"
-                             " AND key LIKE ? AND key != ? AND status IN ('scheduled', 'capped')",
-                             (events.now(), role, f"{batch}:r%", key))
-                conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ?"
-                             " AND key LIKE ? AND key != ? AND status = 'pending'",
-                             (events.now(), role, f"{batch}:r%", key))
+                conn.execute(
+                    "UPDATE wakes SET status = 'skipped', finished_at = ? WHERE role = ?"
+                    " AND key LIKE ? AND key != ? AND status IN ('scheduled', 'capped')",
+                    (events.now(), role, f"{batch}:r%", key),
+                )
+                conn.execute(
+                    "UPDATE wakes SET status = 'superseded', finished_at = ? WHERE role = ?"
+                    " AND key LIKE ? AND key != ? AND status = 'pending'",
+                    (events.now(), role, f"{batch}:r%", key),
+                )
             configured = self._config.roles.get(role)
             if configured is None or not configured.wake.enabled:
                 # The hook can be taken away after the original was delivered. There is nothing to
                 # send to, so the reminder ends here: no attempt, no cap slot, and nothing raised
                 # out of the pass by a deliverer handed an empty target.
-                conn.execute("UPDATE wakes SET status = 'skipped', finished_at = ? WHERE role = ?"
-                             " AND key = ? AND status IN ('scheduled', 'capped')",
-                             (events.now(), role, key))
+                conn.execute(
+                    "UPDATE wakes SET status = 'skipped', finished_at = ? WHERE role = ?"
+                    " AND key = ? AND status IN ('scheduled', 'capped')",
+                    (events.now(), role, key),
+                )
                 log.info("reminder %s %s skipped: the role has no wake to send to", role, key)
                 return False
             if messages.read_seq(conn, role) > baseline:
-                conn.execute("UPDATE wakes SET status = 'superseded', finished_at = ?"
-                             " WHERE role = ? AND key = ? AND status IN ('scheduled', 'capped')",
-                             (events.now(), role, key))
+                conn.execute(
+                    "UPDATE wakes SET status = 'superseded', finished_at = ?"
+                    " WHERE role = ? AND key = ? AND status IN ('scheduled', 'capped')",
+                    (events.now(), role, key),
+                )
                 return False
             charged = conn.execute(
                 "SELECT COUNT(*) FROM wakes WHERE role = ? AND ordinal IS NOT NULL"
                 " AND claimed_at IS NOT NULL AND claimed_at > ?",
-                (role, _now() - REMINDER_WINDOW_SECONDS)).fetchone()[0]
-            already = conn.execute("SELECT claimed_at FROM wakes WHERE role = ? AND key = ?",
-                                   (role, key)).fetchone()
+                (role, _now() - REMINDER_WINDOW_SECONDS),
+            ).one()[0]
+            already = conn.execute("SELECT claimed_at FROM wakes WHERE role = ? AND key = ?", (role, key)).fetchone()
             if already is None:
                 return False
             if already["claimed_at"] is None and charged >= REMINDER_CAP:
-                conn.execute("UPDATE wakes SET status = 'capped' WHERE role = ? AND key = ?"
-                             " AND status = 'scheduled'", (role, key))
+                conn.execute(
+                    "UPDATE wakes SET status = 'capped' WHERE role = ? AND key = ? AND status = 'scheduled'",
+                    (role, key),
+                )
                 return False
-            return bool(conn.execute(
-                "UPDATE wakes SET status = 'pending', lease_until = 0, claimed_at = COALESCE(claimed_at, ?)"
-                " WHERE role = ? AND key = ? AND status IN ('scheduled', 'capped')",
-                (_now(), role, key)).rowcount)
+            return bool(
+                conn.execute(
+                    "UPDATE wakes SET status = 'pending', lease_until = 0, claimed_at = COALESCE(claimed_at, ?)"
+                    " WHERE role = ? AND key = ? AND status IN ('scheduled', 'capped')",
+                    (_now(), role, key),
+                ).rowcount
+            )
 
     def _send(self, role: str, wake_id: str, body: bytes) -> bool:
         wake = self._config.roles[role].wake
@@ -393,8 +425,10 @@ def wake_id(role: str, key: str) -> str:
     return "wake_" + hashlib.sha256(f"{role}:{key}".encode()).hexdigest()[:24]
 
 
-def recent(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:
+def recent(conn: Connection, limit: int = 20) -> list[dict[str, Any]]:
     """The latest wakes and how they ended, for `baton wakes`."""
-    rows = conn.execute("SELECT role, key, status, attempts, created_at, finished_at FROM wakes"
-                        " ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    rows = conn.execute(
+        "SELECT role, key, status, attempts, created_at, finished_at FROM wakes ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
     return [dict(row) for row in rows]

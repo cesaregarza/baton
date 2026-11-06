@@ -49,6 +49,7 @@ def words(error: Exception) -> str:
 
 # 1. propose --------------------------------------------------------------------------------------------
 
+
 def test_propose_returns_the_rendered_proposal(build_world):
     w = build_world()
     proposal = w.propose("lane-a", ROOT, ("topic.create_sub", "reference.edit", "reference.edit"), True, 7)
@@ -80,10 +81,20 @@ def test_propose_stores_one_row_with_every_proposal_field_and_nothing_else(build
     assert row["proposal_expires_at"] == (START + timedelta(hours=24)).isoformat()
     assert re.fullmatch(r"[0-9a-f]{32}", row["nonce"])
     assert re.fullmatch(r"[0-9a-f]{64}", row["digest"])
-    assert (row["alias_name_seen"], row["alias_code_seen"], row["topic_path_seen"]) == \
-        ("lane-b", alias_code(w.alias_b["alias_id"]), CHILD)
-    for column in ("authorized_by", "authorized_at", "authorized_digest", "proof_digest",
-                   "revoked_at", "revoked_by", "revoke_reason"):
+    assert (row["alias_name_seen"], row["alias_code_seen"], row["topic_path_seen"]) == (
+        "lane-b",
+        alias_code(w.alias_b["alias_id"]),
+        CHILD,
+    )
+    for column in (
+        "authorized_by",
+        "authorized_at",
+        "authorized_digest",
+        "proof_digest",
+        "revoked_at",
+        "revoked_by",
+        "revoke_reason",
+    ):
         assert row[column] is None, column
 
 
@@ -91,8 +102,7 @@ def test_propose_writes_one_propose_event_by_the_owner(build_world):
     w = build_world()
     proposal = w.propose()
     [event] = w.events()
-    assert (event["seq"], event["grant_id"], event["event"], event["actor"]) == \
-        (1, proposal["id"], "propose", "owner")
+    assert (event["seq"], event["grant_id"], event["event"], event["actor"]) == (1, proposal["id"], "propose", "owner")
     assert event["at"] == START.isoformat()
     assert event["detail"] is None or isinstance(json.loads(event["detail"]), (dict, list))
 
@@ -105,13 +115,16 @@ def test_two_proposals_for_the_same_pair_are_two_grants_with_nothing_shared(buil
     assert w.row(first["id"])["nonce"] != w.row(second["id"])["nonce"]
 
 
-@pytest.mark.parametrize("what,alias,topic,code", [
-    ("an unknown alias", "nobody", ROOT, "forbidden"),
-    ("a prefix of an alias", "lane", ROOT, "forbidden"),
-    ("an unknown topic", "lane-a", "nowhere", "unknown_topic"),
-    ("a prefix of a topic", "lane-a", "job-hun", "unknown_topic"),
-    ("a topic with a trailing slash", "lane-a", ROOT + "/", "unknown_topic"),
-])
+@pytest.mark.parametrize(
+    "what,alias,topic,code",
+    [
+        ("an unknown alias", "nobody", ROOT, "forbidden"),
+        ("a prefix of an alias", "lane", ROOT, "forbidden"),
+        ("an unknown topic", "lane-a", "nowhere", "unknown_topic"),
+        ("a prefix of a topic", "lane-a", "job-hun", "unknown_topic"),
+        ("a topic with a trailing slash", "lane-a", ROOT + "/", "unknown_topic"),
+    ],
+)
 def test_propose_refuses_a_missing_alias_or_topic_and_writes_nothing(build_world, what, alias, topic, code):
     w = build_world()
     error = refusal(w.propose, alias, topic)
@@ -134,8 +147,10 @@ def test_propose_accepts_the_first_and_last_day(build_world, days):
     assert proposal["expires_at"] == (START + timedelta(days=days)).isoformat()
 
 
-@pytest.mark.parametrize("capabilities", [[], ["bogus"], ["reference.edit", "reference.delete"],
-                                          ["Reference.Edit"], [""], ["reference.edit "]])
+@pytest.mark.parametrize(
+    "capabilities",
+    [[], ["bogus"], ["reference.edit", "reference.delete"], ["Reference.Edit"], [""], ["reference.edit "]],
+)
 def test_propose_refuses_no_capability_and_any_name_but_the_three(build_world, capabilities):
     w = build_world()
     assert refusal(w.propose, capabilities=capabilities).code == "invalid_request"
@@ -150,21 +165,25 @@ def test_each_of_the_three_capabilities_is_accepted_alone(build_world, capabilit
 
 # 2. The digest -------------------------------------------------------------------------------------------
 
+
 # Mutant 4 (the recomputed-digest check) and the digest's field list: changing any one field the digest covers
 # after authorization makes the grant invalid, and changing a field it does not cover does not.
-@pytest.mark.parametrize("column,value", [
-    ("alias_id", "al_0000000000000002"),
-    ("topic_id", "topic_somebody_elses"),
-    ("capabilities", json.dumps(list(CAPABILITIES))),
-    ("inherit", 1),
-    ("expires_at", (START + timedelta(days=29)).isoformat()),
-    ("proposed_by", "someone"),
-    ("proposed_at", (START - timedelta(hours=1)).isoformat()),
-    ("nonce", "f" * 32),
-    ("alias_name_seen", "lane-z"),
-    ("alias_code_seen", "0000"),
-    ("topic_path_seen", "elsewhere"),
-])
+@pytest.mark.parametrize(
+    "column,value",
+    [
+        ("alias_id", "al_0000000000000002"),
+        ("topic_id", "topic_somebody_elses"),
+        ("capabilities", json.dumps(list(CAPABILITIES))),
+        ("inherit", 1),
+        ("expires_at", (START + timedelta(days=29)).isoformat()),
+        ("proposed_by", "someone"),
+        ("proposed_at", (START - timedelta(hours=1)).isoformat()),
+        ("nonce", "f" * 32),
+        ("alias_name_seen", "lane-z"),
+        ("alias_code_seen", "0000"),
+        ("topic_path_seen", "elsewhere"),
+    ],
+)
 def test_editing_any_digested_field_after_authorization_makes_the_grant_invalid(build_world, column, value):
     w = build_world()
     made = w.activate()["id"]
@@ -174,10 +193,13 @@ def test_editing_any_digested_field_after_authorization_makes_the_grant_invalid(
     assert w.covering(ROOT) is None
 
 
-@pytest.mark.parametrize("column,value", [
-    ("proposal_expires_at", (START + timedelta(days=9)).isoformat()),
-    ("digest", "0" * 64),
-])
+@pytest.mark.parametrize(
+    "column,value",
+    [
+        ("proposal_expires_at", (START + timedelta(days=9)).isoformat()),
+        ("digest", "0" * 64),
+    ],
+)
 def test_editing_a_field_the_digest_does_not_cover_changes_nothing(build_world, column, value):
     """The check recomputes from the covered fields, so the stored `digest` copy is not what it trusts."""
     w = build_world()
@@ -196,6 +218,7 @@ def test_an_edited_authorized_digest_makes_the_grant_invalid(build_world):
 
 
 # 3. States, in order -------------------------------------------------------------------------------------
+
 
 def test_a_proposal_is_pending_until_its_day_is_up_and_then_lapsed(build_world):
     w = build_world()
@@ -250,6 +273,7 @@ def test_a_state_is_never_stored(build_world):
 
 # 4. authorize --------------------------------------------------------------------------------------------
 
+
 def test_authorize_mints_a_key_and_stores_only_its_hash(build_world):
     w = build_world()
     proposal = w.propose()
@@ -295,8 +319,10 @@ def test_authorize_writes_an_authorize_event_by_the_owner(build_world):
     proposal = w.propose()
     w.clock.advance(minutes=5)
     w.authorize(proposal)
-    assert [(e["seq"], e["event"], e["actor"], e["at"]) for e in w.events()] == \
-        [(1, "propose", "owner", START.isoformat()), (2, "authorize", "owner", w.clock.now.isoformat())]
+    assert [(e["seq"], e["event"], e["actor"], e["at"]) for e in w.events()] == [
+        (1, "propose", "owner", START.isoformat()),
+        (2, "authorize", "owner", w.clock.now.isoformat()),
+    ]
     assert {e["grant_id"] for e in w.events()} == {proposal["id"]}
 
 
@@ -306,12 +332,14 @@ def test_authorize_refuses_every_digest_but_the_exact_one(build_world):
     proposal = w.propose()
     other = w.propose()
     before = dict(w.row(proposal["id"]))
-    wrong = {"another hash": "0" * 64,
-             "the same hash in capitals": proposal["digest"].upper(),
-             "a prefix of the right one": proposal["digest"][:32],
-             "the right one with a space": proposal["digest"] + " ",
-             "another grant's digest": other["digest"],
-             "nothing": ""}
+    wrong = {
+        "another hash": "0" * 64,
+        "the same hash in capitals": proposal["digest"].upper(),
+        "a prefix of the right one": proposal["digest"][:32],
+        "the right one with a space": proposal["digest"] + " ",
+        "another grant's digest": other["digest"],
+        "nothing": "",
+    }
     for label, given in wrong.items():
         refusal(w.tg.authorize, w.db, proposal["id"], given)
         assert dict(w.row(proposal["id"])) == before, f"{label} changed the row"
@@ -411,6 +439,7 @@ def test_authorize_refuses_when_the_alias_or_topic_is_gone(build_world, table, c
 
 # 5. revoke -----------------------------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("reason", ["", "   ", "\n\t ", "x" * 501, None])
 def test_revoke_refuses_a_missing_blank_or_overlong_reason(build_world, reason):
     w = build_world()
@@ -440,10 +469,14 @@ def test_revoke_fills_only_its_own_fields_and_deletes_nothing(build_world, name)
     w.revoke(made, "the lane is done")
     after = dict(w.row(made))
     assert len(w.rows()) == count, "revoke deleted a row"
-    assert {k: after[k] for k in after if not k.startswith("revoke")} == \
-        {k: before[k] for k in before if not k.startswith("revoke")}, "revoke changed a field that is not its own"
-    assert (after["revoked_at"], after["revoked_by"], after["revoke_reason"]) == \
-        (w.clock.now.isoformat(), "owner", "the lane is done")
+    assert {k: after[k] for k in after if not k.startswith("revoke")} == {
+        k: before[k] for k in before if not k.startswith("revoke")
+    }, "revoke changed a field that is not its own"
+    assert (after["revoked_at"], after["revoked_by"], after["revoke_reason"]) == (
+        w.clock.now.isoformat(),
+        "owner",
+        "the lane is done",
+    )
     assert all(before[column] == after[column] for column in PROPOSAL_COLUMNS)
     assert [e["event"] for e in w.events()][events:] == ["revoke"]
     assert w.events()[-1]["actor"] == "owner"
@@ -477,10 +510,15 @@ def test_revoke_refuses_an_unknown_grant_id(build_world):
 
 # 6. list_grants ------------------------------------------------------------------------------------------
 
+
 def test_the_default_listing_holds_only_pending_and_active_grants(build_world):
     w = build_world()
-    ids = {"expired": w.activate(days=1)["id"], "lapsed": w.propose()["id"], "invalid": w.activate()["id"],
-           "revoked": w.activate()["id"]}
+    ids = {
+        "expired": w.activate(days=1)["id"],
+        "lapsed": w.propose()["id"],
+        "invalid": w.activate()["id"],
+        "revoked": w.activate()["id"],
+    }
     w.edit(ids["invalid"], capabilities=json.dumps(list(CAPABILITIES)))
     w.revoke(ids["revoked"])
     w.clock.now = START + timedelta(days=1)  # the first one expires and the unauthorized one lapses just now
@@ -505,8 +543,20 @@ def test_a_listed_grant_shows_what_the_human_needs_and_never_the_proof_or_nonce(
     w = build_world()
     made = w.activate(capabilities=("thread.organise",), inherit=True)
     [shown] = w.tg.list_grants(w.db)
-    assert set(shown.keys()) >= {"id", "alias_id", "alias_name", "alias_code", "topic_id", "topic_path", "capabilities",
-                                 "inherit", "expires_at", "proposal_expires_at", "digest", "state"}
+    assert set(shown.keys()) >= {
+        "id",
+        "alias_id",
+        "alias_name",
+        "alias_code",
+        "topic_id",
+        "topic_path",
+        "capabilities",
+        "inherit",
+        "expires_at",
+        "proposal_expires_at",
+        "digest",
+        "state",
+    }
     assert shown["id"] == made["id"] and shown["capabilities"] == ["thread.organise"]
     assert (shown["alias_name"], shown["topic_path"]) == ("lane-a", ROOT)
     assert "proof_digest" not in shown.keys() and "nonce" not in shown.keys()
@@ -530,13 +580,15 @@ def test_listing_orders_by_proposal_time_then_id(build_world):
 def test_listing_writes_nothing(build_world):
     w = build_world()
     w.activate()
-    changes = w.db.total_changes
+    driver = w.db._driver_connection()
+    changes = driver.total_changes
     w.tg.list_grants(w.db)
     w.tg.list_grants(w.db, include_all=True)
-    assert w.db.total_changes == changes and len(w.events()) == 2
+    assert driver.total_changes == changes and len(w.events()) == 2
 
 
 # 7. The event log and atomicity ----------------------------------------------------------------------------
+
 
 def test_the_event_sequence_follows_the_operations_and_refusals_add_nothing(build_world):
     w = build_world()
@@ -553,10 +605,15 @@ def test_the_event_sequence_follows_the_operations_and_refusals_add_nothing(buil
     events = w.events()
     assert [e["seq"] for e in events] == list(range(1, len(events) + 1))
     assert [(e["grant_id"], e["event"], e["actor"]) for e in events] == [
-        (first["id"], "propose", "owner"), (second["id"], "propose", "owner"),
-        (first["id"], "authorize", "owner"), (second["id"], "revoke", "owner"), (first["id"], "revoke", "owner")]
-    assert [e["at"] for e in events] == [START.isoformat()] * 2 + \
-        [(START + timedelta(minutes=1)).isoformat()] * 2 + [(START + timedelta(minutes=2)).isoformat()]
+        (first["id"], "propose", "owner"),
+        (second["id"], "propose", "owner"),
+        (first["id"], "authorize", "owner"),
+        (second["id"], "revoke", "owner"),
+        (first["id"], "revoke", "owner"),
+    ]
+    assert [e["at"] for e in events] == [START.isoformat()] * 2 + [(START + timedelta(minutes=1)).isoformat()] * 2 + [
+        (START + timedelta(minutes=2)).isoformat()
+    ]
 
 
 def test_the_event_columns_are_the_ones_the_spec_names(build_world):
@@ -575,11 +632,16 @@ def test_an_operation_is_one_transaction_so_a_failed_event_write_undoes_it(build
         w.authorize(proposal)
     before = [dict(row) for row in w.rows()]
     events = len(w.events())
-    w.db.execute("CREATE TRIGGER no_more_events BEFORE INSERT ON topic_grant_events"
-                 " BEGIN SELECT RAISE(ABORT, 'no more events'); END")
+    w.db.execute(
+        "CREATE TRIGGER no_more_events BEFORE INSERT ON topic_grant_events"
+        " BEGIN SELECT RAISE(ABORT, 'no more events'); END"
+    )
     with pytest.raises(Exception, match="no more events"):
-        {"propose": lambda: w.propose(), "authorize": lambda: w.authorize(proposal),
-         "revoke": lambda: w.revoke(proposal["id"])}[operation]()
+        {
+            "propose": lambda: w.propose(),
+            "authorize": lambda: w.authorize(proposal),
+            "revoke": lambda: w.revoke(proposal["id"]),
+        }[operation]()
     assert not w.db.in_transaction, "the failed operation left its transaction open"
     w.db.execute("DROP TRIGGER no_more_events")
     assert [dict(row) for row in w.rows()] == before

@@ -25,9 +25,10 @@ from test_migration_matrix import FIXTURE_VERSIONS
 from test_topic_containers import make_topic, topic_config
 from test_topic_migration import v14_database
 
-from baton import conversations, store, topics
+from baton import conversations, topics
 from baton.config import Config
-from baton.store import connect
+from baton.database import store
+from baton.database.store import connect
 
 FIXTURES = Path(__file__).parent / "fixtures"
 V15_VERSION = 15  # the version schema_v15.sql holds, not an assertion about the current one
@@ -48,16 +49,20 @@ def install(config: Config, fixture: str) -> None:
 def snapshot_plan(raw: sqlite3.Connection) -> dict[str, list[str]]:
     """Every ordinary table in the database and its columns, as the old schema had them."""
     plan = {}
-    for (name,) in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-                               " AND name NOT LIKE '%\\_fts%' ESCAPE '\\' ORDER BY name"):
+    for (name,) in raw.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        " AND name NOT LIKE '%\\_fts%' ESCAPE '\\' ORDER BY name"
+    ):
         if name not in NOT_COMPARED:
             plan[name] = [row[1] for row in raw.execute(f"PRAGMA table_info({name})")]
     return plan
 
 
 def snapshot(conn: sqlite3.Connection, plan: dict[str, list[str]]) -> dict[str, list[tuple]]:
-    return {table: [tuple(row) for row in conn.execute(f"SELECT {', '.join(cols)} FROM {table} ORDER BY rowid")]
-            for table, cols in plan.items()}
+    return {
+        table: [tuple(row) for row in conn.execute(f"SELECT {', '.join(cols)} FROM {table} ORDER BY rowid")]
+        for table, cols in plan.items()
+    }
 
 
 def ids_in(db: sqlite3.Connection) -> dict[str, str]:
@@ -72,6 +77,7 @@ def assert_good_ids(found: dict[str, str]) -> None:
 
 # 1. The version relationship ----------------------------------------------------------------------------
 
+
 def test_the_version_the_v15_fixture_holds_is_one_the_database_migrates_from():  # FAILS-ON-MAIN
     raw = sqlite3.connect(":memory:")
     raw.executescript((FIXTURES / "schema_v15.sql").read_text())
@@ -83,6 +89,7 @@ def test_the_version_the_v15_fixture_holds_is_one_the_database_migrates_from(): 
 
 
 # 2. Every fixture reaches the current schema with ids and history ---------------------------------------
+
 
 @pytest.mark.parametrize("version", FIXTURE_VERSIONS)
 def test_every_older_schema_gains_the_topic_id_and_the_history_table(tmp_path, version):  # FAILS-ON-MAIN
@@ -101,15 +108,23 @@ def test_every_older_schema_gains_the_topic_id_and_the_history_table(tmp_path, v
 
 # 3. The v15 fixture: ids are new, everything else is as it was ----------------------------------------------
 
+
 def test_the_v15_fixture_has_the_topics_and_threads_it_is_documented_to_have():  # GUARD
     raw = sqlite3.connect(":memory:")
     raw.executescript((FIXTURES / "schema_v15.sql").read_text())
-    assert [row[0] for row in raw.execute("SELECT path FROM topics ORDER BY path")] == \
-        ["baton", "baton/development", "reviews"]
+    assert [row[0] for row in raw.execute("SELECT path FROM topics ORDER BY path")] == [
+        "baton",
+        "baton/development",
+        "reviews",
+    ]
     assert "id" not in {row[1] for row in raw.execute("PRAGMA table_info(topics)")}, "the fixture is schema 15"
     filed = {title: topic for title, topic in raw.execute("SELECT title, topic FROM conversations")}
-    assert filed == {"Release plan": "baton", "A guest question": "baton", "Schema work": "baton/development",
-                     "No topic": None}
+    assert filed == {
+        "Release plan": "baton",
+        "A guest question": "baton",
+        "Schema work": "baton/development",
+        "No topic": None,
+    }
     raw.close()
 
 
@@ -149,18 +164,35 @@ def test_the_upgraded_database_reads_as_the_old_one_did(tmp_path):  # GUARD
     db = connect(config.db_path)
     try:
         listed = {entry["path"]: entry for entry in topics.listing(db, config, reader=O)}
-        assert {path: (entry["title"], entry["description"], entry["members"], entry["threads"],
-                       entry["created_by"]) for path, entry in listed.items()} == {
+        assert {
+            path: (entry["title"], entry["description"], entry["members"], entry["threads"], entry["created_by"])
+            for path, entry in listed.items()
+        } == {
             "baton": ("Baton", "The relay itself", [O, "assistant"], 3, O),
             "baton/development": ("development", None, [O, "outsider"], 1, O),
-            "reviews": ("reviews", "Reviews, one thread each", [], 0, O)}
-        assert all(set(entry) == {"path", "title", "description", "members", "created_by", "created_at", "threads",
-                                  "last_activity_at"} for entry in listed.values()), "no id in a topic's response"
+            "reviews": ("reviews", "Reviews, one thread each", [], 0, O),
+        }
+        assert all(
+            set(entry)
+            == {"path", "title", "description", "members", "created_by", "created_at", "threads", "last_activity_at"}
+            for entry in listed.values()
+        ), "no id in a topic's response"
         assert set(topics.get(db, config, reader=O, path="baton")) == {
-            "path", "title", "description", "members", "created_by", "created_at", "threads", "subtopics"}
+            "path",
+            "title",
+            "description",
+            "members",
+            "created_by",
+            "created_at",
+            "threads",
+            "subtopics",
+        }
         assert {c["title"]: c["topic"] for c in conversations.list_all(db)} == {
-            "Release plan": "baton", "A guest question": "baton", "Schema work": "baton/development",
-            "No topic": None}
+            "Release plan": "baton",
+            "A guest question": "baton",
+            "Schema work": "baton/development",
+            "No topic": None,
+        }
         assert [c["title"] for c in conversations.list_all(db, "baton/development")] == ["Schema work"]
     finally:
         db.close()
@@ -189,8 +221,11 @@ def test_a_migrated_topic_keeps_its_id_through_a_rename_and_a_new_topic_gets_ano
         before = ids_in(db)
         topics.rename(db, config, actor=O, path="baton", new_path="platform")
         after = ids_in(db)
-        assert after == {"platform": before["baton"], "platform/development": before["baton/development"],
-                         "reviews": before["reviews"]}
+        assert after == {
+            "platform": before["baton"],
+            "platform/development": before["baton/development"],
+            "reviews": before["reviews"],
+        }
         make_topic(db, config, "baton")
         made = ids_in(db)["baton"]
         assert isinstance(made, str) and made, "the new topic has no id"
@@ -200,6 +235,7 @@ def test_a_migrated_topic_keeps_its_id_through_a_rename_and_a_new_topic_gets_ano
 
 
 # 4. A database that has to discover its topics, as the version-15 upgrade did ---------------------------------
+
 
 def test_discovered_topics_each_get_an_id_including_implicit_parents(tmp_path):  # FAILS-ON-MAIN
     config = topic_config(tmp_path)
@@ -234,9 +270,13 @@ def test_the_backfilled_members_and_titles_survive(tmp_path):  # FAILS-ON-MAIN
     db = connect(config.db_path)
     try:
         assert_good_ids(ids_in(db))
-        found = {row["path"]: (row["title"], json.loads(row["members"]), row["created_by"])
-                 for row in db.execute("SELECT * FROM topics")}
-        assert found == {"baton": ("baton", [O, "reviewer"], "migration"),
-                         "baton/development": ("development", ["assistant", O], "migration")}
+        found = {
+            row["path"]: (row["title"], json.loads(row["members"]), row["created_by"])
+            for row in db.execute("SELECT * FROM topics")
+        }
+        assert found == {
+            "baton": ("baton", [O, "reviewer"], "migration"),
+            "baton/development": ("development", ["assistant", O], "migration"),
+        }
     finally:
         db.close()

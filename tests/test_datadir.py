@@ -20,7 +20,7 @@ from test_integration import client, payload
 from baton import auth, cli, messages
 from baton.app import create_app
 from baton.config import ConfigError
-from baton.store import connect
+from baton.database.store import connect
 
 
 @pytest.fixture

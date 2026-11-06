@@ -9,8 +9,8 @@ import pytest
 from seat_helpers import agent_says, conversation, get, hidden, log_in, mailbox, make_seat_host, post, stored_by_seat
 
 from baton import conversations
+from baton.database.store import connect
 from baton.errors import ConversationFull
-from baton.store import connect
 
 try:
     from baton import seat
@@ -27,8 +27,12 @@ def inbox_host(tmp_path: Path):
 
 
 def _ack(host, cookies, page):
-    return post(host.config, "/seat/ack", {"receipt": hidden(page.body, "receipt"), "csrf": hidden(page.body, "csrf")},
-                cookies=cookies)
+    return post(
+        host.config,
+        "/seat/ack",
+        {"receipt": hidden(page.body, "receipt"), "csrf": hidden(page.body, "csrf")},
+        cookies=cookies,
+    )
 
 
 def test_reading_the_inbox_moves_nothing(inbox_host) -> None:
@@ -92,8 +96,12 @@ def test_a_receipt_is_bound_to_its_session(inbox_host) -> None:
     page = get(host.config, "/seat/inbox", cookies=cookies)
     _, other = log_in(host.config, host.seat_token)
     other_page = get(host.config, "/seat/inbox", cookies=other)
-    response = post(host.config, "/seat/ack", {"receipt": hidden(page.body, "receipt"),
-                                               "csrf": hidden(other_page.body, "csrf")}, cookies=other)
+    response = post(
+        host.config,
+        "/seat/ack",
+        {"receipt": hidden(page.body, "receipt"), "csrf": hidden(other_page.body, "csrf")},
+        cookies=other,
+    )
     assert response.status in (403, 409) and mailbox(host) == (1, 0)
 
 

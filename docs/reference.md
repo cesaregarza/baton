@@ -20,6 +20,7 @@ Arguments ending in `?` are optional. Some tools are available only when their f
 | `bind_events(token)`, `unbind_events(token)` | Bind or unbind a guest OAuth grant's event subscriptions to an enrolled alias. See [MCP Events](integrations/openai-mcp-events.md#shared-guest-logins). |
 | `send_message(text, to? \| conversation_id?, job_id?, relayed?, reply_to?, attention?, needs_decision?, request_id?, token?)` | Send to a role or conversation. Reply and attention fields apply only to conversations. |
 | `read_messages(after_seq?, limit?)` | Read messages addressed to the caller. Without `after_seq`, return undelivered messages. |
+| `read_secretary_summaries(after?, limit?)` | Page the authenticated role's shared secretary summary archive; rechecks current visibility of every cited source. |
 | `wait(timeout_seconds?)` | Wait up to 30 seconds for messages or job changes addressed to the caller. |
 
 A plain guest has a smaller tool allowlist and must supply an alias proof to post; an enrolled alias can
@@ -189,7 +190,9 @@ configuration problem exits with status 2.
 | `baton alias arm-enrol\|arm-rekey\|map\|unmap` | Manage enrolled aliases on the host. |
 | `baton events status\|unbind` | Inspect event subscriptions and receipts, or unbind a guest grant's event target. |
 | `baton seat logout-all` | End all browser-seat sessions. |
-| `baton secretary --state FILE --policy FILE scan\|replay\|show\|cancel\|decide` | Build and inspect local attention records from retained Baton events. |
+| `baton secretary --state FILE --policy FILE decide\|show\|acknowledge` | Run model triage, acknowledge delivered summaries, and inspect private assessments. |
+| `baton secretary --policy FILE summaries [--after N] [--limit N]` | Page the local principal's shared archive; no private `--state` file is required. |
+| `baton --host URL secretary summaries [--after N] [--limit N]` | Page the authenticated token role's archive remotely; no host-side secretary policy file is required. |
 | `baton secretary --policy FILE read --after POS\|--ids IDS` | Read what the principal was delivered, of any kind, text included, for a secretary thread. |
 
 `--as` defaults to `BATON_ROLE` in local mode and cannot select a human role. `--config` defaults to
@@ -197,54 +200,82 @@ configuration problem exits with status 2.
 host and the role of `BATON_TOKEN` or `BATON_TOKEN_COMMAND` for `message`, `read`, `wait`, and the
 `conversation new`, `list`, `topic`, and `history` subcommands. Administration commands require local mode.
 
-`secretary` is host-local and refuses `--host`. Its JSON policy names one existing non-human principal role
-and one existing, unmapped guest alias ID for attribution; it grants neither authority. For example:
-`{"version":1,"principal":"planner","secretary_alias_id":"al_existing"}`. `scan` reads up to 100 events
-by default (`--limit` allows 1–1000) and stores only metadata, references, and digests in the separate
-`--state` SQLite file. `replay` compares a fresh interpretation without changing saved records; `show`
-renders currently visible source excerpts; `cancel ID --reason TEXT` records an explicit closure.
-`decide --budget-seconds N` scans within the budget, then decides wake, hold or keep for one wake
-(`--trigger`; a job event wakes only with policy `job_events_wake`) with a brief of at most `brief_bytes`
-(default 2048), or digests for the hourly turn (`--hourly`), over what is new since `--since` and never at or
-before `--floor`. Once a brief or digest is delivered, its `covered_through` is the next `--since`: a bound keeps
-the oldest whole lines, so what it leaves out comes next. Without `--since`, the first decision records the floor
-before it scans. It records each decision and never delivers;
-`python -m baton.secretary_decide` takes the same options without the CLI's import time. An optional policy
-`judge` block (`command`, an absolute argv; `timeout_seconds`; `questions_sha256`; and optionally
-`owed_digest_below` and `wake_at`) lets a wake's `decide` put at most two new messages to that host command,
-and a failed, late or malformed answer leaves a message to the deterministic rules, as does one that ties it
-to none of the items offered when it had a candidate the judge was not offered; the catch-up scan and the
-hourly digest never use it. Each result counts the decisions a judge made (`judged_counts`) and names the
-wake's own item (`trigger_item`) while it is in the window, so a caller can tell a trigger the judge
-decided from one it did not. Its `new` items are what this call scanned; its `window` lists everything
-outstanding since `--since`, however little of it this call scanned, as `deliveries` and `context` in stream
-order, each with its first 100 items listed and the rest counted (`more_deliveries`, `more_context`). A caller
-that offers the deliveries to another reader covers no further than the last one it offered. The
-policy and state formats are versioned. This interface does not deliver, approve, or modify Baton work.
-`read` is the one secretary action that returns message text, for a host-local secretary thread. After an event
-position (`--after`), it returns every event the scan reads for the principal, whatever its kind, in two lists:
-`deliveries`, the events addressed to the principal, and `context`, its own sends and later events on jobs it moved,
-which are never deliveries. Each event carries its position, kind, time, actor, audience, job and sequence, summary
-and data, and a message event also carries its message, listed once. A new kind of event addressed to the principal
-is read as a delivery with no change to the secretary. With `--ids`, it reads the given messages, listing any the
-principal can't read as missing. Each message carries its id, position, conversation or direct recipient, sender,
-time, `reply_to`, text and relayed entries. A page holds at most `--limit` events or messages (default 20, at most
-100) and `--max-bytes` (default 256 KiB), always at least one, and `through_pos` is where the next page starts. Each
-of `decide`'s items says whether it was `delivered` to the principal in the same way. `read` opens the database
-read-only, needs no `--state`, and writes nothing; `python -m baton.secretary_read` takes the same options.
-The projection reads events addressed to or authored by the principal, plus later events for jobs whose
-earlier create or move event the principal authored. It derives job facts from those event rows and
-rechecks message visibility before retaining a cited message. Envelope version 1 refuses unknown stored
-representations. If source visibility later narrows, `replay` reports unavailable sources as differences
-without recomputing a misleading partial digest.
-Direct replies correlate to an owed request only when one open request exists between the two roles;
-ambiguous replies leave every candidate open. An untagged acknowledgment without an artifact needs one
-matching expectation. Each brief version contains only the new cited source for that version.
-An incoming direct message opens its own owed record even if it also provides evidence for an awaited
-job result. A job move supersedes only a job-event-origin expectation when the next actor changes.
-An external revision token is an identity, not an ordered version: a later request must explicitly name
-`supersedes repo#7@oldsha` alongside its new `repo#7@newsha` to close the cited predecessor. A review or
-release result requires the matching result kind; `CI PASS` can only satisfy a check expectation.
+Secretary assessment, worker, hook, and acknowledgement actions are host-local. `secretary summaries` also supports
+an authenticated remote read through `--host`; the token role selects the archive principal, and this read needs no
+host-side policy file or policy configuration. The MCP tool `read_secretary_summaries` provides the same role-scoped
+read. Local secretary actions require a version 3 JSON policy with `principal`, stable
+`secretary_id`, explicit `model` and `decision_engine` objects, `max_tool_calls`, `max_events`, `context_bytes`,
+`summary_bytes`, `wake_threshold`, `retry_initial_seconds`, `retry_max_seconds`, `max_attempts`, and
+`digest_seconds`. The [secretary guide](../baton/agents/secretary/README.md#policy) has a complete example.
+`decide` writes private assessment/queue state and appends deliverable summaries to `baton.db`, so the local
+database must be writable. `read` reads source messages from a read-only snapshot; `summaries` only reads the archive.
+Model and engine IDs and HTTP endpoints are selected in the policy; Baton does not supply model, URL, or
+transport defaults. Command providers require `command`, `env`, `timeout_seconds`, and `max_output_tokens`.
+Model commands use protocol 4; decision-engine commands use protocol 3 and return exactly `decision` and
+`wake_probability`. The independent engine runs on each alert page. JEV validates its probability distribution
+and uses `probabilities["wake"]` for `wake_threshold`; its separate wire `confidence` is not used as the threshold.
+A wake verdict at or above `wake_threshold` forces a wake even if model triage holds, keeps, or fails. The model
+may call a tool to retrieve the cached verdict, which contains no rationale.
+
+`decide --budget-seconds N` reads bounded, complete pages of the principal's visible events, including visible
+reply parents, and asks the independent engine and model for triage. The engine timeout must be shorter than the
+assessment budget; install, worker startup, and standalone decisions validate that relationship. Integration
+delivery uses a separate required `delivery_timeout_seconds`, independent of engine timeout. Standalone implicit
+mode handles one due retry before scanning new work, even for a newer trigger. Handle that returned page first,
+then call again for the new event. An untriggered call while failed work is in backoff raises retryable
+`secretary_unavailable`; a different new event can still be assessed during that backoff. Passing both `--since`
+and `--floor` requests an exact replay. An explicit trigger must
+belong to the bounded page or the call fails. Page size also reserves a citation budget from model output
+capacity. Pages are never silently truncated. Transport failures back off in their original mode. Invalid model
+content/output and `InboxTooLarge` count toward `max_attempts` and may split. Timeouts, rejected requests, and
+failed commands also count when another page has received a valid answer under the same policy since this page
+last failed; elapsed time alone never causes splitting. Each poll reserves one configured budget
+for a fresh alert and another for scheduled work. It runs one eligible scheduled lane per poll, alternating retry
+and digest priority, so a lane receives the full reserved budget rather than leftover time.
+
+The worker batches contiguous due held pages into one bounded hourly digest at `digest_seconds` intervals.
+Hold, keep, and model-error pages remain eligible while scanning continues. Pending wake IDs stay queued, with
+wakes surfaced first; new IDs are announced even when older ones remain unacknowledged. Installation binds the
+activation floor to the current database head. Scan progress is separate from the contiguous delivered watermark.
+
+Every summary, including a digest, must account for and cite all events in its page; citing visible reply parents
+is optional. Source checks validate references against supplied context, not the truth of summary claims, and the
+prompt forbids invented assignments or approvals. `acknowledge DECISION_ID` is idempotent. Delivered ranges
+merge only when contiguous, so acknowledging a later wake cannot skip a held gap. Deliver and acknowledge every
+nonempty brief, including digest results with decision `keep`. Sanitized engine, model, and delivery failures
+are reported separately in worker health/status and logged without provider response bodies or credentials. A model outage
+without a forced engine wake remains an outage, while an unavailable model after a forced wake produces a notice.
+Digest failures retain digest mode and eventually produce a keep notice, never an alert or wake. After a crash,
+the queue reuses a saved result for the same policy and current source window before invoking either provider.
+Model failures distinguish missing credentials, authentication rejection, invalid requests, timeouts, and outages.
+Connection/pool timeouts remain outages; read/write timeouts and HTTP 408/504 responses can count toward
+splitting only after another page answers. A supplied key clears a current missing-credential failure to
+`not_used` at startup while preserving its history. Delivery runs in one supervised task alongside assessment;
+its retries double from `retry_initial_seconds` to `retry_max_seconds`, with warnings on failure-state changes.
+Hourly host calls wait only on digest retries, and acknowledged saved results are not returned for delivery again.
+
+`show` inspects saved assessments. Policy version 3 is required. Private state version 1 is refused and requires
+a new file; state version 2 is preserved. `--state` is a private SQLite sidecar for assessment work and positions.
+Deliverable summaries are also appended to shared `baton.db` table `secretary_summaries`, tagged with
+`secretary_id` and principal and uniquely recorded by decision ID. `summaries` pages that archive without `--state`.
+Archive reads budget 256 citation checks per call, completing at least the first row even if it exceeds that
+budget. Follow `next` while `has_more` is true, including when a page returns no visible entries.
+
+`read` returns currently visible source text for the principal. After an event position (`--after`), it pages
+events addressed to or authored by the principal and relevant job events in `deliveries` and `context`; with
+`--ids`, it reads the named messages and reports inaccessible messages as missing. Message rows include their
+IDs and conversation IDs for opening the cited thread. A page holds at most `--limit` events or messages (default
+20, maximum 100) and aims for `--max-bytes` (default 256 KiB); one oversized entry may be returned alone.
+Position-based reads return `through_pos` for the next page; ID-based reads report any `not_read` IDs. `read` opens
+the database read-only, needs no `--state`, and writes nothing; the canonical module command is
+`python -m baton.agents.secretary.inbox.read`. `python -m baton.secretary_read` is a compatibility module
+wrapper with the same options; there is no `baton.secretary_read` executable. `python -m baton.agents.secretary.attention.decide`
+is the canonical decision module; `python -m baton.secretary_decide` remains a compatibility module wrapper.
+
+Secretary policy and installed-instance configuration code lives in `baton.config.secretary`. The Baton host
+TOML format is unchanged. Secretary policy version 3 is required; policies v1 and v2 are unsupported. Private
+state version 1 requires a new file; state version 2 is preserved. The installed integration JSON is a
+separate version 1 worker configuration.
 
 ## Local indexing interface
 

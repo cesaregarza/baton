@@ -36,8 +36,8 @@ from cryptography.x509.oid import NameOID
 
 from baton import messages, wakes
 from baton.config import ConfigError, parse
+from baton.database.store import connect
 from baton.integrations import openai_mcp_events as integration
-from baton.store import connect
 
 NAME = "callback.test"
 EVENT = integration.EVENT_NAME
@@ -68,32 +68,47 @@ class Receiver:
         key = ec.generate_private_key(ec.SECP256R1())
         subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, NAME)])
         now = dt.datetime.now(dt.UTC)
-        cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject).public_key(key.public_key())
-                .serial_number(x509.random_serial_number()).not_valid_before(now - dt.timedelta(minutes=1))
-                .not_valid_after(now + dt.timedelta(hours=1))
-                .add_extension(x509.SubjectAlternativeName([x509.DNSName(NAME)]), critical=False)
-                .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-                .sign(key, hashes.SHA256()))
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(minutes=1))
+            .not_valid_after(now + dt.timedelta(hours=1))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(NAME)]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256())
+        )
         self.ca_file = tmp_path / "receiver-cert.pem"
         self.ca_file.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
         key_file = tmp_path / "receiver-key.pem"
-        key_file.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                                               serialization.NoEncryption()))
+        key_file.write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+            )
+        )
         self.mode = "echo"
         self.statuses: dict[str, int] = {}
         self.requests: list[dict[str, Any]] = []
         receiver = self
 
         class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802
+            def do_GET(self) -> None:
                 receiver.requests.append({"path": self.path, "method": "GET", "headers": {}, "body": b"{}"})
                 self.send_response(405)
                 self.end_headers()
 
-            def do_POST(self) -> None:  # noqa: N802
+            def do_POST(self) -> None:
                 body = self.rfile.read(int(self.headers["Content-Length"]))
-                receiver.requests.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()},
-                                          "body": body, "sni_host": self.headers.get("Host")})
+                receiver.requests.append(
+                    {
+                        "path": self.path,
+                        "headers": {k.lower(): v for k, v in self.headers.items()},
+                        "body": body,
+                        "sni_host": self.headers.get("Host"),
+                    }
+                )
                 payload = json.loads(body)
                 if receiver.mode == "redirect" and self.path != "/hooks/elsewhere":
                     # 307 keeps the method and body, so a client that followed it would be verified there.
@@ -107,8 +122,11 @@ class Receiver:
                     status = receiver.statuses[self.path]
                 answer = b""
                 if verification and receiver.mode != "error":
-                    echoed = payload["challenge"] if receiver.mode in ("echo", "error-echo", "redirect", "trickle",
-                                                                       "gzip") else "not-the-challenge"
+                    echoed = (
+                        payload["challenge"]
+                        if receiver.mode in ("echo", "error-echo", "redirect", "trickle", "gzip")
+                        else "not-the-challenge"
+                    )
                     answer = json.dumps({"challenge": echoed}).encode()
                 if verification and receiver.mode == "gzip":
                     answer = gzip.compress(answer)
@@ -166,14 +184,22 @@ TEST_ONLY = ("allow_private_callbacks", "ca_file")
 
 def settings_table(receiver: Receiver, **overrides: Any) -> str:
     """The production settings, as TOML. Test-only settings never go here; see `events_host`."""
-    values = {"enabled": True, "callback_prefixes": [f"https://{NAME}:{receiver.port}/hooks/"],
-              "timeout_seconds": 5, "max_per_role": 2, "max_total": 3, "min_ttl_seconds": 1, **overrides}
+    values = {
+        "enabled": True,
+        "callback_prefixes": [f"https://{NAME}:{receiver.port}/hooks/"],
+        "timeout_seconds": 5,
+        "max_per_role": 2,
+        "max_total": 3,
+        "min_ttl_seconds": 1,
+        **overrides,
+    }
     lines = [f"{key} = {json.dumps(value)}" for key, value in values.items()]
     return "[integrations.openai_mcp_events]\n" + "\n".join(lines) + "\n"
 
 
-WAKES = ('[roles.planner.wake]\nintegration = "openai_mcp_events"\n'
-         '[roles.worker.wake]\nintegration = "openai_mcp_events"\n')
+WAKES = (
+    '[roles.planner.wake]\nintegration = "openai_mcp_events"\n[roles.worker.wake]\nintegration = "openai_mcp_events"\n'
+)
 
 
 @pytest.fixture
@@ -182,8 +208,11 @@ def events_host(start_host, receiver: Receiver):
 
     def start(oauth: bool = False, **overrides: Any) -> Host:
         # Test-only settings are injected through the constructor, never parsed from the config.
-        test_only = {"allow_private_callbacks": True, "ca_file": str(receiver.ca_file),
-                     **{key: overrides.pop(key) for key in TEST_ONLY if key in overrides}}
+        test_only = {
+            "allow_private_callbacks": True,
+            "ca_file": str(receiver.ca_file),
+            **{key: overrides.pop(key) for key in TEST_ONLY if key in overrides},
+        }
 
         def build(config: Any) -> dict[str, Any]:
             settings = integration.parse_settings(config.integrations["openai_mcp_events"])
@@ -198,20 +227,38 @@ def events_host(start_host, receiver: Receiver):
 
 
 def rpc(host: Host, role: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
-    meta = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
-            "io.modelcontextprotocol/clientInfo": {"name": "example-client", "version": "1"},
-            "io.modelcontextprotocol/clientCapabilities": {}}
-    response = httpx.post(host.mcp_url, headers={
-        "Authorization": f"Bearer {host.tokens[role]}", "Accept": "application/json, text/event-stream",
-        "Mcp-Protocol-Version": "2026-07-28", "Mcp-Method": method,
-    }, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": {**params, "_meta": meta}}, timeout=30)
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "example-client", "version": "1"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    response = httpx.post(
+        host.mcp_url,
+        headers={
+            "Authorization": f"Bearer {host.tokens[role]}",
+            "Accept": "application/json, text/event-stream",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": method,
+        },
+        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": {**params, "_meta": meta}},
+        timeout=30,
+    )
     return response.json()
 
 
 def subscribe(host: Host, role: str, url: str, secret: str, **extra: Any) -> dict[str, Any]:
-    return rpc(host, role, "events/subscribe", {"name": EVENT, "arguments": {},
-                                                "delivery": {"mode": "webhook", "url": url, "secret": secret},
-                                                "cursor": None, **extra})
+    return rpc(
+        host,
+        role,
+        "events/subscribe",
+        {
+            "name": EVENT,
+            "arguments": {},
+            "delivery": {"mode": "webhook", "url": url, "secret": secret},
+            "cursor": None,
+            **extra,
+        },
+    )
 
 
 def state(host: Host) -> dict[str, Any]:
@@ -220,8 +267,9 @@ def state(host: Host) -> dict[str, Any]:
 
 
 def dispatch(host: Host, events: Any = None) -> wakes.Dispatcher:
-    dispatcher = wakes.Dispatcher(host.config, integrations={"openai_mcp_events": events or
-                                                             host.integrations["openai_mcp_events"]})
+    dispatcher = wakes.Dispatcher(
+        host.config, integrations={"openai_mcp_events": events or host.integrations["openai_mcp_events"]}
+    )
     dispatcher.pass_once()
     return dispatcher
 
@@ -275,14 +323,17 @@ def test_a_failed_challenge_is_refused_and_keeps_no_state(events_host, receiver,
     assert len(receiver.requests) == 1  # a redirect is not followed
 
 
-@pytest.mark.parametrize(("url", "reason"), [
-    ("http://callback.test:{port}/hooks/a", "invalid_url"),
-    ("https://someone@example.test:{port}/hooks/a", "invalid_url"),  # any userinfo is refused
-    ("https://elsewhere.test:{port}/hooks/a", "not_allowed"),
-    ("https://callback.test:1/hooks/a", "not_allowed"),
-    ("https://callback.test:{port}/other", "not_allowed"),
-    ("https://callback.test:{port}/hooksevil", "not_allowed"),
-])
+@pytest.mark.parametrize(
+    ("url", "reason"),
+    [
+        ("http://callback.test:{port}/hooks/a", "invalid_url"),
+        ("https://someone@example.test:{port}/hooks/a", "invalid_url"),  # any userinfo is refused
+        ("https://elsewhere.test:{port}/hooks/a", "not_allowed"),
+        ("https://callback.test:1/hooks/a", "not_allowed"),
+        ("https://callback.test:{port}/other", "not_allowed"),
+        ("https://callback.test:{port}/hooksevil", "not_allowed"),
+    ],
+)
 def test_callbacks_off_the_allowlist_are_refused_without_any_request(events_host, receiver, url, reason) -> None:
     host = events_host()
     error = subscribe(host, "worker", url.format(port=receiver.port), new_secret())["error"]
@@ -291,23 +342,39 @@ def test_callbacks_off_the_allowlist_are_refused_without_any_request(events_host
     assert state(host)["subscriptions"] == {}
 
 
-@pytest.mark.parametrize("secret", ["no-prefix", "whsec_short", "whsec_" + base64.b64encode(b"x" * 65).decode(),
-                                    "whsec_not*base64!"])
+@pytest.mark.parametrize(
+    "secret", ["no-prefix", "whsec_short", "whsec_" + base64.b64encode(b"x" * 65).decode(), "whsec_not*base64!"]
+)
 def test_a_malformed_secret_is_refused(events_host, receiver, secret: str) -> None:
     host = events_host()
     assert subscribe(host, "worker", receiver.url(), secret)["error"]["code"] == integration.INVALID_PARAMS
     assert receiver.requests == []
 
 
-@pytest.mark.parametrize("answers", [["127.0.0.1"], ["10.0.0.7"], ["192.168.1.20"], ["172.16.0.3"],
-                                     ["169.254.169.254"], ["::1"], ["fe80::1"], ["fd00::1"], ["::ffff:127.0.0.1"],
-                                     ["198.18.0.1"], ["0.0.0.0"], ["93.184.216.34", "10.0.0.7"]])
+@pytest.mark.parametrize(
+    "answers",
+    [
+        ["127.0.0.1"],
+        ["10.0.0.7"],
+        ["192.168.1.20"],
+        ["172.16.0.3"],
+        ["169.254.169.254"],
+        ["::1"],
+        ["fe80::1"],
+        ["fd00::1"],
+        ["::ffff:127.0.0.1"],
+        ["198.18.0.1"],
+        ["0.0.0.0"],
+        ["93.184.216.34", "10.0.0.7"],
+    ],
+)
 def test_non_global_or_mixed_answers_are_refused_with_the_flag_off(answers: list[str]) -> None:
     config = parse({"host": {"public_url": "https://baton.example.test"}, "roles": {"worker": {}}})
     resolver = StubResolver()
     resolver.answers[NAME] = answers
-    events = integration.McpEvents(config, integration.Settings(callback_prefixes=(f"https://{NAME}/",)),
-                                   resolver=resolver)
+    events = integration.McpEvents(
+        config, integration.Settings(callback_prefixes=(f"https://{NAME}/",)), resolver=resolver
+    )
     with pytest.raises(integration.CallbackError, match="private_address"):
         events._resolve(NAME, 443)
     resolver.answers[NAME] = ["93.184.216.34"]
@@ -338,8 +405,11 @@ def test_a_message_wakes_the_subscribed_role_with_a_signed_content_free_event(ev
     assert (body["name"], body["cursor"]) == (EVENT, None)
     assert body["data"] == {"role": "worker", "reason": "message", "first_unread_seq": 1}
     assert b"private message" not in event["body"]
-    assert sorted(w["status"] for w in wakes.recent(connect(host.config.db_path))) \
-        == ["delivered", "scheduled", "scheduled"]  # the wake, and the two reminders it sets
+    assert sorted(w["status"] for w in wakes.recent(connect(host.config.db_path))) == [
+        "delivered",
+        "scheduled",
+        "scheduled",
+    ]  # the wake, and the two reminders it sets
 
 
 def test_pinning_the_http_client_never_resolves_the_callback_name(events_host, receiver, monkeypatch) -> None:
@@ -377,9 +447,16 @@ def test_wakes_never_cross_roles_and_roles_come_only_from_credentials(events_hos
     assert [r["path"] for r in receiver.events()] == ["/hooks/worker"]
     roles = {sub["url"].rsplit("/", 1)[1]: sub["role"] for sub in state(host)["subscriptions"].values()}
     assert roles == {"worker": "worker", "planner": "planner"}
-    forged = rpc(host, "worker", "events/subscribe", {
-        "name": EVENT, "arguments": {"role": "planner"},
-        "delivery": {"mode": "webhook", "url": receiver.url("/hooks/x"), "secret": new_secret()}})
+    forged = rpc(
+        host,
+        "worker",
+        "events/subscribe",
+        {
+            "name": EVENT,
+            "arguments": {"role": "planner"},
+            "delivery": {"mode": "webhook", "url": receiver.url("/hooks/x"), "secret": new_secret()},
+        },
+    )
     assert forged["error"]["code"] == integration.INVALID_PARAMS
 
 
@@ -398,14 +475,18 @@ def test_caps_per_role_and_overall(events_host, receiver) -> None:
     host = events_host(max_per_role=1, max_total=2)
     first = subscribe(host, "worker", receiver.url("/hooks/1"), new_secret())["result"]["id"]
     assert subscribe(host, "worker", receiver.url("/hooks/1"), new_secret())["result"]["id"] == first  # refresh
-    assert subscribe(host, "worker", receiver.url("/hooks/2"), new_secret())["error"]["code"] == \
-        integration.INVALID_PARAMS
+    assert (
+        subscribe(host, "worker", receiver.url("/hooks/2"), new_secret())["error"]["code"] == integration.INVALID_PARAMS
+    )
     subscribe(host, "planner", receiver.url("/hooks/3"), new_secret())
-    host.integrations["openai_mcp_events"].settings = replace(host.integrations["openai_mcp_events"].settings,
-                                                              max_per_role=5)
+    host.integrations["openai_mcp_events"].settings = replace(
+        host.integrations["openai_mcp_events"].settings, max_per_role=5
+    )
     requests_before = len(receiver.requests)
-    assert subscribe(host, "planner", receiver.url("/hooks/4"), new_secret())["error"]["code"] == \
-        integration.INVALID_PARAMS
+    assert (
+        subscribe(host, "planner", receiver.url("/hooks/4"), new_secret())["error"]["code"]
+        == integration.INVALID_PARAMS
+    )
     assert len(receiver.requests) == requests_before  # refused before any outbound request
     assert len(state(host)["subscriptions"]) == 2
 
@@ -426,8 +507,7 @@ def test_a_revoked_credential_ends_delivery(events_host, receiver) -> None:
     host = events_host()
     subscribe(host, "worker", receiver.url(), new_secret())
     revoked = replace(host.config, tokens=tuple(t for t in host.config.tokens if t.role != "worker"))
-    events = integration.McpEvents(revoked, host.integrations["openai_mcp_events"].settings,
-                                   resolver=host.resolver)
+    events = integration.McpEvents(revoked, host.integrations["openai_mcp_events"].settings, resolver=host.resolver)
     send(host, "worker", "hello")
     dispatch(host, events)
     assert receiver.events() == []
@@ -469,20 +549,25 @@ def test_the_secret_appears_in_no_log_audit_line_wake_or_result(events_host, rec
 # --- configuration and core isolation ---------------------------------------------------------
 
 
-@pytest.mark.parametrize(("table", "message"), [
-    ({"enabled": True}, "callback_prefixes"),
-    ({"enabled": True, "callback_prefixes": ["http://hooks.example.test/"]}, "https"),
-    ({"enabled": True, "callback_prefixes": ["https://*.example.test/"]}, "wildcard"),
-    ({"enabled": True, "callback_prefixes": ["https://hooks.example.test/"], "surprise": 1}, "unknown"),
-])
+@pytest.mark.parametrize(
+    ("table", "message"),
+    [
+        ({"enabled": True}, "callback_prefixes"),
+        ({"enabled": True, "callback_prefixes": ["http://hooks.example.test/"]}, "https"),
+        ({"enabled": True, "callback_prefixes": ["https://*.example.test/"]}, "wildcard"),
+        ({"enabled": True, "callback_prefixes": ["https://hooks.example.test/"], "surprise": 1}, "unknown"),
+    ],
+)
 def test_integration_settings_are_validated(table: dict, message: str) -> None:
     with pytest.raises(ConfigError, match=message):
         integration.parse_settings(table)
 
 
 def test_a_role_may_only_name_an_enabled_integration() -> None:
-    raw = {"host": {"public_url": "https://baton.example.test"},
-           "roles": {"worker": {"wake": {"integration": "openai_mcp_events"}}}}
+    raw = {
+        "host": {"public_url": "https://baton.example.test"},
+        "roles": {"worker": {"wake": {"integration": "openai_mcp_events"}}},
+    }
     with pytest.raises(ConfigError, match="not enabled"):
         parse(raw)
     with pytest.raises(ConfigError, match="only one"):

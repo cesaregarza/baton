@@ -11,8 +11,9 @@ import uvicorn
 
 
 @contextmanager
-def running_server(server: uvicorn.Server, *, startup_timeout: float = 5.0,
-                   shutdown_timeout: float = 5.0) -> Iterator[uvicorn.Server]:
+def running_server(
+    server: uvicorn.Server, *, startup_timeout: float = 5.0, shutdown_timeout: float = 5.0
+) -> Iterator[uvicorn.Server]:
     """Yield a ready server, then request shutdown and wait for its worker to finish."""
     failures: list[BaseException] = []
 
@@ -44,8 +45,9 @@ def running_server(server: uvicorn.Server, *, startup_timeout: float = 5.0,
         server.should_exit = True
         thread.join(timeout=shutdown_timeout)
         if thread.is_alive():
-            message = (f"Test server did not stop within {shutdown_timeout:g} seconds; "
-                       "its daemon thread is still running")
+            message = (
+                f"Test server did not stop within {shutdown_timeout:g} seconds; its daemon thread is still running"
+            )
             if error is not None:
                 error.add_note(message)
             else:

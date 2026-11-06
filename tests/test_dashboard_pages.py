@@ -20,37 +20,53 @@ from topic_backing import back_topics
 from baton import config as config_module
 from baton import conversations, dashboard, jobs
 from baton.config import Config, ConfigError
-from baton.store import connect
+from baton.database.store import connect
 
 MINE = ["orchestrator", "reviewer", "operator"]
 THEIRS = ["orchestrator", "assistant"]
 PROXY = "dash.example.test"
-JOB_STATES = {"initial": "open", "states": {
-    "open": {"waiting_on": "operator", "next": ["working"]},
-    "working": {"waiting_on": "reviewer", "next": ["done"]},
-    "done": {}}}
+JOB_STATES = {
+    "initial": "open",
+    "states": {
+        "open": {"waiting_on": "operator", "next": ["working"]},
+        "working": {"waiting_on": "reviewer", "next": ["done"]},
+        "done": {},
+    },
+}
 
 
-def page_config(tmp_path: Path, *, view_all: bool = False, port: int | None = None, viewer: str = "operator",
-                guest: bool = False, **dashboard_keys: Any) -> Config:
+def page_config(
+    tmp_path: Path,
+    *,
+    view_all: bool = False,
+    port: int | None = None,
+    viewer: str = "operator",
+    guest: bool = False,
+    **dashboard_keys: Any,
+) -> Config:
     """Generic roles; `operator` is the viewer by default, and sees every conversation only with the flag.
 
     `guest` adds a board-reading guest role, for the pages that show a thread a guest started. It is
     opt-in so that every other page test keeps the role set it was written against.
     """
-    roles = {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True,
-                              "can_create_topics": True},
-             "reviewer": {}, "assistant": {}, "operator": {"can_view_all_conversations": view_all}}
+    roles = {
+        "orchestrator": {"can_create_conversations": True, "can_manage_participants": True, "can_create_topics": True},
+        "reviewer": {},
+        "assistant": {},
+        "operator": {"can_view_all_conversations": view_all},
+    }
     if guest:
         roles["guest"] = {"can_view_all_conversations": True}
     roles[viewer] = {**roles[viewer], "display_only": True}  # the view's identity never holds a credential
-    return config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": roles,
-        "conversations": {"enabled": True, "max_messages_per_hour": 1000},
-        "jobs": JOB_STATES,
-        "dashboard": {"enabled": True, "viewer_role": viewer, "listen_port": port or 8766, **dashboard_keys},
-    })
+    return config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": roles,
+            "conversations": {"enabled": True, "max_messages_per_hour": 1000},
+            "jobs": JOB_STATES,
+            "dashboard": {"enabled": True, "viewer_role": viewer, "listen_port": port or 8766, **dashboard_keys},
+        }
+    )
 
 
 def get(config: Config, target: str, *, method: str = "GET", host: str | None = None) -> Any:
@@ -62,19 +78,22 @@ def made(conn: Any, config: Config, title: str, participants: list[str], topic: 
     # These pages are about what the viewer may see, so the label's topic is backed rather than opened.
     if topic:
         back_topics(conn, topic)
-    return conversations.create(conn, config, actor="orchestrator", title=title, participants=participants,
-                                topic=topic)["conversation_id"]
+    return conversations.create(
+        conn, config, actor="orchestrator", title=title, participants=participants, topic=topic
+    )["conversation_id"]
 
 
 def topics_seeded(config: Config) -> dict[str, str]:
     """Conversations under alpha, alpha/x, alphabet and no topic, plus one under alpha the viewer isn't in."""
     conn = connect(config.db_path)
     try:
-        return {"alpha": made(conn, config, "Alpha root", MINE, "alpha"),
-                "alpha/x": made(conn, config, "Alpha x", MINE, "alpha/x"),
-                "alphabet": made(conn, config, "Alphabet", MINE, "alphabet"),
-                "untagged": made(conn, config, "Untagged", MINE),
-                "hidden": made(conn, config, "Hidden alpha", THEIRS, "alpha/hidden")}
+        return {
+            "alpha": made(conn, config, "Alpha root", MINE, "alpha"),
+            "alpha/x": made(conn, config, "Alpha x", MINE, "alpha/x"),
+            "alphabet": made(conn, config, "Alphabet", MINE, "alphabet"),
+            "untagged": made(conn, config, "Untagged", MINE),
+            "hidden": made(conn, config, "Hidden alpha", THEIRS, "alpha/hidden"),
+        }
     finally:
         conn.close()
 
@@ -107,9 +126,23 @@ def test_a_topic_page_never_widens_what_the_viewer_sees(tmp_path) -> None:
     assert "Hidden alpha" in text(get(flagged, "/t/alpha"))
 
 
-@pytest.mark.parametrize("target", ["/t/Alpha", "/t/alpha/x/y", "/t/", "/t/alpha/", "/t/al%20pha", "/t/-alpha",
-                                    "/t/alpha//x", "/t/" + "a" * 200, "/t/alpha%2Fx", "/t/alpha%252Fx",
-                                    "/t/alpha%00", "/t/%E2%80%AEalpha"])
+@pytest.mark.parametrize(
+    "target",
+    [
+        "/t/Alpha",
+        "/t/alpha/x/y",
+        "/t/",
+        "/t/alpha/",
+        "/t/al%20pha",
+        "/t/-alpha",
+        "/t/alpha//x",
+        "/t/" + "a" * 200,
+        "/t/alpha%2Fx",
+        "/t/alpha%252Fx",
+        "/t/alpha%00",
+        "/t/%E2%80%AEalpha",
+    ],
+)
 def test_an_invalid_topic_is_a_bad_request_with_the_standard_headers(tmp_path, target: str) -> None:
     config = page_config(tmp_path)
     topics_seeded(config)
@@ -152,8 +185,9 @@ def needs_seeded(config: Config) -> dict[str, str]:
         ids = {"mine": mine, "other_topic": other_topic, "theirs": theirs}
 
         def say(sender: str, conversation: str, words: str, **kwargs: Any) -> str:
-            return conversations.send(conn, config, sender=sender, conversation_id=conversation, text=words,
-                                      **kwargs)["message_id"]
+            return conversations.send(conn, config, sender=sender, conversation_id=conversation, text=words, **kwargs)[
+                "message_id"
+            ]
 
         ids["plain"] = say("orchestrator", mine, "plain progress note")
         ids["attention"] = say("orchestrator", mine, "operator, please look", attention=["operator"])
@@ -207,7 +241,7 @@ def test_needs_links_each_message_to_its_place_and_counts_both_blocks(tmp_path) 
         conn.close()
     decision = next(m for m in history if m["text"] == "pick option A or B")
     body = text(get(config, "/needs"))
-    assert f'/c/{ids["mine"]}?after_seq={decision["seq"] - 1}#m-{decision["seq"]}' in body
+    assert f"/c/{ids['mine']}?after_seq={decision['seq'] - 1}#m-{decision['seq']}" in body
     assert "2 messages asked for you" in body and "1 decision not addressed to you" in body
     assert "1 job is waiting on you" in body
     target = re.search(rf'href="(/c/{ids["mine"]}\?after_seq={decision["seq"] - 1})#m-{decision["seq"]}"', body)
@@ -221,10 +255,19 @@ def test_needs_filters_by_topic_and_refuses_an_invalid_one(tmp_path) -> None:
     assert alpha == ["operator, please look", "hidden decision", "pick option A or B"]
     assert needs_items(text(get(config, "/needs?topic=beta"))) == ["beta needs operator"]
     assert needs_items(text(get(config, "/needs?topic=alpha/x"))) == ["operator, please look", "pick option A or B"]
-    assert needs_items(text(get(config, "/needs?topic=alpha%2Fx"))) == needs_items(text(get(config,
-                                                                                         "/needs?topic=alpha/x")))
-    for bad in ("Alpha", "alpha/x/y", "", "al%20pha", "alpha%252Fx", "a" * 5000, "alpha&topic=beta",
-                "alpha&topic=alpha"):
+    assert needs_items(text(get(config, "/needs?topic=alpha%2Fx"))) == needs_items(
+        text(get(config, "/needs?topic=alpha/x"))
+    )
+    for bad in (
+        "Alpha",
+        "alpha/x/y",
+        "",
+        "al%20pha",
+        "alpha%252Fx",
+        "a" * 5000,
+        "alpha&topic=beta",
+        "alpha&topic=alpha",
+    ):
         response = get(config, f"/needs?topic={bad}")
         assert response.status == 400, bad
         assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS
@@ -250,10 +293,12 @@ def test_a_message_the_viewer_sent_itself_is_not_listed(tmp_path) -> None:
     conn = connect(config.db_path)
     try:
         mine = made(conn, config, "Own question", MINE)
-        conversations.send(conn, config, sender="operator", conversation_id=mine, text="my own decision request",
-                           needs_decision=True)
-        conversations.send(conn, config, sender="reviewer", conversation_id=mine, text="a decision for anyone",
-                           needs_decision=True)
+        conversations.send(
+            conn, config, sender="operator", conversation_id=mine, text="my own decision request", needs_decision=True
+        )
+        conversations.send(
+            conn, config, sender="reviewer", conversation_id=mine, text="a decision for anyone", needs_decision=True
+        )
     finally:
         conn.close()
     assert needs_items(text(get(config, "/needs"))) == ["a decision for anyone"]
@@ -264,11 +309,13 @@ def test_needs_follows_what_the_viewer_could_read_from_its_join_point(tmp_path) 
     conn = connect(config.db_path)
     try:
         late = made(conn, config, "Joined late", ["orchestrator", "reviewer"])
-        conversations.send(conn, config, sender="reviewer", conversation_id=late, text="before the join",
-                           needs_decision=True)
+        conversations.send(
+            conn, config, sender="reviewer", conversation_id=late, text="before the join", needs_decision=True
+        )
         conversations.add(conn, config, late, "operator", actor="orchestrator")
-        conversations.send(conn, config, sender="reviewer", conversation_id=late, text="after the join",
-                           needs_decision=True)
+        conversations.send(
+            conn, config, sender="reviewer", conversation_id=late, text="after the join", needs_decision=True
+        )
     finally:
         conn.close()
     assert needs_items(text(get(config, "/needs"))) == ["after the join"]
@@ -295,22 +342,31 @@ def test_a_fanned_out_message_is_listed_once(tmp_path, view_all: bool) -> None:
     conn = connect(config.db_path)
     try:
         wide = made(conn, config, "Wide", ["orchestrator", "reviewer", "assistant", "operator"])
-        conversations.send(conn, config, sender="orchestrator", conversation_id=wide, text="to all four",
-                           attention=["operator", "reviewer"], needs_decision=True)
+        conversations.send(
+            conn,
+            config,
+            sender="orchestrator",
+            conversation_id=wide,
+            text="to all four",
+            attention=["operator", "reviewer"],
+            needs_decision=True,
+        )
     finally:
         conn.close()
     assert needs_items(text(get(config, "/needs"))) == ["to all four"]
 
 
-def test_the_total_is_counted_before_the_page_bound_and_shown_apart_from_what_is_displayed(tmp_path,
-                                                                                            monkeypatch) -> None:
+def test_the_total_is_counted_before_the_page_bound_and_shown_apart_from_what_is_displayed(
+    tmp_path, monkeypatch
+) -> None:
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
         mine = made(conn, config, "Many asks", MINE)
         for index in range(7):
-            conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"ask {index}",
-                               attention=["operator"])
+            conversations.send(
+                conn, config, sender="reviewer", conversation_id=mine, text=f"ask {index}", attention=["operator"]
+            )
             conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"noise {index}")
     finally:
         conn.close()
@@ -327,10 +383,16 @@ def test_needs_lists_exactly_the_jobs_waiting_on_the_viewer_and_moves_none(tmp_p
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
-        waiting = jobs.create(conn, config.jobs, request_id="20261029T120000Z-job-a", actor="orchestrator",
-                              title="Approve the plan")
-        moved = jobs.create(conn, config.jobs, request_id="20261029T120000Z-job-b", actor="orchestrator",
-                            title="Already with the reviewer")
+        waiting = jobs.create(
+            conn, config.jobs, request_id="20261029T120000Z-job-a", actor="orchestrator", title="Approve the plan"
+        )
+        moved = jobs.create(
+            conn,
+            config.jobs,
+            request_id="20261029T120000Z-job-b",
+            actor="orchestrator",
+            title="Already with the reviewer",
+        )
         jobs.move(conn, config.jobs, moved["job_id"], "working", actor="operator")
     finally:
         conn.close()
@@ -346,8 +408,13 @@ def test_jobs_have_no_topic_so_a_topic_filter_shows_none_and_says_so(tmp_path) -
     topics_seeded(config)
     conn = connect(config.db_path)
     try:
-        jobs.create(conn, config.jobs, request_id="20261029T120000Z-job-t", actor="orchestrator",
-                    title="alpha is in this job's title")
+        jobs.create(
+            conn,
+            config.jobs,
+            request_id="20261029T120000Z-job-t",
+            actor="orchestrator",
+            title="alpha is in this job's title",
+        )
     finally:
         conn.close()
     assert "alpha is in this job" in text(get(config, "/needs"))
@@ -394,8 +461,9 @@ def test_titles_and_text_on_the_new_pages_render_inert(tmp_path) -> None:
     conn = connect(config.db_path)
     try:
         conversation = made(conn, config, PAYLOAD, MINE, "alpha")
-        conversations.send(conn, config, sender="orchestrator", conversation_id=conversation, text=PAYLOAD,
-                           attention=["operator"])
+        conversations.send(
+            conn, config, sender="orchestrator", conversation_id=conversation, text=PAYLOAD, attention=["operator"]
+        )
         jobs.create(conn, config.jobs, request_id="20261029T120000Z-job-x", actor="orchestrator", title=PAYLOAD)
     finally:
         conn.close()
@@ -421,8 +489,19 @@ def test_proxy_host_accepts_exactly_that_host_and_nothing_like_it(tmp_path) -> N
     assert get(config, "/", host=PROXY).status == 200
     assert get(config, "/needs", host=PROXY).status == 200
     assert get(config, "/").status == 200  # its own loopback address still works
-    for lookalike in (f"{PROXY}.attacker.test", f"evil-{PROXY}", f"x{PROXY}", f"sub.{PROXY}", "example.test",
-                      f"{PROXY}:443", f"{PROXY}:8443", f"{PROXY}.", "DASH.EXAMPLE.TEST", f" {PROXY}", "*"):
+    for lookalike in (
+        f"{PROXY}.attacker.test",
+        f"evil-{PROXY}",
+        f"x{PROXY}",
+        f"sub.{PROXY}",
+        "example.test",
+        f"{PROXY}:443",
+        f"{PROXY}:8443",
+        f"{PROXY}.",
+        "DASH.EXAMPLE.TEST",
+        f" {PROXY}",
+        "*",
+    ):
         assert get(config, "/", host=lookalike).status == 421, lookalike
 
 
@@ -433,11 +512,29 @@ def test_a_proxy_host_with_a_port_accepts_only_that_port(tmp_path) -> None:
         assert get(config, "/", host=other).status == 421, other
 
 
-@pytest.mark.parametrize("value", ["", "*.example.test", "*", "https://dash.example.test", "dash.example.test/",
-                                   "dash.example.test/path", "dash.example.test:0", "dash.example.test:65536",
-                                   "dash.example.test:http", "dash..example.test", "-dash.example.test",
-                                   "dash.example.test ", "Dash.Example.Test", "dash.example.test#x",
-                                   "[::1]:7443", 7443, True, ["dash.example.test"]])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "*.example.test",
+        "*",
+        "https://dash.example.test",
+        "dash.example.test/",
+        "dash.example.test/path",
+        "dash.example.test:0",
+        "dash.example.test:65536",
+        "dash.example.test:http",
+        "dash..example.test",
+        "-dash.example.test",
+        "dash.example.test ",
+        "Dash.Example.Test",
+        "dash.example.test#x",
+        "[::1]:7443",
+        7443,
+        True,
+        ["dash.example.test"],
+    ],
+)
 def test_config_refuses_a_malformed_or_wildcard_proxy_host(tmp_path, value: Any) -> None:
     with pytest.raises(ConfigError, match="dashboard.proxy_host"):
         page_config(tmp_path, proxy_host=value)
@@ -464,8 +561,17 @@ def test_x_forwarded_host_is_never_trusted(tmp_path) -> None:
 
     try:
         assert status({"Host": "attacker.example.test", "X-Forwarded-Host": PROXY}) == 421
-        assert status({"Host": "attacker.example.test", "X-Forwarded-Host": PROXY, "Forwarded": f"host={PROXY}",
-                       "X-Forwarded-For": "127.0.0.1"}) == 421
+        assert (
+            status(
+                {
+                    "Host": "attacker.example.test",
+                    "X-Forwarded-Host": PROXY,
+                    "Forwarded": f"host={PROXY}",
+                    "X-Forwarded-For": "127.0.0.1",
+                }
+            )
+            == 421
+        )
         assert status({"Host": PROXY, "X-Forwarded-Host": "attacker.example.test"}) == 200
     finally:
         server.shutdown()
@@ -494,8 +600,14 @@ def test_a_signal_in_the_oldest_of_many_conversations_is_never_dropped(tmp_path,
     conn = connect(config.db_path)
     try:
         oldest = made(conn, config, "The oldest", MINE, "alpha")
-        conversations.send(conn, config, sender="orchestrator", conversation_id=oldest,
-                           text="in the oldest conversation", attention=["operator"])
+        conversations.send(
+            conn,
+            config,
+            sender="orchestrator",
+            conversation_id=oldest,
+            text="in the oldest conversation",
+            attention=["operator"],
+        )
         for index in range(201):
             made(conn, config, f"Newer {index}", MINE, "alpha")
     finally:
@@ -538,8 +650,15 @@ def decision_for_reviewer(config: Config) -> None:
     conn = connect(config.db_path)
     try:
         mine = made(conn, config, "Decision thread", MINE)
-        conversations.send(conn, config, sender="orchestrator", conversation_id=mine,
-                           text="reviewer, pick A or B", attention=["reviewer"], needs_decision=True)
+        conversations.send(
+            conn,
+            config,
+            sender="orchestrator",
+            conversation_id=mine,
+            text="reviewer, pick A or B",
+            attention=["reviewer"],
+            needs_decision=True,
+        )
     finally:
         conn.close()
 
@@ -567,8 +686,9 @@ def test_attention_alone_to_someone_else_is_not_listed_for_the_viewer(tmp_path) 
     conn = connect(config.db_path)
     try:
         mine = made(conn, config, "Not for operator", MINE)
-        conversations.send(conn, config, sender="orchestrator", conversation_id=mine, text="for reviewer only",
-                           attention=["reviewer"])
+        conversations.send(
+            conn, config, sender="orchestrator", conversation_id=mine, text="for reviewer only", attention=["reviewer"]
+        )
     finally:
         conn.close()
     assert needs_items(text(get(config, "/needs"))) == []
@@ -579,11 +699,21 @@ def test_jobs_past_the_page_bound_are_counted_and_shown_apart(tmp_path) -> None:
     conn = connect(config.db_path)
     try:
         for index in range(dashboard.MAX_NEEDS_JOBS + 1):
-            jobs.create(conn, config.jobs, request_id=f"20261029T120000Z-bound-{index}", actor="orchestrator",
-                        title=f"Waiting job {index}")
+            jobs.create(
+                conn,
+                config.jobs,
+                request_id=f"20261029T120000Z-bound-{index}",
+                actor="orchestrator",
+                title=f"Waiting job {index}",
+            )
         for index in range(3):  # waiting on someone else: never counted for the viewer
-            other = jobs.create(conn, config.jobs, request_id=f"20261029T120000Z-other-{index}",
-                                actor="orchestrator", title=f"Reviewer job {index}")
+            other = jobs.create(
+                conn,
+                config.jobs,
+                request_id=f"20261029T120000Z-other-{index}",
+                actor="orchestrator",
+                title=f"Reviewer job {index}",
+            )
             jobs.move(conn, config.jobs, other["job_id"], "working", actor="operator")
     finally:
         conn.close()
@@ -600,8 +730,9 @@ def test_messages_at_the_page_bound_plus_one_are_counted_and_shown_apart(tmp_pat
     try:
         mine = made(conn, config, "Bound", MINE)
         for index in range(dashboard.MAX_NEEDS + 1):
-            conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"bound ask {index}",
-                               attention=["operator"])
+            conversations.send(
+                conn, config, sender="reviewer", conversation_id=mine, text=f"bound ask {index}", attention=["operator"]
+            )
     finally:
         conn.close()
     body = text(get(config, "/needs"))

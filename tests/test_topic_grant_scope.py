@@ -43,6 +43,7 @@ def covered(w: World, grant_id: str, *topics_: str, capability: str = "reference
 
 # 1. Segments, not prefixes -------------------------------------------------------------------------------
 
+
 # Mutant 1: segment equality replaced by startswith or LIKE.
 @pytest.mark.parametrize("inherit", [False, True])
 def test_a_grant_on_job_hunt_never_covers_job_hunting_or_below_it(build_world, inherit):
@@ -62,6 +63,7 @@ def test_a_grant_on_job_hunting_never_covers_job_hunt_or_below_it(build_world):
 
 # 2. What a grant reaches ---------------------------------------------------------------------------------
 
+
 def test_a_grant_without_inherit_covers_its_own_topic_only(build_world):
     w = build_world()
     made = w.activate(topic=ROOT, inherit=False)["id"]
@@ -73,8 +75,11 @@ def test_a_grant_with_inherit_covers_its_topic_and_the_subtopics_under_it(build_
     w = build_world()
     back_topics(w.db, "job-hunt/y")
     made = w.activate(topic=ROOT, inherit=True)["id"]
-    assert covered(w, made, ROOT, CHILD, "job-hunt/y", LOOKALIKE, LOOKALIKE_CHILD, "reviews") == \
-        [ROOT, CHILD, "job-hunt/y"]
+    assert covered(w, made, ROOT, CHILD, "job-hunt/y", LOOKALIKE, LOOKALIKE_CHILD, "reviews") == [
+        ROOT,
+        CHILD,
+        "job-hunt/y",
+    ]
 
 
 def test_a_grant_on_a_subtopic_covers_neither_its_parent_nor_its_siblings(build_world):
@@ -116,12 +121,14 @@ def test_a_grant_listing_all_three_covers_each(build_world):
 
 # 3. Ids, not names ---------------------------------------------------------------------------------------
 
+
 # Mutant 2: matching by topic_path_seen or alias name instead of topic_id / alias_id.
 def test_a_grant_follows_its_topic_through_a_rename(build_world):
     w = build_world()
     made = w.activate(topic=ROOT, inherit=True)["id"]
-    topics.rename(w.db, w.config, actor="orchestrator", path=ROOT, new_path="work-search",
-                  acknowledge_topic_grants=[made])
+    topics.rename(
+        w.db, w.config, actor="orchestrator", path=ROOT, new_path="work-search", acknowledge_topic_grants=[made]
+    )
     assert covered(w, made, "work-search", "work-search/x") == ["work-search", "work-search/x"]
     assert covered(w, made, ROOT, CHILD) == [], "the old paths are no topics at all now"
     assert w.state(made) == "active", "a rename does not touch the grant's own digest"
@@ -131,8 +138,9 @@ def test_a_grant_follows_its_topic_through_a_rename(build_world):
 def test_a_new_topic_at_a_path_a_rename_freed_is_not_covered(build_world):
     w = build_world()
     made = w.activate(topic=ROOT, inherit=True)["id"]
-    topics.rename(w.db, w.config, actor="orchestrator", path=ROOT, new_path="work-search",
-                  acknowledge_topic_grants=[made])
+    topics.rename(
+        w.db, w.config, actor="orchestrator", path=ROOT, new_path="work-search", acknowledge_topic_grants=[made]
+    )
     back_topics(w.db, ROOT, "job-hunt/fresh")
     assert w.topic_id(ROOT) != w.row(made)["topic_id"]
     assert covered(w, made, ROOT, "job-hunt/fresh") == []
@@ -142,8 +150,9 @@ def test_a_new_topic_at_a_path_a_rename_freed_is_not_covered(build_world):
 def test_a_subtopic_is_judged_by_its_parents_current_path_after_a_rename(build_world):
     w = build_world()
     made = w.activate(topic=ROOT, inherit=True)["id"]
-    topics.rename(w.db, w.config, actor="orchestrator", path=ROOT, new_path=LOOKALIKE + "-two",
-                  acknowledge_topic_grants=[made])
+    topics.rename(
+        w.db, w.config, actor="orchestrator", path=ROOT, new_path=LOOKALIKE + "-two", acknowledge_topic_grants=[made]
+    )
     assert covered(w, made, LOOKALIKE + "-two/x") == [LOOKALIKE + "-two/x"]
     assert w.covering(LOOKALIKE_CHILD) is None
 
@@ -168,6 +177,7 @@ def test_a_grant_ignores_the_aliases_name_after_the_fact(build_world):
 
 
 # 4. Only active grants cover -----------------------------------------------------------------------------
+
 
 # Mutant 4: allowing `pending`.
 @pytest.mark.parametrize("name", ["pending", "lapsed", "expired", "invalid"])
@@ -205,12 +215,15 @@ def test_a_grant_covers_up_to_and_not_including_the_instant_it_expires(build_wor
 
 
 # Mutant 4: dropping the recomputed-digest check. Each edit would widen the grant if it were believed.
-@pytest.mark.parametrize("column,value,topic,capability", [
-    ("capabilities", json.dumps(list(CAPABILITIES)), ROOT, "thread.organise"),
-    ("inherit", 1, CHILD, "reference.edit"),
-    ("expires_at", (START + timedelta(days=300)).isoformat(), ROOT, "reference.edit"),
-    ("topic_id", "REPLACED", ROOT, "reference.edit"),
-])
+@pytest.mark.parametrize(
+    "column,value,topic,capability",
+    [
+        ("capabilities", json.dumps(list(CAPABILITIES)), ROOT, "thread.organise"),
+        ("inherit", 1, CHILD, "reference.edit"),
+        ("expires_at", (START + timedelta(days=300)).isoformat(), ROOT, "reference.edit"),
+        ("topic_id", "REPLACED", ROOT, "reference.edit"),
+    ],
+)
 def test_a_grant_edited_after_authorization_covers_nothing(build_world, column, value, topic, capability):
     w = build_world()
     made = w.activate(topic=ROOT, capabilities=("reference.edit",), inherit=False, days=7)["id"]
@@ -231,6 +244,7 @@ def test_a_grant_edited_to_a_later_expiry_does_not_outlive_its_authorization(bui
 
 
 # 5. Which grant answers ----------------------------------------------------------------------------------
+
 
 def test_the_earliest_proposal_among_the_covering_grants_answers(build_world):
     w = build_world()
@@ -271,13 +285,15 @@ def test_a_grant_that_cannot_cover_never_masks_a_later_one_that_can(build_world)
 
 # 6. Read-only, on the caller's connection --------------------------------------------------------------
 
+
 def test_covering_grant_writes_nothing(build_world):
     w = build_world()
     w.activate(inherit=True)
-    changes, events = w.db.total_changes, len(w.events())
+    driver = w.db._driver_connection()
+    changes, events = driver.total_changes, len(w.events())
     for path in (ROOT, CHILD, "nowhere", LOOKALIKE):
         w.covering(path)
-    assert w.db.total_changes == changes and len(w.events()) == events
+    assert driver.total_changes == changes and len(w.events()) == events
 
 
 def test_covering_grant_runs_inside_the_callers_own_write_transaction(build_world):
@@ -287,8 +303,10 @@ def test_covering_grant_runs_inside_the_callers_own_write_transaction(build_worl
     w.db.execute("BEGIN IMMEDIATE")
     assert w.covering(ROOT) == made
     assert w.db.in_transaction, "covering_grant ended the caller's transaction"
-    w.db.execute("INSERT INTO topic_grant_events (grant_id, event, actor, detail, at)"
-                 " VALUES ('tgr_probe', 'probe', 'owner', NULL, 'now')")
+    w.db.execute(
+        "INSERT INTO topic_grant_events (grant_id, event, actor, detail, at)"
+        " VALUES ('tgr_probe', 'probe', 'owner', NULL, 'now')"
+    )
     assert w.covering(ROOT) == made
     w.db.execute("ROLLBACK")
     assert [e["grant_id"] for e in w.events()].count("tgr_probe") == 0

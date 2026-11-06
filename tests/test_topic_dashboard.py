@@ -17,21 +17,36 @@ from test_dashboard_pages import get, page_config
 
 from baton import conversations, dashboard, topics
 from baton.config import Config
-from baton.store import connect
+from baton.database.store import connect
 
-ALIAS = {"alias_id": "al_0000000000000001", "alias": "lane-a", "badge": "guest", "code": "ab12",
-         "effective_role": "guest"}
+ALIAS = {
+    "alias_id": "al_0000000000000001",
+    "alias": "lane-a",
+    "badge": "guest",
+    "code": "ab12",
+    "effective_role": "guest",
+}
 MINE = ["orchestrator", "reviewer", "operator"]
 
 
 def seeded(tmp_path: Path, *, view_all: bool = True) -> tuple[Config, sqlite3.Connection]:
     config = page_config(tmp_path, view_all=view_all, guest=True)
     conn = connect(config.db_path)
-    with conn:
-        conn.execute("INSERT INTO aliases (id, name, skeleton, verifier, created_at)"
-                     " VALUES (?, 'lane-a', 'lane-a', 'synthetic', 0.0)", (ALIAS["alias_id"],))
-    topics.create(conn, config, actor="orchestrator", path="baton", title="The board",
-                  description="Where the work is discussed", members=["orchestrator", "reviewer"])
+    with conn.transaction():
+        conn.execute(
+            "INSERT INTO aliases (id, name, skeleton, verifier, created_at)"
+            " VALUES (?, 'lane-a', 'lane-a', 'synthetic', 0.0)",
+            (ALIAS["alias_id"],),
+        )
+    topics.create(
+        conn,
+        config,
+        actor="orchestrator",
+        path="baton",
+        title="The board",
+        description="Where the work is discussed",
+        members=["orchestrator", "reviewer"],
+    )
     topics.create(conn, config, actor="orchestrator", path="baton/development", members=MINE)
     return config, conn
 
@@ -64,8 +79,7 @@ def test_a_malformed_topic_path_is_still_a_bad_request(host):
 
 def test_the_index_is_a_directory_of_topics(host):
     config, conn = host
-    conversations.create(conn, config, actor="orchestrator", title="A thread", participants=MINE,
-                         topic="baton")
+    conversations.create(conn, config, actor="orchestrator", title="A thread", participants=MINE, topic="baton")
     page = text(get(config, "/"))
     assert "The board" in page, "a topic's title heads its entry"
     assert "Where the work is discussed" in page
@@ -84,8 +98,7 @@ def test_the_index_counts_threads_and_keeps_the_untopiced(host):
 
 def test_a_topic_page_heads_with_its_own_details(host):
     config, conn = host
-    conversations.create(conn, config, actor="orchestrator", title="A thread", participants=MINE,
-                         topic="baton")
+    conversations.create(conn, config, actor="orchestrator", title="A thread", participants=MINE, topic="baton")
     page = text(get(config, "/t/baton"))
     assert "The board" in page
     assert "Where the work is discussed" in page
@@ -96,8 +109,7 @@ def test_a_topic_page_heads_with_its_own_details(host):
 
 def test_a_topic_page_does_not_load_the_whole_directory(host, monkeypatch):
     config, conn = host
-    conversations.create(conn, config, actor="orchestrator", title="A thread", participants=MINE,
-                         topic="baton")
+    conversations.create(conn, config, actor="orchestrator", title="A thread", participants=MINE, topic="baton")
 
     def unexpected_directory(*args, **kwargs):
         pytest.fail("A topic page should not query the whole topic directory")
@@ -112,8 +124,9 @@ def test_a_topic_page_does_not_load_the_whole_directory(host, monkeypatch):
 
 def test_a_guest_thread_shows_the_alias_that_started_it(host):
     config, conn = host
-    conversations.create(conn, config, actor="guest", title="A guest thread", participants=None,
-                         topic="baton", identity=ALIAS)
+    conversations.create(
+        conn, config, actor="guest", title="A guest thread", participants=None, topic="baton", identity=ALIAS
+    )
     for target in ("/", "/t/baton"):
         page = text(get(config, target))
         assert "lane-a" in page, f"{target} must name the alias"
@@ -122,8 +135,7 @@ def test_a_guest_thread_shows_the_alias_that_started_it(host):
 
 def test_a_core_thread_names_no_alias(host):
     config, conn = host
-    conversations.create(conn, config, actor="orchestrator", title="Core thread", participants=MINE,
-                         topic="baton")
+    conversations.create(conn, config, actor="orchestrator", title="Core thread", participants=MINE, topic="baton")
     page = text(get(config, "/t/baton"))
     assert "Core thread" in page
     assert "lane-a" not in page
@@ -133,8 +145,14 @@ def test_a_topic_page_never_widens_what_the_viewer_sees(tmp_path):
     """The directory counts and the listing both stay the viewer's own, exactly as before."""
     config, conn = seeded(tmp_path, view_all=False)
     try:
-        conversations.create(conn, config, actor="orchestrator", title="Not mine",
-                             participants=["orchestrator", "assistant"], topic="baton")
+        conversations.create(
+            conn,
+            config,
+            actor="orchestrator",
+            title="Not mine",
+            participants=["orchestrator", "assistant"],
+            topic="baton",
+        )
         assert "Not mine" not in text(get(config, "/t/baton"))
         assert "Not mine" not in text(get(config, "/"))
     finally:
@@ -147,6 +165,7 @@ def test_a_topic_with_no_threads_still_has_a_page(host):
     assert answer.status == 200
     assert "None under this topic." in text(answer)
 
+
 def test_the_directory_offers_a_restricted_viewer_only_what_it_can_see_into(tmp_path):
     """A topic whose only thread is hidden from the viewer is not named on the index either.
 
@@ -158,10 +177,15 @@ def test_the_directory_offers_a_restricted_viewer_only_what_it_can_see_into(tmp_
     config, conn = seeded(tmp_path, view_all=False)
     try:
         topics.create(conn, config, actor="orchestrator", path="hidden", members=MINE)
-        conversations.create(conn, config, actor="orchestrator", title="Not mine",
-                             participants=["orchestrator", "assistant"], topic="hidden")
-        conversations.create(conn, config, actor="orchestrator", title="Mine", participants=MINE,
-                             topic="baton")
+        conversations.create(
+            conn,
+            config,
+            actor="orchestrator",
+            title="Not mine",
+            participants=["orchestrator", "assistant"],
+            topic="hidden",
+        )
+        conversations.create(conn, config, actor="orchestrator", title="Mine", participants=MINE, topic="baton")
         page = text(get(config, "/"))
         assert "/t/baton" in page
         assert "/t/hidden" not in page, "a topic the viewer sees no thread in is not offered"
@@ -175,6 +199,7 @@ def test_the_directory_offers_a_restricted_viewer_only_what_it_can_see_into(tmp_
     finally:
         board.close()
 
+
 def test_the_directory_never_renders_an_unreadable_threads_activity(tmp_path):
     """The rendered page must not date a topic from a thread this viewer cannot read.
 
@@ -183,22 +208,33 @@ def test_the_directory_never_renders_an_unreadable_threads_activity(tmp_path):
     """
     config, conn = seeded(tmp_path, view_all=False)
     try:
-        mine = conversations.create(conn, config, actor="orchestrator", title="Mine",
-                                    participants=MINE, topic="baton")
-        theirs = conversations.create(conn, config, actor="orchestrator", title="Not mine",
-                                      participants=["orchestrator", "assistant"], topic="baton")
-        with conn:
-            conn.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?",
-                         ("2026-11-01T10:00:00+00:00", mine["conversation_id"]))
-            conn.execute("UPDATE conversations SET last_activity_at = ? WHERE id = ?",
-                         ("2026-11-02T10:00:00+00:00", theirs["conversation_id"]))
+        mine = conversations.create(conn, config, actor="orchestrator", title="Mine", participants=MINE, topic="baton")
+        theirs = conversations.create(
+            conn,
+            config,
+            actor="orchestrator",
+            title="Not mine",
+            participants=["orchestrator", "assistant"],
+            topic="baton",
+        )
+        with conn.transaction():
+            conn.execute(
+                "UPDATE conversations SET last_activity_at = ? WHERE id = ?",
+                ("2026-11-01T10:00:00+00:00", mine["conversation_id"]),
+            )
+            conn.execute(
+                "UPDATE conversations SET last_activity_at = ? WHERE id = ?",
+                ("2026-11-02T10:00:00+00:00", theirs["conversation_id"]),
+            )
         page = text(get(config, "/"))
         assert "2026-11-01T10:00:00+00:00" in page, "the readable thread's time is what dates the topic"
         assert "2026-11-02T10:00:00+00:00" not in page, "the unreadable thread's time must not appear"
     finally:
         conn.close()
 
+
 # The direct topic route, and what a page a restricted viewer CAN open may say about one it cannot.
+
 
 def subtree(tmp_path, *, view_all: bool, where: str):
     """A parent topic and a subtopic, with one readable thread filed in `where` and one unreadable
@@ -207,10 +243,10 @@ def subtree(tmp_path, *, view_all: bool, where: str):
     topics.create(conn, config, actor="orchestrator", path="work", members=MINE)
     topics.create(conn, config, actor="orchestrator", path="work/open", members=MINE)
     readable_in, hidden_in = ("work", "work/open") if where == "parent" else ("work/open", "work")
-    conversations.create(conn, config, actor="orchestrator", title="Readable", participants=MINE,
-                         topic=readable_in)
-    conversations.create(conn, config, actor="orchestrator", title="Hidden",
-                         participants=["orchestrator", "assistant"], topic=hidden_in)
+    conversations.create(conn, config, actor="orchestrator", title="Readable", participants=MINE, topic=readable_in)
+    conversations.create(
+        conn, config, actor="orchestrator", title="Hidden", participants=["orchestrator", "assistant"], topic=hidden_in
+    )
     return config, conn
 
 
@@ -219,10 +255,15 @@ def test_a_topic_with_nothing_readable_in_it_is_not_found(tmp_path):
     the topic's existence, description or membership is readable by guessing the path."""
     config, conn = seeded(tmp_path, view_all=False)
     try:
-        topics.create(conn, config, actor="orchestrator", path="secret", description="Vendor deal",
-                      members=MINE)
-        conversations.create(conn, config, actor="orchestrator", title="Not mine",
-                             participants=["orchestrator", "assistant"], topic="secret")
+        topics.create(conn, config, actor="orchestrator", path="secret", description="Vendor deal", members=MINE)
+        conversations.create(
+            conn,
+            config,
+            actor="orchestrator",
+            title="Not mine",
+            participants=["orchestrator", "assistant"],
+            topic="secret",
+        )
         answer = get(config, "/t/secret")
         assert answer.status == 404
         assert "Vendor deal" not in text(answer)
@@ -242,8 +283,7 @@ def test_a_board_reader_still_opens_an_empty_topic(tmp_path):
 def test_a_restricted_viewer_opens_a_topic_it_has_a_thread_in(tmp_path):
     config, conn = seeded(tmp_path, view_all=False)
     try:
-        conversations.create(conn, config, actor="orchestrator", title="Mine", participants=MINE,
-                             topic="baton")
+        conversations.create(conn, config, actor="orchestrator", title="Mine", participants=MINE, topic="baton")
         answer = get(config, "/t/baton")
         assert answer.status == 200
         assert "Mine" in text(answer)
@@ -277,7 +317,9 @@ def test_a_page_never_links_a_subtopic_the_viewer_cannot_open(tmp_path):
     finally:
         conn.close()
 
+
 # Presentation: a heading that outranks the one above it, a name printed twice, and a dead end.
+
 
 def rule_size(selector: str) -> float | None:
     """The largest font-size in rem that any rule naming `selector` sets, or None if none does.
@@ -288,6 +330,7 @@ def rule_size(selector: str) -> float | None:
     pattern excludes braces, so an `@media` wrapper is stepped over and its inner rules are read.
     """
     import re
+
     sizes = []
     for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", dashboard.STYLE):
         if selector not in [one.strip() for one in selectors.split(",")]:
@@ -319,14 +362,14 @@ def test_a_topic_named_only_by_its_path_shows_that_name_once(tmp_path):
     config, conn = seeded(tmp_path, view_all=True)
     try:
         topics.create(conn, config, actor="orchestrator", path="plain", members=MINE)
-        conversations.create(conn, config, actor="orchestrator", title="A thread", participants=MINE,
-                             topic="plain")
+        conversations.create(conn, config, actor="orchestrator", title="A thread", participants=MINE, topic="plain")
         page = text(get(config, "/"))
-        entry = page[page.index('href="/t/plain"'):]
-        entry = entry[:entry.index("</li>")]
+        entry = page[page.index('href="/t/plain"') :]
+        entry = entry[: entry.index("</li>")]
         # The visible words only: the href has to carry the path, and that is not what reads as repetition.
         import re
-        shown = re.sub(r"<[^>]*>", " ", entry[entry.index(">") + 1:])
+
+        shown = re.sub(r"<[^>]*>", " ", entry[entry.index(">") + 1 :])
         assert shown.count("plain") == 1, f"the name is shown {shown.count('plain')} times: {shown.strip()}"
     finally:
         conn.close()
@@ -342,15 +385,15 @@ def test_a_bad_request_page_offers_a_way_back(tmp_path):
     finally:
         conn.close()
 
+
 def test_the_directory_counts_a_roots_subtree(tmp_path):
     """A root whose threads all sit in a subtopic showed 0, which read as an empty topic."""
     config, conn = subtree(tmp_path, view_all=False, where="child")
     try:
         page = text(get(config, "/"))
-        entry = page[page.index('href="/t/work"'):]
-        entry = entry[:entry.index("</li>")]
+        entry = page[page.index('href="/t/work"') :]
+        entry = entry[: entry.index("</li>")]
         assert "1 thread" in entry, f"the root should count its subtree: {entry}"
         assert "0 thread" not in entry
     finally:
         conn.close()
-

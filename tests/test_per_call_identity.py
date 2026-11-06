@@ -2,6 +2,7 @@
 
 Everything goes through in-process MCP dispatch or `baton.cli.main`, with synthetic roles and tokens.
 """
+
 from __future__ import annotations
 
 import json
@@ -13,8 +14,9 @@ from conftest import make_config
 from test_aliases import dispatch, payload, rpc
 from test_messages import rid
 
-from baton import auth, cli, store
+from baton import auth, cli
 from baton.app import guard
+from baton.database import store
 
 SECRET = "synthetic enrol secret"
 OTHER = "synthetic other secret"
@@ -36,8 +38,10 @@ max_claims_per_alias_per_hour = 100
 def build_host(tmp_path):
     """A host with an agent role to enrol (hilary, no job authority), a shared guest login and a person."""
     made = {role: auth.new_token() for role in ("hilary", "guest", "person")}
-    entries = "".join(f'[[auth.tokens]]\nname = "{role}-token"\nrole = "{role}"\nsha256 = "{digest}"\n'
-                      for role, (_, digest) in made.items())
+    entries = "".join(
+        f'[[auth.tokens]]\nname = "{role}-token"\nrole = "{role}"\nsha256 = "{digest}"\n'
+        for role, (_, digest) in made.items()
+    )
     built = make_config(tmp_path, extra=ROLES + entries)
     built.tokens.update({role: token for role, (token, _) in made.items()})
     built.config_path = tmp_path / "baton.toml"
@@ -106,6 +110,7 @@ def test_a_fixed_role_enrols_once_with_an_owner_arm(host):
             assert conn.execute("SELECT verifier FROM aliases WHERE name = 'hilary'").fetchone()[0] == verifier
             assert [tuple(row) for row in conn.execute("SELECT role FROM core_enrolment")] == [("hilary",)]
         assert owner(host, "alias", "arm-enrol", "hilary") == 1, "a role enrols once"
+
     dispatch(host, scenario)
 
 
@@ -119,6 +124,7 @@ def test_enrolment_names_only_the_credentials_own_role_and_the_arm_is_single_use
         assert (await claim(client, host, role="hilary")).get("effective_role") == "hilary"
         with db(host) as conn:
             assert conn.execute("SELECT COUNT(*) FROM alias_arms").fetchone()[0] == 0
+
     dispatch(host, scenario)
 
 
@@ -128,6 +134,7 @@ def test_an_expired_enrol_arm_is_refused(host):
         with db(host) as conn:
             conn.execute("UPDATE alias_arms SET expires_at = expires_at - 901")
         assert (await claim(client, host, role="hilary")).get("error") == "forbidden"
+
     dispatch(host, scenario)
 
 
@@ -159,6 +166,7 @@ def test_a_guest_renews_an_enrolled_alias_without_an_arm_and_acts_as_its_role(ho
         assert "alias_id" not in got["messages"][-1] or got["messages"][-1]["alias_id"] is None
         job = await call(client, host, "create_job", {"title": "nope", "token": proof})
         assert job.get("error") == "forbidden", "mapped hilary keeps hilary's job authority, which is false"
+
     dispatch(host, scenario)
 
 
@@ -170,11 +178,11 @@ def test_an_unmapped_proof_still_posts_as_a_guest_and_cannot_use_core_tools(host
         assert (me["role"], me["effective_role"], me["alias"]) == ("guest", "guest", "lane-x")
         refused = await call(client, host, "read_messages", {"token": alias["binding_token"]})
         assert refused.get("error") == "forbidden"
+
     dispatch(host, scenario)
 
 
-@pytest.mark.parametrize("tool,arguments", [("whoami", {}), ("alias_exists", {"name": "x"}),
-                                            ("read_messages", {})])
+@pytest.mark.parametrize("tool,arguments", [("whoami", {}), ("alias_exists", {"name": "x"}), ("read_messages", {})])
 @pytest.mark.parametrize("proof", ["", "not ascii é", "x" * 257, "unknown-proof"])
 def test_a_bad_token_is_refused_on_every_tool(host, tool, arguments, proof):
     async def scenario(client):
@@ -182,6 +190,7 @@ def test_a_bad_token_is_refused_on_every_tool(host, tool, arguments, proof):
         assert refused.get("error") == "forbidden", refused
         if proof:
             assert proof not in host.config.audit_path.read_text()
+
     dispatch(host, scenario)
 
 
@@ -192,6 +201,7 @@ def test_an_expired_or_replaced_proof_is_refused_even_on_read_only_tools(host):
         with db(host) as conn:
             conn.execute("UPDATE alias_bindings SET expires_at = 1")
         assert (await call(client, host, "whoami", {"token": proof})).get("error") == "forbidden"
+
     dispatch(host, scenario)
 
 
@@ -199,6 +209,7 @@ def test_an_explicit_null_token_is_the_same_as_none(host):
     async def scenario(client):
         me = await call(client, host, "whoami", {"token": None})
         assert (me.get("role"), me.get("effective_role"), me.get("alias")) == ("guest", "guest", None)
+
     dispatch(host, scenario)
 
 
@@ -209,6 +220,7 @@ def test_a_token_on_a_fixed_role_credential_is_refused(host, tool, arguments):
         proof = (await claim(client, host))["binding_token"]
         refused = await call(client, host, tool, {**arguments, "token": proof}, role="planner")
         assert refused.get("error") == "forbidden", refused
+
     dispatch(host, scenario)
 
 
@@ -223,6 +235,7 @@ def test_tools_take_token_centrally_except_claim_alias(host):
                 assert "token" not in tool["inputSchema"].get("required", []), name
         assert "core proof" in schemas["read_messages"]["description"]
         assert "core proof" not in schemas["whoami"]["description"]
+
     dispatch(host, scenario)
 
 
@@ -237,6 +250,7 @@ def test_audit_lines_carry_both_identities_and_never_the_proof(host):
         assert (line["alias_id"], line["alias_code"]) == (renewed["alias_id"], renewed["code"])
         assert renewed["binding_token"] not in host.config.audit_path.read_text()
         assert SECRET not in host.config.audit_path.read_text()
+
     dispatch(host, scenario)
 
 
@@ -251,6 +265,7 @@ def test_mapped_calls_use_the_effective_roles_hourly_budget(host, monkeypatch):
         assert "error" not in await call(client, host, "read_messages", {"token": proof})
         limited = await call(client, host, "read_messages", {"token": proof})
         assert limited.get("error") == "rate_limited", "hilary's own calls and mapped calls share one budget"
+
     dispatch(host, scenario)
 
 
@@ -269,27 +284,38 @@ def test_replay_keys_on_the_effective_role_and_rechecks_authorization(host):
         await claim(client, host, passphrase=OTHER)
         stale = await call(client, host, "send_message", {**body, "token": proof})
         assert stale.get("error") == "forbidden", "a stale proof is refused before any cached result"
+
     dispatch(host, scenario)
 
 
 def test_a_replayed_conversation_post_rechecks_membership_first(host):
     config = host.config
     planner = replace(config.roles["planner"], can_create_conversations=True, can_manage_participants=True)
-    host.config = replace(config, conversations=replace(config.conversations, enabled=True),
-                          roles={**config.roles, "planner": planner})
+    host.config = replace(
+        config, conversations=replace(config.conversations, enabled=True), roles={**config.roles, "planner": planner}
+    )
 
     async def scenario(client):
         await enrol(client, host)
         proof = (await claim(client, host))["binding_token"]
-        conv = (await call(client, host, "create_conversation", {
-            "title": "Design", "participants": ["planner", "hilary", "worker"]}, role="planner"))["conversation_id"]
+        conv = (
+            await call(
+                client,
+                host,
+                "create_conversation",
+                {"title": "Design", "participants": ["planner", "hilary", "worker"]},
+                role="planner",
+            )
+        )["conversation_id"]
         body = {"conversation_id": conv, "text": "posted", "request_id": rid("member"), "token": proof}
         assert (await call(client, host, "send_message", body)).get("created") is True
-        removed = await call(client, host, "remove_participant", {"conversation_id": conv, "participant": "hilary"},
-                             role="planner")
+        removed = await call(
+            client, host, "remove_participant", {"conversation_id": conv, "participant": "hilary"}, role="planner"
+        )
         assert "error" not in removed, removed
         replayed = await call(client, host, "send_message", body)
         assert replayed.get("error") == "not_a_participant", "a cached result goes only to a current participant"
+
     dispatch(host, scenario)
 
 
@@ -297,6 +323,7 @@ def test_reserved_names_are_still_refused_to_new_guest_aliases(host):
     async def scenario(client):
         assert (await claim(client, host, "hilary")).get("error") == "forbidden"
         assert (await claim(client, host, "p1anner")).get("error") == "forbidden"
+
     dispatch(host, scenario)
 
 
@@ -311,6 +338,7 @@ def test_unmap_ends_mapped_proofs_and_the_alias_renews_as_a_guest(host):
         with db(host) as conn:
             assert conn.execute("SELECT COUNT(*) FROM alias_roles").fetchone()[0] == 0
             assert conn.execute("SELECT unmapped_at FROM core_enrolment WHERE role = 'hilary'").fetchone()[0]
+
     dispatch(host, scenario)
 
 
@@ -320,8 +348,9 @@ def test_map_restores_an_enrolled_role_and_remapping_ends_every_affected_proof(h
         assert owner(host, "alias", "unmap", "hilary") == 0
         guest_proof = (await claim(client, host))["binding_token"]
         assert owner(host, "alias", "map", "hilary", "hilary") == 0
-        assert (await call(client, host, "whoami", {"token": guest_proof})).get("error") == "forbidden", \
+        assert (await call(client, host, "whoami", {"token": guest_proof})).get("error") == "forbidden", (
             "an old guest proof is never silently upgraded"
+        )
         mapped = (await claim(client, host))["binding_token"]
         other = await claim(client, host, "lane-m")
         assert owner(host, "alias", "map", "lane-m", "hilary") == 0
@@ -329,6 +358,7 @@ def test_map_restores_an_enrolled_role_and_remapping_ends_every_affected_proof(h
             assert (await call(client, host, "whoami", {"token": stale})).get("error") == "forbidden"
         assert (await claim(client, host, "lane-m"))["effective_role"] == "hilary"
         assert (await claim(client, host))["effective_role"] == "guest", "a role maps to one alias at a time"
+
     dispatch(host, scenario)
 
 
@@ -339,13 +369,15 @@ def test_map_works_only_for_an_enrolled_role(host, role):
         assert owner(host, "alias", "map", "lane-n", role) == 1
         with db(host) as conn:
             assert conn.execute("SELECT COUNT(*) FROM alias_roles").fetchone()[0] == 0
+
     dispatch(host, scenario)
 
 
 def test_mapped_posts_use_the_roles_budget_not_the_guest_post_caps(host):
     config = host.config
-    host.config = replace(config, aliases=replace(config.aliases, max_posts_per_alias_per_hour=1,
-                                                  max_posts_per_credential_per_hour=1))
+    host.config = replace(
+        config, aliases=replace(config.aliases, max_posts_per_alias_per_hour=1, max_posts_per_credential_per_hour=1)
+    )
 
     async def scenario(client):
         await enrol(client, host)
@@ -355,31 +387,43 @@ def test_mapped_posts_use_the_roles_budget_not_the_guest_post_caps(host):
             assert sent.get("created") is True, sent
         with db(host) as conn:
             assert conn.execute("SELECT COUNT(*) FROM alias_posts").fetchone()[0] == 0
+
     dispatch(host, scenario)
 
 
 def test_a_token_on_claim_alias_is_refused_and_redacted(host):
     async def scenario(client):
         proof = "synthetic-claim-token-value"
-        refused = await rpc(client, host, "tools/call", {"name": "claim_alias", "arguments": {
-            "name": "lane-t", "passphrase": SECRET, "token": proof}})
+        refused = await rpc(
+            client,
+            host,
+            "tools/call",
+            {"name": "claim_alias", "arguments": {"name": "lane-t", "passphrase": SECRET, "token": proof}},
+        )
         assert payload(refused).get("error") == "invalid_request", refused
         assert proof not in json.dumps(refused) and SECRET not in json.dumps(refused)
         assert proof not in host.config.audit_path.read_text()
         with db(host) as conn:
             assert conn.execute("SELECT COUNT(*) FROM aliases").fetchone()[0] == 0
-        assert (await call(client, host, "claim_alias", {"name": "lane-t", "passphrase": SECRET, "token": None})
-                ).get("effective_role") == "guest", "null is the same as omitted"
+        assert (await call(client, host, "claim_alias", {"name": "lane-t", "passphrase": SECRET, "token": None})).get(
+            "effective_role"
+        ) == "guest", "null is the same as omitted"
+
     dispatch(host, scenario)
 
 
 def test_a_refused_author_field_never_writes_the_token_to_audit(host):
     async def scenario(client):
         proof = (await claim(client, host, "lane-a"))["binding_token"]
-        refused = await rpc(client, host, "tools/call", {"name": "read_messages", "arguments": {
-            "token": proof, "from_role": "synthetic", "request_id": proof}})
+        refused = await rpc(
+            client,
+            host,
+            "tools/call",
+            {"name": "read_messages", "arguments": {"token": proof, "from_role": "synthetic", "request_id": proof}},
+        )
         assert payload(refused).get("error") == "forbidden_field"
         assert proof not in host.config.audit_path.read_text()
+
     dispatch(host, scenario)
 
 
@@ -401,6 +445,7 @@ def test_bind_events_rechecks_the_mapping_inside_its_transaction(host):
             assert conn.execute("SELECT COUNT(*) FROM events_targets").fetchone()[0] == 0
         finally:
             conn.close()
+
     dispatch(host, scenario)
 
 
@@ -442,6 +487,7 @@ def test_a_map_landing_mid_resolution_never_upgrades_a_guest_proof(host):
         guest = (await claim(client, host, "lane-m"))["binding_token"]
         resolved = resolve_while(host, guest, lambda: owner(host, "alias", "map", "lane-m", "hilary"))
         assert resolved["effective_role"] == "guest", "resolved from the state in which the proof was live"
+
     dispatch(host, scenario)
 
 
@@ -451,4 +497,5 @@ def test_an_unmap_landing_mid_resolution_never_downgrades_a_mapped_proof(host):
         mapped = (await claim(client, host))["binding_token"]
         resolved = resolve_while(host, mapped, lambda: owner(host, "alias", "unmap", "hilary"))
         assert resolved["effective_role"] == "hilary", "resolved from the state in which the proof was live"
+
     dispatch(host, scenario)

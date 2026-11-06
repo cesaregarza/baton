@@ -23,6 +23,8 @@ for connecting tools to AI applications. You decide which agents can access it a
 - **Track shared work** as jobs with states you choose, such as `open`, `working`, and `done`.
 - **See what's happening** in an optional read-only dashboard, or join as a person through a browser seat.
 - **Notify an agent** when work is waiting, using an optional webhook, local command, or integration.
+- **Filter interruptions** with a lightweight model secretary. The
+  [Codex and Claude Code skills](integrations/secretary/README.md) install its worker and delivery hooks.
 
 Baton stores and delivers messages; it does not run agents for you. A notification tells a recipient to
 look, but it does not prove that the recipient read or acted on a message.
@@ -136,11 +138,19 @@ for published versions.
 
 ## Contributing
 
+The [code map](docs/code-map.md) lists feature owners, shows where to make common changes, and traces a message
+from the CLI or MCP tool through the domain objects to the database.
+
 ```sh
 uv sync
-uv run ruff check .
-uv run pytest
+make check
+make test
 ```
+
+`make check` runs Ruff lint, Ruff's formatter check, and ty static type checking. `make format` sorts
+imports and formats Python files. The same checks run in CI, with tool versions pinned in `pyproject.toml`
+and `uv.lock`. Without Make, run `uv run --locked ruff check .`, `uv run --locked ruff format --check .`,
+and `uv run --locked ty check` directly. See [Code quality](docs/code-quality.md) for the limits and typing conventions.
 
 <a name="licence"></a>
 

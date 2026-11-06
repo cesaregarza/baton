@@ -18,7 +18,7 @@ from server_support import running_server
 from baton import config as config_module
 from baton.auth import hash_passphrase, new_token
 from baton.config import Config
-from baton.store import connect
+from baton.database.store import connect
 
 PASSPHRASE = "example passphrase for tests"
 REDIRECT = "https://client.example.test/oauth/callback"
@@ -52,29 +52,49 @@ class Host:
         return self.config.resource_url
 
 
-def make_config(tmp_path: Path, *, port: int = 8765, oauth: bool = False, extra: str = "",
-                data_dir: Path | None = None, oauth_roles: tuple[str, ...] = ("planner",)) -> Host:
+def make_config(
+    tmp_path: Path,
+    *,
+    port: int = 8765,
+    oauth: bool = False,
+    extra: str = "",
+    data_dir: Path | None = None,
+    oauth_roles: tuple[str, ...] = ("planner",),
+) -> Host:
     tokens = {role: new_token() for role in ("planner", "worker")}
-    oauth_table = textwrap.dedent(f"""
+    oauth_table = (
+        textwrap.dedent(f"""
         [auth.oauth]
         enabled = true
         passphrase_hash = "{hash_passphrase(PASSPHRASE)}"
         roles = {json.dumps(list(oauth_roles))}
         redirect_uris = ["{REDIRECT}"]
-    """) if oauth else ""
-    entries = "".join(f'[[auth.tokens]]\nname = "{role}-token"\nrole = "{role}"\nsha256 = "{digest}"\n'
-                      for role, (_, digest) in tokens.items())
-    text = textwrap.dedent(f"""
+    """)
+        if oauth
+        else ""
+    )
+    entries = "".join(
+        f'[[auth.tokens]]\nname = "{role}-token"\nrole = "{role}"\nsha256 = "{digest}"\n'
+        for role, (_, digest) in tokens.items()
+    )
+    text = (
+        textwrap.dedent(f"""
         [host]
         public_url = "http://127.0.0.1:{port}"
         listen_port = {port}
-        data_dir = "{data_dir or tmp_path / 'data'}"
+        data_dir = "{data_dir or tmp_path / "data"}"
 
         [roles.planner]
         description = "Plans work and reviews it"
         [roles.worker]
         description = "Does the work"
-    """) + extra + "\n" + entries + oauth_table + JOBS
+    """)
+        + extra
+        + "\n"
+        + entries
+        + oauth_table
+        + JOBS
+    )
     path = tmp_path / "baton.toml"
     path.write_text(text)
     return Host(config_module.load(path), {role: token for role, (token, _) in tokens.items()})
@@ -110,8 +130,9 @@ def start_host(tmp_path: Path) -> Iterator[Callable[..., Host]]:
         port = free_port()
         host = make_config(tmp_path, port=port, **kwargs)  # type: ignore[arg-type]
         host.integrations = integrations(host.config) if integrations else None
-        server = uvicorn.Server(uvicorn.Config(create_app(host.config, host.integrations), host="127.0.0.1",
-                                               port=port, log_level="warning"))
+        server = uvicorn.Server(
+            uvicorn.Config(create_app(host.config, host.integrations), host="127.0.0.1", port=port, log_level="warning")
+        )
         servers.enter_context(running_server(server))
         host.base = f"http://127.0.0.1:{port}"
         return host

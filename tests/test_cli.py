@@ -17,8 +17,19 @@ def test_local_agents_message_wait_and_move_jobs(host, capsys) -> None:
     config = ["--config", str(host.config.data_dir.parent / "baton.toml")]
     code, sent = run(capsys, *config, "message", "--as", "planner", "--to", "worker", "--text", "start")
     assert (code, sent["seq"], sent["created"]) == (0, 1, True)
-    _, again = run(capsys, *config, "message", "--as", "planner", "--to", "worker", "--text", "start",
-                   "--request-id", sent["request_id"])
+    _, again = run(
+        capsys,
+        *config,
+        "message",
+        "--as",
+        "planner",
+        "--to",
+        "worker",
+        "--text",
+        "start",
+        "--request-id",
+        sent["request_id"],
+    )
     assert again["created"] is False
 
     _, waited = run(capsys, *config, "wait", "--as", "worker", "--timeout", "0")
@@ -64,11 +75,25 @@ def test_hash_passphrase_reads_stdin(capsys, monkeypatch, line: str, code: int) 
 def test_job_move_takes_a_retry_id_and_an_expected_revision(host, capsys) -> None:
     config = ["--config", str(host.config.data_dir.parent / "baton.toml")]
     _, job = run(capsys, *config, "job", "create", "--as", "planner", "--title", "Example")
-    _, moved = run(capsys, *config, "job", "move", "--as", "worker", job["job_id"], "working",
-                   "--expected-revision", "1")
-    _, again = run(capsys, *config, "job", "move", "--as", "worker", job["job_id"], "working",
-                   "--expected-revision", "1", "--request-id", moved["request_id"])
+    _, moved = run(
+        capsys, *config, "job", "move", "--as", "worker", job["job_id"], "working", "--expected-revision", "1"
+    )
+    _, again = run(
+        capsys,
+        *config,
+        "job",
+        "move",
+        "--as",
+        "worker",
+        job["job_id"],
+        "working",
+        "--expected-revision",
+        "1",
+        "--request-id",
+        moved["request_id"],
+    )
     assert (moved["created"], again["created"], again["revision"]) == (True, False, 2)
-    code, stale = run(capsys, *config, "job", "move", "--as", "worker", job["job_id"], "review",
-                      "--expected-revision", "1")
+    code, stale = run(
+        capsys, *config, "job", "move", "--as", "worker", job["job_id"], "review", "--expected-revision", "1"
+    )
     assert (code, stale["error"]) == (1, "stale_revision")

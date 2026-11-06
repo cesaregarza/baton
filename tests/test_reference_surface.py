@@ -41,8 +41,19 @@ build_scene = refs.build_scene  # the fixture, under the name the tests ask for
 
 NEW = ["edit_reference", "read_reference", "reference_history"]
 OLD = [name for name in TOOLS if name not in NEW]
-ELEVEN = {"whoami", "alias_exists", "claim_alias", "list_conversations", "read_history", "get_message", "search",
-          "send_message", "create_conversation", "list_topics", "get_topic"}
+ELEVEN = {
+    "whoami",
+    "alias_exists",
+    "claim_alias",
+    "list_conversations",
+    "read_history",
+    "get_message",
+    "search",
+    "send_message",
+    "create_conversation",
+    "list_topics",
+    "get_topic",
+}
 
 
 async def listed(client, host, role):
@@ -84,6 +95,7 @@ def only_scopes(monkeypatch, *scopes):
 
 # 1. The list and the schemas ------------------------------------------------------------------------------
 
+
 def test_the_tool_list_gains_exactly_the_three_tools_after_get_topic_in_their_order(build_scene):
     """The earlier tools are listed as they were; the new ones sit right after `get_topic`, in the conversation
     group, as `edit_reference`, `read_reference`, `reference_history`; and a guest sees the same list as a core role."""
@@ -119,8 +131,15 @@ def test_edit_reference_declares_the_arguments_the_spec_lists(build_scene):
     async def scenario(client):
         found = await shown(client, scene.host, "edit_reference")
         schema = found["inputSchema"]
-        assert set(schema["properties"]) == {"topic", "name", "body", "expected_revision", "request_id",
-                                             "grant_token", "token"}
+        assert set(schema["properties"]) == {
+            "topic",
+            "name",
+            "body",
+            "expected_revision",
+            "request_id",
+            "grant_token",
+            "token",
+        }
         assert set(schema.get("required", [])) == {"topic", "name", "body", "expected_revision"}
         properties = schema["properties"]
         assert [kinds(properties[name]) for name in ("topic", "name", "body")] == [{"string"}] * 3
@@ -167,10 +186,16 @@ def test_reference_history_declares_the_arguments_the_spec_lists_and_no_key(buil
         assert set(schema["properties"]) == {"topic", "name", "after_revision", "limit", "token"}
         assert set(schema.get("required", [])) == {"topic", "name"}
         properties = schema["properties"]
-        assert (kinds(properties["after_revision"]), bounds(properties["after_revision"]),
-                properties["after_revision"].get("default")) == ({"integer"}, {"minimum": 0}, 0)
+        assert (
+            kinds(properties["after_revision"]),
+            bounds(properties["after_revision"]),
+            properties["after_revision"].get("default"),
+        ) == ({"integer"}, {"minimum": 0}, 0)
         assert (kinds(properties["limit"]), bounds(properties["limit"]), properties["limit"].get("default")) == (
-            {"integer"}, {"minimum": 1, "maximum": 100}, 50)
+            {"integer"},
+            {"minimum": 1, "maximum": 100},
+            50,
+        )
         assert found["annotations"] == {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
 
     play(scene.host, scenario)
@@ -192,13 +217,16 @@ def test_the_reference_tools_are_listed_only_when_conversations_are_enabled(tmp_
 
 # 2. Who may call them, at the guard -----------------------------------------------------------------------
 
+
 def test_the_tools_are_registered_through_the_tuples_of_the_module_the_spec_names():
     """The layout the spec fixes: the bodies are a mixin `Tools` inherits, and the module offers the registration
     tuples of (name, scope, read-only) and the names of the guest tools, so `baton/app.py` only adds them."""
     module = refs.reference_tools_module()
-    assert tuple(module.REFERENCE_TOOLS) == (("edit_reference", auth.SCOPE_WRITE, False),
-                                             ("read_reference", auth.SCOPE_READ, True),
-                                             ("reference_history", auth.SCOPE_READ, True))
+    assert tuple(module.REFERENCE_TOOLS) == (
+        ("edit_reference", auth.SCOPE_WRITE, False),
+        ("read_reference", auth.SCOPE_READ, True),
+        ("reference_history", auth.SCOPE_READ, True),
+    )
     assert set(module.REFERENCE_GUEST_TOOLS) == {"read_reference", "reference_history"}
     assert issubclass(app_module.Tools, module.ReferenceTools)
 
@@ -230,7 +258,9 @@ def test_a_bound_guest_is_let_through_the_guard_to_read_and_an_unbound_one_is_no
         assert await read_reference(client, none, BOARDS, NAME) == gone
         assert await reference_history(client, none, BOARDS, NAME) == gone
         assert await none.call(client, "edit_reference", **edit_arguments(BOARDS, NAME, "text", 2)) == {
-            "error": "forbidden", "detail": refs.F2}
+            "error": "forbidden",
+            "detail": refs.F2,
+        }
 
     play(scene.host, scenario)
 
@@ -243,9 +273,11 @@ def test_each_tool_needs_its_scope_and_refuses_a_credential_without_it(build_sce
     async def scenario(client):
         await stage(client, scene.host)
         await write_revisions(client, scene, BOARDS, NAME, 1)
-        calls = {"edit_reference": (edit_arguments(BOARDS, NAME, "text", 1), auth.SCOPE_WRITE),
-                 "read_reference": ({"topic": BOARDS, "name": NAME}, auth.SCOPE_READ),
-                 "reference_history": ({"topic": BOARDS, "name": NAME}, auth.SCOPE_READ)}
+        calls = {
+            "edit_reference": (edit_arguments(BOARDS, NAME, "text", 1), auth.SCOPE_WRITE),
+            "read_reference": ({"topic": BOARDS, "name": NAME}, auth.SCOPE_READ),
+            "reference_history": ({"topic": BOARDS, "name": NAME}, auth.SCOPE_READ),
+        }
 
         async def ask(name):
             return await tool(client, scene.host, name, calls[name][0], role="planner")

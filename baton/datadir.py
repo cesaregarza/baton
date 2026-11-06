@@ -20,10 +20,12 @@ The rules:
 * Every entry in `data_dir` is a regular file, not a symlink, owned by the
   current user, with no group or other bits.
 
-Files are opened relative to a descriptor for the checked directory with
+Non-database files are opened relative to a descriptor for the checked directory with
 `O_NOFOLLOW` and checked again with `fstat`, so a link swapped in after the check
-is refused rather than followed. SQLite opens its files by path. For it, the
-store checks after opening that the path still names the checked directory and
+is refused rather than followed. Existing SQLite files use a descriptor-relative,
+non-following stat check: opening and closing an extra database descriptor could release
+SQLite's process-wide locks. SQLite opens its files by path. For it, the store
+checks after opening that the path still names the checked directory and
 file (device and inode). What remains: swapping the file and swapping it back
 between SQLite's open and that check, which needs write access to the 0700
 directory, so the same user or root.
@@ -35,7 +37,7 @@ import errno
 import os
 import secrets
 import stat
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -64,7 +66,7 @@ def canonical(path: Path | str) -> Path:
 
 
 @contextmanager
-def opened(path: Path) -> Iterator[int]:
+def opened(path: Path) -> Generator[int]:
     """A descriptor for `path` after creating or checking it and its parents, and checking every entry in it."""
     path = canonical(path)
     fd = _walk(path)
@@ -82,8 +84,13 @@ def opened(path: Path) -> Iterator[int]:
                     # Gone since it was listed: another writer's temp file renamed into place, or a SQLite
                     # side file removed with its last connection. A file that no longer exists can't be unsafe.
                     continue
-                _check_private(info, path / entry.name, want=stat.S_ISREG,
-                               kind="regular file", fix="remove it or make it a private file (chmod 600)")
+                _check_private(
+                    info,
+                    path / entry.name,
+                    want=stat.S_ISREG,
+                    kind="regular file",
+                    fix="remove it or make it a private file (chmod 600)",
+                )
         yield fd
     finally:
         os.close(fd)
@@ -112,12 +119,24 @@ def open_file(dir_fd: int, name: str, flags: int, *, directory: Path) -> int:
             raise UnsafeDataDir(directory / name, "is a symlink", "remove it") from None
         raise
     try:
-        _check_private(os.fstat(fd), directory / name, want=stat.S_ISREG, kind="regular file",
-                       fix=f"chmod 600 {directory / name}")
+        _check_private(
+            os.fstat(fd), directory / name, want=stat.S_ISREG, kind="regular file", fix=f"chmod 600 {directory / name}"
+        )
     except BaseException:
         os.close(fd)
         raise
     return fd
+
+
+def stat_file(dir_fd: int, name: str, *, directory: Path) -> os.stat_result:
+    """Check a private regular file without opening or closing a descriptor on its inode.
+
+    SQLite owns its database descriptors: an unrelated close on the same inode can release
+    its process-wide POSIX locks. Its caller rechecks the path identity after SQLite opens it.
+    """
+    info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    _check_private(info, directory / name, want=stat.S_ISREG, kind="regular file", fix=f"chmod 600 {directory / name}")
+    return info
 
 
 def replace_file(dir_fd: int, name: str, data: bytes) -> os.stat_result:
@@ -207,15 +226,20 @@ def _open_dir(dir_fd: int, name: str, path: Path) -> int:
     except OSError:
         info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
         if stat.S_ISLNK(info.st_mode):
-            raise UnsafeDataDir(path, "is a symlink", "use the real path: data_dir and its parents must not be "
-                                "symlinks") from None
+            raise UnsafeDataDir(
+                path, "is a symlink", "use the real path: data_dir and its parents must not be symlinks"
+            ) from None
         raise UnsafeDataDir(path, "is not a directory", "choose another data_dir") from None
 
 
 def _check_ancestor(info: os.stat_result, path: Path) -> None:
     if info.st_uid not in (0, os.geteuid()):
-        raise UnsafeDataDir(path, f"(a parent) is owned by uid {info.st_uid}",
-                            "put data_dir under directories owned by root or you")
+        raise UnsafeDataDir(
+            path, f"(a parent) is owned by uid {info.st_uid}", "put data_dir under directories owned by root or you"
+        )
     if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
-        raise UnsafeDataDir(path, f"(a parent) is group- or other-writable ({stat.S_IMODE(info.st_mode):04o}) "
-                            "without the sticky bit", "choose a data_dir whose parents only you or root can write")
+        raise UnsafeDataDir(
+            path,
+            f"(a parent) is group- or other-writable ({stat.S_IMODE(info.st_mode):04o}) without the sticky bit",
+            "choose a data_dir whose parents only you or root can write",
+        )

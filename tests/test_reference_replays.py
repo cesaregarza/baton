@@ -90,8 +90,12 @@ def test_the_same_request_id_with_anything_else_changed_is_an_idempotency_confli
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
         tables = scene.tables()
-        for arguments in ((BOARDS, NAME, "another body", 0), (BOARDS, NAME, body_of(1), 1),
-                          (BOARDS, "lead-list", body_of(1), 0), (refs.LEADS, NAME, body_of(1), 0)):
+        for arguments in (
+            (BOARDS, NAME, "another body", 0),
+            (BOARDS, NAME, body_of(1), 1),
+            (BOARDS, "lead-list", body_of(1), 0),
+            (refs.LEADS, NAME, body_of(1), 0),
+        ):
             refused(await core_edit(client, scene, *arguments, request_id=rid), "idempotency_conflict", f8(rid))
             assert scene.tables() == tables
 
@@ -110,8 +114,16 @@ def test_a_retry_with_a_renewed_binding_token_is_still_a_replay(build_scene):
         renewed = await claim_again(client, scene)
         assert renewed["binding_token"] != held.token
         tables = scene.tables()
-        again = succeeded(await tool(client, scene.host, "edit_reference", edit_arguments(
-            BOARDS, NAME, body_of(1), 0, request_id=rid, token=renewed["binding_token"], grant_token=held.key)))
+        again = succeeded(
+            await tool(
+                client,
+                scene.host,
+                "edit_reference",
+                edit_arguments(
+                    BOARDS, NAME, body_of(1), 0, request_id=rid, token=renewed["binding_token"], grant_token=held.key
+                ),
+            )
+        )
         assert again == {**first, "created": False}
         assert scene.tables() == tables
 
@@ -128,8 +140,11 @@ def test_another_core_role_cannot_replay_a_request_it_did_not_make(build_scene):
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
         tables = scene.tables()
-        refused(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, role="steward", request_id=rid),
-                "idempotency_conflict", f8(rid))
+        refused(
+            await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, role="steward", request_id=rid),
+            "idempotency_conflict",
+            f8(rid),
+        )
         assert scene.tables() == tables
 
     play(scene.host, scenario)
@@ -148,10 +163,14 @@ def test_two_aliases_never_share_a_request(build_scene):
         rid = request_id()
         made = succeeded(await grantee_edit(client, first, BOARDS, NAME, body_of(1), 0, request_id=rid))
         tables = scene.tables()
-        refused(await grantee_edit(client, second, BOARDS, NAME, body_of(1), 0, request_id=rid),
-                "idempotency_conflict", f8(rid))
-        refused(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid),
-                "idempotency_conflict", f8(rid))
+        refused(
+            await grantee_edit(client, second, BOARDS, NAME, body_of(1), 0, request_id=rid),
+            "idempotency_conflict",
+            f8(rid),
+        )
+        refused(
+            await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid), "idempotency_conflict", f8(rid)
+        )
         assert scene.tables() == tables
         assert scene.revisions(BOARDS, NAME)[0]["author_alias_id"] == made["author"]["alias_id"] == first.alias_id
 
@@ -194,8 +213,9 @@ def test_a_core_retry_naming_a_path_another_topic_now_holds_is_a_conflict(build_
         await open_topic(client, scene, ROOT)
         await open_topic(client, scene, BOARDS)
         tables = scene.tables()
-        refused(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid), "idempotency_conflict",
-                f8(rid))
+        refused(
+            await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid), "idempotency_conflict", f8(rid)
+        )
         assert scene.tables() == tables
 
     play(scene.host, scenario)
@@ -214,8 +234,11 @@ def test_a_grantees_retry_naming_a_path_another_topic_now_holds_is_denied_as_not
         await open_topic(client, scene, ROOT)
         await open_topic(client, scene, BOARDS)
         tables = scene.tables()
-        refused(await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0, request_id=rid), "forbidden",
-                not_covered(held.grant_id, BOARDS))
+        refused(
+            await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0, request_id=rid),
+            "forbidden",
+            not_covered(held.grant_id, BOARDS),
+        )
         assert scene.tables() == tables
         assert json.loads(scene.refused_uses()[-1]["detail"]) == {"tool": "edit_reference", "reason": "not_covered"}
 
@@ -236,10 +259,16 @@ def test_a_retry_naming_the_path_a_topic_left_is_unknown_to_a_core_role_and_deni
         succeeded(await core_edit(client, scene, BOARDS, "lead-list", body_of(1), 0, request_id=other))
         succeeded(await rename(client, scene, ROOT, "job-hunt-old", [held.grant_id]))
         tables = scene.tables()
-        refused(await core_edit(client, scene, BOARDS, "lead-list", body_of(1), 0, request_id=other),
-                "unknown_topic", f9(BOARDS))
-        refused(await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0, request_id=rid), "forbidden",
-                not_covered(held.grant_id, BOARDS))
+        refused(
+            await core_edit(client, scene, BOARDS, "lead-list", body_of(1), 0, request_id=other),
+            "unknown_topic",
+            f9(BOARDS),
+        )
+        refused(
+            await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0, request_id=rid),
+            "forbidden",
+            not_covered(held.grant_id, BOARDS),
+        )
         assert scene.tables() == tables
 
     play(scene.host, scenario)
@@ -274,8 +303,10 @@ def test_a_call_with_no_request_id_gets_a_fresh_one_each_time(build_scene):
         second = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 1))
         assert (first["created"], second["created"]) == (True, True)
         assert first["request_id"] and second["request_id"] and first["request_id"] != second["request_id"]
-        assert [row["request_id"] for row in scene.revisions(BOARDS, NAME)] == [first["request_id"],
-                                                                                second["request_id"]]
+        assert [row["request_id"] for row in scene.revisions(BOARDS, NAME)] == [
+            first["request_id"],
+            second["request_id"],
+        ]
         assert 1 <= len(first["request_id"]) <= 200
 
     play(scene.host, scenario)

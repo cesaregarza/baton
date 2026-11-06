@@ -18,9 +18,9 @@ import pytest
 
 from baton import config as config_module
 from baton import conversations, datadir
+from baton.database.store import connect
 from baton.datadir import UnsafeDataDir
 from baton.integrations import decision_push
-from baton.store import connect
 
 REAL_SCANDIR = os.scandir
 
@@ -80,18 +80,22 @@ def test_a_file_that_stays_is_still_checked_while_another_vanishes(tmp_path, mon
 
 
 def push_setup(tmp_path: Path, transport: Callable[..., int]) -> tuple[Any, Any, str]:
-    config = config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": {"orchestrator": {"can_create_conversations": True}, "reviewer": {}, "assistant": {}},
-        "conversations": {"enabled": True},
-        "integrations": {"decision_push": {"enabled": True, "role": "assistant",
-                                           "url": "https://push.example.test/d"}},
-    })
+    config = config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": {"orchestrator": {"can_create_conversations": True}, "reviewer": {}, "assistant": {}},
+            "conversations": {"enabled": True},
+            "integrations": {
+                "decision_push": {"enabled": True, "role": "assistant", "url": "https://push.example.test/d"}
+            },
+        }
+    )
     push = decision_push.load(config, config.integrations["decision_push"]).with_transport(transport)
     push.prepare()
     db = connect(config.db_path)
-    cid = conversations.create(db, config, actor="orchestrator", title="t",
-                               participants=["orchestrator", "reviewer", "assistant"])["conversation_id"]
+    cid = conversations.create(
+        db, config, actor="orchestrator", title="t", participants=["orchestrator", "reviewer", "assistant"]
+    )["conversation_id"]
     conversations.send(db, config, sender="orchestrator", conversation_id=cid, text="decide", needs_decision=True)
     db.close()
     return config, push, cid
@@ -105,8 +109,9 @@ def test_a_failed_push_is_counted_even_when_another_writer_is_mid_rename(tmp_pat
     def refused(url: str, headers: dict[str, str], body: bytes) -> int:
         # Another writer's temp file is in flight while this pass is between its two state writes.
         private_file(holder["dir"] / temp_name)
-        vanish_after_listing(monkeypatch, lambda: os.replace(holder["dir"] / temp_name,
-                                                             holder["dir"] / "other-state.json"))
+        vanish_after_listing(
+            monkeypatch, lambda: os.replace(holder["dir"] / temp_name, holder["dir"] / "other-state.json")
+        )
         raise ConnectionRefusedError
 
     config, push, _ = push_setup(tmp_path, refused)

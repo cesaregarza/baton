@@ -12,7 +12,7 @@ from test_dashboard_pages import MINE, made, page_config
 from test_dashboard_pages import get as dashboard_get
 
 from baton import conversations
-from baton.store import connect
+from baton.database.store import connect
 
 
 def _older(body: str) -> str | None:
@@ -44,8 +44,12 @@ def test_every_readable_conversation_is_reachable_through_the_seat_pager(tmp_pat
 
 def test_a_removal_between_pages_neither_hides_nor_repeats_a_conversation(tmp_path: Path) -> None:
     host = make_seat_host(tmp_path)
-    ids = {f"Thread {n:03d}": conversation(host, participants=("orchestrator", "reviewer", "operator"),
-                                           title=f"Thread {n:03d}") for n in range(conversations.MAX_LISTED + 1)}
+    ids = {
+        f"Thread {n:03d}": conversation(
+            host, participants=("orchestrator", "reviewer", "operator"), title=f"Thread {n:03d}"
+        )
+        for n in range(conversations.MAX_LISTED + 1)
+    }
     _, cookies = log_in(host.config, host.seat_token)
     pages = []
 
@@ -80,23 +84,28 @@ def test_a_page_past_the_oldest_says_so(tmp_path: Path) -> None:
     host = make_seat_host(tmp_path)
     conversation(host, title="Thread 001")
     _, cookies = log_in(host.config, host.seat_token)
-    body = seat_get(host.config, "/seat/?before_at=2000-01-01T00:00:00%2B00:00&before_id=conv_000",
-                    cookies=cookies).body.decode()
+    body = seat_get(
+        host.config, "/seat/?before_at=2000-01-01T00:00:00%2B00:00&before_id=conv_000", cookies=cookies
+    ).body.decode()
     assert "No older conversations" in body and "not in any conversation yet" not in body
 
 
 def test_the_seat_pager_refuses_a_cursor_it_did_not_make(tmp_path: Path) -> None:
     host = make_seat_host(tmp_path)
     _, cookies = log_in(host.config, host.seat_token)
-    for query in ("before_at=2026-10-31T00:00:00%2B00:00", "before_id=conv_abc", "before_at=yesterday&before_id=c",
-                  "before_at=2026-10-31T00:00:00%2B00:00&before_id=conv_abc&before_id=conv_def",
-                  "before_at=2026-10-31T00:00:00%2B00:00&before_id=%3Cscript%3E"):
+    for query in (
+        "before_at=2026-10-31T00:00:00%2B00:00",
+        "before_id=conv_abc",
+        "before_at=yesterday&before_id=c",
+        "before_at=2026-10-31T00:00:00%2B00:00&before_id=conv_abc&before_id=conv_def",
+        "before_at=2026-10-31T00:00:00%2B00:00&before_id=%3Cscript%3E",
+    ):
         assert seat_get(host.config, f"/seat/?{query}", cookies=cookies).status == 400, query
 
 
 def _gap_between(body: str, before: str, after: str) -> str:
     """The text between two messages' words on a page, where a gap notice belongs."""
-    return body[body.index(before) + len(before):body.index(after)]
+    return body[body.index(before) + len(before) : body.index(after)]
 
 
 def test_the_seat_says_where_messages_are_no_longer_kept(tmp_path: Path) -> None:
@@ -117,8 +126,9 @@ def _replies_with_a_gap(conn, config, cid: str) -> None:
     """A message, three replies to it, and the middle reply (seq 3) gone."""
     parent = conversations.send(conn, config, sender="orchestrator", conversation_id=cid, text="first note")
     for word in ("second note", "third note", "fourth note"):
-        conversations.send(conn, config, sender="reviewer", conversation_id=cid, text=word,
-                           reply_to=parent["message_id"])
+        conversations.send(
+            conn, config, sender="reviewer", conversation_id=cid, text=word, reply_to=parent["message_id"]
+        )
     conn.execute("DELETE FROM messages WHERE conversation_id = ? AND conversation_seq = 3", (cid,))
 
 
@@ -129,8 +139,9 @@ def _thread_with(config, steps: list[tuple[str, int | None]], missing: set[int])
     cid = made(conn, config, "Threads with gaps", MINE)
     ids = {}
     for seq, (words, parent) in enumerate(steps, 1):
-        sent = conversations.send(conn, config, sender="reviewer", conversation_id=cid, text=words,
-                                  reply_to=ids[parent] if parent else None)
+        sent = conversations.send(
+            conn, config, sender="reviewer", conversation_id=cid, text=words, reply_to=ids[parent] if parent else None
+        )
         ids[seq] = sent["message_id"]
     for seq in missing:
         conn.execute("DELETE FROM messages WHERE conversation_id = ? AND conversation_seq = ?", (cid, seq))
@@ -145,7 +156,7 @@ def _summary_only(body: str, ranges: str) -> None:
     """The threaded view states the missing ranges once, for the page, and puts no notice among the messages."""
     assert SUMMARY + ranges in body, f"no summary of {ranges}"
     assert body.count(SUMMARY) == 1
-    assert "no longer kept" not in body[body.index("<ul>"):body.index("</ul>")]  # no inline wording among them
+    assert "no longer kept" not in body[body.index("<ul>") : body.index("</ul>")]  # no inline wording among them
 
 
 def test_the_dashboard_summarises_a_gap_above_an_older_top_level_message(tmp_path: Path) -> None:
@@ -155,14 +166,24 @@ def test_the_dashboard_summarises_a_gap_above_an_older_top_level_message(tmp_pat
 
 
 def test_the_dashboard_summarises_a_gap_between_two_branches(tmp_path: Path) -> None:
-    steps = [("one root", None), ("two reply to one", 1), ("three gone", None), ("four root", None),
-             ("five reply to four", 4)]
+    steps = [
+        ("one root", None),
+        ("two reply to one", 1),
+        ("three gone", None),
+        ("four root", None),
+        ("five reply to four", 4),
+    ]
     _summary_only(_thread_with(page_config(tmp_path), steps, {3}), "#3")
 
 
 def test_the_dashboard_summarises_a_gap_inside_a_reply_branch(tmp_path: Path) -> None:
-    steps = [("one root", None), ("two reply to one", 1), ("three gone", 1), ("four reply to one", 1),
-             ("five root", None)]
+    steps = [
+        ("one root", None),
+        ("two reply to one", 1),
+        ("three gone", 1),
+        ("four reply to one", 1),
+        ("five root", None),
+    ]
     _summary_only(_thread_with(page_config(tmp_path), steps, {3}), "#3")
 
 
@@ -186,8 +207,14 @@ def test_the_seat_places_a_gap_among_replies_in_order(tmp_path: Path) -> None:
 
 BAR = "Some messages on this page are no longer kept"
 CROSS_BRANCH = [("one root", None), ("two top level", None), ("three gone", None), ("four reply to one", 1)]
-INTERLEAVED = [("one root", None), ("two reply to one", 1), ("three gone", 1), ("four root", None),
-               ("five reply to one", 1), ("six reply to four", 4)]
+INTERLEAVED = [
+    ("one root", None),
+    ("two reply to one", 1),
+    ("three gone", 1),
+    ("four root", None),
+    ("five reply to one", 1),
+    ("six reply to four", 4),
+]
 
 
 @pytest.mark.parametrize("steps", [CROSS_BRANCH, INTERLEAVED], ids=["cross-branch", "interleaved"])
@@ -200,7 +227,7 @@ def test_a_page_with_a_gap_carries_the_arrival_bar(tmp_path: Path, steps) -> Non
     dismiss = re.search(r'<input type="checkbox" id="([\w-]+)" class="gap-dismiss"', body)
     assert dismiss and f'<label for="{dismiss.group(1)}">' in bar.group(1)
     assert body.index(dismiss.group(0)) < body.index(bar.group(0))  # the CSS reaches the bar from the checkbox
-    assert "no longer kept" not in body[body.index("<ul>"):body.index("</ul>")]  # still no inline notice among them
+    assert "no longer kept" not in body[body.index("<ul>") : body.index("</ul>")]  # still no inline notice among them
     for seq, _ in enumerate(steps, 1):  # every retained message keeps its anchor
         assert (seq == 3) != (f'id="m-{seq}"' in body)
 
@@ -212,7 +239,7 @@ def test_a_page_without_a_gap_has_no_bar(tmp_path: Path) -> None:
 
 def test_the_marker_closes_a_message_before_its_replies(tmp_path: Path) -> None:
     body = _thread_with(page_config(tmp_path), [("parent words", None), ("reply words", 1)], set())
-    parent = body[body.index('id="m-1"'):]
+    parent = body[body.index('id="m-1"') :]
     marker = parent.index('<span class="gap-end"></span>')
     assert parent.index('<p class="text">parent words</p>') < marker < parent.index('<ul class="replies">')
 
@@ -302,10 +329,12 @@ def test_the_bar_targets_are_sized_only_at_narrow_widths() -> None:
 
 def test_the_bar_markup_is_the_one_the_stylesheet_targets(tmp_path: Path) -> None:
     body = _thread_with(page_config(tmp_path), CROSS_BRANCH, {3})
-    assert ('<input type="checkbox" id="gap-dismiss" class="gap-dismiss">'
-            '<p class="gap-bar">Some messages on this page are no longer kept<span class="gap-sep"> · </span>'
-            '<span class="gap-actions"><a href="#missing">view ranges</a>'
-            '<label for="gap-dismiss">Dismiss</label></span></p>') in body
+    assert (
+        '<input type="checkbox" id="gap-dismiss" class="gap-dismiss">'
+        '<p class="gap-bar">Some messages on this page are no longer kept<span class="gap-sep"> · </span>'
+        '<span class="gap-actions"><a href="#missing">view ranges</a>'
+        '<label for="gap-dismiss">Dismiss</label></span></p>'
+    ) in body
 
 
 def test_the_reveal_is_timed_on_a_hidden_copy_hung_from_the_marker() -> None:
@@ -319,8 +348,16 @@ def test_the_reveal_is_timed_on_a_hidden_copy_hung_from_the_marker() -> None:
     assert "@supports not ((animation-timeline: view()) and (anchor-name: --a)) {" in style
     assert "li:target > .gap-end { display: block; height: 0; anchor-name: --gap-end; }" in style
     (copy,) = [rule for rule in _rules(".gap-measure") if "position: absolute" in rule]
-    for declaration in ("display: block", "position-anchor: --gap-end", "top: anchor(bottom)", "left: 0", "right: 0",
-                        "visibility: hidden", "pointer-events: none", "view-timeline: --gap-reveal block"):
+    for declaration in (
+        "display: block",
+        "position-anchor: --gap-end",
+        "top: anchor(bottom)",
+        "left: 0",
+        "right: 0",
+        "visibility: hidden",
+        "pointer-events: none",
+        "view-timeline: --gap-reveal block",
+    ):
         assert declaration in copy, declaration
     assert "body { timeline-scope: --gap-reveal; }" in style
     assert "--gap-inset" not in style and "view-timeline-inset" not in style
@@ -330,8 +367,12 @@ def test_the_reveal_is_timed_on_a_hidden_copy_hung_from_the_marker() -> None:
 def test_the_copy_and_the_bar_share_their_box_styles() -> None:
     shared = [rule for rule in _rules(".gap-measure") if rule.split("{")[0].strip().endswith(".gap-bar, .gap-measure")]
     assert len(shared) == 1, "the bar and its copy have one shared box rule"
-    for declaration in ("padding: .5rem 1rem", "font-size: .85rem", "border-top: 1px solid var(--line-strong)",
-                        "text-align: center"):
+    for declaration in (
+        "padding: .5rem 1rem",
+        "font-size: .85rem",
+        "border-top: 1px solid var(--line-strong)",
+        "text-align: center",
+    ):
         assert declaration in shared[0], declaration
     assert "position" not in shared[0], "only the real bar is positioned to the viewport"
 

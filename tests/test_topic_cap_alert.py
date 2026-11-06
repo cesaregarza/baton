@@ -22,7 +22,7 @@ from test_topic_containers import ALIAS, OTHER_ALIAS, refused, seed_aliases, top
 
 from baton import conversations, messages, topics, wakes
 from baton.config import Config
-from baton.store import connect
+from baton.database.store import connect
 
 ALERT_ROLE = "orchestrator"
 
@@ -31,8 +31,9 @@ def filled(db: sqlite3.Connection, config: Config) -> None:
     """Three guest threads fill the guest-wide cap this config sets, so the next create is refused."""
     topics.create(db, config, actor=ALERT_ROLE, path="baton", members=[ALERT_ROLE, "reviewer"])
     for identity in (ALIAS, ALIAS, OTHER_ALIAS):
-        conversations.create(db, config, actor="guest", title="A guest thread", participants=None,
-                             topic="baton", identity=identity)
+        conversations.create(
+            db, config, actor="guest", title="A guest thread", participants=None, topic="baton", identity=identity
+        )
 
 
 @pytest.fixture
@@ -47,17 +48,27 @@ def host(tmp_path: Path):
 def test_the_cap_alert_is_stored_read_and_woken_as_an_ordinary_message(host):
     config, db = host
     filled(db, config)
-    refused("limit_exceeded", conversations.create, db, config, actor="guest", title="over",
-            participants=None, topic="baton", identity=OTHER_ALIAS)
+    refused(
+        "limit_exceeded",
+        conversations.create,
+        db,
+        config,
+        actor="guest",
+        title="over",
+        participants=None,
+        topic="baton",
+        identity=OTHER_ALIAS,
+    )
 
     # 1. The notice as stored: senderless, in no conversation, carrying the configured limit.
-    row = db.execute("SELECT * FROM messages WHERE recipient = ? AND sender IS NULL"
-                     " AND notice LIKE '%guest_threads.cap_reached%'", (ALERT_ROLE,)).fetchone()
+    row = db.execute(
+        "SELECT * FROM messages WHERE recipient = ? AND sender IS NULL AND notice LIKE '%guest_threads.cap_reached%'",
+        (ALERT_ROLE,),
+    ).fetchone()
     assert row is not None, "the refusal must have stored one host notice"
     stored = {key: row[key] for key in row.keys()}
     limit = config.aliases.max_threads_per_guest_per_hour
-    assert json.loads(stored["notice"]) == {"event": "guest_threads.cap_reached", "limit": limit,
-                                            "window": "1h"}
+    assert json.loads(stored["notice"]) == {"event": "guest_threads.cap_reached", "limit": limit, "window": "1h"}
     assert str(limit) in stored["text"]
     assert stored["conversation_id"] is None
     assert stored["job_id"] is None
@@ -91,8 +102,9 @@ def test_the_cap_alert_is_stored_read_and_woken_as_an_ordinary_message(host):
         woken = [body for body in bodies if body.get("role") == ALERT_ROLE]
         assert woken, "a stored host notice must produce a wake for its recipient"
         payload = woken[0]
-        assert set(payload) == {"type", "role", "host", "reason", "first_unread_seq"}, \
+        assert set(payload) == {"type", "role", "host", "reason", "first_unread_seq"}, (
             "exactly the fields a message wake carries, so an exact-match receiver accepts it"
+        )
         assert payload["type"] == "baton.wake"
         assert payload["reason"] == "message", "the only reason the receiver accepts"
         assert payload["first_unread_seq"] == delivered["seq"]
@@ -112,4 +124,5 @@ def _write_evidence(artifacts: dict) -> None:
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     for name, value in artifacts.items():
         (directory / f"cap-alert-{name.replace('_', '-')}.json").write_text(
-            json.dumps(value, indent=2, sort_keys=True, default=str) + "\n")
+            json.dumps(value, indent=2, sort_keys=True, default=str) + "\n"
+        )

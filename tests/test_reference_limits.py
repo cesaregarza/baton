@@ -69,11 +69,16 @@ def test_the_module_names_the_limits_the_spec_gives():
     tools call."""
     module = refs.references_module()
     assert (module.MAX_BODY_BYTES, module.MAX_DOCS_PER_TOPIC, module.MAX_NAME, module.MAX_HISTORY_PAGE) == (
-        refs.MAX_BODY, refs.MAX_DOCS, 40, 100)
+        refs.MAX_BODY,
+        refs.MAX_DOCS,
+        40,
+        100,
+    )
     assert all(callable(getattr(module, name)) for name in ("edit", "read", "history"))
 
 
 # 1. The name ------------------------------------------------------------------------------------------------
+
 
 def test_a_name_outside_the_grammar_is_refused_in_f4s_words_and_never_echoed(build_scene):
     """41 characters, empty, upper case, a trailing or a leading hyphen, an underscore, a slash, a space, a letter
@@ -83,11 +88,27 @@ def test_a_name_outside_the_grammar_is_refused_in_f4s_words_and_never_echoed(bui
 
     async def scenario(client):
         held = await board(client, scene)
-        wrong = ["a" * 41, "", "Upper", "trailing-", "-leading", "has_underscore", "a/b", "has space", "caf\u00e9",
-                 "\ud800", secrets.token_urlsafe(32), support.new_key(), held.token, held.key]
+        wrong = [
+            "a" * 41,
+            "",
+            "Upper",
+            "trailing-",
+            "-leading",
+            "has_underscore",
+            "a/b",
+            "has space",
+            "caf\u00e9",
+            "\ud800",
+            secrets.token_urlsafe(32),
+            support.new_key(),
+            held.token,
+            held.key,
+        ]
         for value in wrong:
-            for result in (await core_edit(client, scene, BOARDS, value, "text", 0),
-                           await grantee_edit(client, held, BOARDS, value, "text", 0)):
+            for result in (
+                await core_edit(client, scene, BOARDS, value, "text", 0),
+                await grantee_edit(client, held, BOARDS, value, "text", 0),
+            ):
                 refused(result, "invalid_request", F4)
                 assert not value or value not in str(result), "the refusal echoed the name"
         assert scene.docs() == [] and scene.revisions() == [] and scene.refused_uses() == []
@@ -110,6 +131,7 @@ def test_a_name_inside_the_grammar_is_accepted_at_its_edges(build_scene):
 
 
 # 2. The body ------------------------------------------------------------------------------------------------
+
 
 def test_an_empty_body_is_refused_and_a_body_of_whitespace_alone_is_not(build_scene):
     """Q4. Nothing is stripped, so spaces and newlines are a body; an empty string has no use and is refused with F7."""
@@ -154,8 +176,9 @@ def test_a_body_that_is_not_a_string_is_refused_by_the_module(build_scene, bad):
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize("unit,count", [("a", 32768), ("\u00e9", 16384), ("\U0001f600", 8192)],
-                         ids=["one-byte", "two-byte", "four-byte"])
+@pytest.mark.parametrize(
+    "unit,count", [("a", 32768), ("\u00e9", 16384), ("\U0001f600", 8192)], ids=["one-byte", "two-byte", "four-byte"]
+)
 def test_a_body_of_exactly_32768_bytes_is_accepted_and_stored_whole(build_scene, unit, count):
     """R20. The limit is in bytes of UTF-8, not characters: 32768 ASCII characters, 16384 two-byte ones and 8192
     four-byte ones are the same size, all accepted, and the response and the row say so."""
@@ -172,8 +195,11 @@ def test_a_body_of_exactly_32768_bytes_is_accepted_and_stored_whole(build_scene,
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize("unit,count,size", [("a", 32769, 32769), ("\u00e9", 16385, 32770),
-                                             ("\U0001f600", 8193, 32772)], ids=["one-byte", "two-byte", "four-byte"])
+@pytest.mark.parametrize(
+    "unit,count,size",
+    [("a", 32769, 32769), ("\u00e9", 16385, 32770), ("\U0001f600", 8193, 32772)],
+    ids=["one-byte", "two-byte", "four-byte"],
+)
 def test_a_body_over_32768_bytes_is_refused_with_its_size_and_nothing_is_written(build_scene, unit, count, size):
     """R20, F7b. One byte over, in each width, is `limit_exceeded` naming the limit and the size of this body. The
     two-byte case has fewer characters than the limit, so a count of characters would let it through."""
@@ -192,6 +218,7 @@ def test_a_body_over_32768_bytes_is_refused_with_its_size_and_nothing_is_written
 
 # 3. Documents per topic -----------------------------------------------------------------------------------
 
+
 def test_the_twentieth_document_in_a_topic_is_created_and_the_twenty_first_is_refused(build_scene):
     """R20, F7c. Twenty documents are made in a topic. The twenty-first is refused with the limit named and nothing
     written, an edit to one of the twenty still works, and twenty in a sibling topic and one in the parent do not
@@ -204,12 +231,15 @@ def test_the_twentieth_document_in_a_topic_is_created_and_the_twenty_first_is_re
         for number in range(1, 21):
             succeeded(await core_edit(client, scene, BOARDS, f"ref-{number}", "text", 0))
         tables, counts = scene.tables(), scene.counts()
-        for result in (await core_edit(client, scene, BOARDS, "ref-21", "text", 0),
-                       await grantee_edit(client, held, BOARDS, "ref-21", "text", 0)):
+        for result in (
+            await core_edit(client, scene, BOARDS, "ref-21", "text", 0),
+            await grantee_edit(client, held, BOARDS, "ref-21", "text", 0),
+        ):
             assert result == {"error": "limit_exceeded", "detail": f7c(BOARDS), "limit": "references_per_topic"}
         assert scene.tables() == tables
         assert {key: value for key, value in scene.counts().items() if key != "alias_posts"} == {
-            key: value for key, value in counts.items() if key != "alias_posts"}
+            key: value for key, value in counts.items() if key != "alias_posts"
+        }
         assert scene.refused_uses() == [], "the limit names no grant"
         edited = succeeded(await core_edit(client, scene, BOARDS, "ref-1", "second text", 1))
         assert edited["revision"] == 2
@@ -224,6 +254,7 @@ def test_the_twentieth_document_in_a_topic_is_created_and_the_twenty_first_is_re
 
 
 # 4. The request id and the topic ---------------------------------------------------------------------------
+
 
 def test_a_request_id_of_one_to_two_hundred_characters_is_kept_and_any_other_is_refused(build_scene):
     """F13. An empty request id and one of 201 characters are refused (the empty one is not replaced by a made-up
@@ -254,11 +285,14 @@ def test_a_malformed_topic_is_refused_with_the_existing_messages_and_a_key_is_re
     async def scenario(client):
         held = await board(client, scene)
         for value in ("Upper", "a/b/c", "", "has space", "job-hunt/", "/job-hunt"):
-            refused(await core_edit(client, scene, value, NAME, "text", 0), "invalid_request",
-                    topic_grammar_text(value))
+            refused(
+                await core_edit(client, scene, value, NAME, "text", 0), "invalid_request", topic_grammar_text(value)
+            )
         redacted = {"error": "invalid_request", "detail": topic_grammar_text(held.key).replace(held.key, "[redacted]")}
-        for result in (await core_edit(client, scene, held.key, NAME, "text", 0, grant_token=held.key),
-                       await grantee_edit(client, held, held.key, NAME, "text", 0)):
+        for result in (
+            await core_edit(client, scene, held.key, NAME, "text", 0, grant_token=held.key),
+            await grantee_edit(client, held, held.key, NAME, "text", 0),
+        ):
             assert result == redacted, result
             assert held.key not in str(result)
         assert scene.docs() == [] and scene.refused_uses() == []
@@ -295,6 +329,7 @@ def test_the_shape_checks_need_no_database(build_scene, monkeypatch):
 
 # 5. The hourly limit ----------------------------------------------------------------------------------------
 
+
 def test_a_grantees_edits_and_a_guest_post_share_the_hourly_limit(build_scene):
     """R20, F15. With two attempts an hour per alias, an edit and a post use the quota, and the third attempt of either
     kind is refused as `limit_exceeded` naming the alias counter, with nothing written."""
@@ -306,13 +341,23 @@ def test_a_grantees_edits_and_a_guest_post_share_the_hourly_limit(build_scene):
         held = await board(client, scene)
         conversation = await thread(client, scene.host, LEADS)
         succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0))
-        succeeded(await tool(client, scene.host, "send_message", {
-            "conversation_id": conversation, "text": "a post", "token": held.token}))
+        succeeded(
+            await tool(
+                client,
+                scene.host,
+                "send_message",
+                {"conversation_id": conversation, "text": "a post", "token": held.token},
+            )
+        )
         tables = scene.tables()
         over = await grantee_edit(client, held, BOARDS, NAME, body_of(2), 1)
         assert over == {"error": "limit_exceeded", "detail": F15, "limit": "posts_per_alias"}
-        post = await tool(client, scene.host, "send_message", {
-            "conversation_id": conversation, "text": "another post", "token": held.token})
+        post = await tool(
+            client,
+            scene.host,
+            "send_message",
+            {"conversation_id": conversation, "text": "another post", "token": held.token},
+        )
         assert post.get("error") == "limit_exceeded" and post.get("limit") == "posts_per_alias", post
         assert scene.tables() == tables and scene.posts_counted() == 2
 

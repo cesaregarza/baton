@@ -16,9 +16,10 @@ import pytest
 from test_conversations import group_config
 from test_messages import rid
 
-from baton import conversations, events, messages, store
+from baton import conversations, events, messages
 from baton.config import Config
-from baton.store import SchemaMismatch, connect
+from baton.database import store
+from baton.database.store import SchemaMismatch, connect
 
 V3_SCHEMA = (Path(__file__).parent / "fixtures" / "schema_v3.sql").read_text()
 CONVERSATION = "conv_fromv3"
@@ -38,33 +39,50 @@ def v3_database(config: Config, direct_request: str, group_request: str) -> None
     stamp = events.now()
     with raw:
         for recipient, last_seq in (("reviewer", 2), ("assistant", 1)):
-            raw.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)",
-                        (recipient, last_seq))
-        raw.execute("INSERT INTO conversations (id, request_id, request_digest, title, created_by, created_at,"
-                    " last_seq) VALUES (?, 'conv-request', 'conv-digest', 'From version 3', 'orchestrator', ?, 1)",
-                    (CONVERSATION, stamp))
-        raw.executemany("INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
-                        [(CONVERSATION, role, stamp) for role in GROUP])
+            raw.execute("INSERT INTO mailboxes (recipient, last_seq, read_seq) VALUES (?, ?, 0)", (recipient, last_seq))
+        raw.execute(
+            "INSERT INTO conversations (id, request_id, request_digest, title, created_by, created_at,"
+            " last_seq) VALUES (?, 'conv-request', 'conv-digest', 'From version 3', 'orchestrator', ?, 1)",
+            (CONVERSATION, stamp),
+        )
+        raw.executemany(
+            "INSERT INTO participants (conversation_id, role, added_at) VALUES (?, ?, ?)",
+            [(CONVERSATION, role, stamp) for role in GROUP],
+        )
         # A direct message to reviewer, outside any conversation.
-        raw.execute("INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, recipient, seq,"
-                    " text, at) VALUES ('msg_direct', NULL, NULL, NULL, 'assistant', 'reviewer', 1, 'direct', ?)",
-                    (stamp,))
-        raw.execute("INSERT INTO message_requests (request_id, request_digest, message_id, seq, created_at)"
-                    " VALUES (?, ?, 'msg_direct', 1, ?)",
-                    (direct_request, send_digest("assistant", "direct", recipient="reviewer"), stamp))
+        raw.execute(
+            "INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, recipient, seq,"
+            " text, at) VALUES ('msg_direct', NULL, NULL, NULL, 'assistant', 'reviewer', 1, 'direct', ?)",
+            (stamp,),
+        )
+        raw.execute(
+            "INSERT INTO message_requests (request_id, request_digest, message_id, seq, created_at)"
+            " VALUES (?, ?, 'msg_direct', 1, ?)",
+            (direct_request, send_digest("assistant", "direct", recipient="reviewer"), stamp),
+        )
         # One conversation message, fanned out to the two roles that did not send it.
         for recipient, seq in (("reviewer", 2), ("assistant", 1)):
-            raw.execute("INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, recipient,"
-                        " seq, text, at) VALUES ('msg_group', NULL, ?, 1, 'orchestrator', ?, ?, 'in the group', ?)",
-                        (CONVERSATION, recipient, seq, stamp))
-        raw.execute("INSERT INTO message_requests (request_id, request_digest, message_id, seqs, created_at)"
-                    " VALUES (?, ?, 'msg_group', ?, ?)",
-                    (group_request, send_digest("orchestrator", "in the group", conversation_id=CONVERSATION),
-                     json.dumps({"reviewer": 2, "assistant": 1}), stamp))
+            raw.execute(
+                "INSERT INTO messages (id, job_id, conversation_id, conversation_seq, sender, recipient,"
+                " seq, text, at) VALUES ('msg_group', NULL, ?, 1, 'orchestrator', ?, ?, 'in the group', ?)",
+                (CONVERSATION, recipient, seq, stamp),
+            )
+        raw.execute(
+            "INSERT INTO message_requests (request_id, request_digest, message_id, seqs, created_at)"
+            " VALUES (?, ?, 'msg_group', ?, ?)",
+            (
+                group_request,
+                send_digest("orchestrator", "in the group", conversation_id=CONVERSATION),
+                json.dumps({"reviewer": 2, "assistant": 1}),
+                stamp,
+            ),
+        )
         for recipient, seq in (("reviewer", 1), ("reviewer", 2), ("assistant", 1)):
-            raw.execute("INSERT INTO events (job_id, seq, at, actor, audience, kind, summary, data)"
-                        " VALUES (NULL, ?, ?, 'orchestrator', ?, 'message', 'a message', ?)",
-                        (seq, stamp, recipient, json.dumps({"message_id": "msg_group", "seq": seq})))
+            raw.execute(
+                "INSERT INTO events (job_id, seq, at, actor, audience, kind, summary, data)"
+                " VALUES (NULL, ?, ?, 'orchestrator', ?, 'message', 'a message', ?)",
+                (seq, stamp, recipient, json.dumps({"message_id": "msg_group", "seq": seq})),
+            )
     raw.close()
     os.chmod(config.db_path, 0o600)
 
@@ -79,23 +97,31 @@ def test_a_version_3_database_gains_the_new_columns_and_keeps_everything_else(tm
     columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
     assert {"reply_to", "attention", "needs_decision"} <= columns
     carried = conversations.history(db, "reviewer", CONVERSATION)["messages"]
-    assert [(m["seq"], m["from_role"], m["text"], m["reply_to"], m["attention"], m["needs_decision"])
-            for m in carried] == [(1, "orchestrator", "in the group", None, None, False)]
+    assert [
+        (m["seq"], m["from_role"], m["text"], m["reply_to"], m["attention"], m["needs_decision"]) for m in carried
+    ] == [(1, "orchestrator", "in the group", None, None, False)]
 
     # Version 3's retry identities still replay, so the upgrade admits no stale retry twice.
-    replay = messages.send(db, sender="assistant", recipient="reviewer", text="direct",
-                           request_id=direct_request)
+    replay = messages.send(db, sender="assistant", recipient="reviewer", text="direct", request_id=direct_request)
     assert (replay["created"], replay["message_id"], replay["seq"]) == (False, "msg_direct", 1)
-    again = conversations.send(db, config, sender="orchestrator", conversation_id=CONVERSATION,
-                               text="in the group", request_id=group_request)
+    again = conversations.send(
+        db, config, sender="orchestrator", conversation_id=CONVERSATION, text="in the group", request_id=group_request
+    )
     assert (again["created"], again["seqs"]) == (False, {"reviewer": 2, "assistant": 1})
 
     # And the conversation can be replied into at once, numbered on from where version 3 left off.
-    answer = conversations.send(db, config, sender="reviewer", conversation_id=CONVERSATION, text="answering",
-                                reply_to="msg_group", attention=["orchestrator"], needs_decision=True)
+    answer = conversations.send(
+        db,
+        config,
+        sender="reviewer",
+        conversation_id=CONVERSATION,
+        text="answering",
+        reply_to="msg_group",
+        attention=["orchestrator"],
+        needs_decision=True,
+    )
     assert answer["seqs"] == {"orchestrator": 1, "assistant": 2}
-    [shown] = [m for m in conversations.history(db, "assistant", CONVERSATION)["messages"]
-               if m["text"] == "answering"]
+    [shown] = [m for m in conversations.history(db, "assistant", CONVERSATION)["messages"] if m["text"] == "answering"]
     assert shown["seq"] == 2 and shown["reply_to"] == {"message_id": "msg_group", "seq": 1}
     assert (shown["attention"], shown["needs_decision"]) == (["orchestrator"], True)
     db.close()

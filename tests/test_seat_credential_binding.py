@@ -56,8 +56,9 @@ def test_the_session_is_not_an_mcp_bearer(seat_host) -> None:
 
 def _rewrite(seat_host, tmp_path: Path, **overrides) -> None:
     _, agent_digest = new_token()
-    seat_host.reload(seat_config_text(tmp_path, overrides.pop("seat_digest", seat_host.seat_digest), agent_digest,
-                                      **overrides))
+    seat_host.reload(
+        seat_config_text(tmp_path, overrides.pop("seat_digest", seat_host.seat_digest), agent_digest, **overrides)
+    )
 
 
 @pytest.mark.parametrize("change", ["revoked", "removed", "rotated", "renamed", "reassigned"])
@@ -86,8 +87,12 @@ def test_a_session_cookie_sent_before_login_is_never_adopted(seat_host) -> None:
 
     form = get(seat_host.config, "/seat/login", cookies=planted)
     pre = cookie_value(form, PRE_COOKIE)
-    response = post(seat_host.config, "/seat/login", {"token": seat_host.seat_token, "pre": hidden(form.body, "pre")},
-                    cookies={**planted, PRE_COOKIE: pre})
+    response = post(
+        seat_host.config,
+        "/seat/login",
+        {"token": seat_host.seat_token, "pre": hidden(form.body, "pre")},
+        cookies={**planted, PRE_COOKIE: pre},
+    )
     issued = cookie_value(response, SESSION_COOKIE)
     assert issued and issued != planted[SESSION_COOKIE]
     assert get(seat_host.config, "/seat/", cookies=planted).status != 200

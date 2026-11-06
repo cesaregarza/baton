@@ -287,22 +287,16 @@ the data directory; MCP Events keeps only its subscriptions there and its record
 directory and its contents for unsafe ownership, permissions, and links; see
 [Security: the data directory](../SECURITY.md#the-data-directory) for the exact boundary and limitations.
 
-The optional host-local secretary projection opens `baton.db` read-only under a snapshot and keeps its own
-SQLite state file, with schema version 2 and a separate `(principal, log_epoch, through_pos)` position.
-Items, expectation evidence, dispositions, and brief versions are retained by principal. A batch and its
-position commit together. The projection cites Baton records but owns no jobs, messages, permissions, or
-delivery cursors. Its deterministic interpretation uses a versioned policy file and can be replayed without
-changing the stored projection. No model is needed for this initial offline interface.
-Each brief version cites only that version's new source rather than repeating all prior sources.
-An outgoing job event can open an awaited result. Later events for that tracked job remain in the
-principal's projection even if another actor addresses a different role. The tracked set is reconstructed
-from earlier source events in position order. Job envelopes use event state and the audience as the next
-actor only for nonterminal states; a terminal move instead addresses the creator. They do not sample the
-mutable `jobs` row. Conversation envelopes also omit current conversation fields, so fresh
-scans through the same source position produce the same derived record under the same config,
-policy, and visibility. A hidden message on a tracked job contributes no message text or citation.
-Only a change in next actor can supersede an expectation opened by a job event. A job move does not
-supersede a request opened by a message on that job.
+The host-local secretary reads source messages and events from `baton.db` in a read-only snapshot and keeps private
+version-2 assessment, scan, retry, and acknowledgment state. State version 1 is refused; existing version-2 state
+remains supported.
+The configured model and independent decision engine receive only authorized, bounded event pages. Summaries
+cite every event in their page, while the validator checks source references rather than the truth of claims.
+Deliverable summaries are appended to shared `baton.db` table `secretary_summaries`, keyed by stable
+`secretary_id` and principal. This archive write requires database write access even though source reads use a
+read-only snapshot. Local CLI reads, authenticated remote CLI reads, and the role-scoped
+`read_secretary_summaries` MCP tool can page the archive without the private state file. The feature owns no jobs,
+messages, permissions, or Baton inbox cursor.
 
 ## Design directions
 
@@ -327,9 +321,10 @@ current work and expected results, then prepare a disposition and source-backed 
 admission would precede Baton's configured wake transports only after an explicit cutover. A package
 coordinator would own the delivery decision and queue state; runtime adapters would launch or resume the
 agent through supported interfaces. The coordinator would observe lifecycle signals, not supervise agents.
-Retention, context delivery, interruption, and response expectations remain separate decisions. No such
-built-in secretary or coordinator exists yet, and a disposition would not grant access, move a job, or
-approve anything.
+Retention, context delivery, interruption, and response expectations remain separate decisions. The current
+host-local model secretary screens page-level attention and stores summaries; it does not coordinate or launch
+agents or track expected results. No coordinator for that proposed workflow exists yet, and a disposition would
+not grant access, move a job, or approve anything.
 
 #### Long-thread summaries
 

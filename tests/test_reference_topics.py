@@ -116,11 +116,16 @@ def test_a_new_topic_at_the_freed_path_has_no_references_and_is_not_under_the_ol
         assert scene.topic_id(BOARDS) != old_id
         who = Core(scene.host, "worker")
         assert succeeded(await read_reference(client, who, BOARDS))["references"] == []
-        assert await read_reference(client, who, BOARDS, NAME) == {"error": "unknown_reference",
-                                                                  "detail": f10(NAME, BOARDS)}
+        assert await read_reference(client, who, BOARDS, NAME) == {
+            "error": "unknown_reference",
+            "detail": f10(NAME, BOARDS),
+        }
         tables = scene.tables()
-        refused(await grantee_edit(client, held, BOARDS, NAME, "into the new topic", 0), "forbidden",
-                not_covered(held.grant_id, BOARDS))
+        refused(
+            await grantee_edit(client, held, BOARDS, NAME, "into the new topic", 0),
+            "forbidden",
+            not_covered(held.grant_id, BOARDS),
+        )
         assert scene.tables() == tables
         under_the_grant = succeeded(await grantee_edit(client, held, "job-hunt-old/boards", NAME, body_of(4), 3))
         assert (under_the_grant["revision"], under_the_grant["topic_id"]) == (4, old_id)
@@ -146,7 +151,9 @@ def test_renaming_a_leaf_alone_with_no_grant_carries_its_documents(build_scene):
         assert dropping_topic(after) == dropping_topic(before)
         assert after["current"]["topic"] == "job-hunt/prospects"
         assert await read_reference(client, Core(scene.host, "worker"), LEADS) == {
-            "error": "unknown_topic", "detail": f9(LEADS)}
+            "error": "unknown_topic",
+            "detail": f9(LEADS),
+        }
         assert [row["revision"] for row in scene.revisions(BOARDS, NAME)] == [1]
 
     play(scene.host, scenario)
@@ -163,8 +170,11 @@ def test_a_topic_renamed_out_of_the_granted_root_keeps_its_document_but_not_the_
         succeeded(await grantee_edit(client, held, LEADS, NAME, body_of(1), 0))
         succeeded(await rename(client, scene, LEADS, "leads", [held.grant_id]))
         tables = scene.tables()
-        refused(await grantee_edit(client, held, "leads", NAME, body_of(2), 1), "forbidden",
-                not_covered(held.grant_id, "leads"))
+        refused(
+            await grantee_edit(client, held, "leads", NAME, body_of(2), 1),
+            "forbidden",
+            not_covered(held.grant_id, "leads"),
+        )
         assert scene.tables() == tables
         read = succeeded(await read_reference(client, Bound.of(held), "leads", NAME))
         assert (read["revision"], read["body"], read["author"]) == (1, body_of(1), author_of(held))
@@ -184,8 +194,11 @@ def test_a_topic_renamed_into_the_granted_root_gains_the_grantees_edits(build_sc
     async def scenario(client):
         held = await board(client, scene)
         succeeded(await core_edit(client, scene, "resume", NAME, body_of(1), 0))
-        refused(await grantee_edit(client, held, "resume", NAME, body_of(2), 1), "forbidden",
-                not_covered(held.grant_id, "resume"))
+        refused(
+            await grantee_edit(client, held, "resume", NAME, body_of(2), 1),
+            "forbidden",
+            not_covered(held.grant_id, "resume"),
+        )
         succeeded(await rename(client, scene, "resume", "job-hunt/resume", [held.grant_id]))
         made = succeeded(await grantee_edit(client, held, "job-hunt/resume", NAME, body_of(2), 1))
         assert (made["revision"], made["grant_id"]) == (2, held.grant_id)
@@ -209,8 +222,11 @@ def test_a_subtopic_a_grantee_creates_is_editable_only_if_the_grant_inherits(bui
         succeeded(await Keyed(plain).call(client, "create_topic", path="resume/drafts"))
         made = succeeded(await grantee_edit(client, inheriting, "job-hunt/referrals", NAME, body_of(1), 0))
         assert (made["revision"], made["topic_id"]) == (1, scene.topic_id("job-hunt/referrals"))
-        refused(await grantee_edit(client, plain, "resume/drafts", NAME, body_of(1), 0), "forbidden",
-                not_covered(plain.grant_id, "resume/drafts"))
+        refused(
+            await grantee_edit(client, plain, "resume/drafts", NAME, body_of(1), 0),
+            "forbidden",
+            not_covered(plain.grant_id, "resume/drafts"),
+        )
         assert [row["topic_id"] for row in scene.docs()] == [scene.topic_id("job-hunt/referrals")]
 
     play(scene.host, scenario)
@@ -233,8 +249,7 @@ def test_moving_a_thread_between_topics_leaves_the_documents_where_they_are(buil
         for path, before in listed.items():
             assert succeeded(await read_reference(client, who, path)) == before
         assert scene.tables() == tables
-        assert [entry["name"] for entry in listed[LEADS]["references"]] == [NAME] and listed[BOARDS][
-            "references"] == []
+        assert [entry["name"] for entry in listed[LEADS]["references"]] == [NAME] and listed[BOARDS]["references"] == []
 
     play(scene.host, scenario)
 
@@ -256,8 +271,11 @@ def test_a_document_hangs_on_the_topics_id_and_no_path_is_stored(build_scene):
         cells = {str(value) for rows in scene.tables().values() for row in rows for value in row}
         assert not paths & cells, "a topic's path is stored in a reference table"
         with scene.db() as conn:
-            columns = {name for table in refs.REFERENCE_TABLES
-                       for name in (row["name"] for row in conn.execute(f"PRAGMA table_info({table})"))}
+            columns = {
+                name
+                for table in refs.REFERENCE_TABLES
+                for name in (row["name"] for row in conn.execute(f"PRAGMA table_info({table})"))
+            }
         assert not {name for name in columns if "path" in name}
 
     play(scene.host, scenario)

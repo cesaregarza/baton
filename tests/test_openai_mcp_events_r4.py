@@ -33,8 +33,8 @@ from test_openai_mcp_events import (
 
 from baton import auth, wakes
 from baton.config import ConfigError, parse
+from baton.database.store import connect
 from baton.integrations import openai_mcp_events as integration
-from baton.store import connect
 
 BUDGET = 0.3
 EPSILON = 0.1
@@ -131,11 +131,18 @@ def bad_server(receiver, tmp_path: Path) -> Iterator[Callable[..., Any]]:
     def start(behaviour: Callable[[ssl.SSLContext, socket.socket], None]) -> tuple[BadServer, integration.McpEvents]:
         server = BadServer(receiver.ca_file, tmp_path / "receiver-key.pem", behaviour)
         servers.append(server)
-        config = parse({"host": {"public_url": "https://baton.example.test", "data_dir": str(tmp_path / "data")},
-                        "roles": {"worker": {}}})
-        settings = integration.Settings(callback_prefixes=(f"https://{NAME}:{server.port}/hooks/",),
-                                        timeout_seconds=BUDGET, allow_private_callbacks=True,
-                                        ca_file=str(receiver.ca_file))
+        config = parse(
+            {
+                "host": {"public_url": "https://baton.example.test", "data_dir": str(tmp_path / "data")},
+                "roles": {"worker": {}},
+            }
+        )
+        settings = integration.Settings(
+            callback_prefixes=(f"https://{NAME}:{server.port}/hooks/",),
+            timeout_seconds=BUDGET,
+            allow_private_callbacks=True,
+            ca_file=str(receiver.ca_file),
+        )
         return server, integration.McpEvents(config, settings, resolver=StubResolver())
 
     yield start
@@ -150,7 +157,7 @@ def attempt(server: BadServer, events: integration.McpEvents, body: bytes = b"{}
         outcome = "ok"
     except integration.CallbackError as error:
         outcome = error.reason
-    except Exception as error:  # noqa: BLE001 - any other failure is reported, not hidden
+    except Exception as error:
         outcome = type(error).__name__
     return time.monotonic() - started, outcome
 
@@ -158,8 +165,11 @@ def attempt(server: BadServer, events: integration.McpEvents, body: bytes = b"{}
 # --- R3-1: the deadline is absolute ------------------------------------------------------------
 
 
-@pytest.mark.parametrize("behaviour", [header_trickle, late_headers_then_stall, slow_tls],
-                         ids=["header-trickle", "late-headers-then-stall", "slow-tls"])
+@pytest.mark.parametrize(
+    "behaviour",
+    [header_trickle, late_headers_then_stall, slow_tls],
+    ids=["header-trickle", "late-headers-then-stall", "slow-tls"],
+)
 def test_every_blocking_step_is_bounded_by_the_one_deadline(bad_server, behaviour) -> None:
     server, events = bad_server(behaviour)
     elapsed, outcome = attempt(server, events)
@@ -235,10 +245,12 @@ def test_timed_out_lookups_never_exceed_the_pool_and_a_full_pool_fails_fast(tmp_
         release.wait(10)
         return ["127.0.0.1"]
 
-    config = parse({"host": {"public_url": "https://baton.example.test", "data_dir": str(tmp_path / "d")},
-                    "roles": {"worker": {}}})
-    events = integration.McpEvents(config, integration.Settings(callback_prefixes=(f"https://{NAME}/",),
-                                                                timeout_seconds=0.02), resolver=stuck)
+    config = parse(
+        {"host": {"public_url": "https://baton.example.test", "data_dir": str(tmp_path / "d")}, "roles": {"worker": {}}}
+    )
+    events = integration.McpEvents(
+        config, integration.Settings(callback_prefixes=(f"https://{NAME}/",), timeout_seconds=0.02), resolver=stuck
+    )
     before = resolver_threads()
     try:
         reasons = []
@@ -278,8 +290,9 @@ def test_a_restart_two_days_later_resends_only_unfinished_destinations(events_ho
     real = time.time
     monkeypatch.setattr(time, "time", lambda: real() + 48 * 3600 + 1)
     receiver.statuses = {}
-    restarted = integration.McpEvents(host.config, host.integrations["openai_mcp_events"].settings,
-                                      resolver=host.resolver)
+    restarted = integration.McpEvents(
+        host.config, host.integrations["openai_mcp_events"].settings, resolver=host.resolver
+    )
     dispatch(host, restarted)
     later = [r for r in receiver.events()][3:]
     assert [r["path"] for r in later] == ["/hooks/flaky"]
@@ -319,8 +332,9 @@ def test_a_rotation_after_the_window_replaces_the_previous_key(events_host, rece
 @pytest.mark.parametrize("overlap", [0, 59, "60"])
 def test_a_rotation_overlap_under_a_minute_is_refused(overlap: Any) -> None:
     with pytest.raises(ConfigError):
-        integration.parse_settings({"enabled": True, "callback_prefixes": [f"https://{NAME}/hooks/"],
-                                    "rotation_overlap_seconds": overlap})
+        integration.parse_settings(
+            {"enabled": True, "callback_prefixes": [f"https://{NAME}/hooks/"], "rotation_overlap_seconds": overlap}
+        )
 
 
 # --- R3-6: liveness is rechecked before each attempt -----------------------------------------

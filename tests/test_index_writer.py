@@ -17,12 +17,13 @@ from typing import Any
 
 import pytest
 
-from baton import cli, conversations, search, store
+from baton import cli, conversations, search
 from baton import config as config_module
 from baton.config import Config, ConfigError
+from baton.database import store
+from baton.database.store import connect
 from baton.derived import provenance, storage
 from baton.errors import BatonError
-from baton.store import connect
 
 try:  # written before the module exists: each test then fails on its own instead of the whole run stopping
     from baton import derived
@@ -30,17 +31,24 @@ except ImportError:
     derived = None  # type: ignore[assignment]
 
 GROUP = ["orchestrator", "reviewer", "assistant"]
-ROLES = {"orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
-         "reviewer": {}, "assistant": {}, "outsider": {}}
+ROLES = {
+    "orchestrator": {"can_create_conversations": True, "can_manage_participants": True},
+    "reviewer": {},
+    "assistant": {},
+    "outsider": {},
+}
 
 
 def index_config(tmp_path: Path, **indexer: Any) -> Config:
     """Generic roles, conversations on, and two listed producers unless a test says otherwise."""
-    return config_module.parse({
-        "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
-        "roles": ROLES, "conversations": {"enabled": True},
-        "indexer": {"producers": ["alpha", "beta"], **indexer},
-    })
+    return config_module.parse(
+        {
+            "host": {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")},
+            "roles": ROLES,
+            "conversations": {"enabled": True},
+            "indexer": {"producers": ["alpha", "beta"], **indexer},
+        }
+    )
 
 
 @pytest.fixture
@@ -64,8 +72,9 @@ def refused(code: str, operation, *args, **kwargs) -> BatonError:
 
 def converse(db, config, count: int, participants=GROUP) -> tuple[str, list[str]]:
     """A conversation with `count` messages from the orchestrator, so every message has two copies."""
-    conversation_id = conversations.create(db, config, actor="orchestrator", title="Release plan",
-                                           participants=participants)["conversation_id"]
+    conversation_id = conversations.create(
+        db, config, actor="orchestrator", title="Release plan", participants=participants
+    )["conversation_id"]
     return conversation_id, [say(db, config, conversation_id, f"note {n}") for n in range(1, count + 1)]
 
 
@@ -93,42 +102,66 @@ def read_all(db, config, manifest: dict[str, Any], producer: str = "alpha") -> N
 
 
 def artifacts_for(manifest: dict[str, Any], kinds=None, **overrides: Any) -> list[dict[str, Any]]:
-    return [{"kind": kind, "body": f"{kind} of the release plan", "citations": [],
-             "expected_version": manifest["kinds"][kind]["prior_version"], **overrides}
-            for kind in (kinds or manifest["kinds"])]
+    return [
+        {
+            "kind": kind,
+            "body": f"{kind} of the release plan",
+            "citations": [],
+            "expected_version": manifest["kinds"][kind]["prior_version"],
+            **overrides,
+        }
+        for kind in (kinds or manifest["kinds"])
+    ]
 
 
-def commit(db, config, manifest: dict[str, Any], artifacts=None, request_id: str = "r-1",
-           producer: str = "alpha") -> dict[str, Any]:
+def commit(
+    db, config, manifest: dict[str, Any], artifacts=None, request_id: str = "r-1", producer: str = "alpha"
+) -> dict[str, Any]:
     payload = {"request_id": request_id, "artifacts": artifacts_for(manifest) if artifacts is None else artifacts}
     return derived.commit_batch(db, config, producer, manifest["batch_id"], payload)
 
 
-def cycle(db, config, conversation_id: str, kinds=("summary",), request_id: str = "r-1",
-          producer: str = "alpha") -> dict[str, Any]:
+def cycle(
+    db, config, conversation_id: str, kinds=("summary",), request_id: str = "r-1", producer: str = "alpha"
+) -> dict[str, Any]:
     manifest = begin(db, config, conversation_id, kinds, producer)
     read_all(db, config, manifest, producer)
     return commit(db, config, manifest, request_id=request_id, producer=producer)
 
 
 def versions(db, conversation_id: str, kind: str = "summary", producer: str = "alpha") -> list[dict[str, Any]]:
-    return [dict(row) for row in db.execute(
-        "SELECT * FROM artifact_versions WHERE conversation_id = ? AND kind = ? AND producer = ? ORDER BY version",
-        (conversation_id, kind, producer))]
+    return [
+        dict(row)
+        for row in db.execute(
+            "SELECT * FROM artifact_versions WHERE conversation_id = ? AND kind = ? AND producer = ? ORDER BY version",
+            (conversation_id, kind, producer),
+        )
+    ]
 
 
 def inputs(db, version_id: str) -> list[list[int]]:
-    return [[row[0], row[1]] for row in db.execute(
-        "SELECT from_seq, to_seq FROM artifact_inputs WHERE version_id = ? ORDER BY from_seq", (version_id,))]
+    return [
+        [row[0], row[1]]
+        for row in db.execute(
+            "SELECT from_seq, to_seq FROM artifact_inputs WHERE version_id = ? ORDER BY from_seq", (version_id,)
+        )
+    ]
 
 
 def snapshot(db, skip: tuple[str, ...] = ()) -> dict[str, list[tuple]]:
     """Every table's rows, so a call can be shown to write nothing (or only what it should)."""
-    tables = [row[0] for row in db.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-        " AND name NOT LIKE '%fts%' ORDER BY name")]
-    return {table: sorted(tuple(row) for row in db.execute(f"SELECT * FROM {table}"))
-            for table in tables if table not in skip}
+    tables = [
+        row[0]
+        for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            " AND name NOT LIKE '%fts%' ORDER BY name"
+        )
+    ]
+    return {
+        table: sorted(tuple(row) for row in db.execute(f"SELECT * FROM {table}"))
+        for table in tables
+        if table not in skip
+    }
 
 
 def dirty(db, config, producer: str = "alpha") -> dict[tuple[str, str], dict[str, Any]]:
@@ -151,9 +184,16 @@ def test_29_producer_names_follow_the_role_name_rule_and_are_listed_once(tmp_pat
 
 def test_the_indexer_limits_default_to_the_contract_and_refuse_nonsense(tmp_path: Path) -> None:
     limits = index_config(tmp_path).indexer
-    assert (limits.max_artifact_bytes, limits.max_citations, limits.max_manifest_items, limits.max_manifest_segments,
-            limits.page_items, limits.max_open_batches, limits.batch_ttl_seconds, limits.max_input_segments) \
-        == (16384, 64, 500, 64, 100, 4, 900, 256)
+    assert (
+        limits.max_artifact_bytes,
+        limits.max_citations,
+        limits.max_manifest_items,
+        limits.max_manifest_segments,
+        limits.page_items,
+        limits.max_open_batches,
+        limits.batch_ttl_seconds,
+        limits.max_input_segments,
+    ) == (16384, 64, 500, 64, 100, 4, 900, 256)
     assert limits.receipt_retention_days == 30 and limits.producers == ("alpha", "beta")
     for bad in ({"max_citations": 0}, {"page_items": "100"}, {"max_open_batches": True}):
         with pytest.raises(ConfigError, match="indexer."):
@@ -193,6 +233,7 @@ def test_24_no_mcp_tool_writes_derived_data_or_names_a_producer(config) -> None:
 
     from baton import app
     from baton.app import catalog, guard, tools
+
     registered = [name for name, _, _ in app.TOOLS + app.CONVERSATION_TOOLS + app.SEARCH_TOOLS + app.ARTIFACT_TOOLS]
     writer_words = ("batch", "generation", "dirty", "commit", "index", "producer")
     assert not [name for name in registered if any(word in name for word in writer_words)]
@@ -223,17 +264,23 @@ def test_a_manifest_lists_exact_items_with_counts_and_digests(db, config) -> Non
     conversation_id, sent = converse(db, config, 3)
     manifest = begin(db, config, conversation_id)
     [segment] = manifest["segments"]
-    assert [(item["seq"], item["message_id"], item["item_revision"]) for item in segment["items"]] \
-        == [(1, sent[0], 1), (2, sent[1], 1), (3, sent[2], 1)]
+    assert [(item["seq"], item["message_id"], item["item_revision"]) for item in segment["items"]] == [
+        (1, sent[0], 1),
+        (2, sent[1], 1),
+        (3, sent[2], 1),
+    ]
     assert (segment["from_seq"], segment["to_seq"], segment["count"]) == (1, 3, 3)
     expected = hashlib.sha256("".join(f"{n}:{sent[n - 1]}:1\n" for n in (1, 2, 3)).encode()).hexdigest()
     assert segment["digest"] == expected
-    assert manifest["item_count"] == 3 and manifest["absent"] == [] and manifest["window"] == {"from_seq": 1,
-                                                                                               "to_seq": 3}
+    assert (
+        manifest["item_count"] == 3 and manifest["absent"] == [] and manifest["window"] == {"from_seq": 1, "to_seq": 3}
+    )
     assert manifest["source_revision"] == db.execute("SELECT revision FROM conversations").fetchone()[0]
     body = {key: value for key, value in manifest.items() if key != "manifest_digest"}
-    assert manifest["manifest_digest"] == hashlib.sha256(
-        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    assert (
+        manifest["manifest_digest"]
+        == hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    )
 
 
 def test_11_a_missing_copy_is_absent_and_splits_the_segments(db, config) -> None:
@@ -265,8 +312,10 @@ def test_read_batch_serves_text_and_writes_only_its_delivery_row(db, config) -> 
     manifest = begin(db, config, conversation_id)
     before = snapshot(db, skip=("batch_pages",))
     page = derived.read_batch(db, config, "alpha", manifest["batch_id"], 1)
-    assert [(item["seq"], item["message_id"], item["text"]) for item in page["items"]] \
-        == [(1, sent[0], "note 1"), (2, sent[1], "note 2")]
+    assert [(item["seq"], item["message_id"], item["text"]) for item in page["items"]] == [
+        (1, sent[0], "note 1"),
+        (2, sent[1], "note 2"),
+    ]
     assert snapshot(db, skip=("batch_pages",)) == before
     assert [tuple(row) for row in db.execute("SELECT batch_id, page FROM batch_pages")] == [(manifest["batch_id"], 1)]
 
@@ -280,8 +329,7 @@ def test_bounds_are_refused_naming_the_limit(tmp_path: Path) -> None:
     read_all(db, config, manifest)
     error = refused("limit_exceeded", commit, db, config, manifest, artifacts_for(manifest, body="x" * 9))
     assert error.extra["limit"] == "max_artifact_bytes"
-    error = refused("limit_exceeded", commit, db, config, manifest, artifacts_for(manifest, body="x",
-                                                                                   citations=sent))
+    error = refused("limit_exceeded", commit, db, config, manifest, artifacts_for(manifest, body="x", citations=sent))
     assert error.extra["limit"] == "max_citations"
     db.close()
 
@@ -320,13 +368,20 @@ def test_5_an_identical_replay_creates_nothing_and_any_change_conflicts(db, conf
     assert replay["created"] is False and replay["versions"] == first["versions"]
     assert snapshot(db) == before
     for changed in ({"body": "another body"}, {"citations": [sent[1]]}, {"citations": []}, {"expected_version": 1}):
-        refused("idempotency_conflict", commit, db, config, manifest, artifacts_for(manifest, **{
-            "citations": [sent[0]], **changed}))
+        refused(
+            "idempotency_conflict",
+            commit,
+            db,
+            config,
+            manifest,
+            artifacts_for(manifest, **{"citations": [sent[0]], **changed}),
+        )
     other = begin(db, config, conversation_id, kinds=("decisions",))  # the same request id on another batch
     read_all(db, config, other)
     refused("idempotency_conflict", commit, db, config, other, artifacts_for(manifest, citations=[sent[0]]))
-    assert snapshot(db, skip=("batch_pages", "batches", "generations")) == \
-        {key: value for key, value in before.items() if key not in ("batch_pages", "batches", "generations")}
+    assert snapshot(db, skip=("batch_pages", "batches", "generations")) == {
+        key: value for key, value in before.items() if key not in ("batch_pages", "batches", "generations")
+    }
 
 
 def test_6_two_commits_on_one_version_give_one_success_and_one_conflict(db, config) -> None:
@@ -368,8 +423,9 @@ def test_4_a_citation_outside_the_covered_inputs_is_refused_by_name(db, config) 
     manifest = begin(db, config, conversation_id)
     read_all(db, config, manifest)
     other_id, other_sent = converse(db, config, 1)
-    error = refused("invalid_request", commit, db, config, manifest, artifacts_for(manifest, citations=[
-        sent[0], other_sent[0]]))
+    error = refused(
+        "invalid_request", commit, db, config, manifest, artifacts_for(manifest, citations=[sent[0], other_sent[0]])
+    )
     assert other_sent[0] in str(error)
     later = say(db, config, conversation_id, "after the batch began")  # in the conversation, not in the window
     error = refused("invalid_request", commit, db, config, manifest, artifacts_for(manifest, citations=[later]))
@@ -393,8 +449,9 @@ def test_14_kinds_keep_their_own_checkpoints_and_none_may_skip(tmp_path: Path) -
     assert versions(db, conversation_id, "decisions")[-1]["covered_through_seq"] == 4
     ahead = begin(db, config, conversation_id, kinds=("summary",))  # 5..6
     read_all(db, config, ahead)
-    refused("invalid_request", commit, db, config, ahead, artifacts_for(mixed, kinds=["decisions"]),
-            request_id="r-5")  # a kind the batch wasn't begun for
+    refused(
+        "invalid_request", commit, db, config, ahead, artifacts_for(mixed, kinds=["decisions"]), request_id="r-5"
+    )  # a kind the batch wasn't begun for
     db.close()
 
 
@@ -458,8 +515,10 @@ def test_commits_are_budgeted_per_producer(tmp_path: Path) -> None:
     cycle(db, config, conversation_id, kinds=("summary",), request_id="r-1")
     manifest = begin(db, config, conversation_id, kinds=("decisions",))
     read_all(db, config, manifest)
-    assert refused("limit_exceeded", commit, db, config, manifest, request_id="r-2").extra["limit"] \
+    assert (
+        refused("limit_exceeded", commit, db, config, manifest, request_id="r-2").extra["limit"]
         == "max_commits_per_hour"
+    )
     cycle(db, config, conversation_id, kinds=("decisions",), producer="beta")  # another producer's own budget
     db.close()
 
@@ -515,8 +574,12 @@ def test_an_invalid_version_recovers_by_a_rebase_from_seq_1(db, config) -> None:
     assert dirty(db, config)[(conversation_id, "summary")]["state"] == "invalid"
     manifest = begin(db, config, conversation_id)
     plan = manifest["kinds"]["summary"]
-    assert (plan["rebase"], plan["reason"], plan["prior_version_id"], plan["start_seq"]) \
-        == (True, "prior_invalid", None, 1)
+    assert (plan["rebase"], plan["reason"], plan["prior_version_id"], plan["start_seq"]) == (
+        True,
+        "prior_invalid",
+        None,
+        1,
+    )
     assert plan["prior_version"] == old["version"]  # what the compare-and-set names
     assert manifest["absent"] == [{"from_seq": 2, "to_seq": 2, "reason": "expired"}]
     read_all(db, config, manifest)
@@ -524,8 +587,7 @@ def test_an_invalid_version_recovers_by_a_rebase_from_seq_1(db, config) -> None:
     old_now, new = versions(db, conversation_id)
     assert (old_now["state"], new["state"], new["version"]) == ("invalid", "valid", old["version"] + 1)
     assert inputs(db, new["id"]) == [[1, 1], [3, 3]]
-    assert db.execute("SELECT COUNT(*) FROM artifact_depends_on WHERE version_id = ?", (new["id"],)).fetchone()[0] \
-        == 0
+    assert db.execute("SELECT COUNT(*) FROM artifact_depends_on WHERE version_id = ?", (new["id"],)).fetchone()[0] == 0
     assert (conversation_id, "summary") not in dirty(db, config)
 
 
@@ -536,8 +598,9 @@ def test_a_rebase_commit_naming_an_older_version_conflicts(db, config) -> None:
     db.execute("UPDATE artifact_versions SET state = 'invalid'")
     manifest = begin(db, config, conversation_id)
     read_all(db, config, manifest)
-    refused("version_conflict", commit, db, config, manifest, artifacts_for(manifest, expected_version=0),
-            request_id="r-2")
+    refused(
+        "version_conflict", commit, db, config, manifest, artifacts_for(manifest, expected_version=0), request_id="r-2"
+    )
 
 
 def test_a_long_conversation_recovers_over_several_batches(tmp_path: Path) -> None:
@@ -650,8 +713,19 @@ def test_16_21_a_replay_after_revocation_gets_only_the_receipt_and_only_its_owne
 def test_26_a_producer_removed_from_the_config_is_refused_by_the_commands(db, config, tmp_path, capsys) -> None:
     conversation_id, _ = converse(db, config, 2)
     path = config_file(config, tmp_path, producers=["beta"])
-    code, refusal = run(capsys, "--config", str(path), "index", "begin-batch", "--producer", "alpha",
-                        "--conversation", conversation_id, "--kinds", "summary")
+    code, refusal = run(
+        capsys,
+        "--config",
+        str(path),
+        "index",
+        "begin-batch",
+        "--producer",
+        "alpha",
+        "--conversation",
+        conversation_id,
+        "--kinds",
+        "summary",
+    )
     assert code == 1 and refusal["error"] == "forbidden"
 
 
@@ -661,11 +735,26 @@ def test_26_a_producer_removed_from_the_config_is_refused_by_the_commands(db, co
 def config_file(config: Config, tmp_path: Path, producers=("alpha", "beta")) -> Path:
     path = tmp_path / "baton.toml"
     listed = ", ".join(f'"{name}"' for name in producers)
-    path.write_text("\n".join([
-        "[host]", 'public_url = "http://127.0.0.1:8765"', f'data_dir = "{config.data_dir}"',
-        "[roles.orchestrator]", "can_create_conversations = true", "can_manage_participants = true",
-        "[roles.reviewer]", "[roles.assistant]", "[roles.outsider]",
-        "[conversations]", "enabled = true", "[indexer]", f"producers = [{listed}]", ""]))
+    path.write_text(
+        "\n".join(
+            [
+                "[host]",
+                'public_url = "http://127.0.0.1:8765"',
+                f'data_dir = "{config.data_dir}"',
+                "[roles.orchestrator]",
+                "can_create_conversations = true",
+                "can_manage_participants = true",
+                "[roles.reviewer]",
+                "[roles.assistant]",
+                "[roles.outsider]",
+                "[conversations]",
+                "enabled = true",
+                "[indexer]",
+                f"producers = [{listed}]",
+                "",
+            ]
+        )
+    )
     return path
 
 
@@ -676,27 +765,41 @@ def run(capsys, *argv: str) -> tuple[int, Any]:
 
 
 def files_digest(directory: Path) -> dict[str, str]:
-    return {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in sorted(directory.iterdir()) if path.name.startswith("baton.db")}
+    return {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(directory.iterdir())
+        if path.name.startswith("baton.db")
+    }
 
 
 def test_the_index_commands_batch_and_commit_end_to_end(db, config, tmp_path, capsys) -> None:
     conversation_id, sent = converse(db, config, 2)
     path = config_file(config, tmp_path)
     base = ["--config", str(path), "index"]
-    code, manifest = run(capsys, *base, "begin-batch", "--producer", "alpha", "--conversation", conversation_id,
-                         "--kinds", "summary,decisions")
+    code, manifest = run(
+        capsys,
+        *base,
+        "begin-batch",
+        "--producer",
+        "alpha",
+        "--conversation",
+        conversation_id,
+        "--kinds",
+        "summary,decisions",
+    )
     assert code == 0 and set(manifest["kinds"]) == {"summary", "decisions"}
     code, page = run(capsys, *base, "read-batch", manifest["batch_id"], "--page", "1", "--producer", "alpha")
     assert code == 0 and [item["message_id"] for item in page["items"]] == sent
     payload = tmp_path / "commit.json"
     payload.write_text(json.dumps({"request_id": "r-cli", "artifacts": artifacts_for(manifest)}))
-    code, result = run(capsys, *base, "commit-batch", manifest["batch_id"], "--file", str(payload),
-                       "--producer", "alpha")
+    code, result = run(
+        capsys, *base, "commit-batch", manifest["batch_id"], "--file", str(payload), "--producer", "alpha"
+    )
     assert code == 0 and result["created"] is True
     code, listed = run(capsys, *base, "dirty", "--producer", "alpha")
-    assert code == 0 and not [p for p in listed["pairs"] if p["conversation_id"] == conversation_id
-                              and p["kind"] in ("summary", "decisions")]
+    assert code == 0 and not [
+        p for p in listed["pairs"] if p["conversation_id"] == conversation_id and p["kind"] in ("summary", "decisions")
+    ]
 
 
 def test_25_dirty_writes_nothing_at_all(db, config, tmp_path, capsys) -> None:
@@ -722,8 +825,14 @@ def test_dirty_requires_its_producer_selector(db, config, tmp_path, capsys) -> N
 
 def test_the_derived_tables_are_step_10_and_carry_scope_all(db, config) -> None:
     assert set(store._ADDED_TABLES[10]) == {  # named by its own step, so a later step doesn't break it
-        "generations", "batches", "batch_pages", "artifact_versions", "artifact_inputs", "artifact_depends_on",
-        "commit_requests"}
+        "generations",
+        "batches",
+        "batch_pages",
+        "artifact_versions",
+        "artifact_inputs",
+        "artifact_depends_on",
+        "commit_requests",
+    }
     conversation_id, _ = converse(db, config, 2)
     cycle(db, config, conversation_id)
     for table in ("generations", "batches", "artifact_versions"):
@@ -731,9 +840,13 @@ def test_the_derived_tables_are_step_10_and_carry_scope_all(db, config) -> None:
 
 
 def test_the_derived_inputs_are_indexed_for_the_expiry_match(db) -> None:
-    plan = " ".join(str(tuple(row)) for row in db.execute(
-        "EXPLAIN QUERY PLAN SELECT version_id FROM artifact_inputs WHERE conversation_id = 'c'"
-        " AND from_seq <= 3 AND to_seq >= 3"))
+    plan = " ".join(
+        str(tuple(row))
+        for row in db.execute(
+            "EXPLAIN QUERY PLAN SELECT version_id FROM artifact_inputs WHERE conversation_id = 'c'"
+            " AND from_seq <= 3 AND to_seq >= 3"
+        )
+    )
     assert "USING INDEX" in plan or "USING COVERING INDEX" in plan
 
 
@@ -799,9 +912,17 @@ def test_a_full_commit_is_valid_and_a_replay_reports_the_state_now(db, config) -
     assert [v["state"] for v in first["versions"]] == ["valid"] and first["operation"] == "commit_batch"
     say(db, config, conversation_id, "one more")
     manifest_id = db.execute("SELECT batch_id FROM artifact_versions").fetchone()[0]
-    replay = derived.commit_batch(db, config, "alpha", manifest_id,
-                                  {"request_id": "r-1", "artifacts": [
-                                      {"kind": "summary", "body": "summary of the release plan", "citations": [],
-                                       "expected_version": 0}]})
+    replay = derived.commit_batch(
+        db,
+        config,
+        "alpha",
+        manifest_id,
+        {
+            "request_id": "r-1",
+            "artifacts": [
+                {"kind": "summary", "body": "summary of the release plan", "citations": [], "expected_version": 0}
+            ],
+        },
+    )
     assert replay["created"] is False and replay["operation"] == "commit_batch"
     assert [v["state"] for v in replay["versions"]] == ["behind"]  # current state, not the stored one

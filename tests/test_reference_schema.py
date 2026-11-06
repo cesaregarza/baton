@@ -53,8 +53,8 @@ from test_topic_containers import topic_config
 from test_topic_id_migration import install, snapshot, snapshot_plan
 from topic_grant_tools_support import play, refused, succeeded
 
-from baton import store
-from baton.store import connect
+from baton.database import store
+from baton.database.store import connect
 
 build_scene = refs.build_scene  # the fixture, under the name the tests ask for
 
@@ -81,10 +81,20 @@ def unique_columns(db: sqlite3.Connection, table: str) -> set[tuple[str, ...]]:
 
 def a_revision(**overrides):
     """A row that satisfies every constraint of `reference_revisions`; a test changes the one thing it is about."""
-    row = {"doc_id": "ref_0000000000000001", "revision": 1, "body": "text", "author_role": "planner",
-           "author_alias_id": None, "author_alias_name": None, "author_alias_code": None, "grant_id": None,
-           "request_id": "req-" + request_id(), "request_digest": "0" * 64, "base_revision": 0,
-           "at": "2026-11-03T12:00:00+00:00"}
+    row = {
+        "doc_id": "ref_0000000000000001",
+        "revision": 1,
+        "body": "text",
+        "author_role": "planner",
+        "author_alias_id": None,
+        "author_alias_name": None,
+        "author_alias_code": None,
+        "grant_id": None,
+        "request_id": "req-" + request_id(),
+        "request_digest": "0" * 64,
+        "base_revision": 0,
+        "at": "2026-11-03T12:00:00+00:00",
+    }
     return {**row, **overrides}
 
 
@@ -93,6 +103,7 @@ def insert(db: sqlite3.Connection, table: str, row: dict) -> None:
 
 
 # 1. The fixture and the version relationship ---------------------------------------------------------------
+
 
 def test_the_v17_fixture_has_the_rows_it_is_documented_to_have():
     """GUARD. Two topics with ids, one alias, one conversation in a topic with no `reviewer` in it, one authorized grant
@@ -107,7 +118,8 @@ def test_the_v17_fixture_has_the_rows_it_is_documented_to_have():
     assert all(one.startswith("topic_") for one in topics.values()) and len(set(topics.values())) == 2
     assert [row["name"] for row in raw.execute("SELECT name FROM aliases")] == ["job-search"]
     assert [(row["title"], row["topic"]) for row in raw.execute("SELECT title, topic FROM conversations")] == [
-        ("Which boards to watch", "job-hunt/boards")]
+        ("Which boards to watch", "job-hunt/boards")
+    ]
     assert "reviewer" not in {row["role"] for row in raw.execute("SELECT role FROM participants")}
     [grant] = raw.execute("SELECT * FROM topic_grants").fetchall()
     assert grant["topic_id"] == topics["job-hunt"] and grant["inherit"] == 1
@@ -115,7 +127,9 @@ def test_the_v17_fixture_has_the_rows_it_is_documented_to_have():
     assert re.fullmatch("[0-9a-f]{64}", grant["proof_digest"])
     assert set(json.loads(grant["capabilities"])) == set(support.ALL)
     assert [row["event"] for row in raw.execute("SELECT event FROM topic_grant_events ORDER BY seq")] == [
-        "propose", "authorize"]
+        "propose",
+        "authorize",
+    ]
     assert not NEW_TABLES & tables_of(raw), "the fixture is the schema before the reference tables"
     assert "tgk_" not in text, "a fixture holds no grant key"
     raw.close()
@@ -146,6 +160,7 @@ def test_the_migration_matrix_lists_the_reference_step():
 
 
 # 2. Every fixture reaches the current schema with both tables, empty -----------------------------------------
+
 
 @pytest.mark.parametrize("version", FIXTURE_VERSIONS)
 def test_every_older_schema_gains_both_reference_tables_empty(tmp_path, version):
@@ -201,8 +216,9 @@ def test_an_upgraded_database_declares_the_same_reference_tables_as_a_fresh_one(
         for name in sorted(NEW_TABLES):
             require_reference_tables(fresh)
             require_reference_tables(upgraded)
-            assert [tuple(row) for row in upgraded.execute(f"PRAGMA table_info({name})")] == \
-                [tuple(row) for row in fresh.execute(f"PRAGMA table_info({name})")]
+            assert [tuple(row) for row in upgraded.execute(f"PRAGMA table_info({name})")] == [
+                tuple(row) for row in fresh.execute(f"PRAGMA table_info({name})")
+            ]
             assert unique_columns(upgraded, name) == unique_columns(fresh, name)
     finally:
         fresh.close()
@@ -210,6 +226,7 @@ def test_an_upgraded_database_declares_the_same_reference_tables_as_a_fresh_one(
 
 
 # 3. The tables a fresh database declares ------------------------------------------------------------------
+
 
 def test_a_fresh_database_declares_reference_docs_as_the_spec_lists_it(tmp_path):
     """An id, the topic's id, the name and the time, all text; the topic's id and the name are unique together."""
@@ -220,7 +237,10 @@ def test_a_fresh_database_declares_reference_docs_as_the_spec_lists_it(tmp_path)
         assert list(columns) == ["id", "topic_id", "name", "created_at"]
         assert columns["id"]["pk"] == 1 and {row["type"] for row in columns.values()} == {"TEXT"}
         assert [name for name, row in columns.items() if not row["pk"] and row["notnull"]] == [
-            "topic_id", "name", "created_at"]
+            "topic_id",
+            "name",
+            "created_at",
+        ]
         assert ("topic_id", "name") in unique_columns(db, "reference_docs")
     finally:
         db.close()
@@ -233,14 +253,34 @@ def test_a_fresh_database_declares_reference_revisions_as_the_spec_lists_it(tmp_
     try:
         require_reference_tables(db)
         columns = columns_of(db, "reference_revisions")
-        assert list(columns) == ["doc_id", "revision", "body", "author_role", "author_alias_id", "author_alias_name",
-                                 "author_alias_code", "grant_id", "request_id", "request_digest", "base_revision", "at"]
+        assert list(columns) == [
+            "doc_id",
+            "revision",
+            "body",
+            "author_role",
+            "author_alias_id",
+            "author_alias_name",
+            "author_alias_code",
+            "grant_id",
+            "request_id",
+            "request_digest",
+            "base_revision",
+            "at",
+        ]
         assert {name: row["type"] for name, row in columns.items() if row["type"] != "TEXT"} == {
-            "revision": "INTEGER", "base_revision": "INTEGER"}
+            "revision": "INTEGER",
+            "base_revision": "INTEGER",
+        }
         assert {name for name, row in columns.items() if not row["notnull"]} == {
-            "author_alias_id", "author_alias_name", "author_alias_code", "grant_id"}
+            "author_alias_id",
+            "author_alias_name",
+            "author_alias_code",
+            "grant_id",
+        }
         assert [name for name, row in sorted(columns.items(), key=lambda item: item[1]["pk"]) if row["pk"]] == [
-            "doc_id", "revision"]
+            "doc_id",
+            "revision",
+        ]
         assert {("doc_id", "revision"), ("request_id",)} <= unique_columns(db, "reference_revisions")
     finally:
         db.close()
@@ -301,8 +341,10 @@ def test_the_reference_tables_have_no_foreign_keys_and_no_triggers(tmp_path, tab
 
 # 4. Rows are never changed --------------------------------------------------------------------------------
 
+
 def test_no_row_of_either_table_is_updated_or_deleted_by_a_stale_edit_a_replay_a_refusal_or_an_undo(
-        build_scene, monkeypatch):
+    build_scene, monkeypatch
+):
     """R16. Five revisions are written and both tables are snapshotted. Then a stale refusal, a replay, a refused edit
     by a core role, one by a revoked grantee and an undo (revision 3's text as revision 6) each run. After every step
     the earlier rows are byte for byte what they were, and over the whole run no statement updates, deletes or replaces
@@ -322,7 +364,7 @@ def test_no_row_of_either_table_is_updated_or_deleted_by_a_stale_edit_a_replay_a
             """Every row that was there is there as it was; whatever else the tables hold was added after them."""
             now, then = scene.tables(), snapshots[0]
             for table in REFERENCE_TABLES:
-                assert now[table][:len(then[table])] == then[table], table
+                assert now[table][: len(then[table])] == then[table], table
             return now
 
         assert (await core_edit(client, scene, BOARDS, NAME, "text", 2)).get("error") == "stale_revision"
@@ -330,8 +372,7 @@ def test_no_row_of_either_table_is_updated_or_deleted_by_a_stale_edit_a_replay_a
         replay = succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(5), 4, request_id=rid))
         assert replay["created"] is False
         assert unchanged() == snapshots[0]
-        refused(await core_edit(client, scene, BOARDS, NAME, "text", 5, role="worker"), "forbidden",
-                refs.f1("worker"))
+        refused(await core_edit(client, scene, BOARDS, NAME, "text", 5, role="worker"), "forbidden", refs.f1("worker"))
         assert unchanged() == snapshots[0]
         succeeded(await core_edit(client, scene, LEADS, NAME, "another document", 0))
         undone = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(3), 5))

@@ -53,8 +53,14 @@ OTHER_WRITER = "text from the writer who got there first"
 
 
 def core_job(expected, number, token):
-    return lambda tools: tools.edit_reference("planner", topic=BOARDS, name=NAME, body=f"writer {number}",
-                                              expected_revision=expected, request_id=f"race-{token}-{number}")
+    return lambda tools: tools.edit_reference(
+        "planner",
+        topic=BOARDS,
+        name=NAME,
+        body=f"writer {number}",
+        expected_revision=expected,
+        request_id=f"race-{token}-{number}",
+    )
 
 
 def prepared(scene, revisions):
@@ -73,6 +79,7 @@ def is_stale(kind, error, current):
 
 
 # 1. Writers racing on threads ---------------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("expected", [0, 3])
 def test_eight_writers_who_read_the_same_revision_make_exactly_one_new_one(build_scene, monkeypatch, expected):
@@ -114,8 +121,15 @@ def test_eight_grantees_of_two_aliases_race_for_one_revision_and_one_wins(build_
 
     def grantee_job(held, number):
         inputs = as_the_guard_calls(scene, held)
-        return lambda tools: tools.edit_reference("guest", topic=BOARDS, name=NAME, body=f"writer {number}",
-                                                  expected_revision=3, request_id=f"race-{token}-{number}", **inputs)
+        return lambda tools: tools.edit_reference(
+            "guest",
+            topic=BOARDS,
+            name=NAME,
+            body=f"writer {number}",
+            expected_revision=3,
+            request_id=f"race-{token}-{number}",
+            **inputs,
+        )
 
     jobs = [grantee_job(state["first" if number % 2 == 0 else "second"], number) for number in range(8)]
     results = run_together(scene, monkeypatch, jobs)
@@ -138,19 +152,31 @@ def test_eight_simultaneous_retries_of_one_request_write_one_revision_and_answer
     body_method("edit_reference")
     prepared(scene, 2)
     rid = request_id()
-    jobs = [lambda tools: tools.edit_reference("planner", topic=BOARDS, name=NAME, body="one request",
-                                               expected_revision=2, request_id=rid) for _ in range(8)]
+    jobs = [
+        lambda tools: tools.edit_reference(
+            "planner", topic=BOARDS, name=NAME, body="one request", expected_revision=2, request_id=rid
+        )
+        for _ in range(8)
+    ]
     results = run_together(scene, monkeypatch, jobs)
     assert [kind for kind, _ in results] == ["ok"] * 8, results
     answers = [answer for _, answer in results]
     assert sorted(answer["created"] for answer in answers) == [False] * 7 + [True]
     assert {answer["revision"] for answer in answers} == {3}
-    assert len({tuple(sorted((key, str(value)) for key, value in answer.items() if key != "created"))
-                for answer in answers}) == 1
+    assert (
+        len(
+            {
+                tuple(sorted((key, str(value)) for key, value in answer.items() if key != "created"))
+                for answer in answers
+            }
+        )
+        == 1
+    )
     assert [row["revision"] for row in scene.revisions(BOARDS, NAME)] == [1, 2, 3]
 
 
 # 2. A writer that gets in before the edit's transaction -------------------------------------------------------
+
 
 @pytest.mark.parametrize("expected", [0, 2])
 def test_a_writer_that_commits_before_the_edits_transaction_is_seen_by_the_edit(build_scene, monkeypatch, expected):
@@ -168,8 +194,11 @@ def test_a_writer_that_commits_before_the_edits_transaction_is_seen_by_the_edit(
         result = await core_edit(client, scene, BOARDS, NAME, "text from the slow writer", expected)
         assert staging.fired, "the edit ran no write statement"
         assert staging.outcome == "landed", staging.outcome
-        assert result == {"error": "stale_revision", "detail": f5(NAME, BOARDS, expected + 1, expected),
-                          "current_revision": expected + 1}, result
+        assert result == {
+            "error": "stale_revision",
+            "detail": f5(NAME, BOARDS, expected + 1, expected),
+            "current_revision": expected + 1,
+        }, result
         rows = scene.revisions(BOARDS, NAME)
         assert [row["revision"] for row in rows] == list(range(1, expected + 2))
         assert rows[-1]["body"] == OTHER_WRITER
@@ -190,8 +219,9 @@ def test_a_writer_cannot_commit_between_the_edits_read_and_its_write(build_scene
     async def scenario(client):
         await support.stage(client, scene.host)
         await write_revisions(client, scene, BOARDS, NAME, expected)
-        staging = Staging(monkeypatch).at("write_after_read",
-                                          other_writer_adds_revision(scene, BOARDS, NAME, expected + 1))
+        staging = Staging(monkeypatch).at(
+            "write_after_read", other_writer_adds_revision(scene, BOARDS, NAME, expected + 1)
+        )
         made = succeeded(await core_edit(client, scene, BOARDS, NAME, "text from the edit", expected))
         assert staging.fired, "the edit never wrote after reading the document"
         assert staging.outcome == "locked", f"another writer got in while the edit held its lock: {staging.outcome}"
@@ -229,12 +259,15 @@ def test_every_statement_of_an_edit_runs_inside_its_one_write_transaction(build_
             assert staging.outside_a_transaction() == [], (label, staging.outside_a_transaction())
             if label.endswith("success"):
                 assert [text.split()[0].upper() for text in texts if text.upper().startswith(("BEGIN", "COMMIT"))] == [
-                    "BEGIN", "COMMIT"], (label, texts)
+                    "BEGIN",
+                    "COMMIT",
+                ], (label, texts)
 
     play(scene.host, scenario)
 
 
 # 3. A grant revoked while an edit starts ----------------------------------------------------------------------
+
 
 def test_a_revoke_made_after_a_read_refuses_the_next_edit(build_scene):
     """R17, case 17 (a). The grantee reads revision 5; the owner revokes G1; its edit with expected 5 is refused in S2's
@@ -247,8 +280,11 @@ def test_a_revoke_made_after_a_read_refuses_the_next_edit(build_scene):
         read = succeeded(await refs.read_reference(client, refs.Bound.of(held), BOARDS, NAME))
         scene.revoke(held.grant_id)
         tables = scene.tables()
-        refused(await grantee_edit(client, held, BOARDS, NAME, "text", read["current_revision"]), "forbidden",
-                revoked(held.grant_id))
+        refused(
+            await grantee_edit(client, held, BOARDS, NAME, "text", read["current_revision"]),
+            "forbidden",
+            revoked(held.grant_id),
+        )
         assert scene.tables() == tables
 
     play(scene.host, scenario)
@@ -277,7 +313,8 @@ def test_a_revoke_that_commits_just_before_the_edits_transaction_refuses_the_edi
 
 
 def test_an_edit_that_holds_its_lock_keeps_the_revoke_out_until_it_has_committed_and_its_row_keeps_the_grant(
-        build_scene, monkeypatch):
+    build_scene, monkeypatch
+):
     """R17. The owner tries to revoke right before the edit's first write that follows its checks. The edit holds the
     write lock, so the revoke waits its 50 ms and fails with "database is locked"; the edit commits and stands, its row
     keeps the grant's id; and the revoke then succeeds, after which the next edit is refused."""

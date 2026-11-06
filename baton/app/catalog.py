@@ -4,8 +4,17 @@ from typing import Annotated
 
 from pydantic import Field
 
-from baton import auth
-from baton.reference_tools import REFERENCE_GUEST_TOOLS, REFERENCE_TOOLS
+from baton.app.tool_policy import ARTIFACT_TOOLS as ARTIFACT_TOOLS
+from baton.app.tool_policy import CONVERSATION_TOOLS as CONVERSATION_TOOLS
+from baton.app.tool_policy import GRANT_TOOLS as GRANT_TOOLS
+from baton.app.tool_policy import GUEST_IDENTIFIED as GUEST_IDENTIFIED
+from baton.app.tool_policy import GUEST_TOOLS as GUEST_TOOLS
+from baton.app.tool_policy import IDENTIFIED_CHANGES as IDENTIFIED_CHANGES
+from baton.app.tool_policy import LITERAL_TOOLS as LITERAL_TOOLS
+from baton.app.tool_policy import REFERENCE_GUEST_TOOLS as REFERENCE_GUEST_TOOLS
+from baton.app.tool_policy import REFERENCE_TOOLS as REFERENCE_TOOLS
+from baton.app.tool_policy import SEARCH_TOOLS as SEARCH_TOOLS
+from baton.app.tool_policy import TOOLS as TOOLS
 
 INSTRUCTIONS = """baton relays messages and job state between agents. You act as one role, fixed by your credential.
 Call whoami to see your role and the others. send_message to a role, or to a conversation you take part in;
@@ -18,64 +27,29 @@ An alias enrolled as a role is different: pass its binding_token as `token` on a
 that role, with its mailbox, waits and permissions. whoami shows the role a call runs as."""
 
 
-# (tool, scope, read-only)
-TOOLS = (
-    ("whoami", auth.SCOPE_READ, True),
-    ("alias_exists", auth.SCOPE_READ, True),
-    ("claim_alias", auth.SCOPE_WRITE, False),
-    ("bind_events", auth.SCOPE_WRITE, False),
-    ("unbind_events", auth.SCOPE_WRITE, False),
-    ("send_message", auth.SCOPE_WRITE, False),
-    ("read_messages", auth.SCOPE_READ, False),
-    ("wait", auth.SCOPE_READ, False),
-    ("create_job", auth.SCOPE_WRITE, False),
-    ("move_job", auth.SCOPE_WRITE, False),
-    ("get_job", auth.SCOPE_READ, True),
-    ("list_jobs", auth.SCOPE_READ, True),
-    ("read_job_events", auth.SCOPE_READ, True),
+TOKEN_ARGUMENT = Annotated[
+    str | None,
+    Field(
+        description=(
+            "A binding_token from claim_alias, for a shared guest login only. "
+            "An enrolled alias's token makes this call "
+            "run as its mapped role; any other alias's token posts as that alias. Omitted and null are the same; an "
+            "empty, malformed, unknown or expired token is refused."
+        )
+    ),
+]
+CORE_PROOF_NOTE = (
+    "\n\nOn a shared guest login this tool needs a core proof: token=<the binding_token of an alias "
+    "enrolled as a role>."
 )
-# Present only when the config enables conversations.
-CONVERSATION_TOOLS = (
-    ("create_conversation", auth.SCOPE_WRITE, False),
-    ("list_conversations", auth.SCOPE_READ, True),
-    ("read_history", auth.SCOPE_READ, True),
-    ("add_participant", auth.SCOPE_WRITE, False),
-    ("remove_participant", auth.SCOPE_WRITE, False),
-    ("set_topic", auth.SCOPE_WRITE, False),
-    ("create_topic", auth.SCOPE_WRITE, False),
-    ("update_topic", auth.SCOPE_WRITE, False),
-    ("rename_topic", auth.SCOPE_WRITE, False),
-    ("list_topics", auth.SCOPE_READ, True),
-    ("get_topic", auth.SCOPE_READ, True),
-    *REFERENCE_TOOLS,
+AUDITED_IDS = (
+    "to",
+    "conversation_id",
+    "participant",
+    "topic",
+    "job_id",
+    "reply_to",
+    "request_id",
+    "to_state",
+    "expected_revision",
 )
-# Present only when the config enables search.
-SEARCH_TOOLS = (
-    ("search", auth.SCOPE_READ, True),
-    ("get_message", auth.SCOPE_READ, True),
-)
-# Present only when the config enables search. Read-only: nothing on MCP writes derived data.
-ARTIFACT_TOOLS = (
-    ("read_artifacts", auth.SCOPE_READ, True),
-)
-GUEST_TOOLS = frozenset({"whoami", "alias_exists", "claim_alias", "list_conversations", "read_history",
-                         "get_message", "search", "send_message", "create_conversation",
-                         "list_topics", "get_topic"}) | REFERENCE_GUEST_TOOLS
-# Guest calls whose body is given the alias behind them, so the row it writes is attributed.
-GUEST_IDENTIFIED = frozenset({"send_message", "create_conversation"})
-# Tools whose bodies read the call context itself, not only the role it runs as.
-CALL_TOOLS = frozenset({"whoami", "bind_events", "unbind_events"})
-# Topic changes and reference edits whose row names the alias behind an alias-bound call, not only its role.
-IDENTIFIED_CHANGES = frozenset({"create_topic", "update_topic", "rename_topic", "set_topic", "edit_reference"})
-# The tools a guest may call by presenting a topic grant key. Their body decides what the key allows.
-GRANT_TOOLS = frozenset({"create_topic", "set_topic", "edit_reference"})
-# The tools that take every argument as sent, not as the JSON it may spell.
-LITERAL_TOOLS = frozenset(name for name, _, _ in REFERENCE_TOOLS)
-TOKEN_ARGUMENT = Annotated[str | None, Field(description=(
-    "A binding_token from claim_alias, for a shared guest login only. An enrolled alias's token makes this call "
-    "run as its mapped role; any other alias's token posts as that alias. Omitted and null are the same; an "
-    "empty, malformed, unknown or expired token is refused."))]
-CORE_PROOF_NOTE = ("\n\nOn a shared guest login this tool needs a core proof: token=<the binding_token of an alias "
-                   "enrolled as a role>.")
-AUDITED_IDS = ("to", "conversation_id", "participant", "topic", "job_id", "reply_to", "request_id",
-               "to_state", "expected_revision")

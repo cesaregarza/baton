@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from baton import inbox, jobs, messages
+from baton import jobs, messages
 from baton.errors import (
     IdempotencyConflict,
     IllegalTransition,
@@ -14,6 +14,7 @@ from baton.errors import (
     StaleRevision,
     UnknownJob,
 )
+from baton.messages import inbox
 
 
 def test_a_job_follows_the_configured_graph_and_tells_whoever_acts_next(host, conn) -> None:
@@ -73,8 +74,9 @@ def test_list_filters_and_messages_can_name_a_job(host, conn) -> None:
 
 
 def test_listing_jobs_does_not_read_bodies_or_retry_fields(host, conn) -> None:
-    created = jobs.create(conn, host.config.jobs, request_id="summary", actor="planner", title="Large job",
-                          body="x" * jobs.MAX_BODY_BYTES)
+    created = jobs.create(
+        conn, host.config.jobs, request_id="summary", actor="planner", title="Large job", body="x" * jobs.MAX_BODY_BYTES
+    )
     full = jobs.get(conn, created["job_id"])
 
     def summaries_only(action, table, column, database, source):
@@ -82,24 +84,29 @@ def test_listing_jobs_does_not_read_bodies_or_retry_fields(host, conn) -> None:
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
 
-    conn.set_authorizer(summaries_only)
+    # This SQLite-specific check observes the driver without exposing authorizers in Baton's domain API.
+    sqlite = conn._driver_connection()
+    sqlite.set_authorizer(summaries_only)
     try:
         [summary] = jobs.list_jobs(conn)
     finally:
-        conn.set_authorizer(None)
+        sqlite.set_authorizer(None)
     assert summary == {key: value for key, value in full.items() if key != "body"}
     assert list(summary) == ["id", "title", "state", "waiting_on", "revision", "created_by", "created_at", "updated_at"]
 
 
-@pytest.mark.parametrize(("state", "waiting_on", "titles"), [
-    (None, None, {"Open", "Review", "Cancelled"}),
-    ("open", None, {"Open"}),
-    (None, "planner", {"Review"}),
-    ("review", "planner", {"Review"}),
-    ("review", "worker", set()),
-    ("", None, set()),
-    (None, "", set()),
-])
+@pytest.mark.parametrize(
+    ("state", "waiting_on", "titles"),
+    [
+        (None, None, {"Open", "Review", "Cancelled"}),
+        ("open", None, {"Open"}),
+        (None, "planner", {"Review"}),
+        ("review", "planner", {"Review"}),
+        ("review", "worker", set()),
+        ("", None, set()),
+        (None, "", set()),
+    ],
+)
 def test_job_lists_and_counts_use_the_same_optional_filters(host, conn, state, waiting_on, titles) -> None:
     graph = host.config.jobs
     jobs.create(conn, graph, request_id="open", actor="planner", title="Open")
@@ -115,9 +122,10 @@ def test_job_lists_and_counts_use_the_same_optional_filters(host, conn, state, w
 
 def test_job_paging_keeps_timestamp_ties_and_limit_bounds(host, conn, monkeypatch) -> None:
     monkeypatch.setattr(jobs.events, "now", lambda: "2026-01-01T00:00:00+00:00")
-    ids = [jobs.create(conn, host.config.jobs, request_id=f"page-{number}",
-                       actor="planner", title=str(number))["job_id"]
-           for number in range(205)]
+    ids = [
+        jobs.create(conn, host.config.jobs, request_id=f"page-{number}", actor="planner", title=str(number))["job_id"]
+        for number in range(205)
+    ]
     expected = sorted(ids, reverse=True)
     assert [job["id"] for job in jobs.list_jobs(conn)] == expected[:50]
     assert [job["id"] for job in jobs.list_jobs(conn, limit=999)] == expected[:200]
@@ -136,13 +144,20 @@ def test_moves_carry_a_revision_and_a_retry_identity(host, conn) -> None:
     moved = jobs.move(conn, graph, job["job_id"], "working", actor="worker", request_id=request_id, expected_revision=1)
     assert (moved["revision"], moved["created"]) == (2, True)
     events_before = len(jobs.read_events(conn, job["job_id"])["events"])
-    again = jobs.move(conn, graph, job["job_id"], "working", actor="worker", request_id=moved["request_id"],
-                      expected_revision=1)
+    again = jobs.move(
+        conn, graph, job["job_id"], "working", actor="worker", request_id=moved["request_id"], expected_revision=1
+    )
     assert (again["revision"], again["created"]) == (2, False)
     assert len(jobs.read_events(conn, job["job_id"])["events"]) == events_before
     with pytest.raises(StaleRevision):
         jobs.move(conn, graph, job["job_id"], "review", actor="worker", expected_revision=1)
     with pytest.raises(RequestTooOld):
-        jobs.move(conn, graph, job["job_id"], "review", actor="worker",
-                  request_id=f"{datetime.now(UTC) - timedelta(days=31):%Y%m%dT%H%M%SZ}-old")
+        jobs.move(
+            conn,
+            graph,
+            job["job_id"],
+            "review",
+            actor="worker",
+            request_id=f"{datetime.now(UTC) - timedelta(days=31):%Y%m%dT%H%M%SZ}-old",
+        )
     assert jobs.get(conn, job["job_id"])["revision"] == 2

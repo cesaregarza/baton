@@ -11,8 +11,9 @@ from baton import cli, remote
 
 
 def result(text: str = "", *, structured=None, is_error: bool = False) -> CallToolResult:
-    return CallToolResult(content=[TextContent(text=text)] if text else [],
-                          structured_content=structured, is_error=is_error)
+    return CallToolResult(
+        content=[TextContent(text=text)] if text else [], structured_content=structured, is_error=is_error
+    )
 
 
 def test_sdk_validation_errors_become_remote_refusals_and_cli_json(start_host, monkeypatch, capsys):
@@ -29,17 +30,20 @@ def test_sdk_validation_errors_become_remote_refusals_and_cli_json(start_host, m
     assert json.loads(capsys.readouterr().out) == {"error": "tool_error", "detail": detail}
 
 
-@pytest.mark.parametrize(("response", "expected"), [
-    (result("not JSON", structured={"result": {"messages": []}}), {"messages": []}),
-    (result(structured={"messages": []}), {"messages": []}),
-    (result(structured={"result": [1, 2]}), [1, 2]),
-    (result('{"messages": []}'), {"messages": []}),
-    (result('{"result": [1, 2]}'), {"result": [1, 2]}),
-    (result("[1, 2]"), [1, 2]),
-    (result("0"), 0),
-    (result("null"), None),
-    (result(), None),
-])
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (result("not JSON", structured={"result": {"messages": []}}), {"messages": []}),
+        (result(structured={"messages": []}), {"messages": []}),
+        (result(structured={"result": [1, 2]}), [1, 2]),
+        (result('{"messages": []}'), {"messages": []}),
+        (result('{"result": [1, 2]}'), {"result": [1, 2]}),
+        (result("[1, 2]"), [1, 2]),
+        (result("0"), 0),
+        (result("null"), None),
+        (result(), None),
+    ],
+)
 def test_successful_responses_keep_their_existing_shapes(response, expected):
     assert remote._decode_result(response) == expected
 

@@ -49,11 +49,12 @@ def start(tmp_path: Path, path: str = "") -> tuple[IssuerHost, uvicorn.Server]:
 
     port = free_port()
     file = tmp_path / "baton.toml"
-    file.write_text(textwrap.dedent(f"""
+    file.write_text(
+        textwrap.dedent(f"""
         [host]
         public_url = "http://127.0.0.1:{port}{path}"
         listen_port = {port}
-        data_dir = "{tmp_path / 'data'}"
+        data_dir = "{tmp_path / "data"}"
 
         [roles.planner]
         description = "An example role"
@@ -63,7 +64,8 @@ def start(tmp_path: Path, path: str = "") -> tuple[IssuerHost, uvicorn.Server]:
         passphrase_hash = "{auth.hash_passphrase(PASSPHRASE)}"
         roles = ["planner"]
         redirect_uris = ["{REDIRECT}", "{STABLE}"]
-    """))
+    """)
+    )
     config = config_module.load(file)
     server = uvicorn.Server(uvicorn.Config(create_app(config), host="127.0.0.1", port=port, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
@@ -80,15 +82,25 @@ def issuer_host(tmp_path: Path, request) -> Iterator[IssuerHost]:
 
 
 def register(host: IssuerHost, redirect: str = REDIRECT) -> httpx.Response:
-    return httpx.post(host.base + "/register", json={"redirect_uris": [redirect], "client_name": "Example client",
-                                                     "token_endpoint_auth_method": "none"})
+    return httpx.post(
+        host.base + "/register",
+        json={"redirect_uris": [redirect], "client_name": "Example client", "token_endpoint_auth_method": "none"},
+    )
 
 
 def authorize_params(host: IssuerHost, client_id: str, redirect: str = REDIRECT, **overrides: str) -> dict:
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-    return {"response_type": "code", "client_id": client_id, "redirect_uri": redirect, "code_challenge": challenge,
-            "code_challenge_method": "S256", "state": "s1", "resource": host.config.resource_url, **overrides}
+    return {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": "s1",
+        "resource": host.config.resource_url,
+        **overrides,
+    }
 
 
 def query_of(response: httpx.Response) -> dict[str, list[str]]:
@@ -122,12 +134,15 @@ def test_the_success_redirect_carries_iss(issuer_host: IssuerHost) -> None:
     assert query.get("iss") == [host.issuer] and query["state"] == ["s1"] and query["code"]
 
 
-@pytest.mark.parametrize("overrides, error", [
-    ({"response_type": "token"}, "unsupported_response_type"),
-    ({"code_challenge_method": "plain"}, "invalid_request"),
-    ({"resource": "https://elsewhere.example.test/mcp"}, "invalid_target"),
-    ({"scope": "not.a.scope"}, "invalid_scope"),
-])
+@pytest.mark.parametrize(
+    "overrides, error",
+    [
+        ({"response_type": "token"}, "unsupported_response_type"),
+        ({"code_challenge_method": "plain"}, "invalid_request"),
+        ({"resource": "https://elsewhere.example.test/mcp"}, "invalid_target"),
+        ({"scope": "not.a.scope"}, "invalid_scope"),
+    ],
+)
 def test_every_error_redirect_to_the_client_carries_iss(issuer_host: IssuerHost, overrides: dict, error: str) -> None:
     host = issuer_host
     client_id = register(host).json()["client_id"]
@@ -149,15 +164,20 @@ def test_iss_appears_only_on_redirects_back_to_the_client(issuer_host: IssuerHos
     assert wrong.status_code == 200 and "location" not in wrong.headers
     unknown = httpx.get(host.base + "/authorize", params=authorize_params(host, "no-such-client"))
     assert "location" not in unknown.headers  # no client to send it to, so no redirect at all
-    assert "iss" not in httpx.get(host.base + "/.well-known/oauth-protected-resource"
-                                  + urlparse(host.config.resource_url).path).json()
+    assert (
+        "iss"
+        not in httpx.get(
+            host.base + "/.well-known/oauth-protected-resource" + urlparse(host.config.resource_url).path
+        ).json()
+    )
 
 
 # The stable callback is an ordinary exact URI; a per-client one is refused and logged path-only --------------
 
 
-def test_the_stable_callback_registers_when_listed_and_a_per_client_one_does_not(issuer_host: IssuerHost,
-                                                                                  caplog) -> None:
+def test_the_stable_callback_registers_when_listed_and_a_per_client_one_does_not(
+    issuer_host: IssuerHost, caplog
+) -> None:
     host = issuer_host
     assert register(host, STABLE).status_code == 201
     with caplog.at_level(logging.WARNING, logger="baton.auth"):
@@ -169,14 +189,19 @@ def test_the_stable_callback_registers_when_listed_and_a_per_client_one_does_not
 
 
 def test_a_refusal_log_line_is_sanitized_and_capped(tmp_path: Path, caplog) -> None:
-    config = config_module.parse({
-        "host": {"public_url": "https://baton.example.test", "data_dir": str(tmp_path / "data")},
-        "roles": {"planner": {}},
-        "auth": {"oauth": {"enabled": True, "passphrase_hash": "scrypt$00$00", "roles": ["planner"]}}})
+    config = config_module.parse(
+        {
+            "host": {"public_url": "https://baton.example.test", "data_dir": str(tmp_path / "data")},
+            "roles": {"planner": {}},
+            "auth": {"oauth": {"enabled": True, "passphrase_hash": "scrypt$00$00", "roles": ["planner"]}},
+        }
+    )
     config.data_dir.mkdir(mode=0o700)
     provider = auth.PassphraseProvider(config)
-    for uri in ("https://client.example.test/cb\x1b[31m\r\nFAKE LOG LINE\x00\x7f",
-                "https://someone@example.com/" + "y" * 5000):
+    for uri in (
+        "https://client.example.test/cb\x1b[31m\r\nFAKE LOG LINE\x00\x7f",
+        "https://someone@example.com/" + "y" * 5000,
+    ):
         client = OAuthClientInformationFull.model_construct(client_id="c1", redirect_uris=[uri])
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger="baton.auth"), pytest.raises(auth.RegistrationError):

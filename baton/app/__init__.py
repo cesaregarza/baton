@@ -21,17 +21,16 @@ from mcp.types import ToolAnnotations
 from starlette.types import ASGIApp
 
 from baton import __version__, auth, dashboard, datadir, seat
+from baton.app.reference_tools import LiteralArguments as LiteralArguments
+from baton.app.reference_tools import ReferenceTools as ReferenceTools
+from baton.app.topic_tools import TopicTools as TopicTools
 from baton.config import Config
+from baton.database.store import connect
 from baton.integrations import Integration, IntegrationUnavailable, load_enabled
-from baton.reference_tools import LiteralArguments as LiteralArguments
-from baton.reference_tools import ReferenceTools as ReferenceTools
-from baton.store import connect
-from baton.topic_tools import TopicTools as TopicTools
 from baton.wakes import Dispatcher
 
 from .catalog import ARTIFACT_TOOLS as ARTIFACT_TOOLS
 from .catalog import AUDITED_IDS as AUDITED_IDS
-from .catalog import CALL_TOOLS as CALL_TOOLS
 from .catalog import CONVERSATION_TOOLS as CONVERSATION_TOOLS
 from .catalog import CORE_PROOF_NOTE as CORE_PROOF_NOTE
 from .catalog import GRANT_TOOLS as GRANT_TOOLS
@@ -64,32 +63,50 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
     if integrations is None:
         integrations = load_enabled(config)
     tools, guard = Tools(config), Guard(config)
-    middleware = [guard.refuse_author_fields, guard.refuse_claim_validation, guard.refuse_token_validation,
-                  *(item for integration in integrations.values() for item in integration.middleware())]
+    middleware = [
+        guard.refuse_author_fields,
+        guard.refuse_claim_validation,
+        guard.refuse_token_validation,
+        *(item for integration in integrations.values() for item in integration.middleware()),
+    ]
     settings = auth.auth_settings(config)
-    common = {"name": "baton", "version": __version__, "instructions": INSTRUCTIONS, "auth": settings,
-              "middleware": middleware}
-    if config.oauth.enabled:
-        provider = auth.PassphraseProvider(config)
-        server = MCPServer(auth_server_provider=provider, **common)
+    provider = auth.PassphraseProvider(config) if config.oauth.enabled else None
+    server = MCPServer(
+        name="baton",
+        version=__version__,
+        instructions=INSTRUCTIONS,
+        auth=settings,
+        middleware=middleware,
+        auth_server_provider=provider,
+        token_verifier=auth.StaticTokenVerifier(config) if provider is None else None,
+    )
+    if provider is not None:
         auth.register_login_routes(server, provider)
-    else:
-        server = MCPServer(token_verifier=auth.StaticTokenVerifier(config), **common)
-    for name, scope, read_only in (TOOLS + (CONVERSATION_TOOLS if config.conversations.enabled else ())
-                                   + (SEARCH_TOOLS + ARTIFACT_TOOLS if config.search.enabled else ())):
-        server.add_tool(guard.wrap(name, scope, getattr(tools, name)), name=name,
-                        annotations=ToolAnnotations(readOnlyHint=read_only, destructiveHint=False,
-                                                    openWorldHint=False))
+    for name, scope, read_only in (
+        TOOLS
+        + (CONVERSATION_TOOLS if config.conversations.enabled else ())
+        + (SEARCH_TOOLS + ARTIFACT_TOOLS if config.search.enabled else ())
+    ):
+        server.add_tool(
+            guard.wrap(name, scope, getattr(tools, name)),
+            name=name,
+            annotations=ToolAnnotations(read_only_hint=read_only, destructive_hint=False, open_world_hint=False),
+        )
         if name in LITERAL_TOOLS:  # these take every argument as sent: a reference may be named "null"
-            guard.take_literally(server._tool_manager.get_tool(name))
+            tool = server._tool_manager.get_tool(name)
+            assert tool is not None  # add_tool above registered this exact name.
+            guard.take_literally(tool)
     for integration in integrations.values():
         integration.register(server)
     public = urlparse(config.public_url)
-    app = server.streamable_http_app(stateless_http=True, transport_security=TransportSecuritySettings(
-        allowed_hosts=[public.netloc, "127.0.0.1:*", "localhost:*"],
-        allowed_origins=[f"{public.scheme}://{public.netloc}", *config.allowed_origins],
-    ))
-    if config.oauth.enabled:
+    app = server.streamable_http_app(
+        stateless_http=True,
+        transport_security=TransportSecuritySettings(
+            allowed_hosts=[public.netloc, "127.0.0.1:*", "localhost:*"],
+            allowed_origins=[f"{public.scheme}://{public.netloc}", *config.allowed_origins],
+        ),
+    )
+    if provider is not None:
         app.add_middleware(auth.EndpointGuard, provider=provider)
         app.add_middleware(auth.IssuerIdentification, provider=provider)
     return app
@@ -109,7 +126,7 @@ def _prepared(name: str, integration: Integration) -> bool:
     except IntegrationUnavailable as error:
         log.error("integration %s is off for this run: %s", name, error)
         return False
-    except Exception as error:  # noqa: BLE001 - an optional integration must never stop the host
+    except Exception as error:
         log.error("integration %s is off for this run: prepare failed (%s)", name, type(error).__name__)
         return False
     return True

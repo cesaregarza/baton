@@ -13,7 +13,7 @@ import pytest
 from conftest import free_port, make_config
 
 from baton import cli, messages, wakes
-from baton.store import connect
+from baton.database.store import connect
 
 SENTINEL = "sentinelwaketoken7f3a"
 
@@ -47,7 +47,7 @@ def bare_logging() -> Iterator[None]:
 
 def _receiver(status: int) -> HTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             self.rfile.read(int(self.headers["Content-Length"]))
             self.send_response(status)
             self.end_headers()

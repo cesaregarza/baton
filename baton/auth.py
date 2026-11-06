@@ -34,7 +34,7 @@ import os
 import secrets
 import time
 from collections import OrderedDict, deque
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,7 +57,7 @@ from mcp.server.transport_security import RequestBodyLimitMiddleware
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from baton import datadir
 from baton.config import Config, ConfigError
@@ -112,8 +112,14 @@ def static_token(config: Config, token: str) -> AccessToken | None:
         if hmac.compare_digest(entry.sha256, digest):
             if entry.sha256 in revoked_digests(config):
                 return None
-            return AccessToken(token=token, client_id=f"token:{entry.name}", scopes=ALL_SCOPES,
-                               resource=config.resource_url, subject=entry.role, claims={"role": entry.role})
+            return AccessToken(
+                token=token,
+                client_id=f"token:{entry.name}",
+                scopes=ALL_SCOPES,
+                resource=config.resource_url,
+                subject=entry.role,
+                claims={"role": entry.role},
+            )
     return None
 
 
@@ -156,14 +162,18 @@ def revoke_token(config: Config, name: str) -> dict:
     entry = matches[0]
     directory = config.data_dir
     with datadir.opened(directory) as dir_fd:
-        lock = datadir.open_file(dir_fd, config.revoked_tokens_path.stem + ".lock", os.O_RDWR | os.O_CREAT,
-                                 directory=directory)
+        lock = datadir.open_file(
+            dir_fd, config.revoked_tokens_path.stem + ".lock", os.O_RDWR | os.O_CREAT, directory=directory
+        )
         try:
             fcntl.flock(lock, fcntl.LOCK_EX)
             found = datadir.read_file(dir_fd, config.revoked_tokens_path.name, directory=directory)
             state = json.loads(found[1]) if found else {"revoked": {}}
-            state["revoked"][entry.sha256] = {"name": name, "role": entry.role,
-                                              "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            state["revoked"][entry.sha256] = {
+                "name": name,
+                "role": entry.role,
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
             datadir.replace_file(dir_fd, config.revoked_tokens_path.name, json.dumps(state).encode())
         finally:
             os.close(lock)
@@ -180,10 +190,20 @@ def credential_authority(token: AccessToken) -> dict:
     """
     role = role_of(token)
     if token.client_id.startswith("token:"):
-        return {"kind": "token", "name": token.client_id.removeprefix("token:"), "sha256": token_digest(token.token),
-                "role": role}
-    return {"kind": "oauth", "client_id": token.client_id, "grant": (token.claims or {}).get("grant"), "role": role,
-            "scopes": sorted(token.scopes), "resource": token.resource}
+        return {
+            "kind": "token",
+            "name": token.client_id.removeprefix("token:"),
+            "sha256": token_digest(token.token),
+            "role": role,
+        }
+    return {
+        "kind": "oauth",
+        "client_id": token.client_id,
+        "grant": (token.claims or {}).get("grant"),
+        "role": role,
+        "scopes": sorted(token.scopes),
+        "resource": token.resource,
+    }
 
 
 def authority_live(config: Config, authority: dict) -> bool:
@@ -198,19 +218,28 @@ def authority_live(config: Config, authority: dict) -> bool:
     if authority.get("kind") == "token":
         return authority["sha256"] not in revoked_digests(config) and any(
             (entry.name, entry.sha256, entry.role) == (authority["name"], authority["sha256"], authority["role"])
-            for entry in config.tokens)
-    if (authority.get("kind") != "oauth" or not config.oauth.enabled or authority.get("grant") is None
-            or authority["role"] not in config.oauth.roles or authority["resource"] != config.resource_url):
+            for entry in config.tokens
+        )
+    if (
+        authority.get("kind") != "oauth"
+        or not config.oauth.enabled
+        or authority.get("grant") is None
+        or authority["role"] not in config.oauth.roles
+        or authority["resource"] != config.resource_url
+    ):
         return False
     # Parsed again only when the file changed: ended tokens stay in it, so it only grows.
     store = _live_stores.setdefault(config.oauth_state_path, TokenStore(config.oauth_state_path))
     store.sync()
     now = time.time()
-    return any((grant["client_id"], grant.get("grant"), grant["role"]) == (authority["client_id"], authority["grant"],
-                                                                          authority["role"])
-               and _in_force(grant, now) and SCOPE_READ in grant["scopes"]
-               and grant.get("resource") == authority["resource"]
-               for grant in [*store.access.values(), *store.refresh.values()])
+    return any(
+        (grant["client_id"], grant.get("grant"), grant["role"])
+        == (authority["client_id"], authority["grant"], authority["role"])
+        and _in_force(grant, now)
+        and SCOPE_READ in grant["scopes"]
+        and grant.get("resource") == authority["resource"]
+        for grant in [*store.access.values(), *store.refresh.values()]
+    )
 
 
 def role_of(token: AccessToken | None) -> str | None:
@@ -241,9 +270,14 @@ def valid_redirect_uri(uri: str, config: Config) -> bool:
     if uri in config.oauth.redirect_uris:
         return True
     parsed = urlparse(uri)
-    return (config.oauth.allow_loopback_redirects and parsed.scheme == "http"
-            and parsed.hostname in ("127.0.0.1", "::1", "localhost")
-            and parsed.username is None and parsed.password is None and not parsed.fragment)
+    return (
+        config.oauth.allow_loopback_redirects
+        and parsed.scheme == "http"
+        and parsed.hostname in ("127.0.0.1", "::1", "localhost")
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.fragment
+    )
 
 
 def _in_force(token: dict, now: float) -> bool:
@@ -307,7 +341,7 @@ class TokenStore:
         self._signature = signature
 
     @contextmanager
-    def mutation(self) -> Iterator[TokenStore]:
+    def mutation(self) -> Generator[TokenStore]:
         directory = self.path.parent
         with datadir.opened(directory) as dir_fd:
             lock = datadir.open_file(dir_fd, self.path.stem + ".lock", os.O_RDWR | os.O_CREAT, directory=directory)
@@ -349,8 +383,12 @@ class TokenStore:
             for key in [key for key, token in table.items() if token["expires_at"] < now - REFRESH_TTL]:
                 moved.append({"table": name, "key": key, "entry": table.pop(key)})
         if moved:
-            fd = datadir.open_file(dir_fd, self.path.stem + "-ended.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT,
-                                   directory=self.path.parent)
+            fd = datadir.open_file(
+                dir_fd,
+                self.path.stem + "-ended.jsonl",
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                directory=self.path.parent,
+            )
             with os.fdopen(fd, "ab") as record:
                 record.write("".join(json.dumps({"moved_at": now, **line}) + "\n" for line in moved).encode())
                 record.flush()
@@ -358,8 +396,9 @@ class TokenStore:
             os.fsync(dir_fd)
 
     def _save(self, dir_fd: int) -> None:
-        body = json.dumps({"clients": self.clients, "access": self.access, "refresh": self.refresh,
-                           "unused": self.unused}).encode()
+        body = json.dumps(
+            {"clients": self.clients, "access": self.access, "refresh": self.refresh, "unused": self.unused}
+        ).encode()
         info = datadir.replace_file(dir_fd, self.path.name, body)
         self._signature = (info.st_ino, info.st_mtime_ns, info.st_size)
 
@@ -409,8 +448,9 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         for uri in client_info.redirect_uris or []:
             if carries_iss(str(uri)):
-                log.warning("registration refused: redirect URI carries the reserved iss parameter: %s",
-                            loggable_uri(str(uri)))
+                log.warning(
+                    "registration refused: redirect URI carries the reserved iss parameter: %s", loggable_uri(str(uri))
+                )
                 raise RegistrationError("invalid_redirect_uri", "a redirect URI may not carry an iss parameter")
             if not valid_redirect_uri(str(uri), self.config):
                 log.warning("registration refused: redirect URI not allowed: %s", loggable_uri(str(uri)))
@@ -468,22 +508,32 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
             return None
         del self.pending[login_id]
         code = secrets.token_urlsafe(32)
-        self.codes[code] = (AuthorizationCode(
-            code=code, scopes=login.scopes, expires_at=now + CODE_TTL, client_id=login.client_id,
-            code_challenge=login.params.code_challenge, redirect_uri=login.params.redirect_uri,
-            redirect_uri_provided_explicitly=login.params.redirect_uri_provided_explicitly,
-            resource=self.config.resource_url, subject=role,
-        ), role)
+        self.codes[code] = (
+            AuthorizationCode(
+                code=code,
+                scopes=login.scopes,
+                expires_at=now + CODE_TTL,
+                client_id=login.client_id,
+                code_challenge=login.params.code_challenge,
+                redirect_uri=login.params.redirect_uri,
+                redirect_uri_provided_explicitly=login.params.redirect_uri_provided_explicitly,
+                resource=self.config.resource_url,
+                subject=role,
+            ),
+            role,
+        )
         log.info("login approved for client %s as role %s", login.client_id, role)
-        return construct_redirect_uri(str(login.params.redirect_uri), code=code, state=login.params.state,
-                                      iss=self.issuer)
+        return construct_redirect_uri(
+            str(login.params.redirect_uri), code=code, state=login.params.state, iss=self.issuer
+        )
 
     async def load_authorization_code(self, client: OAuthClientInformationFull, authorization_code: str):
         entry = self.codes.get(authorization_code)
         return entry[0] if entry and entry[0].client_id == client.client_id else None
 
-    async def exchange_authorization_code(self, client: OAuthClientInformationFull,
-                                          authorization_code: AuthorizationCode) -> OAuthToken:
+    async def exchange_authorization_code(
+        self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
+    ) -> OAuthToken:
         _, role = self.codes.pop(authorization_code.code)
         with self.store.mutation() as store:
             store.unused.pop(client.client_id, None)
@@ -494,11 +544,18 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
         data = self.store.refresh.get(token_digest(refresh_token))
         if data is None or data["client_id"] != client.client_id or not _in_force(data, time.time()):
             return None
-        return RefreshToken(token=refresh_token, client_id=data["client_id"], scopes=data["scopes"],
-                            expires_at=data["expires_at"], resource=data["resource"], subject=data["role"])
+        return RefreshToken(
+            token=refresh_token,
+            client_id=data["client_id"],
+            scopes=data["scopes"],
+            expires_at=data["expires_at"],
+            resource=data["resource"],
+            subject=data["role"],
+        )
 
-    async def exchange_refresh_token(self, client: OAuthClientInformationFull, refresh_token: RefreshToken,
-                                     scopes: list[str]) -> OAuthToken:
+    async def exchange_refresh_token(
+        self, client: OAuthClientInformationFull, refresh_token: RefreshToken, scopes: list[str]
+    ) -> OAuthToken:
         if scopes and not set(scopes) <= set(refresh_token.scopes):
             raise TokenError("invalid_scope")
         with self.store.mutation() as store:
@@ -507,8 +564,12 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
             live = presented is not None and _in_force(presented, now)
             if live:
                 _end_token(presented, "spent", now)
-                tokens = self._issue(client.client_id, scopes or refresh_token.scopes, presented["role"],
-                                     presented.get("grant") or secrets.token_hex(16))
+                tokens = self._issue(
+                    client.client_id,
+                    scopes or refresh_token.scopes,
+                    presented["role"],
+                    presented.get("grant") or secrets.token_hex(16),
+                )
         if not live:
             # Raised once the lock is released. The SDK's errors are frozen dataclasses, and contextlib sets the
             # traceback of an exception leaving a `with`, so raised inside it this became a server error.
@@ -524,9 +585,15 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
         if data is None or not _in_force(data, time.time()) or data["role"] not in self.config.oauth.roles:
             return None
         # The SDK refuses a token whose resource is not this server's (validate_token_resource).
-        return AccessToken(token=token, client_id=data["client_id"], scopes=data["scopes"],
-                           expires_at=data["expires_at"], resource=data["resource"], subject=data["role"],
-                           claims={"role": data["role"], "grant": data.get("grant")})
+        return AccessToken(
+            token=token,
+            client_id=data["client_id"],
+            scopes=data["scopes"],
+            expires_at=data["expires_at"],
+            resource=data["resource"],
+            subject=data["role"],
+            claims={"role": data["role"], "grant": data.get("grant")},
+        )
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         """Revoking either token ends every grant the client holds."""
@@ -545,12 +612,22 @@ class PassphraseProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Ref
         """Mint a token pair; the caller holds `store.mutation()`. `grant_id` stays the same across refreshes."""
         now = int(time.time())
         access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
-        grant = {"client_id": client_id, "scopes": scopes, "resource": self.config.resource_url, "role": role,
-                 "grant": grant_id}
+        grant = {
+            "client_id": client_id,
+            "scopes": scopes,
+            "resource": self.config.resource_url,
+            "role": role,
+            "grant": grant_id,
+        }
         self.store.access[token_digest(access)] = {**grant, "expires_at": now + ACCESS_TTL}
         self.store.refresh[token_digest(refresh)] = {**grant, "expires_at": now + REFRESH_TTL}
-        return OAuthToken(access_token=access, token_type="Bearer", expires_in=ACCESS_TTL, refresh_token=refresh,
-                          scope=" ".join(scopes))
+        return OAuthToken(
+            access_token=access,
+            token_type="Bearer",
+            expires_in=ACCESS_TTL,
+            refresh_token=refresh,
+            scope=" ".join(scopes),
+        )
 
 
 class EndpointGuard:
@@ -643,7 +720,7 @@ class IssuerIdentification:
     def _with_iss(self, send: Send) -> Send:
         refused = False
 
-        async def wrapped(message: dict) -> None:
+        async def wrapped(message: Message) -> None:
             nonlocal refused
             if refused:
                 return  # the original response's body, replaced below
@@ -657,9 +734,16 @@ class IssuerIdentification:
                             refused = True
                             log.warning("refused an /authorize redirect whose callback already carries iss")
                             body = json.dumps({"error": "invalid_request"}).encode()
-                            await send({"type": "http.response.start", "status": 400,
-                                        "headers": [(b"content-type", b"application/json"),
-                                                    (b"content-length", str(len(body)).encode())]})
+                            await send(
+                                {
+                                    "type": "http.response.start",
+                                    "status": 400,
+                                    "headers": [
+                                        (b"content-type", b"application/json"),
+                                        (b"content-length", str(len(body)).encode()),
+                                    ],
+                                }
+                            )
                             await send({"type": "http.response.body", "body": body})
                             return
                         value = construct_redirect_uri(location, iss=self._issuer).encode("latin-1")
@@ -670,10 +754,10 @@ class IssuerIdentification:
         return wrapped
 
     def _with_flag(self, send: Send) -> Send:
-        start: dict | None = None
+        start: Message | None = None
         body = b""
 
-        async def wrapped(message: dict) -> None:
+        async def wrapped(message: Message) -> None:
             nonlocal start, body
             if message["type"] == "http.response.start":
                 start = message
@@ -686,8 +770,10 @@ class IssuerIdentification:
                 metadata = json.loads(body)
                 metadata["authorization_response_iss_parameter_supported"] = True
                 body = json.dumps(metadata).encode()
-            headers = [(n, str(len(body)).encode() if n.lower() == b"content-length" else v)
-                       for n, v in start.get("headers", [])]
+            headers = [
+                (n, str(len(body)).encode() if n.lower() == b"content-length" else v)
+                for n, v in start.get("headers", [])
+            ]
             await send({**start, "headers": headers})
             await send({"type": "http.response.body", "body": body})
 
@@ -715,7 +801,7 @@ def loggable_uri(uri: str) -> str:
         return "<unparseable>"
     hidden = parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment
     shown = "".join(ch for ch in f"{scheme}://{host}" if ch.isprintable()) + (_PATH_REDACTED if hidden else "")
-    return shown if len(shown) <= MAX_LOGGED_URI else shown[:MAX_LOGGED_URI - len(_TRUNCATED)] + _TRUNCATED
+    return shown if len(shown) <= MAX_LOGGED_URI else shown[: MAX_LOGGED_URI - len(_TRUNCATED)] + _TRUNCATED
 
 
 def _within_window(calls: deque[float], now: float) -> deque[float]:
@@ -740,9 +826,13 @@ REVOCATION = RevocationOptions(enabled=True)
 
 def auth_settings(config: Config) -> AuthSettings:
     oauth = config.oauth.enabled
-    return AuthSettings(issuer_url=config.public_url, resource_server_url=config.resource_url,
-                        validate_token_resource=True, client_registration_options=REGISTRATION if oauth else None,
-                        revocation_options=REVOCATION if oauth else None)
+    return AuthSettings(
+        issuer_url=config.public_url,
+        resource_server_url=config.resource_url,
+        validate_token_resource=True,
+        client_registration_options=REGISTRATION if oauth else None,
+        revocation_options=REVOCATION if oauth else None,
+    )
 
 
 LOGIN_PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width">
@@ -788,9 +878,14 @@ def _login_page(provider: PassphraseProvider, login_id: str, error: str = "") ->
         return HTMLResponse("This approval link has expired. Start the connection again.", 400, SECURITY_HEADERS)
     client = provider.store.clients.get(login.client_id, {})
     roles = "".join(f"<option>{html.escape(role)}</option>" for role in provider.config.oauth.roles)
-    return HTMLResponse(LOGIN_PAGE.format(
-        client=html.escape(client.get("client_name") or login.client_id),
-        scopes=html.escape(" ".join(login.scopes)),
-        host=html.escape(urlparse(str(login.params.redirect_uri)).netloc),
-        error=html.escape(error), login_id=html.escape(login_id), roles=roles,
-    ), headers=SECURITY_HEADERS)
+    return HTMLResponse(
+        LOGIN_PAGE.format(
+            client=html.escape(client.get("client_name") or login.client_id),
+            scopes=html.escape(" ".join(login.scopes)),
+            host=html.escape(urlparse(str(login.params.redirect_uri)).netloc),
+            error=html.escape(error),
+            login_id=html.escape(login_id),
+            roles=roles,
+        ),
+        headers=SECURITY_HEADERS,
+    )

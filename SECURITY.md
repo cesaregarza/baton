@@ -13,9 +13,10 @@ in a public issue.
 
 A Baton host serves one operator's agents. Roles limit what clients can do, but they are not independent
 tenants. For example, any role can read jobs. Someone with shell access as the host's user can use the local
-CLI as an agent role and can access the database directly. In particular, the CLI does not enforce the MCP
-guard's `job_authority` restriction. A malicious operator, a compromised host, and denial of service beyond
-Baton's built-in limits are outside this model.
+CLI as an agent role and can access the database directly. The local CLI deliberately refuses guest direct
+messages through the same agent permission check used for message authorization; this does not change the
+MCP guest-message policy. The CLI does not enforce the MCP guard's `job_authority` restriction. A malicious
+operator, a compromised host, and denial of service beyond Baton's built-in limits are outside this model.
 
 Use TLS whenever traffic leaves the machine. The MCP server listens on loopback by default and checks
 `Host` and browser `Origin` headers. [Connecting from another machine](docs/exposing.md) explains how to
@@ -180,12 +181,16 @@ commands, and when the database, OAuth state, or audit log is accessed.
   symlinks and checked again. OAuth state is written to a unique exclusive temporary file, synced, and
   renamed into place. SQLite's WAL and shared-memory files inherit the database's permissions.
 
+Existing database files are checked with non-following, descriptor-relative stat calls. Baton does not open and
+close extra descriptors on them, which could release SQLite's process-wide locks. New files are exclusively
+created with private permissions before SQLite opens them.
+
 SQLite opens files by path rather than through the checked directory descriptor. Baton checks the directory
 and database device and inode after SQLite opens them, but a file swapped and swapped back between the open
 and that check could still be used. That requires write access to the private directory, which is within
 the host-user trust boundary above.
 
-This revision uses database schema 19. Schemas 2–18 upgrade in one transaction; unsupported versions are
+This revision uses database schema 22. Schemas 2–21 upgrade in one transaction; unsupported versions are
 refused before journal-mode or schema changes. Back up the data before upgrading.
 
 <a name="integrations"></a>
@@ -215,7 +220,9 @@ The data directory contains the following. Protect backups as carefully as the l
 
 - `baton.db`: message text, senders, recipients, times, authorship markers, and relayed words; conversation
   titles and participants; jobs and their state history; event and wake state; retry digests; aliases,
-  their mappings and the times of their rekeys; and optional indexing, seat and MCP Events state. Message
+  their mappings and the times of their rekeys; optional indexing, seat and MCP Events state; and the
+  append-only `secretary_summaries` archive containing deliverable summaries, source references, principal,
+  stable secretary ID, decision ID, and creation time. Message
   copies, read or unread, conversation metadata, job history, ended seat rows and MCP Events receipts,
   outcomes and rotation times remain until the database is deleted.
 - Message-request and job-move retry digests and outcomes are kept until the database is deleted. Wake
@@ -236,13 +243,18 @@ The data directory contains the following. Protect backups as carefully as the l
 - `audit.jsonl`: call time, credential and effective roles, credential identifier, tool, relevant IDs,
   outcome, and any alias ID and code. It excludes message text, job bodies, passphrases, and credentials.
   Malformed secret-bearing calls are refused before validation can echo their input.
-- An optional `0600` secretary state file holds source references, digests, bounded metadata, expectations,
-  dispositions, append-only brief versions, `decide` records with only a digest of each brief, and each judge
-  verdict beside the deterministic rules' verdict. It stores no message text. With a policy `judge` block,
-  `decide` writes a new message's authored text and its candidate items' first words to that host command's
-  stdin only. `show` reads excerpts from
-  `baton.db` at inspection time and rechecks the principal's visibility. This local projection cannot grant
-  authority, approve work, advance a delivery cursor, or send a wake.
+- A secretary state file stores model assessments, including full reasons and briefs, source references, and
+  bounded result metadata; it does not archive source message bodies. The secretary reads source messages and
+  events under a read-only database snapshot, but appending deliverable summaries to `secretary_summaries` requires
+  database write access. The independent decision engine and model
+  receive authorized page context on alert pages, and the model receives page context for summaries. State
+  version 1 is refused and requires a new file; version 2 remains supported. Private state is retained until the
+  operator removes it. Deliverable summaries are also appended to `secretary_summaries` in `baton.db`.
+- `read_secretary_summaries` exposes a role-scoped read of the archive over MCP. The remote `baton --host URL
+  secretary summaries` command uses the authenticated token role and requires no host-side secretary policy file;
+  other secretary operations remain host-local.
+- Command providers receive only environment variables named in their policy `env` allowlist. They run as the
+  Baton host user and retain that user's filesystem access; filtering the environment is not a sandbox.
 
 The host's stderr logs record events such as registration, consent outcomes, and wake failures without
 message text or secrets. Operator-configured webhook signing secrets are read from named environment

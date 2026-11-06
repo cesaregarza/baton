@@ -24,13 +24,16 @@ def config_with_webhook(url: str):
     return parse({"host": {"public_url": "http://127.0.0.1:8765"}, "roles": {"worker": {"wake": {"webhook": url}}}})
 
 
-@pytest.mark.parametrize("url", [
-    f"https://hooks.example.test:{SENTINEL}/wake",   # a port that doesn't parse, carrying the token
-    f"https://hooks.example.test:99999/{SENTINEL}",  # a port out of range
-    f"https://:443/{SENTINEL}",                       # no host
-    f"https:///{SENTINEL}",
-    f"ftp://hooks.example.test/{SENTINEL}",           # not http(s)
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://hooks.example.test:{SENTINEL}/wake",  # a port that doesn't parse, carrying the token
+        f"https://hooks.example.test:99999/{SENTINEL}",  # a port out of range
+        f"https://:443/{SENTINEL}",  # no host
+        f"https:///{SENTINEL}",
+        f"ftp://hooks.example.test/{SENTINEL}",  # not http(s)
+    ],
+)
 def test_a_malformed_webhook_url_is_refused_at_config_load_without_repeating_it(url: str) -> None:
     with pytest.raises(ConfigError) as refused:
         config_with_webhook(url)
@@ -38,8 +41,9 @@ def test_a_malformed_webhook_url_is_refused_at_config_load_without_repeating_it(
     assert SENTINEL not in str(refused.value)
 
 
-@pytest.mark.parametrize("url", ["https://hooks.example.test/wake", "http://127.0.0.1:8080/wake",
-                                 "https://hooks.example.test:8443/wake?x=1"])
+@pytest.mark.parametrize(
+    "url", ["https://hooks.example.test/wake", "http://127.0.0.1:8080/wake", "https://hooks.example.test:8443/wake?x=1"]
+)
 def test_a_well_formed_webhook_url_still_loads(url: str) -> None:
     assert config_with_webhook(url).roles["worker"].wake.webhook == url
 
@@ -68,8 +72,9 @@ def test_a_dispatcher_pass_error_logs_no_exception_text(tmp_path: Path, caplog, 
 
 
 def test_an_integration_delivery_error_logs_no_exception_text(tmp_path: Path, caplog) -> None:
-    host = make_config(tmp_path, extra='[roles.worker.wake]\nintegration = "example"\n'
-                                       '[integrations.example]\nenabled = true\n')
+    host = make_config(
+        tmp_path, extra='[roles.worker.wake]\nintegration = "example"\n[integrations.example]\nenabled = true\n'
+    )
 
     class Failing:
         def deliver(self, role: str, wake_id: str, body: bytes) -> bool:

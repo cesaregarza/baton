@@ -15,17 +15,21 @@ runs on its own thread until the host stops. An integration whose `prepare()`
 fails is off for that run, and the host serves without it: it raises
 `IntegrationUnavailable` with a message that is safe to log, and any other
 failure is logged by its type alone.
+
+The secretary subpackage is a separate host-local worker and product-hook CLI;
+its installation skills live in integrations/secretary at the repository root.
 """
 
 from __future__ import annotations
 
 import importlib
 from collections.abc import Sequence
-from typing import Any, Protocol
-
-from mcp.server.mcpserver import MCPServer
+from typing import TYPE_CHECKING, Any, Protocol
 
 from baton.config import Config, ConfigError
+
+if TYPE_CHECKING:
+    from mcp.server.mcpserver import MCPServer
 
 
 class IntegrationUnavailable(Exception):

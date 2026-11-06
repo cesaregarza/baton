@@ -23,21 +23,21 @@ from baton import config as config_module
 from baton.config import ConfigError, parse
 
 FORMS = [
-    "https://münich.example.test",                                # a Unicode host
-    "https://BATON.example.test",                                 # an upper-case host
-    "https://baton.example.test:443",                             # a default port
+    "https://münich.example.test",  # a Unicode host
+    "https://BATON.example.test",  # an upper-case host
+    "https://baton.example.test:443",  # a default port
     "http://baton.example.test:80/baton",
-    "https://baton.example.test:0443",                            # a padded port
+    "https://baton.example.test:0443",  # a padded port
     "https://baton.example.test:08443/baton",
-    "https://[2001:0db8:0000:0000:0000:0000:0000:0001]:8765",     # an uncompressed IPv6 host
+    "https://[2001:0db8:0000:0000:0000:0000:0000:0001]:8765",  # an uncompressed IPv6 host
     "https://[2001:DB8::1]:8765",
-    "https://baton.example.test/a/../baton",                      # ".." segments
+    "https://baton.example.test/a/../baton",  # ".." segments
     "https://baton.example.test/./baton",
-    "https://baton.example.test/a%20b",                           # percent-encoding
-    "https://baton.example.test/café",                       # a non-ASCII path
-    "https://baton.example.test/",                                # a trailing slash
+    "https://baton.example.test/a%20b",  # percent-encoding
+    "https://baton.example.test/café",  # a non-ASCII path
+    "https://baton.example.test/",  # a trailing slash
     "https://baton.example.test/baton/",
-    "https://baton.example.test",                                 # already canonical
+    "https://baton.example.test",  # already canonical
     "https://xn--mnich-kva.example.test",
     "https://[2001:db8::1]:8765",
     "https://baton.example.test:8443/baton",
@@ -46,19 +46,30 @@ FORMS = [
 
 def sdk_issuer(public_url: str) -> str:
     """The issuer exactly as the MCP SDK will publish it for this public_url."""
-    return str(AuthSettings(issuer_url=public_url, resource_server_url=public_url + "/mcp",
-                            validate_token_resource=True).issuer_url)
+    return str(
+        AuthSettings(
+            issuer_url=public_url, resource_server_url=public_url + "/mcp", validate_token_resource=True
+        ).issuer_url
+    )
 
 
 def raw(public_url: str, tmp_path: Path) -> dict:
-    return {"host": {"public_url": public_url, "data_dir": str(tmp_path / "data")}, "roles": {"planner": {}},
-            "auth": {"oauth": {"enabled": True, "passphrase_hash": auth.hash_passphrase(PASSPHRASE),
-                               "roles": ["planner"], "redirect_uris": [REDIRECT]}}}
+    return {
+        "host": {"public_url": public_url, "data_dir": str(tmp_path / "data")},
+        "roles": {"planner": {}},
+        "auth": {
+            "oauth": {
+                "enabled": True,
+                "passphrase_hash": auth.hash_passphrase(PASSPHRASE),
+                "roles": ["planner"],
+                "redirect_uris": [REDIRECT],
+            }
+        },
+    }
 
 
 @pytest.mark.parametrize("public_url", FORMS)
-def test_each_form_is_refused_naming_the_canonical_one_or_agrees_everywhere(public_url: str,
-                                                                           tmp_path: Path) -> None:
+def test_each_form_is_refused_naming_the_canonical_one_or_agrees_everywhere(public_url: str, tmp_path: Path) -> None:
     written = public_url.rstrip("/")  # the config strips one trailing slash, as before
     canonical = sdk_issuer(written)
     if "%" in urlparse(canonical).path:
@@ -84,8 +95,10 @@ def observed_issuers(config) -> set[str]:
     with TestClient(create_app(config), base_url=origin, follow_redirects=False) as http:
         server = http.get("/.well-known/oauth-authorization-server").json()
         resource = http.get("/.well-known/oauth-protected-resource" + urlparse(config.resource_url).path).json()
-        client_id = http.post("/register", json={"redirect_uris": [REDIRECT], "client_name": "Example",
-                                                 "token_endpoint_auth_method": "none"}).json()["client_id"]
+        client_id = http.post(
+            "/register",
+            json={"redirect_uris": [REDIRECT], "client_name": "Example", "token_endpoint_auth_method": "none"},
+        ).json()["client_id"]
 
         class Host:  # the shape authorize_params expects
             pass
