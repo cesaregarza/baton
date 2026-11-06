@@ -9,7 +9,7 @@ import os
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from baton import config as config_module
@@ -61,8 +61,12 @@ class DecisionRun:
     hourly: bool = False
     clock: Callable[[], float] = time.monotonic
     through: int | None = None
+    # The baseline this attempt wrote, so later failures can still match its retained page.
+    model_successes: int | None = field(default=None, init=False)
+    model_policy: str = field(default="", init=False)
 
     async def run(self) -> dict:
+        self.model_successes = None
         self._check()
         async with DatabaseWorker() as database:
             policy = await database.call(load_policy, self.secretary.config, self.secretary.policy_path)
@@ -199,7 +203,9 @@ class DecisionRun:
             category = "timeout" if isinstance(error, TimeoutError) else error.category
             await database.call(health.failed, category)
             raise
-        await database.call(health.succeeded, Page(window.since, window.through, context["mode"]))
+        recorded = await database.call(health.succeeded, Page(window.since, window.through, context["mode"]))
+        self.model_successes = recorded["successes"]
+        self.model_policy = policy.digest
         return assessment
 
     def _check_trigger(self, window: InboxWindow) -> None:

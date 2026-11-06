@@ -59,6 +59,8 @@ class Worker:
         self.instance = instance
         self.failed_pages = 0
         self.digest_first = False
+        self.worker_status = "running"
+        self.worker_error: str | None = None
         self.engine_health = {"status": "not_used", "last_failure": None, "checked_at": None}
         self.model_health = {"status": "not_used", "last_failure": None, "checked_at": None}
         self.delivery_health = {"status": "not_used", "last_failure": None, "checked_at": None}
@@ -66,6 +68,7 @@ class Worker:
         self.delivery_task: asyncio.Task[None] | None = None
         self.delivery_retry_at = 0.0
         self.delivery_retry_seconds: float | None = None
+        self.health_lock = asyncio.Lock()
 
     def _health_status(self, *, worker_status: str = "running") -> dict:
         components = {
@@ -101,27 +104,11 @@ class Worker:
                     while True:
                         try:
                             await self.step(database)
-                            await database.call(
-                                self.instance.receipts.set,
-                                "health",
-                                {
-                                    **self._health_status(),
-                                    "failed_pages": self.failed_pages,
-                                    "checked_at": time.time(),
-                                },
-                            )
+                            await self._write_health(database)
                             retry_seconds = policy.retry_initial_seconds
                         except Exception as error:
                             log.warning("secretary pass failed: %s", type(error).__name__)
-                            await database.call(
-                                self.instance.receipts.set,
-                                "health",
-                                {
-                                    **self._health_status(worker_status="retrying"),
-                                    "error": type(error).__name__,
-                                    "checked_at": time.time(),
-                                },
-                            )
+                            await self._write_health(database, worker_status="retrying", error=type(error).__name__)
                             await asyncio.sleep(retry_seconds)
                             retry_seconds = min(policy.retry_max_seconds, retry_seconds * 2)
                         await self._start_delivery_if_due()
@@ -164,6 +151,28 @@ class Worker:
         else:
             self.delivery_offer = None
 
+    async def _write_health(
+        self,
+        database: DatabaseWorker,
+        *,
+        worker_status: str = "running",
+        error: str | None = None,
+        delivery_only: bool = False,
+    ) -> None:
+        """Serialize receipt updates so delivery cannot hide the main loop's last result."""
+        async with self.health_lock:
+            if not delivery_only:
+                self.worker_status = worker_status
+                self.worker_error = error
+            health = {
+                **self._health_status(worker_status=self.worker_status),
+                "failed_pages": self.failed_pages,
+                "checked_at": time.time(),
+            }
+            if self.worker_error is not None:
+                health["error"] = self.worker_error
+            await database.call(self.instance.receipts.set, "health", health)
+
     async def _start_delivery_if_due(self) -> None:
         task = self.delivery_task
         if task is not None and task.done():
@@ -202,12 +211,7 @@ class Worker:
                 self.delivery_retry_seconds = offer.retry_initial_seconds
             else:
                 self._schedule_delivery_retry(offer, time.monotonic())
-            health = self._health_status()
-            await database.call(
-                self.instance.receipts.set,
-                "health",
-                {**health, "failed_pages": self.failed_pages, "checked_at": time.time()},
-            )
+            await self._write_health(database, delivery_only=True)
 
     def _schedule_delivery_retry(self, offer: DeliveryOffer, now: float) -> None:
         delay = self.delivery_retry_seconds or offer.retry_initial_seconds

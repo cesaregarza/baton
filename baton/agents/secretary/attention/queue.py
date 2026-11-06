@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from baton.config.secretary import Policy, load_policy, validate_decision_budget
@@ -130,17 +130,21 @@ class AttentionQueue:
         if restored is not None:
             acknowledged = await self.database.call(self.backlog.log.is_acknowledged, restored["decision_id"])
             return None if acknowledged else restored
+        run = DecisionRun(
+            self.secretary,
+            budget,
+            page.since,
+            self.floor,
+            trigger,
+            hourly=page.mode == "digest",
+            through=page.through,
+        )
         try:
-            result = await DecisionRun(
-                self.secretary,
-                budget,
-                page.since,
-                self.floor,
-                trigger,
-                hourly=page.mode == "digest",
-                through=page.through,
-            ).run()
+            result = await run.run()
         except (SecretaryUnavailable, InboxTooLarge) as error:
+            if run.model_successes is not None:
+                # Accept our own baseline update, while still rejecting a later concurrent callback's write.
+                page = replace(page, model_successes=run.model_successes, model_policy=run.model_policy)
             return await self._failed(page, error)
         if result["event_count"] == 0:
             await self.database.call(self.backlog.discard_empty, page)

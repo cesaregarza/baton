@@ -213,7 +213,8 @@ parents may also be cited.
 The model receives authorized message text in `context.events` and visible parents in
 `context.reply_context`; it cannot rewrite or replace that evidence. The service checks every citation against the
 supplied context and rereads visibility after inference. If content or visibility changed, it returns a retryable
-`secretary_unavailable` error without advancing delivery. It does not independently verify a summary's meaning.
+`secretary_unavailable` error without advancing delivery. The retained page backs off even when the model
+answered successfully before that recheck failed. It does not independently verify a summary's meaning.
 The private sidecar stores full assessment results, including the reason, brief, and source references, but not
 source message bodies. It is protected by the private-file checks and remains until the operator removes it; there
 is no automatic assessment cleanup. Deliverable summaries are also written to the append-only `secretary_summaries`

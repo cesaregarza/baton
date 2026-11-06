@@ -104,12 +104,14 @@ python -m baton.integrations.secretary --instance /absolute/private/secretary-in
 baton secretary --policy /absolute/path/to/secretary-policy-v3.json summaries --after 0 --limit 50
 ```
 
-The worker health receipt reports overall `running` or `degraded` status and separate `engine`, `model`, and
+The worker health receipt reports overall `running`, `degraded`, or `retrying` status and separate `engine`, `model`, and
 `delivery` component states. A delivery timeout, unsuccessful Codex exit, launch failure, or missing executable
 records a safe failure category and keeps the worker polling. One delivery task runs at a time; failures back off
 from `retry_initial_seconds` up to `retry_max_seconds`, and repeated failures in the same category do not repeat
 the warning. Shutdown cancels and joins the task, killing and reaping any in-flight command.
 Successful delivery clears the degraded delivery state while retaining the latest failure category and timestamp.
+If an assessment pass failed, delivery completion preserves its `retrying` status and error. Only a successful
+assessment pass clears that error; delivery success does not imply assessment recovered.
 
 The local `summaries` command pages archived deliverable summaries from `baton.db`; it does not require the private
 secretary state file. An authenticated remote token can read its own archive without a host-side policy file or
