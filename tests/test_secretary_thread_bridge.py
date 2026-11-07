@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 import pytest
+import secretary_thread_fixtures as fixtures
 
 from baton.agents.secretary.harness.prompt import RESPONSE_SCHEMA, PromptLayers
 
@@ -31,6 +32,8 @@ GUIDANCE = THREAD / "GUIDANCE.md"
 STUB = TESTS / "secretary_thread_gate_stub.py"
 POLICY_TEXT = "Synthetic attribution policy: name who said or asked what."
 UNOFFERED_DELIMITER = "BATON_REPLY_JSON"  # the fixed word an earlier proposal used; nothing may rely on it
+TOOL_TOKENS = 8000  # the smaller of the thread's two tool output limits, as the operator's stated assumption
+ASCII_BYTES_PER_TOKEN = 2.5  # the fewest ASCII bytes of this JSON one token holds, by the same assumption
 
 
 def message(number: int, text: str = "Synthetic text.", sender: str = "worker") -> dict:
@@ -46,11 +49,19 @@ def message(number: int, text: str = "Synthetic text.", sender: str = "worker") 
     }
 
 
-def request(events: list[dict], *, mode: str = "alert", principal: str = "planner", calls: int = 0) -> bytes:
+def request(
+    events: list[dict],
+    *,
+    mode: str = "alert",
+    principal: str = "planner",
+    calls: int = 0,
+    instructions: str = POLICY_TEXT,
+    reply_context: list[dict] | None = None,
+) -> bytes:
     """A protocol 4 turn request as Baton's harness builds it, with `calls` earlier tool exchanges."""
     context = {
         "principal": principal,
-        "instructions": POLICY_TEXT,
+        "instructions": instructions,
         "summary_bytes": 4096,
         "knowledge": "Synthetic contextual knowledge.",
         "mode": mode,
@@ -59,7 +70,7 @@ def request(events: list[dict], *, mode: str = "alert", principal: str = "planne
         "floor": 0,
         "through_pos": events[-1]["pos"],
         "events": events,
-        "reply_context": [],
+        "reply_context": reply_context or [],
         "wake_required": False,
         "engine_verdict": None,
     }
@@ -150,6 +161,11 @@ class Host:
         return {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "HOME": str(self.work)}
 
     def run(self, *args: str, stdin: bytes = b"", timeout: float = 20) -> tuple[int, dict | None]:
+        code, out = self.printed(*args, stdin=stdin, timeout=timeout)
+        return code, json.loads(out) if out.strip() else None
+
+    def printed(self, *args: str, stdin: bytes = b"", timeout: float = 20) -> tuple[int, str]:
+        """A command's exit code and its stdout exactly as the thread's tools would get it."""
         done = subprocess.run(
             [sys.executable, "-I", str(self.bridge), *args],
             input=stdin,
@@ -157,7 +173,7 @@ class Host:
             timeout=timeout,
             env=self.env(),
         )
-        return done.returncode, json.loads(done.stdout) if done.stdout.strip() else None
+        return done.returncode, done.stdout.decode()
 
     def start(self, events: list[dict] | None = None, *, seconds: float = 30, **options) -> tuple[Turn, dict]:
         turn = Turn(self, request(events or [message(1)], **options), seconds)
@@ -188,6 +204,62 @@ def submit(host: Host, form: dict, body: str) -> tuple[int, dict | None]:
     script = f"{form['command']}\n{body}\n{form['closing_line']}".encode()
     done = subprocess.run(["bash", "-c", script], cwd=host.work, capture_output=True, timeout=20, env=host.env())
     return done.returncode, json.loads(done.stdout) if done.stdout.strip() else None
+
+
+def tool_tokens(text: str) -> float:
+    """What printed text may cost the thread's tools: ASCII at ASCII_BYTES_PER_TOKEN, any other byte a token."""
+    ascii_bytes = len(text.encode("ascii", "ignore"))
+    return ascii_bytes / ASCII_BYTES_PER_TOKEN + (len(text.encode()) - ascii_bytes)
+
+
+def read_all(host: Host, header: dict) -> list[tuple[str, dict]]:
+    """Every page the header counts, each read once, in order: its printed line and its value."""
+    count = header.get("pages")
+    assert isinstance(count, int) and count >= 1, f"the header counts no pages: {count!r}"
+    read = []
+    for number in range(1, count + 1):
+        code, line = host.printed("read", header["request_id"], "--page", str(number))
+        assert code == 0 and line.strip(), (number, code, line[:200])
+        read.append((line, json.loads(line)))
+    return read
+
+
+def delivered(read: list[tuple[str, dict]]) -> list[str]:
+    """Each event as the pages deliver it, in order, printed the way a whole page prints it: a part's shares joined."""
+    events, parts = [], None
+    for _, page in read:
+        for item in page["events"]:
+            if "part" not in item:
+                assert parts is None, "an event arrived inside another's parts"
+                events.append(json.dumps(item, sort_keys=True, ensure_ascii=False))
+                continue
+            if item["part"] == 1:
+                assert parts is None, "a split event began before the last one ended"
+                parts = (item["source_key"], item["parts"], [])
+            assert parts is not None and (item["source_key"], item["parts"]) == parts[:2], item
+            assert item["part"] == len(parts[2]) + 1, "parts out of order"
+            parts[2].append(item["json"])
+            if item["part"] == item["parts"]:
+                events.append("".join(parts[2]))
+                parts = None
+    assert parts is None, "a split event never finished"
+    return events
+
+
+def printed_as_a_page(events: list[dict]) -> list[str]:
+    return [json.dumps(event, sort_keys=True, ensure_ascii=False) for event in events]
+
+
+def page_bound() -> float:
+    bound = module_constant("PAGE_TOKENS")
+    assert isinstance(bound, int | float) and 0 < bound <= TOOL_TOKENS, f"no page bound within the tools: {bound!r}"
+    return bound
+
+
+def assert_within_the_tools(read: list[tuple[str, dict]]) -> None:
+    bound = page_bound()
+    for number, (line, _) in enumerate(read, 1):
+        assert tool_tokens(line) <= bound, f"page {number} costs {tool_tokens(line):.0f} tokens against {bound}"
 
 
 def form_of(output: dict | None) -> dict:
@@ -279,17 +351,12 @@ def test_the_closing_line_is_new_every_turn_and_not_the_fixed_word_or_found_in_t
         turn.process.communicate()
 
 
-def test_every_read_page_and_the_layers_read_carry_the_turns_form(host):
-    big = "x" * (30 * 1024)
-    page = [message(number, big) for number in range(1, 4)]
-    _, header = host.start(page)
+def test_every_read_page_carries_the_turns_form(host):
+    _, header = host.start(fixtures.forty_one_events())
     form = form_of(header)
-    code, first = host.run("read", header["request_id"])
-    assert form_of(first) == form and first["more"] is True
-    code, last = host.run("read", header["request_id"], "--after", str(first["through_pos"]))
-    assert form_of(last) == form
-    code, layers = host.run("read", header["request_id"], "--layers")
-    assert form_of(layers) == form
+    read = read_all(host, header)
+    assert len(read) > 1
+    assert all(form_of(page) == form for _, page in read)
 
 
 def test_a_refused_reply_carries_the_form_and_a_correction_goes_through_it(host):
@@ -315,17 +382,16 @@ def test_a_tool_call_then_the_final_assessment_each_go_through_their_turns_form(
 
 
 def test_every_turns_first_page_carries_the_three_trusted_layers_and_later_pages_do_not(host):
-    big = "x" * (30 * 1024)
-    page = [message(number, big) for number in range(1, 4)]
+    page = fixtures.forty_one_events()
     wanted = [item["content"][0]["text"] for item in json.loads(request(page))["input"][:3]]
     for calls in (0, 1):
         turn, header = host.start(page, calls=calls)
-        code, first = host.run("read", header["request_id"])
+        read = read_all(host, header)
+        first = read[0][1]
         assert "layers" in first, "the first page holds no layers"
         assert [layer["text"] for layer in first["layers"]] == wanted
         assert [layer["role"] for layer in first["layers"]] == ["developer"] * 3
-        code, later = host.run("read", header["request_id"], "--after", str(first["through_pos"]))
-        assert "layers" not in later
+        assert all(not page.get("layers") for _, page in read[1:])
         turn.process.kill()
         turn.process.communicate()
 
@@ -336,12 +402,133 @@ def test_the_header_says_citing_every_source_is_required_and_is_not_coverage(hos
     assert isinstance(note, str) and "not coverage" in note and "every event" in note
 
 
-def test_the_event_page_bound_is_unchanged(host):
-    assert module_constant("PAGE_BYTES") == 48 * 1024
-    big = "x" * (30 * 1024)
-    _, header = host.start([message(number, big) for number in range(1, 4)])
-    code, first = host.run("read", header["request_id"])
-    assert len(first["events"]) == 1 and first["more"] is True
+# --- pages the thread's tools show whole ---------------------------------------------------------------------
+
+
+def test_guard_the_41_event_fixture_reproduces_the_two_oversized_pages_of_the_earlier_bound():
+    """Regression guard: the fixture is the observed shape, two pages each far past what the tools show."""
+    old = fixtures.old_pages(fixtures.forty_one_events())
+    assert [len(page) for page in old] == [16, 25]
+    for page in old:
+        assert sum(fixtures.printed_size(event) for event in page) > TOOL_TOKENS * ASCII_BYTES_PER_TOKEN
+
+
+def test_every_printed_line_of_the_41_event_turn_fits_the_tools(host):
+    _, header = host.start(fixtures.forty_one_events(), instructions=fixtures.ATTRIBUTION_POLICY)
+    code, first = host.printed("read", header["request_id"])  # page 1, the same command in every version
+    assert code == 0 and tool_tokens(first) <= TOOL_TOKENS, f"page 1 costs {tool_tokens(first):.0f} tokens"
+    code, line = host.printed("receive", "--wait", "10")
+    assert code == 0 and tool_tokens(line) <= page_bound()
+    read = read_all(host, header)
+    assert read[0][0] == first or {**json.loads(first), "seconds_left": 0} == {**read[0][1], "seconds_left": 0}
+    assert_within_the_tools(read)
+    assert len(read) > 2
+
+
+@pytest.mark.parametrize("window", ["forty_one_events", "nine_events"])
+def test_every_event_and_reply_parent_arrives_once_and_byte_identical(host, window):
+    events = getattr(fixtures, window)()
+    parents = [{"source_key": f"message:msg_{number:016x}", "pos": None} for number in (7, 8)]
+    _, header = host.start(events, instructions=fixtures.ATTRIBUTION_POLICY, reply_context=parents)
+    read = read_all(host, header)
+    assert_within_the_tools(read)
+    assert delivered(read) == printed_as_a_page(events)
+    shown = [entry["source_key"] for _, page in read for entry in page.get("reply_context", [])]
+    assert shown == [parent["source_key"] for parent in parents]
+
+
+def test_an_event_larger_than_a_page_arrives_whole_in_numbered_parts_on_consecutive_pages(host):
+    hazards = 'quote " backslash \\ newline\n tab\t caf\u00e9 \u65e5\u672c \U0001f680 \u2028 '
+    events = [message(1), message(2, hazards * 2000), message(3)]
+    _, header = host.start(events)
+    read = read_all(host, header)
+    assert_within_the_tools(read)
+    assert delivered(read) == printed_as_a_page(events)
+    parts = [(number, item) for number, (_, page) in enumerate(read, 1) for item in page["events"] if "part" in item]
+    assert len(parts) > 2, "the large event was not split"
+    assert [item["part"] for _, item in parts] == list(range(1, len(parts) + 1))
+    assert {item["parts"] for _, item in parts} == {len(parts)}
+    pages_holding = [number for number, _ in parts]
+    assert pages_holding == list(range(pages_holding[0], pages_holding[0] + len(parts))), "parts not consecutive"
+    lines = [line for _, page in read for line in page["index"] if "2/3 " in line]
+    assert lines == [f"2/3 pos 2 message from worker (part {k} of {len(parts)})" for k in range(1, len(parts) + 1)]
+
+
+def test_long_layers_count_inside_the_bound_and_come_before_every_event(host):
+    policy = "Synthetic policy line, with caf\u00e9 and \u65e5\u672c in it. " * 600
+    events = fixtures.forty_one_events()
+    wanted = [item["content"][0]["text"] for item in json.loads(request(events, instructions=policy))["input"][:3]]
+    _, header = host.start(events, instructions=policy)
+    read = read_all(host, header)
+    assert_within_the_tools(read)
+    order = [field for _, page in read for field in ("layers", "events") for _ in page.get(field, [])]
+    assert order == sorted(order, key=lambda field: field != "layers"), "an event came before a layer"
+    texts: dict[int, str] = {}
+    for _, page in read:
+        for layer in page.get("layers", []):
+            texts[layer["index"]] = texts.get(layer["index"], "") + layer["text"]
+    assert [texts[index] for index in sorted(texts)] == wanted
+    assert delivered(read) == printed_as_a_page(events)
+
+
+def test_the_header_counts_the_pages_and_every_read_agrees(host):
+    _, header = host.start(fixtures.forty_one_events())
+    read = read_all(host, header)
+    count = header["pages"]
+    assert [page["page"] for _, page in read] == list(range(1, count + 1))
+    assert {page["pages"] for _, page in read} == {count}
+    assert [page["more"] for _, page in read] == [True] * (count - 1) + [False]
+    for beyond in (0, count + 1):
+        code, out = host.run("read", header["request_id"], "--page", str(beyond))
+        assert (code, out["status"], out["detail"], out["pages"]) == (1, "invalid", "no_such_page", count)
+    again = host.run("read", header["request_id"], "--page", "1")[1]
+    assert {**again, "seconds_left": None} == {**read[0][1], "seconds_left": None}, "the same page changed"
+
+
+def test_every_page_carries_status_and_its_own_seconds_left(host):
+    _, header = host.start(fixtures.forty_one_events())
+    read = read_all(host, header)
+    for _, page in read:
+        assert page.get("status") == "page"
+        left = page.get("seconds_left")
+        assert isinstance(left, float) and 0 < left <= header["seconds_left"], left
+
+
+def test_the_index_lists_every_event_once_in_order_with_its_author_and_attention(host):
+    events = fixtures.forty_one_events()
+    _, header = host.start(events)
+    read = read_all(host, header)
+    lines = [line for _, page in read for line in page["index"]]
+    wanted = []
+    for number, event in enumerate(events, 1):
+        attention = event["message"]["attention"]
+        line = f"{number}/41 pos {event['pos']} message from {event['actor']}"
+        wanted.append(line + (f" attention {', '.join(attention)}" if attention else ""))
+    assert lines == wanted
+    for _, page in read:
+        assert len(page["index"]) == len(page["events"])
+
+
+def test_the_nine_event_window_keeps_the_refusal_the_approval_and_both_requests_in_view(host):
+    events = fixtures.nine_events()
+    _, header = host.start(events, instructions=fixtures.ATTRIBUTION_POLICY)
+    read = read_all(host, header)
+    assert delivered(read) == printed_as_a_page(events)
+    lines = [line for _, page in read for line in page["index"]]
+    assert len(lines) == 9 and len(set(lines)) == 9
+    refusal, approval = (lines[index] for index in (fixtures.REFUSAL, fixtures.APPROVAL))
+    assert refusal.startswith(f"{fixtures.REFUSAL + 1}/9 ") and approval.startswith(f"{fixtures.APPROVAL + 1}/9 ")
+    assert "from operator" in refusal and "from operator" in approval
+    assert lines[fixtures.TWO_ACTORS].endswith("attention reviewer, coordinator")
+
+
+def test_a_summary_over_its_bound_is_refused_with_its_size_and_the_bound(host):
+    turn, header = host.start()
+    code, out = submit(host, form_of(header), serialize(assessment(header, summary="x" * 5000)))
+    assert (code, out["status"], out["detail"]) == (1, "invalid", "summary_bytes")
+    assert (out.get("summary_size"), out.get("summary_bytes")) == (5000, 4096), out
+    assert isinstance(out.get("seconds_left"), float)
+    assert_still_open(host, turn, header)
 
 
 # --- stdin that is not an answer --------------------------------------------------------------------------------
@@ -395,8 +582,8 @@ def test_a_wrong_id_is_not_outstanding_before_stdin_is_judged(host):
     _, header = host.start()
     other = "thr_" + "0" * 32
     code, out = host.run("reply", other, stdin=b"")
-    assert (code, out) == (1, {"status": "not_outstanding"})
-    assert reply_on_terminal(host, other) == {"status": "not_outstanding"}
+    assert (code, out["status"]) == (1, "not_outstanding")
+    assert reply_on_terminal(host, other)["status"] == "not_outstanding"
 
 
 # --- text that must arrive intact --------------------------------------------------------------------------------
@@ -474,11 +661,13 @@ def test_guard_a_wrong_malformed_or_finished_id_is_not_outstanding(host):
     turn, header = host.start()
     answer = serialize(assessment(header)).encode()
     for bad in ("thr_" + "f" * 32, "thr_xyz", "thr_", "not-an-id", "'; touch SENTINEL; '", "thr_" + "F" * 32):
-        assert host.run("reply", bad, stdin=answer) == (1, {"status": "not_outstanding"})
+        code, out = host.run("reply", bad, stdin=answer)
+        assert (code, out["status"]) == (1, "not_outstanding")
     assert not (host.work / "SENTINEL").exists()
     assert host.run("reply", header["request_id"], stdin=answer) == (0, {"status": "accepted"})
     turn.finish()
-    assert host.run("reply", header["request_id"], stdin=answer) == (1, {"status": "not_outstanding"})
+    code, out = host.run("reply", header["request_id"], stdin=answer)
+    assert (code, out["status"]) == (1, "not_outstanding")
     assert [row["outcome"] for row in host.timing() if row["step"] == "replied"][-1] == "not_outstanding"
 
 
@@ -488,7 +677,7 @@ def test_guard_a_reply_inside_the_return_margin_is_late_and_a_second_identical_o
     time.sleep(max(0.0, turn.deadline - 0.3 - time.time()))
     first = host.run("reply", header["request_id"], stdin=answer)
     second = host.run("reply", header["request_id"], stdin=answer)
-    assert first == (1, {"status": "late"}) and second == (1, {"status": "late"})
+    assert (first[0], first[1]["status"]) == (1, "late") and (second[0], second[1]["status"]) == (1, "late")
     code, refused = host.run("reply", header["request_id"], stdin=b"{")
     assert (code, refused["status"], refused["detail"]) == (1, "invalid", "not_json")  # invalid is judged before late
     assert [row["outcome"] for row in host.timing() if row["step"] == "replied"] == ["late", "late", "invalid"]
@@ -524,7 +713,7 @@ def test_guard_the_return_margin_is_half_a_second(
     with answer.open(encoding="utf-8") as stdin:
         monkeypatch.setattr(sys, "stdin", stdin)
         in_process.main(["reply", header["request_id"]])
-    assert json.loads(capsys.readouterr().out) == {"status": status}
+    assert json.loads(capsys.readouterr().out)["status"] == status
 
 
 def test_the_form_is_built_only_for_a_request_id(in_process):
@@ -536,12 +725,40 @@ def test_the_form_is_built_only_for_a_request_id(in_process):
     assert reply_form("thr_" + "a" * 32)["closing_line"] == "END_thr_" + "a" * 32
 
 
-def test_guard_read_of_a_finished_turn_is_not_outstanding(host):
+def test_read_of_a_finished_turn_or_another_id_is_not_outstanding_and_says_to_go_back_to_receive(host):
     turn, header = host.start()
     answer = serialize(assessment(header)).encode()
     assert host.run("reply", header["request_id"], stdin=answer) == (0, {"status": "accepted"})
     turn.finish()
-    assert host.run("read", header["request_id"]) == (1, {"error": "not_outstanding"})
+    for request_id in (header["request_id"], "thr_" + "0" * 32):
+        code, out = host.run("read", request_id)
+        assert code == 1 and out is not None
+        assert out.get("status") == "not_outstanding", out
+        assert "receive" in out.get("next", "") and "events" not in out
+
+
+def test_a_read_and_a_reply_once_the_turns_time_is_gone_are_late_and_say_to_go_back_to_receive(host):
+    turn, header = host.start(seconds=3)
+    time.sleep(max(0.0, turn.deadline - 0.3 - time.time()))
+    code, page = host.run("read", header["request_id"], "--page", "1")
+    assert code == 1 and page is not None and page.get("status") == "late", page
+    assert "receive" in page.get("next", "") and "events" not in page
+    code, out = host.run("reply", header["request_id"], stdin=serialize(assessment(header)).encode())
+    assert (code, out["status"]) == (1, "late") and "receive" in out.get("next", "")
+
+
+def test_a_late_or_not_outstanding_reply_says_the_turn_is_over(host):
+    other = "thr_" + "0" * 32
+    turn, header = host.start()
+    code, out = host.run("reply", other, stdin=serialize(assessment(header)).encode())
+    assert out["status"] == "not_outstanding" and "receive" in out.get("next", ""), out
+
+
+def test_a_fault_carries_a_status(host):
+    turn, header = host.start()
+    (host.gate / "thread" / "protocol4" / "request.json").write_text("{")
+    code, out = host.run("read", header["request_id"])
+    assert code == 1 and out is not None and out.get("status") == "fault", out
 
 
 def test_guard_the_spool_keeps_the_earlier_bridges_turn_fields_so_either_version_answers_the_others_turn(host):
@@ -624,11 +841,37 @@ def test_the_guidance_names_the_bridge_version_and_holds_no_host_path():
     assert not re.search(paths, text) and not re.search(paths, BRIDGE_SOURCE.read_text(encoding="utf-8"))
 
 
+def test_the_guidance_holds_the_cells_the_deadline_and_the_drafting_rule():
+    text = GUIDANCE.read_text(encoding="utf-8")
+    cells = re.findall(r"(?m)^    const out = await tools\.exec_command\(\{ cmd: (.+) \}\);\n    console\.log\(", text)
+    assert cells == [
+        '"BRIDGE receive --wait 600"',
+        '"BRIDGE read REQUEST_ID --page N"',
+        'form.command + "\\n" + JSON.stringify(answer) + "\\n" + form.closing_line',
+    ]
+    assert text.count("console.log(") == 3, "a cell prints more than once"
+    assert "TextEncoder" not in text
+    for needle in (
+        "never measure bytes",
+        "Never reread a page",
+        "seconds_left",
+        "about 44",
+        "stop work on it",
+        "one clause",
+        "A refusal and a later approval are two events",
+        "who asked whom",
+        "summary_size",
+        "no_such_page",
+        '"status": "fault"',
+    ):
+        assert needle in text, needle
+
+
 def test_the_guidance_covers_the_loop_the_replies_and_the_coverage_rule():
     text = GUIDANCE.read_text(encoding="utf-8")
     for needle in (
         "BRIDGE receive --wait",
-        "--after THROUGH_POS",
+        "--page N",
         "reply_form",
         "closing_line",
         "summary_bytes",
@@ -636,7 +879,6 @@ def test_the_guidance_covers_the_loop_the_replies_and_the_coverage_rule():
         "not coverage",
         "late",
         "not_outstanding",
-        '{"error": "not_outstanding"}',
         "stdin_idle",
         "unpaired_surrogate",
         "unresolved",
