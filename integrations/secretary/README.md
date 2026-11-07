@@ -179,24 +179,28 @@ Host contract:
   be answered (`late`, `not_outstanding`) says to stop and return to `receive`.
 
 To adopt a new version, do these steps in order. "The process list" means every process whose command line holds
-the bridge path. An idle spool alone is not enough: a waiting `receive` holds no lease, so `status` reports `idle`
-while it waits, and it keeps running the bytes it started with, so one started before the swap can take the next
-turn on the old bridge.
+the bridge path. It includes the shell of a command session that runs a `receive`. An idle spool alone is not
+enough: a waiting `receive` holds nothing in the spool, so `status` reports `idle`, and it keeps the bytes it
+started with, so it can take the next turn on the old bridge.
 
-1. Hold. Turn the secretary gate and thread mode off, and verify both. Enable neither until step 7 passes.
-2. Retire the thread's receive loop. With no turn in progress, no `receive` should be running. With a turn in
-   progress, interrupt it so that it starts no further `receive`. A `receive` still running exits by itself at its
-   `--wait` bound; wait for it. Do not kill processes broadly.
+1. Hold. Turn off the host's secretary gate and thread mode, the switches that let Baton offer turns to the
+   thread, and verify both. While both are off, nothing can offer a turn. Enable neither until step 7 passes.
+2. Retire the thread's receive loop. If the thread is not mid-turn (its latest turn completed, or it is not
+   loaded), no `receive` should be running. If it is mid-turn (its receive loop is a pending call), interrupt that
+   turn so it starts no further `receive`. A `receive` still running exits by itself at its `--wait` bound; wait
+   for it. Waiting is enough; do not end any process.
 3. Require an empty process list and `secretary_bridge.py status` reporting the spool `idle`. If it reports `live`
-   or `abandoned`, stop and report it. Keep a copy of the installed bridge's bytes for rollback.
-4. Immediately before the swap, recheck all of it: gate and mode off, no turn in progress, an empty process list and
-   an idle spool. If any check fails, go back to step 2.
+   or `abandoned`, stop and report it. Keep copies of the installed bridge's bytes and its resume message for
+   rollback.
+4. Immediately before the swap, recheck all of it: gate and mode off, the thread not mid-turn, an empty process
+   list and an idle spool. If any check fails, go back to step 2.
 5. Install. Write the new bytes to a temporary file in the same directory, give it the same owner and mode, and
    rename it over the bridge.
-6. Run `status` again, and check that the process list is still empty.
+6. Run `status` again and check that it exits 0 and reports the spool `idle`, and that the process list is still
+   empty.
 7. Resume the same thread with the rendered resume message below. Check that it acknowledges the new version and
-   runs exactly one `receive`, and that this is the only process in the list. Only then may gate and mode be
-   enabled.
+   runs exactly one `receive`, and that the process list shows that one `receive` (with any shell that runs it) and
+   nothing else. Only then may gate and mode be enabled.
 
 The resume message is the guidance, preceded by one line naming the host's command.
 [`thread/resume_message.py`](thread/resume_message.py) renders it: `BRIDGE: ` and its one argument, a blank line,
@@ -207,12 +211,14 @@ python3 -I integrations/secretary/thread/resume_message.py "$BRIDGE_COMMAND" > r
 ```
 
 `BRIDGE_COMMAND` is the interpreter, `-I` and the installed bridge's path. The thread acknowledges with the
-version; the next `receive` header shows `bridge_version` and `reply_form`.
+version; the next `receive` header shows `bridge_version` and `reply_form`. If that header shows no version or a
+different one, a process older than the swap took the turn: turn gate and mode off at once, keep them off, report
+the header's version line, and do not retry the install.
 
 To roll back, hold, retire the loop and require an empty process list and an idle spool as in steps 1 to 4. Then
-reinstall the previous bridge bytes kept in step 3 the same way, run `status`, and check that the process list is
-still empty. Resume the same thread with the previous version's resume message, and make the same checks as in
-step 7 before enabling gate and mode.
+reinstall the previous bridge bytes kept in step 3 the same way, and make the checks of step 6. Resume the same
+thread with the previous version's resume message, also kept in step 3, and check that it acknowledges the
+previous version, with the other step 7 checks, before enabling gate and mode.
 
 ## Where the behavior lives
 
