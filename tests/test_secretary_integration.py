@@ -180,6 +180,31 @@ def _positions(world, instance: Path) -> tuple[int, int]:
     return AttentionLog(state_path, world.config.data_dir, "planner").positions()
 
 
+def _assert_claude_file_delivery(project: Path, instance: Path, session_output: dict) -> None:
+    fragment = json.loads(instance.with_name("hooks.json").read_text())
+    assert fragment["hooks"]["FileChanged"][0]["hooks"][0]["asyncRewake"] is True
+    assert session_output["hookSpecificOutput"]["watchPaths"] == [str(instance.parent / "pending.json")]
+    changed = {
+        "hook_event_name": "FileChanged",
+        "session_id": SESSION,
+        "cwd": str(project),
+        "file_path": str(instance.parent / "pending.json"),
+        "event": "change",
+    }
+    first, _ = _hook(project, instance, changed)
+    assert first.returncode == 2 and "Baton secretary attention summary" in first.stderr
+    again, _ = _hook(project, instance, changed)
+    assert again.returncode == 0 and again.stderr == ""
+    wrong, _ = _hook(project, instance, {**changed, "file_path": str(project / "other")})
+    assert wrong.returncode == 0 and wrong.stderr == ""
+    stop_guard, output = _hook(
+        project,
+        instance,
+        {"hook_event_name": "Stop", "session_id": SESSION, "cwd": str(project), "stop_hook_active": True},
+    )
+    assert stop_guard.returncode == 0 and output is None and stop_guard.stderr == ""
+
+
 @pytest.mark.parametrize("product", ["codex", "claude-code"])
 def test_install_generated_hook_worker_receive_and_explicit_ack_lifecycle(tmp_path, product) -> None:
     with make_world(tmp_path) as world:
@@ -224,6 +249,24 @@ def test_install_generated_hook_worker_receive_and_explicit_ack_lifecycle(tmp_pa
                 duplicate, duplicate_output = _hook(project, instance, stop_event)
                 assert stop.returncode == 0 and stop_output["decision"] == "block"
                 assert duplicate.returncode == 0 and duplicate_output is None
+            else:
+                _assert_claude_file_delivery(project, instance, output)
+
+            # A second notification must be delivered while the first remains unacknowledged.
+            if product == "codex":
+                _wait_for_receipt(instance, "queued")
+            unacknowledged = say(world, room, "reviewer", "Another update before acknowledgment")
+            _wait_for_receipt(instance, "pending", lambda pending: len(pending or []) == 2)
+            summaries = json.loads(_cli(instance, "receive").stdout)
+            pending = _status(instance)["pending"]
+            assert set(pending) == {item["decision_id"] for item in summaries}
+            assert summary["decision_id"] in pending
+            assert any(f"message:{sent['message_id']}" in item["sources"] for item in summaries)
+            assert any(f"message:{unacknowledged['message_id']}" in item["sources"] for item in summaries)
+            if product == "codex":
+                _wait(lambda: codex_log.exists() and len(codex_log.read_text().splitlines()) == 2)
+            assert _positions(world, instance) == initial_positions
+
             ack = _cli(instance, "acknowledge", summary["decision_id"])
             assert ack.returncode == 0
             second = say(world, room, "reviewer", "A new follow-up after acknowledgment")
@@ -231,7 +274,9 @@ def test_install_generated_hook_worker_receive_and_explicit_ack_lifecycle(tmp_pa
             _wait_for_receipt(
                 instance,
                 "pending",
-                lambda pending: len(model.requests) >= 2 and bool(pending) and summary["decision_id"] not in pending,
+                lambda pending: (
+                    len(model.requests) >= 3 and len(pending or []) == 2 and summary["decision_id"] not in pending
+                ),
             )
             after = next(
                 item
@@ -241,7 +286,7 @@ def test_install_generated_hook_worker_receive_and_explicit_ack_lifecycle(tmp_pa
             assert f"message:{second['message_id']}" in after["sources"]
             assert f"message:{sent['message_id']}" not in after["sources"]
             assert table_hashes(world.baton, exclude={"secretary_summaries"}) == source_before
-            assert archived_summary_count(world.baton) >= 2
+            assert archived_summary_count(world.baton) == 3
         finally:
             _stop_worker(worker)
 
@@ -287,116 +332,6 @@ def test_pending_result_survives_worker_kill_restart_and_duplicate_lock(tmp_path
                 _stop_worker(first)
             if second is not None:
                 _stop_worker(second)
-
-
-@pytest.mark.parametrize("product", ["codex", "claude-code"])
-def test_older_unacknowledged_summary_does_not_block_a_new_wake(tmp_path, product) -> None:
-    with make_world(tmp_path) as world:
-        room = conversation(world)
-        project, instance, codex_log, *_ = _install(world, tmp_path, product)
-        _hook(project, instance, {"hook_event_name": "SessionStart", "session_id": SESSION, "cwd": str(project)})
-        first = say(world, room, "worker", "First independent update")
-        model = _model(world, tmp_path)
-        worker = _start_worker(instance)
-        try:
-            _wait_for_receipt(instance, "pending", lambda pending: len(model.requests) >= 1 and len(pending or []) == 1)
-            first_pending = _status(instance)["pending"][0]
-            if product == "codex":
-                # Codex records completed delivery; Claude wakes through the pending file instead.
-                _wait_for_receipt(instance, "queued", lambda queued: queued and first_pending in queued["decisions"])
-            second = say(world, room, "reviewer", "A distinct update arrives before acknowledgment")
-            _wait_for_receipt(instance, "pending", lambda pending: len(model.requests) >= 2 and len(pending or []) == 2)
-            summaries = json.loads(_cli(instance, "receive").stdout)
-            pending = _status(instance)["pending"]
-            assert set(pending) == {summary["decision_id"] for summary in summaries}
-            assert first_pending in pending
-            assert any(f"message:{first['message_id']}" in item["sources"] for item in summaries)
-            assert any(f"message:{second['message_id']}" in item["sources"] for item in summaries)
-            if product == "codex":
-                _wait(lambda: codex_log.exists() and len(codex_log.read_text().splitlines()) == 2)
-        finally:
-            _stop_worker(worker)
-
-
-def test_hold_remains_unacknowledged_while_a_new_page_wakes(tmp_path) -> None:
-    with make_world(tmp_path) as world:
-        room = conversation(world)
-        project, instance, codex_log, *_ = _install(world, tmp_path, "codex")
-        initial_positions = _positions(world, instance)
-        _hook(project, instance, {"hook_event_name": "SessionStart", "session_id": SESSION, "cwd": str(project)})
-        first = say(world, room, "worker", "Earlier held context")
-        model = _model(world, tmp_path, plan={"steps": [{"decision": "hold", "summary": "", "sources": []}, {}]})
-        worker = _start_worker(instance)
-        try:
-            _wait(lambda: len(model.requests) >= 1)
-            assert _status(instance)["pending"] == []
-            assert not codex_log.exists()
-            second = say(world, room, "reviewer", "This new note needs attention")
-            before = table_hashes(world.baton, exclude={"secretary_summaries"})
-            _wait_for_receipt(instance, "pending", lambda pending: len(model.requests) >= 2 and bool(pending))
-            result = next(
-                item
-                for item in json.loads(_cli(instance, "receive").stdout)
-                if f"message:{second['message_id']}" in item["sources"]
-            )
-            assert f"message:{first['message_id']}" not in result["sources"]
-            assert f"message:{second['message_id']}" in result["sources"]
-            assert _cli(instance, "acknowledge", result["decision_id"]).returncode == 0
-            assert _positions(world, instance) == initial_positions
-            # The earlier page remains on disk for the scheduled digest, even after the later wake is read.
-            from baton.agents.secretary.attention.backlog import Backlog
-
-            state_path = Path(json.loads(instance.read_text())["state"])
-            backlog = Backlog(AttentionLog(state_path, world.config.data_dir, "planner"))
-            assert backlog.due(time.time() + 3601, held=True)[0].since == initial_positions[0]
-            assert table_hashes(world.baton, exclude={"secretary_summaries"}) == before
-            assert archived_summary_count(world.baton) >= 1
-        finally:
-            _stop_worker(worker)
-
-
-def test_claude_file_changed_wake_and_stop_loop_guard_are_session_scoped(tmp_path) -> None:
-    with make_world(tmp_path) as world:
-        room = conversation(world)
-        project, instance, _, _, _, result = _install(world, tmp_path, "claude-code")
-        fragment = json.loads(Path(result["hooks"]).read_text())
-        file_hook = fragment["hooks"]["FileChanged"][0]["hooks"][0]
-        assert file_hook["asyncRewake"] is True
-        sent = say(world, room, "worker", "Claude file notification")
-        model = _model(world, tmp_path)
-        before = table_hashes(world.baton, exclude={"secretary_summaries"})
-        event = {"hook_event_name": "SessionStart", "session_id": SESSION, "cwd": str(project)}
-        _, initial_output = _hook(project, instance, event)
-        assert initial_output is not None
-        worker = _start_worker(instance)
-        try:
-            _wait_for_receipt(instance, "pending")
-            assert initial_output["hookSpecificOutput"]["watchPaths"] == [str(instance.parent / "pending.json")]
-            changed = {
-                "hook_event_name": "FileChanged",
-                "session_id": SESSION,
-                "cwd": str(project),
-                "file_path": str(instance.parent / "pending.json"),
-                "event": "change",
-            }
-            first, _ = _hook(project, instance, changed)
-            assert first.returncode == 2 and "Baton secretary attention summary" in first.stderr
-            again, _ = _hook(project, instance, changed)
-            assert again.returncode == 0 and again.stderr == ""
-            wrong, _ = _hook(project, instance, {**changed, "file_path": str(project / "other")})
-            assert wrong.returncode == 0 and wrong.stderr == ""
-            stop_guard, output = _hook(
-                project,
-                instance,
-                {"hook_event_name": "Stop", "session_id": SESSION, "cwd": str(project), "stop_hook_active": True},
-            )
-            assert stop_guard.returncode == 0 and output is None and stop_guard.stderr == ""
-            received = json.loads(_cli(instance, "receive").stdout)[0]
-            assert len(model.requests) == 1 and f"message:{sent['message_id']}" in received["sources"]
-            assert table_hashes(world.baton, exclude={"secretary_summaries"}) == before
-            assert archived_summary_count(world.baton) >= 1
-        finally:
-            _stop_worker(worker)
 
 
 def test_visibility_revocation_before_receive_discards_brief_and_rejects_ack(tmp_path) -> None:

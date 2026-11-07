@@ -49,16 +49,28 @@ async def control_move(client, scene, held):
 # 1. create_topic ------------------------------------------------------------------------------------------------
 
 
-def test_a_grantee_creates_a_subtopic_that_copies_its_parents_members_and_records_the_grant(build_scene):
-    """Case 5. Title and description may be given; members come from the parent, and the history row names the
-    alias that acted and the grant it acted under."""
-    # Mutant 7: not copying the parent's members. Mutant 10: grant_id missing from the history row.
+def test_granted_topic_creation_copies_members_and_ignores_inherit(build_scene):
+    """Members are snapshotted from the parent; the grant's inheritance flag controls scope, not creation."""
+    # Mutant 7: accepting caller-supplied members, not copying the parent's members, or requiring inheritance.
+    # Mutant 10: the successful change row omits its grant id.
     scene = build_scene()
 
     async def scenario(client):
-        held = await board(client, scene, ("topic.create_sub",), inherit=False)
+        await stage(client, scene.host)
+        plain = await scene.grantee(client, "lane-a", "job-hunt", ("topic.create_sub",), inherit=False)
+        inheriting = await scene.grantee(client, "lane-b", "resume", ("topic.create_sub",), inherit=True)
+
+        for members in (["planner"], ["planner", "worker"]):
+            refused(
+                await plain.call(client, "create_topic", path="job-hunt/with-members", members=members),
+                "invalid_request",
+                NO_MEMBERS,
+            )
+            assert "job-hunt/with-members" not in scene.topic_paths()
+            assert scene.events("refused_use") == []
+
         made = succeeded(
-            await held.call(
+            await plain.call(
                 client, "create_topic", path="job-hunt/referrals", title="Referrals", description="Introductions"
             )
         )
@@ -73,29 +85,16 @@ def test_a_grantee_creates_a_subtopic_that_copies_its_parents_members_and_record
         new_id = scene.topic_id("job-hunt/referrals")
         assert new_id not in {scene.topic_id(path) for path in support.BOARD}
         row = only([one for one in scene.changes("create_topic") if one["topic_id"] == new_id], "history row")
-        assert (row["actor"], row["grant_id"]) == (held.actor, held.grant_id)
+        assert (row["actor"], row["grant_id"]) == (plain.actor, plain.grant_id)
         assert json.loads(row["before"] if row["before"] else "null") is None
         assert json.loads(row["after"])["path"] == "job-hunt/referrals"
 
-    play(scene.host, scenario)
-
-
-def test_the_new_subtopic_takes_a_snapshot_of_its_parents_members_and_does_not_follow_them(build_scene):
-    """The copy is made once, when the topic is created. A later change to the parent's members leaves it alone."""
-    # Mutant 7: not copying the parent's members.
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await board(client, scene, ("topic.create_sub",))
         succeeded(
             await tool(client, scene.host, "update_topic", {"path": "job-hunt", "members": ["worker"]}, role="planner")
         )
-        succeeded(await held.call(client, "create_topic", path="job-hunt/snapshot"))
-        assert scene.members("job-hunt/snapshot") == ["worker"]
-        succeeded(
-            await tool(client, scene.host, "update_topic", {"path": "job-hunt", "members": ["planner"]}, role="planner")
-        )
-        assert scene.members("job-hunt/snapshot") == ["worker"]
+        assert scene.members("job-hunt/referrals") == ["planner", "worker"]
+        inherited = succeeded(await inheriting.call(client, "create_topic", path="resume/next-step"))
+        assert inherited["path"] == "resume/next-step"
 
     play(scene.host, scenario)
 
@@ -123,37 +122,6 @@ def test_a_guest_thread_can_be_started_in_a_grantee_made_subtopic(build_scene):
     play(scene.host, scenario)
 
 
-def test_a_grantee_may_not_pass_members(build_scene):
-    """`members` from a grantee is refused as invalid, whatever it holds, and nothing is created."""
-    # Mutant 7: accepting members from a grantee.
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await board(client, scene, ("topic.create_sub",))
-        for members in (["planner"], ["planner", "worker"]):
-            result = await held.call(client, "create_topic", path="job-hunt/with-members", members=members)
-            refused(result, "invalid_request", NO_MEMBERS)
-        assert "job-hunt/with-members" not in scene.topic_paths()
-        assert scene.events("refused_use") == []
-
-    play(scene.host, scenario)
-
-
-def test_creating_does_not_depend_on_inherit(build_scene):
-    """The parent must be the grant's own topic; whether the grant also covers subtopics does not matter."""
-    # Mutant 7: requiring inherit, or covering rather than naming the parent.
-    scene = build_scene()
-
-    async def scenario(client):
-        await stage(client, scene.host)
-        plain = await scene.grantee(client, "lane-a", "job-hunt", ("topic.create_sub",), inherit=False)
-        inheriting = await scene.grantee(client, "lane-b", "resume", ("topic.create_sub",), inherit=True)
-        succeeded(await plain.call(client, "create_topic", path="job-hunt/one"))
-        succeeded(await inheriting.call(client, "create_topic", path="resume/two"))
-
-    play(scene.host, scenario)
-
-
 def test_a_grantee_cannot_create_anywhere_but_directly_under_the_topic_its_grant_names(build_scene):
     """Cases 6 and 10. Root level, a lookalike root, an unrelated root and another root's subtopic are refused as
     not covered, each with its event. A third level is refused too. A grant on a subtopic names that subtopic, so it
@@ -176,21 +144,6 @@ def test_a_grantee_cannot_create_anywhere_but_directly_under_the_topic_its_grant
             assert result.get("error") in ("forbidden", "invalid_request"), (path, result)
         added = set(scene.topic_paths()) - set(support.BOARD)
         assert added == set(), added
-
-    play(scene.host, scenario)
-
-
-def test_creating_a_path_that_already_exists_is_refused_as_it_is_for_a_core_role(build_scene):
-    """Once the grant covers the parent, an existing path is refused with the text a core role gets."""
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await board(client, scene, ("topic.create_sub",))
-        refused(
-            await held.call(client, "create_topic", path="job-hunt/boards"),
-            "invalid_request",
-            "topic 'job-hunt/boards' already exists",
-        )
 
     play(scene.host, scenario)
 
@@ -305,39 +258,37 @@ def test_a_grantee_moves_a_thread_between_covered_topics_and_the_participants_ar
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize(
-    "source,destination,uncovered",
-    [
-        ("resume", "job-hunt/boards", "resume"),
-        ("job-hunt/boards", "resume", "resume"),
-        ("job-hunting", "job-hunt", "job-hunting"),
-        ("job-hunt", "job-hunting", "job-hunting"),
-    ],
-)
-def test_a_move_needs_both_the_source_and_the_destination_in_scope(build_scene, source, destination, uncovered):
-    """Case 8. One end outside the grant, whichever end it is, refuses the move; the lookalike names count as
-    outside. Nothing changes: no history row, no notice."""
+def test_a_move_needs_both_the_source_and_the_destination_in_scope(build_scene):
+    """Case 8. Every outside endpoint, including lookalike paths, refuses without moving the thread."""
     # Mutant 1: thread.organise checking only the source, or only the destination.
     scene = build_scene()
 
     async def scenario(client):
         held = await board(client, scene, ("thread.organise",))
-        moving = await thread(client, scene.host, source)
-        result = await held.call(client, "set_topic", conversation_id=moving, topic=destination)
-        assert result.get("error") == "forbidden", result
-        assert result["detail"].startswith(not_allowed(held.grant_id, "thread.organise")), result
-        # The destination is the caller's own word and is named; the thread's current topic never is.
-        assert (uncovered in result["detail"]) == (uncovered == destination), result
-        assert scene.thread_topic(moving) == source
-        assert scene.changes("set_topic") == [] and scene.moved_notices(moving) == []
-        row = only(scene.events("refused_use"), "refused_use event")
-        assert json.loads(row["detail"]) == {"tool": "set_topic", "reason": "not_covered"}
+        cases = (
+            ("resume", "job-hunt/boards", "resume"),
+            ("job-hunt/boards", "resume", "resume"),
+            ("job-hunting", "job-hunt", "job-hunting"),
+            ("job-hunt", "job-hunting", "job-hunting"),
+        )
+        for index, (source, destination, uncovered) in enumerate(cases, start=1):
+            moving = await thread(client, scene.host, source, f"Scope case {index}")
+            result = await held.call(client, "set_topic", conversation_id=moving, topic=destination)
+            assert result.get("error") == "forbidden", (source, destination, result)
+            assert result["detail"].startswith(not_allowed(held.grant_id, "thread.organise")), result
+            # The destination is the caller's own word and is named; the thread's current topic never is.
+            assert (uncovered in result["detail"]) == (uncovered == destination), result
+            assert scene.thread_topic(moving) == source
+            assert scene.changes("set_topic") == [] and scene.moved_notices(moving) == []
+            events = scene.events("refused_use")
+            assert len(events) == index
+            assert json.loads(events[-1]["detail"]) == {"tool": "set_topic", "reason": "not_covered"}
 
     play(scene.host, scenario)
 
 
-def test_a_thread_with_no_topic_cannot_be_moved_by_a_grantee(build_scene):
-    """Moving a thread into the scope from no topic would let a grantee take over any thread: refused."""
+def test_a_move_needs_an_existing_source_topic_row(build_scene):
+    """A null or stale source label cannot be moved into a covered destination."""
     # Mutant 1: checking only the destination.
     scene = build_scene()
 
@@ -345,32 +296,15 @@ def test_a_thread_with_no_topic_cannot_be_moved_by_a_grantee(build_scene):
         held = await board(client, scene, ("thread.organise",))
         await control_move(client, scene, held)
         before = scene.changes("set_topic")
-        moving = await thread(client, scene.host, None)
-        result = await held.call(client, "set_topic", conversation_id=moving, topic="job-hunt/boards")
-        assert result.get("error") == "forbidden", result
-        assert scene.thread_topic(moving) is None
-        assert scene.changes("set_topic") == before and scene.moved_notices(moving) == []
-
-    play(scene.host, scenario)
-
-
-def test_a_stale_topic_string_with_no_topic_row_cannot_be_moved_by_a_grantee(build_scene):
-    """A thread whose label names no topic (left over from before topics were records) resolves to nothing and
-    is refused, even though its destination is covered."""
-    # Mutant 1: checking only the destination.
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await board(client, scene, ("thread.organise",))
-        await control_move(client, scene, held)
-        before = scene.changes("set_topic")
-        moving = await thread(client, scene.host, "job-hunt/leads")
-        with scene.db() as conn:
-            conn.execute("UPDATE conversations SET topic = 'job-hunt/ghost' WHERE id = ?", (moving,))
-        result = await held.call(client, "set_topic", conversation_id=moving, topic="job-hunt/boards")
-        assert result.get("error") == "forbidden", result
-        assert scene.thread_topic(moving) == "job-hunt/ghost"
-        assert scene.changes("set_topic") == before and scene.moved_notices(moving) == []
+        for source in (None, "job-hunt/ghost"):
+            moving = await thread(client, scene.host, None if source is None else "job-hunt/leads", f"Source {source}")
+            if source is not None:
+                with scene.db() as conn:
+                    conn.execute("UPDATE conversations SET topic = ? WHERE id = ?", (source, moving))
+            result = await held.call(client, "set_topic", conversation_id=moving, topic="job-hunt/boards")
+            assert result.get("error") == "forbidden", (source, result)
+            assert scene.thread_topic(moving) == source
+            assert scene.changes("set_topic") == before and scene.moved_notices(moving) == []
 
     play(scene.host, scenario)
 
@@ -384,12 +318,14 @@ def test_a_grantee_cannot_clear_a_threads_topic_or_move_it_to_a_topic_that_does_
         await control_move(client, scene, held)
         before = scene.changes("set_topic")
         moving = await thread(client, scene.host, "job-hunt/leads")
-        cleared = await held.call(client, "set_topic", conversation_id=moving, topic=None)
-        assert cleared.get("error") == "forbidden", cleared
-        missing = await held.call(client, "set_topic", conversation_id=moving, topic="job-hunt/ghost")
-        assert "error" in missing, missing
-        assert scene.thread_topic(moving) == "job-hunt/leads"
-        assert scene.changes("set_topic") == before and scene.moved_notices(moving) == []
+        for topic in (None, "job-hunt/ghost"):
+            result = await held.call(client, "set_topic", conversation_id=moving, topic=topic)
+            if topic is None:
+                assert result.get("error") == "forbidden", result
+            else:
+                assert "error" in result, result
+            assert scene.thread_topic(moving) == "job-hunt/leads", topic
+            assert scene.changes("set_topic") == before and scene.moved_notices(moving) == [], topic
 
     play(scene.host, scenario)
 

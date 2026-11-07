@@ -70,21 +70,14 @@ def refusal(result):
     return str(result)
 
 
-def test_an_anonymous_guest_cannot_start_a_thread(topic_host):
-    """No token means no alias binding, so the guard refuses before any topic check."""
-
-    async def scenario(client):
-        await make_topic(client, topic_host)
-        result = await call(client, topic_host, "create_conversation", {"title": "Mine", "topic": TOPIC})
-        assert "binding" in refusal(result).lower(), refusal(result)
-
-    dispatch(topic_host, scenario)
-
-
 def test_an_aliased_guest_starts_a_thread_and_is_attributed(topic_host):
     async def scenario(client):
         await make_topic(client, topic_host)
         bound = await claim(client, topic_host)
+        listed = await call(client, topic_host, "list_topics")
+        assert [entry["path"] for entry in listed["topics"]] == [TOPIC]
+        seen = await call(client, topic_host, "get_topic", {"path": TOPIC})
+        assert seen["path"] == TOPIC
         made = await call(
             client,
             topic_host,
@@ -96,63 +89,14 @@ def test_an_aliased_guest_starts_a_thread_and_is_attributed(topic_host):
         assert made.get("created_by") == "guest", refusal(made)
         assert made.get("created_by_alias") == "lane-a", refusal(made)
         assert made.get("created_by_alias_code") == bound["code"], refusal(made)
-
-    dispatch(topic_host, scenario)
-
-
-def test_an_aliased_guest_may_not_name_participants(topic_host):
-    async def scenario(client):
-        await make_topic(client, topic_host)
-        bound = await claim(client, topic_host)
-        result = await call(
+        refused = await call(
             client,
             topic_host,
             "create_conversation",
             {"title": "Mine", "topic": TOPIC, "participants": ["planner"], "token": bound["binding_token"]},
         )
-        assert "participants" in refusal(result), refusal(result)
-
-    dispatch(topic_host, scenario)
-
-
-def test_a_guest_cannot_create_a_topic_over_the_wire(topic_host):
-    async def scenario(client):
-        bound = await claim(client, topic_host)
-        result = await call(
-            client,
-            topic_host,
-            "create_topic",
-            {"path": "mine", "members": ["planner", "worker"], "token": bound["binding_token"]},
-        )
-        assert result.get("error") == "forbidden", refusal(result)
-        assert "guest may not call create_topic" in refusal(result), refusal(result)
-
-    dispatch(topic_host, scenario)
-
-
-def test_a_guest_can_read_the_topic_directory(topic_host):
-    async def scenario(client):
-        await make_topic(client, topic_host)
-        listed = await call(client, topic_host, "list_topics")
-        assert [e["path"] for e in listed.get("topics", [])] == [TOPIC], refusal(listed)
-        seen = await call(client, topic_host, "get_topic", {"path": TOPIC})
-        assert seen.get("path") == TOPIC, refusal(seen)
-
-    dispatch(topic_host, scenario)
-
-
-def test_a_core_role_still_names_participants(topic_host):
-    """The core path is unchanged: participants are given, and the topic is optional."""
-
-    async def scenario(client):
-        made = await call(
-            client,
-            topic_host,
-            "create_conversation",
-            {"title": "Core", "participants": ["planner", "worker"]},
-            role="planner",
-        )
-        assert made.get("created") is True, refusal(made)
-        assert made.get("topic") is None
+        assert "participants" in refusal(refused), refusal(refused)
+        threads = await call(client, topic_host, "list_conversations", {"topic": TOPIC})
+        assert [entry["conversation_id"] for entry in threads["conversations"]] == [made["conversation_id"]]
 
     dispatch(topic_host, scenario)

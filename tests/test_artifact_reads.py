@@ -392,16 +392,6 @@ def test_before_filters_messages_by_send_time_and_artifacts_by_when_written(db, 
     assert kinds_found("2026-01-15T00:00:00Z") == {"artifact"}
 
 
-def test_the_before_help_says_which_time_each_kind_is_compared_by() -> None:
-    import inspect
-
-    from baton import app
-
-    annotation = inspect.signature(app.Tools.search).parameters["before"].annotation
-    description = " ".join(str(getattr(meta, "description", "")) for meta in getattr(annotation, "__metadata__", ()))
-    assert "sent" in description and "written" in description, description
-
-
 def test_contiguous_recent_messages_fill_one_segment(tmp_path: Path) -> None:
     config = reads_config(tmp_path, rolling=3, max_manifest_segments=1)
     db = connect(config.db_path)

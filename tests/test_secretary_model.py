@@ -131,7 +131,8 @@ def test_command_model_assesses_grouped_conversation_once_caches_and_reads_baton
         assert result["decision"] == "wake" and result["brief"]
         assert request["version"] == 4 and request["context"]["mode"] == "alert"
         assert request["max_output_tokens"] == 4096
-        assert model.engine_requests
+        assert len(model.engine_requests) == 1
+        assert result["engine_status"] == "available"
         assert request["response_schema"]["additionalProperties"] is False
         assert table_hashes(world.baton, exclude={"secretary_summaries"}) == before
         assert archived_summary_count(world.baton) == before_archived + 1
@@ -222,16 +223,6 @@ def test_unknown_source_reference_is_rejected_without_saving_assessment(tmp_path
         model.set_plan({})
         result = _decide(world)
         assert result["decision"] == "wake" and len(model.requests) == 2
-
-
-def test_independent_engine_runs_for_every_alert_even_when_model_skips_its_tool(tmp_path) -> None:
-    with make_world(tmp_path) as world:
-        model = Model(world, tmp_path)
-        messages.send(world.baton, sender="worker", recipient="planner", text="A real incoming note")
-        result = _decide(world)
-        assert len(model.requests) == 1 and model.requests[0]["version"] == 4
-        assert len(model.engine_requests) == 1
-        assert result["engine_status"] == "available" and result["decision"] == "wake"
 
 
 def test_confident_engine_wake_overrides_language_model_hold(tmp_path) -> None:

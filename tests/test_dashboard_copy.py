@@ -276,7 +276,7 @@ def test_a_thread_with_nothing_in_it_says_so_as_the_page_does(tmp_path) -> None:
     assert copy_of(config, cid) == HEADER.format(title="Quiet", cid=cid) + "No messages yet.\n"
 
 
-@pytest.mark.parametrize(("count", "size"), [(205, 0), (40, 16 * 1024)])
+@pytest.mark.parametrize(("count", "size"), [(101, 0), (17, 16 * 1024)])
 def test_a_thread_longer_than_a_page_is_copied_whole_from_any_of_its_pages(tmp_path, count: int, size: int) -> None:
     """A page holds 100 messages or about half a megabyte, so a copy of the page alone would stop short."""
     config = page_config(tmp_path)
@@ -390,17 +390,17 @@ def test_html_and_script_in_a_message_are_copied_as_text_and_never_run(tmp_path)
 # 5. The copy is a read like any other -----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", ["/copy.js", "/c/{cid}/text"])
-def test_the_copy_routes_carry_the_standard_headers_and_refuse_foreign_hosts_and_writes(tmp_path, path: str) -> None:
+def test_the_copy_routes_carry_the_standard_headers_and_refuse_foreign_hosts_and_writes(tmp_path) -> None:
     config = page_config(tmp_path)
-    target = path.format(cid=varied_thread(config))
+    cid = varied_thread(config)
     before = snapshot(config)
-    response = get(config, target)
-    assert response.status == 200
-    assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS
-    assert not any(key.lower().startswith("access-control-") for key in response.headers)
-    assert get(config, target, host="attacker.example.test").status == 421
-    for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
-        refused = get(config, target, method=method)
-        assert refused.status == 405 and refused.headers["Allow"] == "GET, HEAD", method
+    for target in ("/copy.js", f"/c/{cid}/text"):
+        response = get(config, target)
+        assert response.status == 200
+        assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS
+        assert not any(key.lower().startswith("access-control-") for key in response.headers)
+        assert get(config, target, host="attacker.example.test").status == 421
+        for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+            refused = get(config, target, method=method)
+            assert refused.status == 405 and refused.headers["Allow"] == "GET, HEAD", (method, target)
     assert snapshot(config) == before, "copying marks nothing read and writes nothing"

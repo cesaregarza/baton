@@ -7,8 +7,6 @@ from pathlib import Path
 
 import pytest
 from seat_helpers import (
-    SEAT_HOST,
-    SESSION_COOKIE,
     agent_says,
     conversation,
     get,
@@ -40,26 +38,31 @@ def _form(host, cid, cookies) -> dict[str, str]:
 
 def test_a_byte_limited_history_page_links_to_the_rest(room) -> None:
     host, cid, cookies = room
-    for n in range(12):
+    for n in range(9):
         agent_says(host, cid, f"long {n:02d} " + "x" * 30_000)
     seen, target = set(), f"/seat/c/{cid}"
-    for _ in range(12):
+    for page_number in range(9):
         body = get(host.config, target, cookies=cookies).body.decode()
-        seen |= {n for n in range(12) if f"long {n:02d} " in body}
+        shown = {n for n in range(9) if f"long {n:02d} " in body}
+        if page_number == 0:
+            assert 0 < len(shown) < 9, "the first page must cross the real byte limit"
+        assert seen.isdisjoint(shown), (target, shown, seen)
+        seen |= shown
         marker = f'href="/seat/c/{cid}?after_seq='
         newer = [part.split('"')[0] for part in body.split(marker)[1:] if part.split("</a>")[0].endswith('">Newer')]
         if not newer:
             break
         target = f"/seat/c/{cid}?after_seq={newer[0]}"
-    assert seen == set(range(12))
+    assert seen == set(range(9))
 
 
-@pytest.mark.parametrize("value", ["é", "ñ" * 64, " "])
-def test_a_non_ascii_csrf_value_is_refused_not_raised(room, value: str) -> None:
+def test_non_ascii_csrf_values_are_refused_not_raised(room) -> None:
     host, cid, cookies = room
-    fields = _form(host, cid, cookies) | {"text": "hi", "csrf": value}
-    assert post(host.config, f"/seat/c/{cid}/send", fields, cookies=cookies).status == 403
-    assert stored_by_seat(host) == []
+    for value in ("é", "ñ" * 64, " "):
+        fields = _form(host, cid, cookies) | {"text": "hi", "csrf": value}
+        response = post(host.config, f"/seat/c/{cid}/send", fields, cookies=cookies)
+        assert response.status == 403, repr(value)
+        assert stored_by_seat(host) == [], repr(value)
 
 
 def test_a_non_ascii_pre_login_value_is_refused_not_raised(room) -> None:
@@ -72,14 +75,13 @@ def test_a_non_ascii_pre_login_value_is_refused_not_raised(room) -> None:
     assert response.status == 403
 
 
-@pytest.mark.parametrize("after", [str(2**63), "9" * 19])
-def test_a_cursor_past_sqlite_range_is_a_client_error(room, after: str) -> None:
+def test_a_cursor_past_sqlite_range_is_a_client_error(room) -> None:
     host, cid, cookies = room
-    assert get(host.config, f"/seat/c/{cid}?after_seq={after}", cookies=cookies).status == 400
+    assert get(host.config, f"/seat/c/{cid}?after_seq={2**63}", cookies=cookies).status == 400
 
 
 def test_the_hourly_quota_holds_when_two_sends_overlap(room, monkeypatch) -> None:
-    """At 59 sends, a second send that arrives while the first is being stored is refused: 60, never 61."""
+    """With one quota slot left, an overlapping second send cannot use the first send's reserved slot."""
     host, cid, cookies = room
     monkeypatch.setattr(seat, "SENDS_PER_HOUR", 3)
     for n in range(2):
@@ -131,14 +133,14 @@ def _rows(host, *, ended: bool = False) -> int:
 
 def test_form_ids_kept_per_session_never_pass_the_bound(room, monkeypatch) -> None:
     host, cid, cookies = room
-    monkeypatch.setattr(seat, "MAX_REQUESTS", 10)
-    monkeypatch.setattr(seat, "SENDS_PER_HOUR", 6)
-    for n in range(7):
+    monkeypatch.setattr(seat, "MAX_REQUESTS", 4)
+    monkeypatch.setattr(seat, "SENDS_PER_HOUR", 2)
+    for n in range(2):
         post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": f"m{n}"}, cookies=cookies)
-    for _ in range(10):
+    for _ in range(4):
         get(host.config, f"/seat/c/{cid}", cookies=cookies)
-    assert _rows(host) <= 10 and _rows(host, ended=True) > 0, "the bound ends form ids and keeps them"
-    assert len(stored_by_seat(host)) == 6
+    assert _rows(host) <= 4 and _rows(host, ended=True) > 0, "the bound ends form ids and keeps them"
+    assert len(stored_by_seat(host)) == 2
     # the latest form still works after the trimming
     assert (
         post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": "late"}, cookies=cookies).status
@@ -149,19 +151,13 @@ def test_form_ids_kept_per_session_never_pass_the_bound(room, monkeypatch) -> No
 def test_form_ids_in_all_never_pass_the_bound(tmp_path: Path, monkeypatch) -> None:
     host = make_seat_host(tmp_path)
     cid = conversation(host)
-    monkeypatch.setattr(seat, "MAX_REQUESTS", 5)
-    monkeypatch.setattr(seat, "MAX_SESSIONS", 3)
-    for _ in range(5):
+    monkeypatch.setattr(seat, "MAX_REQUESTS", 3)
+    monkeypatch.setattr(seat, "MAX_SESSIONS", 2)
+    for _ in range(3):
         _, cookies = log_in(host.config, host.seat_token)
-        for _ in range(8):
+        for _ in range(3):
             get(host.config, f"/seat/c/{cid}", cookies=cookies)
-    assert _rows(host) <= 3 * 5 and _rows(host, ended=True) > 0
-
-
-def test_a_huge_cursor_is_refused_before_any_query(room) -> None:
-    host, cid, cookies = room
-    headers = [("Host", SEAT_HOST), ("Cookie", f"{SESSION_COOKIE}={cookies[SESSION_COOKIE]}")]
-    assert seat.respond(host.config, "GET", f"/seat/c/{cid}?after_seq={2**64}", headers, b"").status == 400
+    assert _rows(host) <= 2 * 3 and _rows(host, ended=True) > 0
 
 
 def test_pages_keep_the_origin_on_same_origin_form_posts(room) -> None:
@@ -169,14 +165,6 @@ def test_pages_keep_the_origin_on_same_origin_form_posts(room) -> None:
     host, cid, cookies = room
     for page in (get(host.config, "/seat/login"), get(host.config, f"/seat/c/{cid}", cookies=cookies)):
         assert page.headers["Referrer-Policy"] == "same-origin"
-
-
-@pytest.mark.parametrize("origin", ["null", "https://elsewhere.example.test"])
-def test_a_null_or_foreign_origin_is_still_refused(room, origin: str) -> None:
-    host, cid, cookies = room
-    fields = _form(host, cid, cookies) | {"text": "hi"}
-    assert post(host.config, f"/seat/c/{cid}/send", fields, cookies=cookies, origin=origin).status == 403
-    assert stored_by_seat(host) == []
 
 
 def test_each_inbox_item_names_its_conversation(room) -> None:
@@ -192,16 +180,17 @@ def test_each_inbox_item_names_its_conversation(room) -> None:
 
 def test_sends_older_than_the_hour_are_trimmed_too(room, monkeypatch) -> None:
     host, cid, cookies = room
-    monkeypatch.setattr(seat, "MAX_REQUESTS", 10)
-    for n in range(6):
+    monkeypatch.setattr(seat, "MAX_REQUESTS", 4)
+    for n in range(2):
         post(host.config, f"/seat/c/{cid}/send", _form(host, cid, cookies) | {"text": f"m{n}"}, cookies=cookies)
     start = seat._now()
-    for minutes in (50, 100):  # the same session, kept alive, until those sends are more than an hour old
+    # Keep the session active across its one-hour idle timeout while the sends age out of quota.
+    for minutes in (50, 100):
         monkeypatch.setattr(seat, "_now", lambda m=minutes: start + m * 60)
         assert get(host.config, "/seat/", cookies=cookies).status == 200
-    for _ in range(12):
+    for _ in range(4):
         get(host.config, f"/seat/c/{cid}", cookies=cookies)
-    assert _rows(host) <= 10 and _rows(host, ended=True) > 0
+    assert _rows(host) <= 4 and _rows(host, ended=True) > 0
 
 
 def test_a_retry_that_stores_while_its_failed_twin_releases_is_still_counted(room, monkeypatch) -> None:

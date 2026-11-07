@@ -39,6 +39,7 @@ from baton.errors import BatonError
 REFERENCE_TABLES = ("reference_docs", "reference_revisions")
 BOARDS, LEADS, ROOT = "job-hunt/boards", "job-hunt/leads", "job-hunt"
 NAME = "job-board"
+REFERENCE_TOPICS = (ROOT, BOARDS)
 MAX_BODY = 32768  # the spec's limit, not read from the module under test
 MAX_DOCS = 20
 # What an edit's response carries, exactly, and the author block's keys for an alias-bound call.
@@ -353,7 +354,7 @@ async def board(
     alias: str = "job-search",
 ) -> Grantee:
     """The staged board, and a grantee holding one grant on `topic`."""
-    await support.stage(client, scene.host)
+    await support.stage(client, scene.host, paths=REFERENCE_TOPICS)
     return await scene.grantee(client, alias, topic, capabilities, inherit)
 
 

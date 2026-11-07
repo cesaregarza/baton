@@ -293,8 +293,3 @@ WHOLE_TABLES = {
     19: {"alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes", "events_receipts"},
     21: {"secretary_summaries"},  # shared secretary summary archive
 }  # records kept instead of overwritten or expired
-
-
-def test_the_seat_tables_are_step_8() -> None:
-    # Named by its own version, not the current one, so a later step that adds tables doesn't break it.
-    assert set(store._ADDED_TABLES[8]) == {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"}

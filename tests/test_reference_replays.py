@@ -86,7 +86,7 @@ def test_the_same_request_id_with_anything_else_changed_is_an_idempotency_confli
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=(*refs.REFERENCE_TOPICS, refs.LEADS))
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
         tables = scene.tables()
@@ -136,7 +136,7 @@ def test_another_core_role_cannot_replay_a_request_it_did_not_make(build_scene):
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
         tables = scene.tables()
@@ -185,7 +185,11 @@ def test_a_retry_after_a_rename_names_the_new_path_and_is_answered_from_the_stor
     scene = build_scene()
 
     async def scenario(client):
-        held = await board(client, scene) if who == "grantee" else await support.stage(client, scene.host)
+        held = (
+            await board(client, scene)
+            if who == "grantee"
+            else await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
+        )
         edit = editing_as(who, client, scene, held)
         rid = request_id()
         first = succeeded(await edit(BOARDS, NAME, body_of(1), 0, request_id=rid))
@@ -206,7 +210,7 @@ def test_a_core_retry_naming_a_path_another_topic_now_holds_is_a_conflict(build_
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
         succeeded(await rename(client, scene, ROOT, "job-hunt-old"))
@@ -281,7 +285,7 @@ def test_a_retry_by_a_core_role_whose_flag_has_been_removed_is_refused(build_sce
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
         scene.set_role("planner", can_create_topics=False)
@@ -298,7 +302,7 @@ def test_a_call_with_no_request_id_gets_a_fresh_one_each_time(build_scene):
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         first = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0))
         second = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 1))
         assert (first["created"], second["created"]) == (True, True)

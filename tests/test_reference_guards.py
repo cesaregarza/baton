@@ -272,7 +272,7 @@ def test_no_existing_tools_response_gained_a_field_and_a_stale_job_move_has_no_c
     }
 
     async def scenario(client):
-        await stage(client, scene.host)
+        await stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         planner = Core(scene.host)
         job = await planner.call(client, "create_job", title="J", body="b")
         moved = await planner.call(client, "move_job", job_id=job["job_id"], to_state="working", expected_revision=1)

@@ -108,7 +108,7 @@ def test_a_name_inside_the_grammar_is_accepted_at_its_edges(build_scene):
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         for name in ("a", "a" * 40, "007", "a-b", "double--hyphen", "x" + "-" * 38 + "y"):
             made = succeeded(await core_edit(client, scene, BOARDS, name, "text", 0))
             assert (made["name"], made["revision"]) == (name, 1)
@@ -125,7 +125,7 @@ def test_an_empty_body_is_refused_and_a_body_of_whitespace_alone_is_not(build_sc
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         refused(await core_edit(client, scene, BOARDS, NAME, "", 0), "invalid_request", F7)
         assert scene.docs() == []
         made = succeeded(await core_edit(client, scene, BOARDS, NAME, " \n\t \r\n", 0))
@@ -134,60 +134,53 @@ def test_an_empty_body_is_refused_and_a_body_of_whitespace_alone_is_not(build_sc
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize("bad", ["\ud800", "\udfff", "text\udc00text"], ids=["high", "low", "inside"])
-def test_a_body_that_cannot_be_encoded_as_utf8_is_refused_as_text(build_scene, bad):
+def test_a_body_that_cannot_be_encoded_as_utf8_is_refused_as_text(build_scene):
     """A lone surrogate reaches the tool from JSON. It is not text of UTF-8 bytes, so it is refused in F7's words
     rather than failing inside the database, and nothing is written."""
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
-        refused(await core_edit(client, scene, BOARDS, NAME, bad, 0), "invalid_request", F7)
-        assert scene.docs() == [] and scene.revisions() == []
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
+        for bad in ("\ud800", "\udfff", "text\udc00text"):
+            refused(await core_edit(client, scene, BOARDS, NAME, bad, 0), "invalid_request", F7)
+            assert scene.docs() == [] and scene.revisions() == [], repr(bad)
 
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize("bad", [None, 5, b"bytes"], ids=["null", "number", "bytes"])
-def test_a_body_that_is_not_a_string_is_refused_by_the_module(build_scene, bad):
+def test_a_body_that_is_not_a_string_is_refused_by_the_module(build_scene):
     """The schema makes `body` text, but the body called directly gets the same refusal."""
     scene = build_scene()
 
-    async def scenario(client):
-        await support.stage(client, scene.host)
+    for bad in (None, 5, b"bytes"):
         with pytest.raises(BatonError) as raised:
             direct(scene, "edit_reference", "planner", topic=BOARDS, name=NAME, body=bad, expected_revision=0)
-        assert (raised.value.code, str(raised.value)) == ("invalid_request", F7)
-        assert scene.docs() == []
-
-    play(scene.host, scenario)
+        assert (raised.value.code, str(raised.value)) == ("invalid_request", F7), repr(bad)
+        assert scene.docs() == [] and scene.revisions() == [], repr(bad)
 
 
-@pytest.mark.parametrize(
-    "unit,count", [("a", 32768), ("\u00e9", 16384), ("\U0001f600", 8192)], ids=["one-byte", "two-byte", "four-byte"]
-)
-def test_a_body_of_exactly_32768_bytes_is_accepted_and_stored_whole(build_scene, unit, count):
+def test_a_body_of_exactly_32768_bytes_is_accepted_and_stored_whole(build_scene):
     """R20. The limit is in bytes of UTF-8, not characters: 32768 ASCII characters, 16384 two-byte ones and 8192
     four-byte ones are the same size, all accepted, and the response and the row say so."""
     # Mutant 15: the size counted as len(body), or the limit as `>=`.
     scene = build_scene()
-    text = unit * count
 
     async def scenario(client):
-        await support.stage(client, scene.host)
-        made = succeeded(await core_edit(client, scene, BOARDS, NAME, text, 0))
-        assert made["size"] == 32768
-        assert only(scene.revisions(BOARDS, NAME), "revision")["body"] == text
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
+        for name, unit, count in (
+            ("ascii", "a", 32768),
+            ("two-byte", "\u00e9", 16384),
+            ("four-byte", "\U0001f600", 8192),
+        ):
+            text = unit * count
+            made = succeeded(await core_edit(client, scene, BOARDS, name, text, 0))
+            assert made["size"] == 32768, name
+            assert only(scene.revisions(BOARDS, name), "revision")["body"] == text, name
 
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize(
-    "unit,count,size",
-    [("a", 32769, 32769), ("\u00e9", 16385, 32770), ("\U0001f600", 8193, 32772)],
-    ids=["one-byte", "two-byte", "four-byte"],
-)
-def test_a_body_over_32768_bytes_is_refused_with_its_size_and_nothing_is_written(build_scene, unit, count, size):
+def test_a_body_over_32768_bytes_is_refused_with_its_size_and_nothing_is_written(build_scene):
     """R20, F7b. One byte over, in each width, is `limit_exceeded` naming the limit and the size of this body. The
     two-byte case has fewer characters than the limit, so a count of characters would let it through."""
     # Mutant 15: the size counted as len(body), or the limit as `>=`.
@@ -195,10 +188,16 @@ def test_a_body_over_32768_bytes_is_refused_with_its_size_and_nothing_is_written
 
     async def scenario(client):
         held = await board(client, scene)
-        expected = {"error": "limit_exceeded", "detail": f7b(size), "limit": "reference_body_bytes"}
-        assert await core_edit(client, scene, BOARDS, NAME, unit * count, 0) == expected
-        assert await grantee_edit(client, held, BOARDS, NAME, unit * count, 0) == expected
-        assert scene.docs() == [] and scene.revisions() == [] and scene.refused_uses() == []
+        for name, unit, count, size in (
+            ("ascii", "a", 32769, 32769),
+            ("two-byte", "\u00e9", 16385, 32770),
+            ("four-byte", "\U0001f600", 8193, 32772),
+        ):
+            expected = {"error": "limit_exceeded", "detail": f7b(size), "limit": "reference_body_bytes"}
+            text = unit * count
+            assert await core_edit(client, scene, BOARDS, name, text, 0) == expected, name
+            assert await grantee_edit(client, held, BOARDS, name, text, 0) == expected, name
+            assert scene.docs() == [] and scene.revisions() == [] and scene.refused_uses() == [], name
 
     play(scene.host, scenario)
 
@@ -215,6 +214,7 @@ def test_the_twentieth_document_in_a_topic_is_created_and_the_twenty_first_is_re
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=(LEADS,))
         for number in range(1, 21):
             succeeded(await core_edit(client, scene, BOARDS, f"ref-{number}", "text", 0))
         tables, counts = scene.tables(), scene.counts()
@@ -250,7 +250,7 @@ def test_a_request_id_of_one_to_two_hundred_characters_is_kept_and_any_other_is_
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         for bad in ("", "r" * 201):
             refused(await core_edit(client, scene, BOARDS, NAME, "text", 0, request_id=bad), "invalid_request", F13)
         assert scene.docs() == []
@@ -326,6 +326,7 @@ def test_a_grantees_edits_and_a_guest_post_share_the_hourly_limit(build_scene):
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=(LEADS,))
         conversation = await thread(client, scene.host, LEADS)
         succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0))
         succeeded(
@@ -382,6 +383,7 @@ def test_two_aliases_on_one_credential_share_the_per_credential_counter(build_sc
 
     async def scenario(client):
         first = await board(client, scene)
+        await support.stage(client, scene.host, paths=(LEADS,))
         second = await scene.grantee(client, "lead-scout", LEADS, ("reference.edit",), inherit=False)
         succeeded(await grantee_edit(client, first, BOARDS, NAME, body_of(1), 0))
         over = await grantee_edit(client, second, LEADS, NAME, body_of(1), 0)

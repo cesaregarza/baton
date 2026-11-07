@@ -57,25 +57,26 @@ def test_acknowledging_a_page_moves_exactly_that_page(inbox_host) -> None:
     assert b"arrived while the page was open" in get(host.config, "/seat/inbox", cookies=cookies).body
 
 
-def test_a_page_is_at_most_fifty_and_acknowledges_only_what_it_showed(inbox_host) -> None:
+def test_a_page_is_bounded_and_acknowledges_only_what_it_showed(inbox_host, monkeypatch) -> None:
     host, room, cookies = inbox_host
-    for n in range(70):
+    monkeypatch.setattr(seat, "INBOX_PAGE", 2)
+    for n in range(3):
         agent_says(host, room, f"step {n}")
     page = get(host.config, "/seat/inbox", cookies=cookies)
-    assert b"step 49" in page.body and b"step 50" not in page.body
+    assert b"step 1" in page.body and b"step 2" not in page.body
     _ack(host, cookies, page)
-    assert mailbox(host) == (70, 50)
+    assert mailbox(host) == (3, 2)
 
 
 def test_a_byte_limited_page_acknowledges_its_actual_last_item(inbox_host) -> None:
     host, room, cookies = inbox_host
-    for n in range(12):
+    for n in range(9):
         agent_says(host, room, f"long {n:02d} " + "x" * 30_000)
     page = get(host.config, "/seat/inbox", cookies=cookies)
-    shown = sum(f"long {n:02d} ".encode() in page.body for n in range(12))
-    assert 0 < shown < 12
+    shown = sum(f"long {n:02d} ".encode() in page.body for n in range(9))
+    assert 0 < shown < 9
     _ack(host, cookies, page)
-    assert mailbox(host) == (12, shown)
+    assert mailbox(host) == (9, shown)
 
 
 def test_a_stale_receipt_is_refused_and_moves_nothing(inbox_host) -> None:
@@ -139,18 +140,39 @@ def test_messages_from_a_conversation_the_seat_left_are_content_free_and_acknowl
     assert read == last  # the placeholder doesn't stall the mailbox
 
 
-def test_a_full_mailbox_blocks_sends_until_the_seat_acknowledges(inbox_host) -> None:
+def test_warning_and_full_mailbox_boundary_acknowledge_one_slot(inbox_host, monkeypatch) -> None:
     host, room, cookies = inbox_host
     from baton import messages
 
-    while messages.unread(connect(host.config.db_path), "operator") < messages.MAX_UNREAD:
-        agent_says(host, room, "filler")
+    monkeypatch.setattr(seat, "INBOX_PAGE", 1)
+    conn = connect(host.config.db_path)
+    try:
+        for n in range(seat.WARN_UNREAD - 1):
+            conversations.send(conn, host.config, sender="orchestrator", conversation_id=room, text=f"filler {n}")
+        assert b"unread. Conversations" not in get(host.config, "/seat/", cookies=cookies).body
+        conversations.send(conn, host.config, sender="orchestrator", conversation_id=room, text="at warning threshold")
+        warning = get(host.config, "/seat/", cookies=cookies).body
+        assert b"400 unread" in warning and b"stop accepting messages at 500 unread" in warning
+        for n in range(seat.WARN_UNREAD + 1, messages.MAX_UNREAD):
+            conversations.send(conn, host.config, sender="orchestrator", conversation_id=room, text=f"filler {n}")
+        assert b"499 unread" in get(host.config, "/seat/", cookies=cookies).body
+        conversations.send(conn, host.config, sender="orchestrator", conversation_id=room, text="at capacity")
+    finally:
+        conn.close()
+
+    assert mailbox(host) == (messages.MAX_UNREAD, 0)
     with pytest.raises(ConversationFull):
         agent_says(host, room, "one too many")
-    for _ in range(messages.MAX_UNREAD // 50):
-        page = get(host.config, "/seat/inbox", cookies=cookies)
-        assert _ack(host, cookies, page).status == 303
-    agent_says(host, room, "accepted again")
+    page = get(host.config, "/seat/inbox", cookies=cookies)
+    assert b"filler 0" in page.body and b"filler 1" not in page.body
+    assert _ack(host, cookies, page).status == 303
+    assert mailbox(host) == (messages.MAX_UNREAD, 1)
+
+    agent_says(host, room, "accepted again")  # the acknowledgment freed one real slot
+    assert mailbox(host) == (messages.MAX_UNREAD + 1, 1)
+    with pytest.raises(ConversationFull):
+        agent_says(host, room, "full again")
+    assert mailbox(host) == (messages.MAX_UNREAD + 1, 1)
 
 
 def test_acknowledging_approves_nothing(inbox_host) -> None:
@@ -162,10 +184,3 @@ def test_acknowledging_approves_nothing(inbox_host) -> None:
     assert stored_by_seat(host) == []  # no reply was sent for the person
     assert conn.execute("SELECT COUNT(*) FROM events WHERE actor = 'operator'").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == events_before
-
-
-def test_the_inbox_warns_before_the_mailbox_fills(inbox_host) -> None:
-    host, room, cookies = inbox_host
-    for _ in range(400):
-        agent_says(host, room, "filler")
-    assert b"stop accepting messages at 500 unread" in get(host.config, "/seat/", cookies=cookies).body

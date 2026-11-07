@@ -87,7 +87,7 @@ def test_a_core_edit_audits_its_topic_its_id_the_reference_the_revision_and_the_
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
         assert without_time(scene.audit()[-1]) == core_line(
@@ -131,7 +131,7 @@ def test_a_replay_audits_the_revision_it_returned_not_the_current_one(build_scen
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
         first = without_time(scene.audit()[-1])
@@ -170,6 +170,7 @@ def test_a_refusal_for_a_grant_that_does_not_cover_the_topic_audits_no_id_and_no
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=("resume",))
         rid = request_id()
         assert (await grantee_edit(client, held, "resume", NAME, "text", 0, request_id=rid)).get("error") == "forbidden"
         line = without_time(scene.audit()[-1])
@@ -187,7 +188,7 @@ def test_the_read_tools_audit_the_topic_its_id_and_the_name_and_no_revision_or_g
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 3)
         guest = await bound_guest(client, scene)
         who = Core(scene.host, "worker")
@@ -384,7 +385,7 @@ def test_a_topic_or_name_that_is_not_well_formed_is_left_out_of_the_line_and_the
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         for topic, name, body, expect in (
             (BOARDS, "Not A Name", "x", {"topic": BOARDS}),
             ("Not/A/Topic", NAME, "x", {"reference": NAME}),
@@ -435,6 +436,7 @@ def test_only_the_refusals_that_name_a_grant_write_a_refused_use_event(build_sce
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=(LEADS, "resume"))
         other = await scene.grantee(client, "lead-scout", BOARDS, ("reference.edit",), inherit=False)
         doomed = await scene.grantee(client, "board-bot", LEADS, ("reference.edit",), inherit=False)
         scene.revoke(doomed.grant_id)

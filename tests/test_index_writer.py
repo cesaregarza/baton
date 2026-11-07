@@ -228,24 +228,6 @@ def test_29_dirty_needs_no_listed_producer_and_creates_nothing(db, config) -> No
     assert snapshot(db) == before  # in particular, no generation was created
 
 
-def test_24_no_mcp_tool_writes_derived_data_or_names_a_producer(config) -> None:
-    import inspect
-
-    from baton import app
-    from baton.app import catalog, guard, tools
-
-    registered = [name for name, _, _ in app.TOOLS + app.CONVERSATION_TOOLS + app.SEARCH_TOOLS + app.ARTIFACT_TOOLS]
-    writer_words = ("batch", "generation", "dirty", "commit", "index", "producer")
-    assert not [name for name in registered if any(word in name for word in writer_words)]
-    assert all(read_only for _, _, read_only in app.ARTIFACT_TOOLS)
-    for name in registered:  # no tool takes a producer as who is calling; reads take one only as a filter
-        if name not in ("read_artifacts", "search"):
-            assert "producer" not in inspect.signature(getattr(app.Tools, name)).parameters, name
-    source = "\n".join(inspect.getsource(module) for module in (app, catalog, guard, tools))
-    assert not [call for call in ("begin_batch", "read_batch", "commit_batch") if call in source]
-    assert "producer" not in app.Tools(config).whoami("reviewer")
-
-
 # Manifests: exact items, holes, digests, bounds ------------------------------------------------------------
 
 

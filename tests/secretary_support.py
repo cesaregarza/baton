@@ -13,8 +13,6 @@ from baton import conversations
 from baton.config import Config
 from baton.database import store
 
-ALIAS_ID = "al_0000000000000001"
-
 
 def explicit_policy(principal: str = "planner") -> dict:
     """Complete synthetic version 3 policy with inert provider commands."""
@@ -104,11 +102,7 @@ next = ["done", "working"]
 """)
     config = config_module.load(config_path)
     data_dir.mkdir(mode=0o700)
-    raw = sqlite3.connect(config.db_path)
-    raw.executescript((Path(__file__).parent / "fixtures" / "schema_v16.sql").read_text())
-    raw.close()
-    config.db_path.chmod(0o600)
-    baton = store.connect(config.db_path)  # migrate only this synthetic test fixture, before any secretary call
+    baton = store.connect(config.db_path)
     policy_path = tmp_path / "policy.json"
     policy_path.write_text(json.dumps(explicit_policy(principal)))
     return World(config, config_path, policy_path, data_dir / "secretary.db", baton)

@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from secretary_support import ALIAS_ID, conversation, make_world, say, table_hashes
+from secretary_support import conversation, make_world, say, table_hashes
 
 import baton
 from baton import cli, conversations, events, jobs, messages
@@ -118,8 +118,13 @@ def test_after_a_position_lists_each_message_the_principal_sees_once_with_its_te
         direct = messages.send(world.baton, sender="worker", recipient="planner", text="Direct words")
         asked = say(world, room, "planner", "Please check", attention=["worker"])  # one copy per other participant
         reply = say(world, room, "worker", "Reply words", reply_to=asked["message_id"], relayed=RELAYED)
+        alias_id = "al_0000000000000001"
+        world.baton.execute(
+            "INSERT INTO aliases (id,name,skeleton,verifier,created_at) VALUES (?,?,?,?,?)",
+            (alias_id, "lane-a", "lane-a", "synthetic-verifier", 0.0),
+        )
         guest = say(
-            world, room, "guest", "Guest words", identity={"alias_id": ALIAS_ID, "alias": "lane-a", "code": "ab12"}
+            world, room, "guest", "Guest words", identity={"alias_id": alias_id, "alias": "lane-a", "code": "ab12"}
         )
         code, page = _read(world, capsys, "--after", "0")
         assert code == 0 and page["principal"] == "planner" and page["after"] == 0
@@ -144,7 +149,7 @@ def test_after_a_position_lists_each_message_the_principal_sees_once_with_its_te
             "Reply words",
             RELAYED,
         )
-        assert guested["sender"] == f"guest:{ALIAS_ID}" and guested["alias"] == {"name": "lane-a", "code": "ab12"}
+        assert guested["sender"] == f"guest:{alias_id}" and guested["alias"] == {"name": "lane-a", "code": "ab12"}
         assert all(message["at"] and type(message["pos"]) is int for message in _messages(page))
         assert [message["pos"] for message in _messages(page)] == sorted(m["pos"] for m in _messages(page))
         assert [entry["message"]["id"] for entry in page.get("context", [])] == [asked["message_id"]]  # its own post

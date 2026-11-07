@@ -132,7 +132,7 @@ def test_every_identified_reader_can_list_read_the_current_text_an_old_revision_
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 3)
         who = await reader(kind, client, scene)
         listing = succeeded(await read_reference(client, who, BOARDS))
@@ -157,7 +157,7 @@ def test_a_guest_with_no_valid_binding_is_refused_as_an_unbound_post_is_and_sees
     real = time.time
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 2)
         expiring = await bound_guest(client, scene)
         monkeypatch.setattr(aliases, "time", SimpleNamespace(time=lambda: real() + 25 * 3600))
@@ -185,7 +185,7 @@ def test_reads_consult_no_grant_and_write_no_row_anywhere(build_scene, monkeypat
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 3)
         readers = [await reader(kind, client, scene) for kind in READERS]
         before = scene.counts()
@@ -214,7 +214,7 @@ def test_the_list_of_an_empty_topic_is_empty_and_documents_are_listed_by_name_wi
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=(*refs.REFERENCE_TOPICS, LEADS))
         who = Core(scene.host, "worker")
         empty = succeeded(await read_reference(client, who, BOARDS))
         assert empty == {"topic": BOARDS, "topic_id": scene.topic_id(BOARDS), "references": []}
@@ -270,7 +270,7 @@ def test_the_current_revision_and_an_old_one_each_return_their_own_text_and_prov
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         held = await scene.grantee(client, "job-search", ROOT, ("reference.edit",), inherit=True)
         first = succeeded(await core_edit(client, scene, BOARDS, NAME, "the first text", 0))
         second = succeeded(await grantee_edit(client, held, BOARDS, NAME, "the second text, longer caf\u00e9", 1))
@@ -320,7 +320,7 @@ def test_text_comes_back_byte_for_byte(build_scene):
     }
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         guest = await bound_guest(client, scene)
         for name, text in bodies.items():
             succeeded(await core_edit(client, scene, BOARDS, name, text, 0))
@@ -344,7 +344,7 @@ def test_an_unknown_topic_an_unknown_reference_and_an_unknown_revision_are_three
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=(*refs.REFERENCE_TOPICS, LEADS))
         await write_revisions(client, scene, BOARDS, NAME, 6)
         who = Core(scene.host, "worker")
         ghost = "job-hunt/ghost"
@@ -380,7 +380,7 @@ def test_a_revision_without_a_name_and_a_revision_below_one_are_refused(build_sc
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 2)
         who = Core(scene.host, "worker")
         assert await read_reference(client, who, BOARDS, None, 1) == {"error": "invalid_request", "detail": F12}
@@ -390,18 +390,18 @@ def test_a_revision_without_a_name_and_a_revision_below_one_are_refused(build_sc
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize("revision", [0, -3])
-def test_the_module_does_not_read_revision_zero_as_the_current_one(build_scene, revision):
+def test_the_module_does_not_read_revision_zero_as_the_current_one(build_scene):
     """R4. Called directly, past the schema, a revision below 1 is still refused and no text is returned."""
     # Mutant 19: revision 0 treated as the current.
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 2)
-        with pytest.raises(BatonError) as raised:
-            direct(scene, "read_reference", "worker", topic=BOARDS, name=NAME, revision=revision)
-        assert raised.value.code in ("unknown_reference", "invalid_request"), str(raised.value)
+        for revision in (0, -3):
+            with pytest.raises(BatonError) as raised:
+                direct(scene, "read_reference", "worker", topic=BOARDS, name=NAME, revision=revision)
+            assert raised.value.code in ("unknown_reference", "invalid_request"), (revision, str(raised.value))
 
     play(scene.host, scenario)
 
@@ -419,23 +419,20 @@ PAGING = [
 ]
 
 
-@pytest.mark.parametrize("argument,value", PAGING, ids=[f"{argument}={value!r}" for argument, value in PAGING])
-def test_the_module_refuses_a_limit_or_a_cursor_the_schema_would_have_refused(build_scene, argument, value):
+def test_the_module_refuses_a_limit_or_a_cursor_the_schema_would_have_refused(build_scene, monkeypatch):
     """R6. Called directly, past the schema, `history` still refuses a limit of 0 or 101, a cursor below 0 and a boolean
     or a text for either: the module's own checks hold where the schema's bounds do not run."""
     scene = build_scene()
+    staging = refs.Staging(monkeypatch)
 
-    async def scenario(client):
-        await support.stage(client, scene.host)
-        await write_revisions(client, scene, BOARDS, NAME, 2)
+    for argument, value in PAGING:
         with pytest.raises(BatonError) as raised:
             direct(scene, "reference_history", "worker", topic=BOARDS, name=NAME, **{argument: value})
         assert (raised.value.code, str(raised.value)) == (
             "invalid_request",
             "limit is 1-100 and after_revision at least 0",
-        )
-
-    play(scene.host, scenario)
+        ), (argument, value)
+        assert staging.texts() == [], (argument, value, staging.texts())
 
 
 def test_a_history_page_ends_at_the_current_revision_it_reports_when_a_write_lands_between_its_reads(
@@ -446,7 +443,7 @@ def test_a_history_page_ends_at_the_current_revision_it_reports_when_a_write_lan
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 3)
         # A writer commits revision 4 after the call has read that the document is at 3, and before it reads the page.
         staging = ReadStaging(monkeypatch).before(
@@ -472,7 +469,7 @@ def test_a_read_answers_from_the_state_it_began_with_when_a_write_lands_after_it
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 3)
         # A writer commits revision 4 after the call's first read (the topic) and before its second (the document).
         staging = ReadStaging(monkeypatch).before(
@@ -498,7 +495,7 @@ def test_history_pages_forward_oldest_first_with_no_bodies_and_a_cursor_that_con
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 10)
         who = Core(scene.host, "worker")
         seen, after = [], 0
@@ -532,7 +529,7 @@ def test_history_arguments_outside_their_bounds_are_refused_by_the_schema(build_
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 2)
         who = Core(scene.host, "worker")
         for paging, argument in (
@@ -553,7 +550,7 @@ def test_a_document_has_no_cap_on_revisions_and_its_history_pages_past_the_page_
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         for number in range(1, 106):
             made = direct(
                 scene,

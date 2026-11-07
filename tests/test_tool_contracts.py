@@ -6,13 +6,11 @@ recomputing snapshots. Activating a grant does not change schemas or authorize a
 
 from __future__ import annotations
 
-import pytest
 import test_topic_guest_surface as surface
 from test_aliases import dispatch, rpc
 from test_topic_guest_surface import call, claim, make_topic
 from topic_grant_support import CAPABILITIES, grants_module
 
-from baton import app
 from baton.database import store
 
 guest_host = surface.guest_host  # the credentials the topic host is built on
@@ -53,6 +51,10 @@ TOOL_NAMES = [
     "get_message",
     "read_artifacts",
 ]
+GRANT_ARGUMENTS = {
+    "grant_token": {"create_topic", "set_topic", "edit_reference"},
+    "acknowledge_topic_grants": {"rename_topic"},
+}
 GUEST_MAY_CALL = {
     "whoami",
     "alias_exists",
@@ -77,32 +79,40 @@ async def listed_tools(client, host, role):
 def test_the_public_tool_names_are_stable(topic_host):  # GUARD
     async def scenario(client):
         for role in ("planner", "guest"):
-            shown = sorted(tool["name"] for tool in await listed_tools(client, topic_host, role))
+            tools = await listed_tools(client, topic_host, role)
+            shown = sorted(tool["name"] for tool in tools)
             assert shown == sorted(TOOL_NAMES), f"{role} sees a different set of tool names"
 
+            catalog = {tool["name"]: tool for tool in tools}
+            for name, tool in catalog.items():
+                properties = tool["inputSchema"].get("properties", {})
+                if name not in {"search", "read_artifacts"}:
+                    assert "producer" not in properties, (role, name)
+                assert "grant_key" not in properties, (role, name)
+                for argument, allowed in GRANT_ARGUMENTS.items():
+                    assert (argument in properties) == (name in allowed), (role, argument, name)
+                    if name in allowed:
+                        assert argument not in tool["inputSchema"].get("required", []), (role, name, argument)
+                        spec = properties[argument]
+                        if argument == "grant_token":
+                            assert {entry.get("type") for entry in spec.get("anyOf", [])} == {"string", "null"}, (
+                                role,
+                                name,
+                                spec,
+                            )
+                        else:
+                            kinds = {entry.get("type") for entry in spec.get("anyOf", [])}
+                            assert kinds == {"array", "null"}, (role, name, spec)
+                            assert {
+                                entry["items"]["type"] for entry in spec["anyOf"] if entry.get("type") == "array"
+                            } == {"string"}, (role, name, spec)
+            assert {"query_vector", "model"} <= set(catalog["search"]["inputSchema"]["properties"]), role
+            assert catalog["read_artifacts"]["annotations"]["readOnlyHint"] is True, role
+            identity = await call(client, topic_host, "whoami", role=role)
+            assert identity.get("role") == role, identity
+            assert "producer" not in identity, role
+
     dispatch(topic_host, scenario)
-
-
-# Only the tools that consume a grant expose its input arguments.
-GRANT_ARGUMENTS = {
-    "grant_token": {"create_topic", "set_topic", "edit_reference"},
-    "acknowledge_topic_grants": {"rename_topic"},
-}
-
-
-def test_only_grant_aware_tools_accept_grant_arguments(topic_host):
-    async def scenario(client):
-        for tool in await listed_tools(client, topic_host, "planner"):
-            properties = tool["inputSchema"].get("properties", {})
-            assert "grant_key" not in properties, tool["name"]
-            for argument, tools in GRANT_ARGUMENTS.items():
-                assert (argument in properties) == (tool["name"] in tools), (argument, tool["name"])
-
-    dispatch(topic_host, scenario)
-
-
-def test_the_guest_tools_are_the_same_eleven_and_the_two_that_read_references(topic_host):  # GUARD
-    assert app.GUEST_TOOLS == GUEST_MAY_CALL
 
 
 def required_arguments(tool: dict) -> dict:
@@ -149,36 +159,12 @@ GUEST_ANSWERS = [
 ]
 
 
-@pytest.mark.parametrize(
-    "name,arguments,expected", GUEST_ANSWERS, ids=[f"{row[0]}-{number}" for number, row in enumerate(GUEST_ANSWERS)]
-)
-def test_a_guests_calls_are_answered_as_they_were(topic_host, name, arguments, expected):  # GUARD
+def test_a_guests_calls_are_answered_as_they_were(topic_host):  # GUARD
     async def scenario(client):
         await make_topic(client, topic_host)
-        assert await call(client, topic_host, name, arguments) == expected
-
-    dispatch(topic_host, scenario)
-
-
-def test_a_bound_guest_is_still_refused_the_topic_tools_in_the_same_words(topic_host):  # GUARD
-    async def scenario(client):
-        await make_topic(client, topic_host)
-        token = (await claim(client, topic_host))["binding_token"]
-        for name, arguments in (
-            ("create_topic", {"path": "mine", "members": ["planner", "worker"]}),
-            ("update_topic", {"path": "reviews", "title": "t"}),
-            ("rename_topic", {"path": "reviews", "new_path": "y"}),
-            ("set_topic", {"conversation_id": "conv_x", "topic": "reviews"}),
-        ):
-            result = await call(client, topic_host, name, {**arguments, "token": token})
-            assert result == {"error": "forbidden", "detail": f"guest may not call {name}"}, name
-        unknown = await call(
-            client, topic_host, "create_conversation", {"title": "t", "topic": "nowhere", "token": token}
-        )
-        assert unknown == {
-            "error": "invalid_request",
-            "detail": "topic 'nowhere' is not a topic; a core role opens one with create_topic",
-        }
+        for name, arguments, expected in GUEST_ANSWERS:
+            result = await call(client, topic_host, name, arguments)
+            assert result == expected, name
 
     dispatch(topic_host, scenario)
 
@@ -192,13 +178,40 @@ def test_an_active_grant_changes_no_answer_to_a_call_that_presents_no_key(topic_
         await make_topic(client, topic_host)
         token = (await claim(client, topic_host))["binding_token"]
         asked = [
-            ("create_topic", {"path": "mine", "members": ["planner", "worker"], "token": token}),
-            ("set_topic", {"conversation_id": "conv_x", "topic": "reviews", "token": token}),
-            ("update_topic", {"path": "reviews", "title": "t", "token": token}),
-            ("rename_topic", {"path": "reviews", "new_path": "y", "token": token}),
-            ("create_conversation", {"title": "t", "topic": "nowhere", "token": token}),
+            (
+                "create_topic",
+                {"path": "mine", "members": ["planner", "worker"], "token": token},
+                {"error": "forbidden", "detail": "guest may not call create_topic"},
+            ),
+            (
+                "set_topic",
+                {"conversation_id": "conv_x", "topic": "reviews", "token": token},
+                {"error": "forbidden", "detail": "guest may not call set_topic"},
+            ),
+            (
+                "update_topic",
+                {"path": "reviews", "title": "t", "token": token},
+                {"error": "forbidden", "detail": "guest may not call update_topic"},
+            ),
+            (
+                "rename_topic",
+                {"path": "reviews", "new_path": "y", "token": token},
+                {"error": "forbidden", "detail": "guest may not call rename_topic"},
+            ),
+            (
+                "create_conversation",
+                {"title": "t", "topic": "nowhere", "token": token},
+                {
+                    "error": "invalid_request",
+                    "detail": "topic 'nowhere' is not a topic; a core role opens one with create_topic",
+                },
+            ),
         ]
-        before = [await call(client, topic_host, name, arguments) for name, arguments in asked]
+        before = []
+        for name, arguments, expected in asked:
+            result = await call(client, topic_host, name, arguments)
+            assert result == expected, (name, result)
+            before.append(result)
         shown_before = [
             (tool["name"], tool["inputSchema"], tool["annotations"])
             for tool in await listed_tools(client, topic_host, "guest")
@@ -212,7 +225,8 @@ def test_an_active_grant_changes_no_answer_to_a_call_that_presents_no_key(topic_
             conn.close()
         assert granted["grant_key"], "the grant is active"
 
-        assert [await call(client, topic_host, name, arguments) for name, arguments in asked] == before
+        for index, (name, arguments, _) in enumerate(asked):
+            assert await call(client, topic_host, name, arguments) == before[index], name
         shown_after = [
             (tool["name"], tool["inputSchema"], tool["annotations"])
             for tool in await listed_tools(client, topic_host, "guest")

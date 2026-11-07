@@ -54,7 +54,7 @@ def test_a_revision_beyond_the_databases_integers_is_an_unknown_revision_and_the
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 3)
         lines = len(scene.audit())
         asked = {"topic": BOARDS, "name": NAME, "revision": revision}
@@ -78,7 +78,7 @@ def test_a_history_cursor_beyond_the_databases_integers_reads_an_empty_page_and_
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 3)
         lines = len(scene.audit())
         asked = {"topic": BOARDS, "name": NAME, "after_revision": 2**63}
@@ -111,7 +111,7 @@ def test_an_edit_expecting_a_revision_beyond_the_databases_integers_is_stale_and
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 3)
         tables = scene.tables()
         for name, current in ((NAME, 3), ("not-there", 0)):

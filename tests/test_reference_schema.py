@@ -314,6 +314,7 @@ def test_no_row_of_either_table_is_updated_or_deleted_by_a_stale_edit_a_replay_a
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=(LEADS,))
         await write_revisions(client, scene, BOARDS, NAME, 4)
         rid = request_id()
         succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(5), 4, request_id=rid))

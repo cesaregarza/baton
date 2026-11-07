@@ -118,7 +118,7 @@ def test_mistyped_expected_revisions_are_refused_by_the_schema_and_write_nothing
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         if existing:
             await write_revisions(client, scene, BOARDS, NAME, 1)
         tables, lines = scene.tables(), audit_lines(scene)
@@ -137,7 +137,7 @@ def test_mistyped_revisions_are_refused_by_the_schema_and_no_text_comes_back(bui
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 2)
         tables, lines = scene.tables(), audit_lines(scene)
         for wrong in REVISION:
@@ -159,7 +159,7 @@ def test_mistyped_limit_or_cursor_values_are_refused_by_the_schema(build_scene, 
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 2)
         tables, lines = scene.tables(), audit_lines(scene)
         for wrong in values:
@@ -230,18 +230,16 @@ def test_a_request_id_with_no_utf8_form_is_refused_before_the_transaction_and_th
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize("bad", ["\ud800", "\udfff", "id-\udc00-id"], ids=["high", "low", "inside"])
-def test_the_module_refuses_a_request_id_with_no_utf8_form_before_it_opens_a_transaction(build_scene, monkeypatch, bad):
+def test_the_module_refuses_a_request_id_with_no_utf8_form_before_it_opens_a_transaction(build_scene, monkeypatch):
     """Called directly, past the guard and the SDK, the edit itself raises the refusal any malformed request id gets,
     runs no statement and writes nothing: the guard's audit line depends on the refusal being raised, not on the SDK."""
     scene = build_scene()
+    staging = Staging(monkeypatch)
 
-    async def scenario(client):
-        await support.stage(client, scene.host)
+    for bad in ("\ud800", "\udfff", "id-\udc00-id"):
         tables = scene.tables()
-        staging = Staging(monkeypatch)
         raised = what_it_raised(
-            lambda: direct(
+            lambda bad=bad: direct(
                 scene,
                 "edit_reference",
                 "planner",
@@ -253,9 +251,7 @@ def test_the_module_refuses_a_request_id_with_no_utf8_form_before_it_opens_a_tra
             )
         )
         assert isinstance(raised, InvalidRequest) and str(raised) == F13, repr(raised)
-        assert scene.tables() == tables and staging.texts() == []
-
-    play(scene.host, scenario)
+        assert scene.tables() == tables and staging.texts() == [], repr(bad)
 
 
 def test_a_request_id_is_refused_for_having_no_utf8_form_and_never_for_its_letters(build_scene):
@@ -265,7 +261,7 @@ def test_a_request_id_is_refused_for_having_no_utf8_form_and_never_for_its_lette
     kept = ["caf\u00e9-\u00fc", "clef-\U0001d11e", "\U0001f600" * 200]
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         assert await core_edit(client, scene, BOARDS, NAME, "text", 0, request_id="\ud800") == MALFORMED_ID
         for number, rid in enumerate(kept):
             first = succeeded(await core_edit(client, scene, BOARDS, NAME, "text", number, request_id=rid))
@@ -323,6 +319,7 @@ def test_a_grant_key_with_no_utf8_form_gets_what_any_key_that_opens_nothing_gets
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=("job-hunt/leads",))
         moving = await thread(client, scene.host, "job-hunt/leads")
         calls = {
             "edit_reference": lambda who: grantee_edit(client, who, BOARDS, NAME, "text", 0),
@@ -360,8 +357,7 @@ def test_a_grant_key_with_no_utf8_form_gets_what_any_key_that_opens_nothing_gets
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize("bad", ["\ud800", "\udfff", "tgk_a\udc00b"], ids=["high", "low", "inside"])
-def test_the_grant_check_refuses_a_key_with_no_utf8_form_before_it_hashes_it_or_asks_the_database(build_scene, bad):
+def test_the_grant_check_refuses_a_key_with_no_utf8_form_before_it_hashes_it_or_asks_the_database(build_scene):
     """Called directly, `grant_for_use` raises the refusal any key that opens nothing gets, a plain `Forbidden` that
     names no grant, and the database sees no statement for it, while it does see one for an ASCII key. With no
     binding the refusal is still the binding's own."""
@@ -370,18 +366,19 @@ def test_the_grant_check_refuses_a_key_with_no_utf8_form_before_it_hashes_it_or_
     async def scenario(client):
         held = await board(client, scene)
         identity = as_the_guard_calls(scene, held)["identity"]
-        with scene.db() as conn:
-            statements = []
-            conn.set_trace_callback(statements.append)
-            raised = what_it_raised(lambda: topic_grants.grant_for_use(conn, identity, bad))
-            asked = len(statements)
-            ordinary = what_it_raised(lambda: topic_grants.grant_for_use(conn, identity, "not-a-grant-key"))
-            conn.set_trace_callback(None)
-            unbound = what_it_raised(lambda: topic_grants.grant_for_use(conn, None, bad))
-        assert type(raised) is Forbidden and str(raised) == "unknown topic grant key", repr(raised)
-        assert asked == 0, statements
-        assert (type(ordinary), str(ordinary)) == (Forbidden, "unknown topic grant key") and len(statements) > 0
-        assert type(unbound) is Forbidden and str(unbound) == NEEDS_BINDING, repr(unbound)
+        for bad in ("\ud800", "\udfff", "tgk_a\udc00b"):
+            with scene.db() as conn:
+                statements = []
+                conn.set_trace_callback(statements.append)
+                raised = what_it_raised(lambda bad=bad: topic_grants.grant_for_use(conn, identity, bad))
+                asked = len(statements)
+                ordinary = what_it_raised(lambda: topic_grants.grant_for_use(conn, identity, "not-a-grant-key"))
+                conn.set_trace_callback(None)
+                unbound = what_it_raised(lambda bad=bad: topic_grants.grant_for_use(conn, None, bad))
+            assert type(raised) is Forbidden and str(raised) == "unknown topic grant key", repr(bad)
+            assert asked == 0, (bad, statements)
+            assert (type(ordinary), str(ordinary)) == (Forbidden, "unknown topic grant key") and len(statements) > 0
+            assert type(unbound) is Forbidden and str(unbound) == NEEDS_BINDING, repr(bad)
 
     play(scene.host, scenario)
 
@@ -469,7 +466,7 @@ def test_the_string_null_is_refused_by_the_schema_as_a_string_for_a_whole_number
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         if existing:
             await write_revisions(client, scene, BOARDS, NAME, 1)
         tables, lines = scene.tables(), audit_lines(scene)
@@ -521,7 +518,7 @@ def test_a_body_that_reads_as_json_is_stored_and_read_back_as_sent(build_scene):
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         for number, text in enumerate(["null", "[1]", '{"a": 1}']):
             made = succeeded(await core_edit(client, scene, BOARDS, NAME, text, number))
             assert made["size"] == len(text.encode()), made
