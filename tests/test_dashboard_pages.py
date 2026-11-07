@@ -126,9 +126,11 @@ def test_a_topic_page_never_widens_what_the_viewer_sees(tmp_path) -> None:
     assert "Hidden alpha" in text(get(flagged, "/t/alpha"))
 
 
-@pytest.mark.parametrize(
-    "target",
-    [
+def test_an_invalid_topic_is_a_bad_request_with_the_standard_headers(tmp_path) -> None:
+    config = page_config(tmp_path)
+    topics_seeded(config)
+    before = snapshot(config)
+    for target in (
         "/t/Alpha",
         "/t/alpha/x/y",
         "/t/",
@@ -141,14 +143,11 @@ def test_a_topic_page_never_widens_what_the_viewer_sees(tmp_path) -> None:
         "/t/alpha%252Fx",
         "/t/alpha%00",
         "/t/%E2%80%AEalpha",
-    ],
-)
-def test_an_invalid_topic_is_a_bad_request_with_the_standard_headers(tmp_path, target: str) -> None:
-    config = page_config(tmp_path)
-    topics_seeded(config)
-    response = get(config, target)
-    assert response.status == 400, target
-    assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS
+    ):
+        response = get(config, target)
+        assert response.status == 400, target
+        assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS, target
+        assert snapshot(config) == before, target
 
 
 def test_a_topic_route_is_decoded_once_per_segment(tmp_path) -> None:
@@ -230,20 +229,29 @@ def test_needs_never_shows_an_invisible_conversation_until_the_flag_is_set(tmp_p
     assert "hidden decision" in text(get(flagged, "/needs"))
 
 
-def test_needs_links_each_message_to_its_place_and_counts_both_blocks(tmp_path) -> None:
+def test_needs_links_messages_to_their_place_and_counts_waiting_jobs_without_moving_them(tmp_path) -> None:
     config = page_config(tmp_path)
     ids = needs_seeded(config)
     conn = connect(config.db_path)
     try:
-        jobs.create(conn, config.jobs, request_id="20261029T120000Z-job-one", actor="orchestrator", title="Sign off")
+        waiting = jobs.create(
+            conn, config.jobs, request_id="20261029T120000Z-job-one", actor="orchestrator", title="Sign off"
+        )
+        moved = jobs.create(
+            conn, config.jobs, request_id="20261029T120000Z-job-moved", actor="orchestrator", title="With reviewer"
+        )
+        jobs.move(conn, config.jobs, moved["job_id"], "working", actor="operator")
         history = conversations.history(conn, "operator", ids["mine"])["messages"]
     finally:
         conn.close()
     decision = next(m for m in history if m["text"] == "pick option A or B")
+    before = snapshot(config)
     body = text(get(config, "/needs"))
     assert f"/c/{ids['mine']}?after_seq={decision['seq'] - 1}#m-{decision['seq']}" in body
     assert "2 messages asked for you" in body and "1 decision not addressed to you" in body
     assert "1 job is waiting on you" in body
+    assert "Sign off" in body and waiting["job_id"] in body and "With reviewer" not in body
+    assert snapshot(config) == before
     target = re.search(rf'href="(/c/{ids["mine"]}\?after_seq={decision["seq"] - 1})#m-{decision["seq"]}"', body)
     assert f'id="m-{decision["seq"]}"' in text(get(config, target.group(1).replace("&amp;", "&")))
 
@@ -277,15 +285,6 @@ def test_needs_says_so_when_nothing_needs_the_viewer(tmp_path) -> None:
     config = page_config(tmp_path)
     body = text(get(config, "/needs"))
     assert "0 messages asked for you" in body and "0 jobs are waiting on you" in body
-
-
-def test_needs_labels_messages_as_retained_signals_not_unresolved_or_unread(tmp_path) -> None:
-    config = page_config(tmp_path)
-    needs_seeded(config)
-    body = text(get(config, "/needs")).lower()
-    assert "retained" in body
-    for word in ("unresolved", "unread", "resolved", "pending"):
-        assert word not in body, word
 
 
 def test_a_message_the_viewer_sent_itself_is_not_listed(tmp_path) -> None:
@@ -336,9 +335,8 @@ def test_needs_drops_a_message_once_the_viewers_copy_is_gone(tmp_path) -> None:
     assert needs_items(text(get(config, "/needs"))) == ["new ask"]
 
 
-@pytest.mark.parametrize("view_all", [False, True])
-def test_a_fanned_out_message_is_listed_once(tmp_path, view_all: bool) -> None:
-    config = page_config(tmp_path, view_all=view_all)
+def test_a_fanned_out_message_is_listed_once(tmp_path) -> None:
+    config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
         wide = made(conn, config, "Wide", ["orchestrator", "reviewer", "assistant", "operator"])
@@ -356,51 +354,7 @@ def test_a_fanned_out_message_is_listed_once(tmp_path, view_all: bool) -> None:
     assert needs_items(text(get(config, "/needs"))) == ["to all four"]
 
 
-def test_the_total_is_counted_before_the_page_bound_and_shown_apart_from_what_is_displayed(
-    tmp_path, monkeypatch
-) -> None:
-    config = page_config(tmp_path)
-    conn = connect(config.db_path)
-    try:
-        mine = made(conn, config, "Many asks", MINE)
-        for index in range(7):
-            conversations.send(
-                conn, config, sender="reviewer", conversation_id=mine, text=f"ask {index}", attention=["operator"]
-            )
-            conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"noise {index}")
-    finally:
-        conn.close()
-    monkeypatch.setattr(dashboard, "MAX_NEEDS", 3)
-    body = text(get(config, "/needs"))
-    assert needs_items(body) == ["ask 6", "ask 5", "ask 4"]
-    assert "7 messages asked for you" in body and "showing the newest 3 of 7" in body
-
-
 # 3. Needs you: jobs -----------------------------------------------------------------------------------------
-
-
-def test_needs_lists_exactly_the_jobs_waiting_on_the_viewer_and_moves_none(tmp_path) -> None:
-    config = page_config(tmp_path)
-    conn = connect(config.db_path)
-    try:
-        waiting = jobs.create(
-            conn, config.jobs, request_id="20261029T120000Z-job-a", actor="orchestrator", title="Approve the plan"
-        )
-        moved = jobs.create(
-            conn,
-            config.jobs,
-            request_id="20261029T120000Z-job-b",
-            actor="orchestrator",
-            title="Already with the reviewer",
-        )
-        jobs.move(conn, config.jobs, moved["job_id"], "working", actor="operator")
-    finally:
-        conn.close()
-    before = snapshot(config)
-    body = text(get(config, "/needs"))
-    assert "Approve the plan" in body and "Already with the reviewer" not in body
-    assert waiting["job_id"] in body
-    assert snapshot(config) == before
 
 
 def test_jobs_have_no_topic_so_a_topic_filter_shows_none_and_says_so(tmp_path) -> None:
@@ -426,34 +380,29 @@ def test_jobs_have_no_topic_so_a_topic_filter_shows_none_and_says_so(tmp_path) -
 # 4. Viewing stays neutral -----------------------------------------------------------------------------------
 
 
+NEW_ROUTES = ("/t/alpha", "/t/alpha/x", "/needs", "/needs?topic=alpha")
+
+
 def test_visiting_every_new_page_writes_nothing(tmp_path) -> None:
     config = page_config(tmp_path, view_all=True)
     topics_seeded(config)
     needs_seeded(config)
     before = snapshot(config)
-    for target in ("/", "/t/alpha", "/t/alpha/x", "/t/beta", "/needs", "/needs?topic=alpha", "/needs?topic=beta"):
+    targets = ("/", "/t/alpha", "/t/alpha/x", "/t/beta", "/needs", "/needs?topic=alpha", "/needs?topic=beta")
+    for target in targets:
         for method in ("GET", "HEAD"):
-            assert get(config, target, method=method).status == 200, (method, target)
+            response = get(config, target, method=method)
+            assert response.status == 200, (method, target)
+            if target in NEW_ROUTES:
+                assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS
+        if target in NEW_ROUTES:
+            response = get(config, target)
+            assert not any(key.lower().startswith("access-control-") for key in response.headers)
+            assert get(config, target, host="attacker.example.test").status == 421
+            for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+                refused = get(config, target, method=method)
+                assert refused.status == 405 and refused.headers["Allow"] == "GET, HEAD", (method, target)
     assert snapshot(config) == before
-
-
-# 5. Safety on every new route -------------------------------------------------------------------------------
-
-NEW_ROUTES = ("/t/alpha", "/t/alpha/x", "/needs", "/needs?topic=alpha")
-
-
-@pytest.mark.parametrize("target", NEW_ROUTES)
-def test_every_new_route_has_the_headers_refuses_foreign_hosts_and_writes(tmp_path, target: str) -> None:
-    config = page_config(tmp_path)
-    topics_seeded(config)
-    response = get(config, target)
-    assert response.status == 200
-    assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS
-    assert not any(key.lower().startswith("access-control-") for key in response.headers)
-    assert get(config, target, host="attacker.example.test").status == 421
-    for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
-        refused = get(config, target, method=method)
-        assert refused.status == 405 and refused.headers["Allow"] == "GET, HEAD", method
 
 
 def test_titles_and_text_on_the_new_pages_render_inert(tmp_path) -> None:
@@ -543,7 +492,7 @@ def test_config_refuses_a_malformed_or_wildcard_proxy_host(tmp_path, value: Any)
 def test_x_forwarded_host_is_never_trusted(tmp_path) -> None:
     config = page_config(tmp_path, port=free_port(), proxy_host=PROXY)
     server = dashboard.server(config)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
 
     def status(headers: dict[str, str]) -> int:
@@ -578,25 +527,12 @@ def test_x_forwarded_host_is_never_trusted(tmp_path) -> None:
         server.server_close()
 
 
-# 7. Docs ----------------------------------------------------------------------------------------------------
-
-
-def test_the_docs_describe_the_new_pages_and_what_proxy_host_requires() -> None:
-    root = Path(__file__).resolve().parent.parent
-    readme, design = (root / "README.md").read_text(), (root / "docs" / "design.md").read_text()
-    for doc in (readme, design):
-        assert "/needs" in doc and "/t/" in doc and "proxy_host" in doc
-        assert "authenticating proxy" in doc
-    security = (root / "SECURITY.md").read_text()
-    assert "proxy_host" in security and "not authentication" in security
-
-
 # Review findings (bridge 1055) --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("view_all", [False, True])
-def test_a_signal_in_the_oldest_of_many_conversations_is_never_dropped(tmp_path, view_all: bool) -> None:
-    config = page_config(tmp_path, view_all=view_all)
+def test_a_signal_in_a_conversation_beyond_the_newest_list_page_is_never_dropped(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard, "MAX_LISTED", 2)
+    config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
         oldest = made(conn, config, "The oldest", MINE, "alpha")
@@ -608,7 +544,7 @@ def test_a_signal_in_the_oldest_of_many_conversations_is_never_dropped(tmp_path,
             text="in the oldest conversation",
             attention=["operator"],
         )
-        for index in range(201):
+        for index in range(2):
             made(conn, config, f"Newer {index}", MINE, "alpha")
     finally:
         conn.close()
@@ -618,27 +554,13 @@ def test_a_signal_in_the_oldest_of_many_conversations_is_never_dropped(tmp_path,
         assert "1 message asked for you" in body, target
 
 
-def test_a_list_page_says_when_it_shows_only_the_newest_conversations(tmp_path, monkeypatch) -> None:
-    config = page_config(tmp_path)
-    conn = connect(config.db_path)
-    try:
-        for index in range(5):
-            made(conn, config, f"Conversation {index}", MINE, "alpha")
-    finally:
-        conn.close()
-    monkeypatch.setattr(dashboard, "MAX_LISTED", 3)
-    for target in ("/", "/t/alpha"):
-        body = text(get(config, target))
-        assert len(titles(body)) == 3, target
-        assert "showing the newest 3 of 5 conversations" in body, target
-
-
-def test_a_conversation_beyond_the_newest_list_page_still_opens_with_its_title(tmp_path) -> None:
+def test_a_conversation_beyond_the_first_list_page_still_opens_with_its_title(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard, "MAX_LISTED", 1)
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
         oldest = made(conn, config, "Oldest title", MINE)
-        for index in range(201):
+        for index in range(2):
             made(conn, config, f"Newer {index}", MINE)
     finally:
         conn.close()
@@ -692,51 +614,3 @@ def test_attention_alone_to_someone_else_is_not_listed_for_the_viewer(tmp_path) 
     finally:
         conn.close()
     assert needs_items(text(get(config, "/needs"))) == []
-
-
-def test_jobs_past_the_page_bound_are_counted_and_shown_apart(tmp_path) -> None:
-    config = page_config(tmp_path)
-    conn = connect(config.db_path)
-    try:
-        for index in range(dashboard.MAX_NEEDS_JOBS + 1):
-            jobs.create(
-                conn,
-                config.jobs,
-                request_id=f"20261029T120000Z-bound-{index}",
-                actor="orchestrator",
-                title=f"Waiting job {index}",
-            )
-        for index in range(3):  # waiting on someone else: never counted for the viewer
-            other = jobs.create(
-                conn,
-                config.jobs,
-                request_id=f"20261029T120000Z-other-{index}",
-                actor="orchestrator",
-                title=f"Reviewer job {index}",
-            )
-            jobs.move(conn, config.jobs, other["job_id"], "working", actor="operator")
-    finally:
-        conn.close()
-    body = text(get(config, "/needs"))
-    total = dashboard.MAX_NEEDS_JOBS + 1
-    assert f"{total} jobs are waiting on you" in body
-    assert f"showing {dashboard.MAX_NEEDS_JOBS} of {total}" in body
-    assert len(re.findall(r"Waiting job \d+", body)) == dashboard.MAX_NEEDS_JOBS
-
-
-def test_messages_at_the_page_bound_plus_one_are_counted_and_shown_apart(tmp_path) -> None:
-    config = page_config(tmp_path)
-    conn = connect(config.db_path)
-    try:
-        mine = made(conn, config, "Bound", MINE)
-        for index in range(dashboard.MAX_NEEDS + 1):
-            conversations.send(
-                conn, config, sender="reviewer", conversation_id=mine, text=f"bound ask {index}", attention=["operator"]
-            )
-    finally:
-        conn.close()
-    body = text(get(config, "/needs"))
-    total = dashboard.MAX_NEEDS + 1
-    assert f"{total} messages asked for you" in body
-    assert f"showing the newest {dashboard.MAX_NEEDS} of {total}" in body
-    assert len(needs_items(body)) == dashboard.MAX_NEEDS

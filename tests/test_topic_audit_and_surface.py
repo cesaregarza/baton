@@ -111,6 +111,16 @@ def topic_ids(host) -> dict[str, str]:
         return {row["path"]: row["id"] for row in conn.execute("SELECT path, id FROM topics")}
 
 
+def conversation_topic(host, conversation_id: str) -> str | None:
+    conn = database(host)
+    try:
+        row = conn.execute("SELECT topic FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+        assert row is not None, conversation_id
+        return row["topic"]
+    finally:
+        conn.close()
+
+
 def changes(host) -> list[sqlite3.Row]:
     with database(host) as conn:
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'topic_changes'").fetchone(), (
@@ -150,32 +160,25 @@ async def seed(client, host):
 # 1. The audit line --------------------------------------------------------------------------------------
 
 
-def test_create_topic_audits_the_new_topics_path_and_id(host):  # FAILS-ON-MAIN
+def test_topic_operations_audit_the_named_path_and_topic_id(host):
     async def scenario(client):
+        conversation = await seed(client, host)
         made = await call(
-            client, host, "create_topic", {"path": "baton", "title": "Secret title", "description": "Secret text"}
+            client,
+            host,
+            "create_topic",
+            {"path": "other", "title": "Secret title", "description": "Secret text"},
         )
         assert made["created"] is True
-        line = last_line(host)
-        assert without_time(line) == planner_line("create_topic", topic="baton", topic_id=topic_ids(host)["baton"])
+        assert without_time(last_line(host)) == planner_line(
+            "create_topic", topic="other", topic_id=topic_ids(host)["other"]
+        )
 
-    run(host, scenario)
-
-
-def test_update_topic_audits_the_topics_path_and_id(host):  # FAILS-ON-MAIN
-    async def scenario(client):
-        await seed(client, host)
         await call(client, host, "update_topic", {"path": "baton/dev", "title": "Secret title"})
         assert without_time(last_line(host)) == planner_line(
             "update_topic", topic="baton/dev", topic_id=topic_ids(host)["baton/dev"]
         )
 
-    run(host, scenario)
-
-
-def test_rename_topic_audits_the_old_path_the_new_path_and_the_unchanged_id(host):  # FAILS-ON-MAIN
-    async def scenario(client):
-        await seed(client, host)
         before = topic_ids(host)["baton/dev"]
         await call(client, host, "rename_topic", {"path": "baton/dev", "new_path": "baton/devx"})
         assert without_time(last_line(host)) == planner_line(
@@ -183,54 +186,29 @@ def test_rename_topic_audits_the_old_path_the_new_path_and_the_unchanged_id(host
         )
         assert topic_ids(host)["baton/devx"] == before
 
-    run(host, scenario)
-
-
-def test_get_topic_audits_the_path_and_id(host):  # FAILS-ON-MAIN
-    async def scenario(client):
-        await seed(client, host)
         await call(client, host, "get_topic", {"path": "baton"})
         assert without_time(last_line(host)) == planner_line(
             "get_topic", topic="baton", topic_id=topic_ids(host)["baton"]
         )
 
-    run(host, scenario)
-
-
-def test_set_topic_audits_the_destination_path_and_id(host):  # FAILS-ON-MAIN
-    async def scenario(client):
-        conversation = await seed(client, host)
-        moved = await call(client, host, "set_topic", {"conversation_id": conversation, "topic": "baton/dev"})
+        moved = await call(client, host, "set_topic", {"conversation_id": conversation, "topic": "baton/devx"})
         assert moved["changed"] is True
         assert without_time(last_line(host)) == planner_line(
-            "set_topic", conversation_id=conversation, topic="baton/dev", topic_id=topic_ids(host)["baton/dev"]
+            "set_topic", conversation_id=conversation, topic="baton/devx", topic_id=topic_ids(host)["baton/devx"]
         )
 
-    run(host, scenario)
-
-
-def test_create_conversation_in_a_topic_audits_the_topics_path_and_id(host):  # FAILS-ON-MAIN
-    async def scenario(client):
-        await seed(client, host)
         await call(
             client,
             host,
             "create_conversation",
-            {"title": "Another", "participants": ["planner", "worker"], "topic": "baton/dev"},
+            {"title": "Another", "participants": ["planner", "worker"], "topic": "baton/devx"},
         )
         assert without_time(last_line(host)) == planner_line(
-            "create_conversation", topic="baton/dev", topic_id=topic_ids(host)["baton/dev"]
+            "create_conversation", topic="baton/devx", topic_id=topic_ids(host)["baton/devx"]
         )
-
-    run(host, scenario)
-
-
-def test_list_conversations_filtered_by_topic_audits_the_path_and_id(host):  # FAILS-ON-MAIN
-    async def scenario(client):
-        await seed(client, host)
-        await call(client, host, "list_conversations", {"topic": "baton"})
+        await call(client, host, "list_conversations", {"topic": "baton/devx"})
         assert without_time(last_line(host)) == planner_line(
-            "list_conversations", topic="baton", topic_id=topic_ids(host)["baton"]
+            "list_conversations", topic="baton/devx", topic_id=topic_ids(host)["baton/devx"]
         )
 
     run(host, scenario)
@@ -248,74 +226,6 @@ def test_a_call_that_names_no_topic_audits_none(host):  # GUARD
         line = last_line(host)
         assert line.get("topic") is None and line.get("topic_id") is None
         assert line["conversation_id"] == conversation
-
-    run(host, scenario)
-
-
-@pytest.mark.parametrize(
-    "tool,arguments,named",
-    [
-        ("get_topic", {"path": "nowhere"}, "nowhere"),
-        ("update_topic", {"path": "nowhere", "title": "x"}, "nowhere"),
-        ("rename_topic", {"path": "nowhere", "new_path": "elsewhere"}, "nowhere"),
-    ],
-)
-def test_a_refusal_for_an_unknown_topic_names_the_path_and_no_id(host, tool, arguments, named):  # FAILS-ON-MAIN
-    async def scenario(client):
-        await seed(client, host)
-        refusal = await call(client, host, tool, arguments)
-        assert "error" in refusal, refusal
-        line = last_line(host)
-        assert line["tool"] == tool and line["outcome"] == refusal["error"]
-        assert line.get("topic") == named, line
-        assert line.get("topic_id") is None, line
-
-    run(host, scenario)
-
-
-def test_a_refused_set_topic_names_the_destination_path_and_no_id(host):  # GUARD for the path, new for the id
-    async def scenario(client):
-        conversation = await seed(client, host)
-        refusal = await call(client, host, "set_topic", {"conversation_id": conversation, "topic": "nowhere"})
-        assert refusal["error"] == "invalid_request"
-        line = last_line(host)
-        assert (line["tool"], line["conversation_id"], line["topic"]) == ("set_topic", conversation, "nowhere")
-        assert line.get("topic_id") is None
-
-    run(host, scenario)
-
-
-def test_a_refused_create_topic_names_the_path_it_was_asked_for(host):  # FAILS-ON-MAIN
-    async def scenario(client):
-        refusal = await call(client, host, "create_topic", {"path": "baton"}, role="worker")
-        assert refusal["error"] == "forbidden"
-        assert last_line(host).get("topic") == "baton"
-        assert last_line(host).get("topic_id") is None, "a topic that was not made has no id"
-
-    run(host, scenario)
-
-
-def test_a_guest_refusal_never_audits_its_binding_token_in_a_topic_field(host):  # FAILS-ON-MAIN
-    async def scenario(client):
-        conversation = await seed(client, host)
-        token = (await claim(client, host, "lane-a"))["binding_token"]
-        refusals = [
-            await call(
-                client,
-                host,
-                "set_topic",
-                {"conversation_id": conversation, "topic": token, "token": token},
-                role="guest",
-            ),
-            await call(client, host, "create_topic", {"path": token, "token": token}, role="guest"),
-            await call(
-                client, host, "rename_topic", {"path": "baton", "new_path": token, "token": token}, role="guest"
-            ),
-        ]
-        assert [refusal["error"] for refusal in refusals] == ["forbidden"] * 3, refusals
-        assert [line["tool"] for line in audit_lines(host)[-3:]] == ["set_topic", "create_topic", "rename_topic"]
-        leaked = [line["tool"] for line in audit_lines(host) if token in json.dumps(line)]
-        assert not leaked, f"the binding token reached the audit line of {leaked}"
 
     run(host, scenario)
 
@@ -339,25 +249,6 @@ def test_a_direct_credentials_changes_name_exactly_its_role(host):  # FAILS-ON-M
         ]
         assert {row["actor"] for row in rows} == {"planner"}
         assert {row["grant_id"] for row in rows} == {None}
-
-    run(host, scenario)
-
-
-def test_a_refused_call_over_mcp_writes_no_history(host):  # FAILS-ON-MAIN
-    async def scenario(client):
-        conversation = await seed(client, host)
-        before = [tuple(row) for row in changes(host)]
-        for tool, arguments, role in (
-            ("create_topic", {"path": "other"}, "worker"),
-            ("create_topic", {"path": "baton"}, "planner"),
-            ("update_topic", {"path": "nowhere", "title": "x"}, "planner"),
-            ("rename_topic", {"path": "baton", "new_path": "baton/dev"}, "planner"),
-            ("set_topic", {"conversation_id": conversation, "topic": "nowhere"}, "planner"),
-            ("set_topic", {"conversation_id": conversation, "topic": "baton/dev"}, "worker"),
-        ):
-            refusal = await call(client, host, tool, arguments, role=role)
-            assert "error" in refusal, (tool, refusal)
-        assert [tuple(row) for row in changes(host)] == before
 
     run(host, scenario)
 
@@ -401,6 +292,11 @@ def test_an_alias_bound_call_names_its_role_and_its_alias_in_the_history(alias_h
 
     async def scenario(client):
         enrolled = await enrol(client, host)
+        direct = await call(client, host, "create_topic", {"path": "direct"}, role="hilary")
+        assert direct.get("created") is True, direct
+        direct_row = changes(host)[-1]
+        assert direct_row["actor"] == "hilary" and direct_row["grant_id"] is None
+
         proof = (await claim(client, host))["binding_token"]
         made = await call(
             client,
@@ -427,26 +323,13 @@ def test_an_alias_bound_call_names_its_role_and_its_alias_in_the_history(alias_h
         )
         assert moved.get("changed") is True, moved
         rows = changes(host)
-        assert [row["operation"] for row in rows] == ["create_topic", "set_topic"]
-        for row in rows:
+        assert [row["operation"] for row in rows] == ["create_topic", "create_topic", "set_topic"]
+        for row in rows[1:]:
             assert row["actor"].startswith("hilary"), row["actor"]
             assert enrolled["alias_id"] in row["actor"], "the alias's id is not in the actor"
         line = [one for one in audit(host) if one["tool"] == "set_topic"][-1]
         assert line["alias_id"] == enrolled["alias_id"]
         assert (line["topic"], line["topic_id"]) == ("baton", topic_ids(host)["baton"])
-
-    run(host, scenario)
-
-
-def test_the_enrolled_role_acting_on_its_own_credential_is_just_the_role(alias_host):  # FAILS-ON-MAIN
-    host = alias_host
-
-    async def scenario(client):
-        await enrol(client, host)
-        made = await call(client, host, "create_topic", {"path": "baton"}, role="hilary")
-        assert made.get("created") is True, made
-        [row] = changes(host)
-        assert row["actor"] == "hilary"
 
     run(host, scenario)
 
@@ -575,6 +458,14 @@ REFUSAL_TEXTS = [
         "worker may not create or change topics (roles.worker.can_create_topics)",
     ),
     (
+        "an unauthorized create naming an existing topic",
+        "create_topic",
+        {"path": "baton"},
+        "worker",
+        "forbidden",
+        "worker may not create or change topics (roles.worker.can_create_topics)",
+    ),
+    (
         "a subtopic without its parent",
         "create_topic",
         {"path": "nowhere/child"},
@@ -615,6 +506,14 @@ REFUSAL_TEXTS = [
         "new_path 'baton/x' is 'baton' itself or inside it",
     ),
     (
+        "an ancestor renamed onto its existing child",
+        "rename_topic",
+        {"path": "baton", "new_path": "baton/dev"},
+        "planner",
+        "invalid_request",
+        "new_path 'baton/dev' is 'baton' itself or inside it",
+    ),
+    (
         "a rename to three levels",
         "rename_topic",
         {"path": "baton", "new_path": "reviews/baton"},
@@ -639,23 +538,34 @@ REFUSAL_TEXTS = [
         "forbidden",
         "worker may not change a conversation's topic (roles.worker.can_manage_participants)",
     ),
+    (
+        "a guest read of an unknown topic",
+        "get_topic",
+        {"path": "nowhere"},
+        "guest",
+        "unknown_topic",
+        "no topic 'nowhere'",
+    ),
 ]
 
 
-@pytest.mark.parametrize("label,tool,arguments,role,code,detail", REFUSAL_TEXTS, ids=[row[0] for row in REFUSAL_TEXTS])
-def test_refusals_read_as_they_did(host, label, tool, arguments, role, code, detail):  # GUARD
+def test_topic_refusals_keep_their_text_audit_path_and_write_no_history(host):  # GUARD
     async def scenario(client):
-        await call(client, host, "create_topic", {"path": "baton", "members": ["planner", "worker"]})
-        await call(client, host, "create_topic", {"path": "baton/dev"})
+        conversation = await seed(client, host)
         await call(client, host, "create_topic", {"path": "reviews"})
-        made = await call(
-            client,
-            host,
-            "create_conversation",
-            {"title": "A thread", "participants": ["planner", "worker"], "topic": "baton"},
-        )
-        arguments_ = {key: made["conversation_id"] if value == "$c" else value for key, value in arguments.items()}
-        assert await call(client, host, tool, arguments_, role=role) == {"error": code, "detail": detail}
+        before_changes = [tuple(row) for row in changes(host)]
+        before_topics = topic_ids(host)
+        for label, name, arguments, role, code, detail in REFUSAL_TEXTS:
+            given = {key: conversation if value == "$c" else value for key, value in arguments.items()}
+            result = await call(client, host, name, given, role=role)
+            assert result == {"error": code, "detail": detail}, (label, result)
+            line = last_line(host)
+            named = arguments.get("path", arguments.get("topic"))
+            assert (line["tool"], line["outcome"], line.get("topic")) == (name, code, named), (label, line)
+            assert line.get("topic_id") is None and "new_path" not in line, (label, line)
+            assert [tuple(row) for row in changes(host)] == before_changes, label
+            assert topic_ids(host) == before_topics, label
+            assert conversation_topic(host, conversation) == "baton", label
 
     run(host, scenario)
 
@@ -675,33 +585,47 @@ TOKEN_CALLS = [
 ]
 
 
-@pytest.mark.parametrize("role", ["guest", "planner"])
-@pytest.mark.parametrize("tool,field,arguments", TOKEN_CALLS, ids=[f"{tool}-{field}" for tool, field, _ in TOKEN_CALLS])
-def test_a_binding_token_in_a_topic_argument_never_reaches_the_line(host, tool, field, arguments, role):
+def test_binding_tokens_in_topic_arguments_never_reach_audit_lines(host):
     """The call omits `token`, so nothing tells the line which value is the secret: it must not copy the argument."""
 
     async def scenario(client):
         conversation = await seed(client, host)
         token = (await claim(client, host, "lane-a"))["binding_token"]
-        given = {key: conversation if value == "$c" else value for key, value in arguments.items()}
-        await call(client, host, tool, {**given, field: token}, role=role)
-        line = last_line(host)
-        assert line["tool"] == tool and line["outcome"] != "ok", line
-        assert token not in json.dumps(line), f"the binding token reached the audit line: {line}"
-        assert "new_path" not in line, line
-        # Only the value that is not a topic path is dropped: a refused rename still names its well-formed `path`.
-        assert line.get("topic") == (arguments["path"] if field == "new_path" else None), line
+        before_changes = [tuple(row) for row in changes(host)]
+        before_topics = topic_ids(host)
+        for role in ("guest", "planner"):
+            for name, field, arguments in TOKEN_CALLS:
+                given = {key: conversation if value == "$c" else value for key, value in arguments.items()}
+                result = await call(client, host, name, {**given, field: token}, role=role)
+                assert "error" in result, (role, name, field, result)
+                line = last_line(host)
+                assert line["tool"] == name and line["outcome"] != "ok", (role, name, field, line)
+                assert token not in json.dumps(line), f"{role} {name}.{field} leaked the binding token: {line}"
+                assert "new_path" not in line, (role, name, field, line)
+                # A refused rename still audits its valid source path, not the secret destination.
+                assert line.get("topic") == (arguments["path"] if field == "new_path" else None), (
+                    role,
+                    name,
+                    field,
+                    line,
+                )
+                assert [tuple(row) for row in changes(host)] == before_changes, (role, name, field)
+                assert topic_ids(host) == before_topics, (role, name, field)
+                assert conversation_topic(host, conversation) == "baton", (role, name, field)
 
-    run(host, scenario)
-
-
-def test_a_guest_refusal_naming_a_well_formed_unknown_path_still_audits_it(host):
-    async def scenario(client):
-        await seed(client, host)
-        refusal = await call(client, host, "get_topic", {"path": "nowhere"}, role="guest")
-        assert refusal["error"] == "unknown_topic"
-        line = last_line(host)
-        assert line["topic"] == "nowhere" and "topic_id" not in line, line
+        for name, arguments in (
+            ("set_topic", {"conversation_id": conversation, "topic": token, "token": token}),
+            ("create_topic", {"path": token, "token": token}),
+            ("rename_topic", {"path": "baton", "new_path": token, "token": token}),
+        ):
+            result = await call(client, host, name, arguments, role="guest")
+            assert result["error"] == "forbidden", (name, result)
+            line = last_line(host)
+            assert line["tool"] == name and token not in json.dumps(line), (name, line)
+            assert line.get("topic") == ("baton" if name == "rename_topic" else None), (name, line)
+            assert [tuple(row) for row in changes(host)] == before_changes, name
+            assert topic_ids(host) == before_topics, name
+            assert conversation_topic(host, conversation) == "baton", name
 
     run(host, scenario)
 

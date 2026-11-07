@@ -113,7 +113,7 @@ def test_a_webhook_is_signed_with_standard_webhooks(tmp_path: Path, monkeypatch)
             pass
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     secret = "whsec_" + base64.b64encode(b"example signing key for tests").decode()
     monkeypatch.setenv("EXAMPLE_WEBHOOK_SECRET", secret)
     host = make_config(

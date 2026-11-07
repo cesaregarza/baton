@@ -675,43 +675,44 @@ def test_mailbox_wait_fallback_search_and_existing_html_show_attribution(posting
     dispatch(posting_host, scenario)
 
 
-@pytest.mark.parametrize(
-    ("field", "shape"),
-    [
-        ("text", "list"),
-        ("to", "list"),
-        ("conversation_id", "list"),
-        ("job_id", "list"),
-        ("reply_to", "list"),
-        ("request_id", "list"),
-        ("attention", "dict"),
-        ("attention", "nested"),
-        ("relayed", "dict"),
-        ("relayed", "list"),
-        ("needs_decision", "dict"),
-        ("needs_decision", "scalar"),
-        ("token", "list"),
-    ],
+POST_SHAPES = (
+    ("text", "list"),
+    ("to", "list"),
+    ("conversation_id", "list"),
+    ("job_id", "list"),
+    ("reply_to", "list"),
+    ("request_id", "list"),
+    ("attention", "dict"),
+    ("attention", "nested"),
+    ("relayed", "dict"),
+    ("relayed", "list"),
+    ("needs_decision", "dict"),
+    ("needs_decision", "scalar"),
+    ("token", "list"),
 )
+
+
 @pytest.mark.parametrize("role", ["guest", "planner"])
-def test_optional_post_validation_never_echoes_binding_proof(posting_host, caplog, field, shape, role):
+def test_optional_post_validation_never_echoes_binding_proof(posting_host, caplog, role):
     async def scenario(client):
         conv = await board(client, posting_host)
         bound = await claim(client, posting_host)
         proof = bound["binding_token"]
-        bad = {"list": [proof], "dict": {"secret": proof}, "nested": [[proof]], "scalar": proof}[shape]
-        arguments = {"conversation_id": conv, "text": "refused", "token": proof, field: bad}
-        response = await rpc(
-            client, posting_host, "tools/call", {"name": "send_message", "arguments": arguments}, role=role
-        )
-        assert proof not in json.dumps(response), "optional-argument validation must not disclose the binding proof"
-        assert payload(response)["error"] in {"invalid_request", "forbidden"}
-        assert proof not in caplog.text and proof not in posting_host.config.audit_path.read_text()
         conn = store.connect(posting_host.config.db_path)
         try:
-            assert conn.execute("SELECT COUNT(*) FROM alias_posts").fetchone()[0] == 0
-            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
-            assert conn.execute("SELECT COUNT(*) FROM message_requests").fetchone()[0] == 0
+            for field, shape in POST_SHAPES:
+                case = f"{role} {field}={shape}"
+                bad = {"list": [proof], "dict": {"secret": proof}, "nested": [[proof]], "scalar": proof}[shape]
+                arguments = {"conversation_id": conv, "text": "refused", "token": proof, field: bad}
+                response = await rpc(
+                    client, posting_host, "tools/call", {"name": "send_message", "arguments": arguments}, role=role
+                )
+                assert proof not in json.dumps(response), f"{case}: validation must not disclose the binding proof"
+                assert payload(response)["error"] in {"invalid_request", "forbidden"}, case
+                assert proof not in caplog.text and proof not in posting_host.config.audit_path.read_text(), case
+                assert conn.execute("SELECT COUNT(*) FROM alias_posts").fetchone()[0] == 0, case
+                assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0, case
+                assert conn.execute("SELECT COUNT(*) FROM message_requests").fetchone()[0] == 0, case
         finally:
             conn.close()
 

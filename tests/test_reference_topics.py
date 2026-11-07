@@ -142,7 +142,7 @@ def test_renaming_a_leaf_alone_with_no_grant_carries_its_documents(build_scene):
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=(*refs.REFERENCE_TOPICS, LEADS))
         await write_revisions(client, scene, LEADS, NAME, 3)
         await write_revisions(client, scene, BOARDS, NAME, 1)
         before = await everything_about(client, scene, LEADS)
@@ -167,6 +167,7 @@ def test_a_topic_renamed_out_of_the_granted_root_keeps_its_document_but_not_the_
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=(LEADS,))
         succeeded(await grantee_edit(client, held, LEADS, NAME, body_of(1), 0))
         succeeded(await rename(client, scene, LEADS, "leads", [held.grant_id]))
         tables = scene.tables()
@@ -193,6 +194,7 @@ def test_a_topic_renamed_into_the_granted_root_gains_the_grantees_edits(build_sc
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=("resume",))
         succeeded(await core_edit(client, scene, "resume", NAME, body_of(1), 0))
         refused(
             await grantee_edit(client, held, "resume", NAME, body_of(2), 1),
@@ -215,7 +217,7 @@ def test_a_subtopic_a_grantee_creates_is_editable_only_if_the_grant_inherits(bui
     both = ("reference.edit", "topic.create_sub")
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=(ROOT, "resume"))
         inheriting = await scene.grantee(client, "job-search", ROOT, both, inherit=True)
         plain = await scene.grantee(client, "lead-scout", "resume", both, inherit=False)
         succeeded(await Keyed(inheriting).call(client, "create_topic", path="job-hunt/referrals"))
@@ -239,6 +241,7 @@ def test_moving_a_thread_between_topics_leaves_the_documents_where_they_are(buil
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=(LEADS,))
         await write_revisions(client, scene, LEADS, NAME, 2)
         moving = await thread(client, scene.host, LEADS)
         who = Core(scene.host, "worker")
@@ -261,7 +264,7 @@ def test_a_document_hangs_on_the_topics_id_and_no_path_is_stored(build_scene):
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=(*refs.REFERENCE_TOPICS, LEADS, "resume"))
         for path in (ROOT, BOARDS, LEADS, "resume"):
             succeeded(await core_edit(client, scene, path, NAME, "text", 0))
         docs = scene.docs()

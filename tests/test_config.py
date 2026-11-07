@@ -22,6 +22,8 @@ def test_a_minimal_config_gets_the_default_job_graph() -> None:
     [
         ({"host": {"public_url": "baton.example.test"}}, "public_url"),
         ({"roles": {}}, "at least one role"),
+        ({"indexer": {"messaging_role": "planner"}}, "indexer.messaging_role is not supported yet"),
+        ({"search": {"enabled": "false"}}, "search.enabled must be a boolean"),
         ({"roles": {"Bad Name": {}}}, "must match"),
         ({"roles": {"planner": {"wake": {"webhook": "https://a.test", "command": ["true"]}}}}, "both"),
         ({"roles": {"planner": {"wake": {"command": "true"}}}}, "list of strings"),

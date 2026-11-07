@@ -67,7 +67,7 @@ def prepared(scene, revisions):
     """The board, and `revisions` revisions of the document, written before the race starts."""
 
     async def setup(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, revisions)
 
     play(scene.host, setup)
@@ -187,7 +187,7 @@ def test_a_writer_that_commits_before_the_edits_transaction_is_seen_by_the_edit(
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, expected)
         tables = scene.tables()
         staging = Staging(monkeypatch).at("first_write", other_writer_adds_revision(scene, BOARDS, NAME, expected + 1))
@@ -217,7 +217,7 @@ def test_a_writer_cannot_commit_between_the_edits_read_and_its_write(build_scene
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, expected)
         staging = Staging(monkeypatch).at(
             "write_after_read", other_writer_adds_revision(scene, BOARDS, NAME, expected + 1)
@@ -242,6 +242,7 @@ def test_every_statement_of_an_edit_runs_inside_its_one_write_transaction(build_
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=("resume",))
         staging = Staging(monkeypatch)
         rid = request_id()
         calls = [
@@ -267,27 +268,6 @@ def test_every_statement_of_an_edit_runs_inside_its_one_write_transaction(build_
 
 
 # 3. A grant revoked while an edit starts ----------------------------------------------------------------------
-
-
-def test_a_revoke_made_after_a_read_refuses_the_next_edit(build_scene):
-    """R17, case 17 (a). The grantee reads revision 5; the owner revokes G1; its edit with expected 5 is refused in S2's
-    words, as a refused use, and no row is written."""
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await board(client, scene)
-        await write_revisions(client, scene, BOARDS, NAME, 5)
-        read = succeeded(await refs.read_reference(client, refs.Bound.of(held), BOARDS, NAME))
-        scene.revoke(held.grant_id)
-        tables = scene.tables()
-        refused(
-            await grantee_edit(client, held, BOARDS, NAME, "text", read["current_revision"]),
-            "forbidden",
-            revoked(held.grant_id),
-        )
-        assert scene.tables() == tables
-
-    play(scene.host, scenario)
 
 
 def test_a_revoke_that_commits_just_before_the_edits_transaction_refuses_the_edit(build_scene, monkeypatch):

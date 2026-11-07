@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 from secretary_support import make_world
 
+from baton import cli
 from baton.agents.agent import Agent
 from baton.agents.secretary.attention import archive as archive_module
 from baton.agents.secretary.attention.archive import SummaryArchive
-from baton.database.store import SCHEMA_VERSION, connect
+from baton.database.store import connect
 from baton.errors import Forbidden, InvalidRequest
 
 
@@ -110,7 +106,7 @@ def test_secretary_state_can_be_removed_after_summary_is_archived(tmp_path) -> N
             conn.close()
 
 
-def test_summaries_cli_pages_by_policy_principal_without_private_state(tmp_path) -> None:
+def test_summaries_cli_pages_by_policy_principal_without_private_state(tmp_path, capsys) -> None:
     with make_world(tmp_path) as world:
         archive = SummaryArchive(world.config)
         archive.save("planner-secretary", _result("planner", "planner-first", "first"))
@@ -119,9 +115,6 @@ def test_summaries_cli_pages_by_policy_principal_without_private_state(tmp_path)
         assert not world.state_path.exists()
 
         command = [
-            sys.executable,
-            "-m",
-            "baton.cli",
             "--config",
             str(world.config_path),
             "secretary",
@@ -131,24 +124,15 @@ def test_summaries_cli_pages_by_policy_principal_without_private_state(tmp_path)
             "--limit",
             "1",
         ]
-        cwd = Path(__file__).resolve().parents[1]
-        first = subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
-        assert first.returncode == 0, first.stderr
-        first_page = json.loads(first.stdout)
+        assert cli.main(command) == 0
+        first_page = json.loads(capsys.readouterr().out)
         assert first_page["principal"] == "planner"
         assert [item["decision_id"] for item in first_page["items"]] == ["planner-first"]
         assert first_page["has_more"] is True
         assert isinstance(first_page["next"], int)
 
-        continuation = subprocess.run(
-            [*command, "--after", str(first_page["next"])],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert continuation.returncode == 0, continuation.stderr
-        next_page = json.loads(continuation.stdout)
+        assert cli.main([*command, "--after", str(first_page["next"])]) == 0
+        next_page = json.loads(capsys.readouterr().out)
         assert [item["decision_id"] for item in next_page["items"]] == ["planner-second"]
         assert next_page["has_more"] is False
         assert not world.state_path.exists()
@@ -200,61 +184,7 @@ def test_remote_secretary_summaries_follow_token_role_and_reject_local_policy(
     assert [item["decision_id"] for item in worker_page["items"]] == ["worker-only"]
 
 
-def test_archive_pages_past_conversation_revocation_without_skipping_visible_rows(tmp_path) -> None:
-    with make_world(tmp_path) as world:
-        from baton import conversations
-
-        board = connect(world.config.db_path)
-        try:
-            room = conversations.create(
-                board,
-                world.config,
-                actor="planner",
-                title="Visibility test",
-                participants=["planner", "worker", "reviewer"],
-            )["conversation_id"]
-            sent = conversations.send(
-                board, world.config, sender="worker", conversation_id=room, text="source that becomes unavailable"
-            )
-            message_id = sent["message_id"]
-            row = board.execute(
-                "SELECT pos FROM events WHERE kind='message' AND json_extract(data,'$.message_id')=? LIMIT 1",
-                (message_id,),
-            ).one()
-            archive = SummaryArchive(world.config)
-            archive.save("secretary-a", _result("planner", "before", "visible before"))
-            archive.save(
-                "secretary-a",
-                _result(
-                    "planner",
-                    "revoked",
-                    "no longer visible",
-                    source_refs=[
-                        {
-                            "source_key": f"message:{message_id}",
-                            "pos": row[0],
-                            "message_id": message_id,
-                            "conversation_id": room,
-                            "job_id": None,
-                        }
-                    ],
-                ),
-            )
-            archive.save("secretary-a", _result("planner", "after", "visible after"))
-
-            conversations.remove(board, world.config, room, "planner", actor="planner")
-
-            page = archive.page_for_host("planner", limit=1)
-            assert [item["decision_id"] for item in page["items"]] == ["before"]
-            assert page["has_more"] is True
-            following = archive.page_for_host("planner", after=page["next"], limit=1)
-            assert [item["decision_id"] for item in following["items"]] == ["after"]
-            assert following["has_more"] is False
-        finally:
-            board.close()
-
-
-def test_archive_continues_after_more_than_500_hidden_rows(tmp_path) -> None:
+def test_archive_pages_past_hidden_rows_and_scan_budget_without_losing_visible_rows(tmp_path, monkeypatch) -> None:
     with make_world(tmp_path) as world:
         from baton import conversations
 
@@ -283,22 +213,34 @@ def test_archive_continues_after_more_than_500_hidden_rows(tmp_path) -> None:
                 "conversation_id": room,
                 "job_id": None,
             }
-            for index in range(501):
+            monkeypatch.setattr(archive_module, "MAX_SCAN_ROWS", 3)
+            archive.save("secretary-a", _result("planner", "before-hidden"))
+            for index in range(4):
                 archive.save("secretary-a", _result("planner", f"hidden-{index:03}", source_refs=[reference]))
             archive.save("secretary-a", _result("planner", "visible-first"))
             archive.save("secretary-a", _result("planner", "visible-second"))
             conversations.remove(board, world.config, room, "planner", actor="planner")
 
+            checked = []
+            original_visible = archive_module._reference_visible
+
+            def track_visibility(conn, config, principal, reference):
+                checked.append(reference)
+                return original_visible(conn, config, principal, reference)
+
+            monkeypatch.setattr(archive_module, "_reference_visible", track_visibility)
             after = 0
             visible = []
             for _ in range(5):
+                checked.clear()
                 page = archive.page_for_host("planner", after=after, limit=1)
+                assert len(checked) <= 3, "one page exceeded the configured scan budget"
                 visible.extend(item["decision_id"] for item in page["items"])
                 if not page["has_more"]:
                     break
                 assert isinstance(page["next"], int) and page["next"] > after
                 after = page["next"]
-            assert visible == ["visible-first", "visible-second"]
+            assert visible == ["before-hidden", "visible-first", "visible-second"]
         finally:
             board.close()
 
@@ -331,7 +273,7 @@ def test_archive_checks_only_limit_plus_one_sources_with_indexed_message_lookup(
                 "conversation_id": room,
                 "job_id": None,
             }
-            for index in range(50):
+            for index in range(3):
                 archive.save("secretary-a", _result("planner", f"visible-{index:02}", source_refs=[reference]))
 
             calls = 0
@@ -603,24 +545,3 @@ def test_archive_validates_page_bounds_and_rejects_untrusted_roles(host) -> None
         archive.page_for_host("planner", after=-1)
     with pytest.raises(InvalidRequest):
         archive.page_for_host("planner", limit=101)
-
-
-def test_version_20_database_migrates_without_losing_existing_data(tmp_path) -> None:
-    path = tmp_path / "baton.db"
-    with sqlite3.connect(path) as raw:
-        raw.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
-        raw.execute("INSERT INTO schema_version VALUES (20)")
-        raw.execute("CREATE TABLE preserved (value TEXT NOT NULL)")
-        raw.execute("INSERT INTO preserved VALUES ('unchanged')")
-    os.chmod(path, 0o600)
-
-    conn = connect(path)
-    try:
-        assert conn.execute("SELECT version FROM schema_version").one()[0] == SCHEMA_VERSION == 22
-        assert conn.execute("SELECT value FROM preserved").one()[0] == "unchanged"
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(secretary_summaries)")}
-        assert columns == {"cursor", "secretary_id", "principal", "decision_id", "result", "created_at"}
-        indexes = {row["name"] for row in conn.execute("PRAGMA index_list(secretary_summaries)")}
-        assert "secretary_summaries_by_principal" in indexes
-    finally:
-        conn.close()

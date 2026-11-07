@@ -151,7 +151,7 @@ class Receiver:
         context.load_cert_chain(self.ca_file, key_file)
         self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
         self.port = self.server.server_address[1]
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
     def url(self, path: str = "/hooks/a") -> str:
         return f"https://{NAME}:{self.port}{path}"
@@ -177,6 +177,7 @@ def receiver(tmp_path: Path) -> Receiver:
     receiver = Receiver(tmp_path)
     yield receiver
     receiver.server.shutdown()
+    receiver.server.server_close()
 
 
 TEST_ONLY = ("allow_private_callbacks", "ca_file")
@@ -313,42 +314,40 @@ def test_subscribe_verifies_with_a_signed_challenge_then_stores_privately(events
     assert len(state(host)["subscriptions"]) == 1
 
 
-@pytest.mark.parametrize("mode", ["wrong", "error", "error-echo", "redirect"])
-def test_a_failed_challenge_is_refused_and_keeps_no_state(events_host, receiver, mode: str) -> None:
+def test_a_failed_challenge_is_refused_and_keeps_no_state(events_host, receiver) -> None:
     host = events_host()
-    receiver.mode = mode
-    error = subscribe(host, "worker", receiver.url(), new_secret())["error"]
-    assert (error["code"], error["data"]["reason"]) == (integration.CALLBACK_ENDPOINT_ERROR, "challenge_failed")
-    assert state(host)["subscriptions"] == {}
-    assert len(receiver.requests) == 1  # a redirect is not followed
+    for mode in ("wrong", "error", "error-echo", "redirect"):
+        receiver.mode = mode
+        sent_before = len(receiver.requests)
+        error = subscribe(host, "worker", receiver.url(), new_secret())["error"]
+        assert error["code"] == integration.CALLBACK_ENDPOINT_ERROR, mode
+        assert error["data"]["reason"] == "challenge_failed", mode
+        assert state(host)["subscriptions"] == {}, mode
+        assert len(receiver.requests) == sent_before + 1, mode  # one challenge; a redirect is not followed
 
 
-@pytest.mark.parametrize(
-    ("url", "reason"),
-    [
+def test_callbacks_off_the_allowlist_are_refused_without_any_request(events_host, receiver) -> None:
+    host = events_host()
+    for url, reason in [
         ("http://callback.test:{port}/hooks/a", "invalid_url"),
         ("https://someone@example.test:{port}/hooks/a", "invalid_url"),  # any userinfo is refused
         ("https://elsewhere.test:{port}/hooks/a", "not_allowed"),
         ("https://callback.test:1/hooks/a", "not_allowed"),
         ("https://callback.test:{port}/other", "not_allowed"),
         ("https://callback.test:{port}/hooksevil", "not_allowed"),
-    ],
-)
-def test_callbacks_off_the_allowlist_are_refused_without_any_request(events_host, receiver, url, reason) -> None:
-    host = events_host()
-    error = subscribe(host, "worker", url.format(port=receiver.port), new_secret())["error"]
-    assert (error["code"], error["data"]["reason"]) == (integration.CALLBACK_ENDPOINT_ERROR, reason)
-    assert receiver.requests == [] and host.resolver.calls == []
-    assert state(host)["subscriptions"] == {}
+    ]:
+        error = subscribe(host, "worker", url.format(port=receiver.port), new_secret())["error"]
+        assert (error["code"], error["data"]["reason"]) == (integration.CALLBACK_ENDPOINT_ERROR, reason), url
+        assert receiver.requests == [] and host.resolver.calls == [], url
+        assert state(host)["subscriptions"] == {}, url
 
 
-@pytest.mark.parametrize(
-    "secret", ["no-prefix", "whsec_short", "whsec_" + base64.b64encode(b"x" * 65).decode(), "whsec_not*base64!"]
-)
-def test_a_malformed_secret_is_refused(events_host, receiver, secret: str) -> None:
+def test_a_malformed_secret_is_refused(events_host, receiver) -> None:
     host = events_host()
-    assert subscribe(host, "worker", receiver.url(), secret)["error"]["code"] == integration.INVALID_PARAMS
-    assert receiver.requests == []
+    for secret in ["no-prefix", "whsec_short", "whsec_" + base64.b64encode(b"x" * 65).decode(), "whsec_not*base64!"]:
+        assert subscribe(host, "worker", receiver.url(), secret)["error"]["code"] == integration.INVALID_PARAMS, secret
+        assert receiver.requests == [], secret
+        assert state(host)["subscriptions"] == {}, secret
 
 
 @pytest.mark.parametrize(
@@ -496,8 +495,13 @@ def test_expiry_bounds_and_the_end_of_delivery(events_host, receiver) -> None:
     no_expiry = subscribe(host, "planner", receiver.url("/hooks/p"), new_secret(), ttlMs=None)["result"]
     granted = dt.datetime.fromisoformat(no_expiry["refreshBefore"]) - dt.datetime.now(dt.UTC)
     assert dt.timedelta(minutes=59) < granted <= dt.timedelta(hours=1)  # never unbounded
-    subscribe(host, "worker", receiver.url(), new_secret(), ttlMs=1000)
-    time.sleep(1.2)
+    before = time.time()
+    worker = subscribe(host, "worker", receiver.url(), new_secret(), ttlMs=1000)["result"]["id"]
+    path = host.config.data_dir / integration.STATE_FILE
+    saved = json.loads(path.read_text())
+    assert before + 1 <= saved["subscriptions"][worker]["expires_at"] <= time.time() + 1  # the 1 s asked for
+    saved["subscriptions"][worker]["expires_at"] = before - 1  # and then that second has passed
+    path.write_text(json.dumps(saved))
     send(host, "worker", "too late")
     dispatch(host)
     assert receiver.events() == []

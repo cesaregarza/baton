@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
-from secretary_support import conversation, make_world, say
+from secretary_support import archived_summary_count, conversation, make_world, say, table_hashes
 from test_secretary_model import Model
 
 from baton.agents.secretary import Secretary
 from baton.agents.secretary.attention.backlog import Backlog
 from baton.agents.secretary.attention.runtime import DatabaseWorker
 from baton.agents.secretary.attention.state import AttentionLog
+from baton.integrations.secretary.hooks import receive
 from baton.integrations.secretary.instance import Instance
 from baton.integrations.secretary.worker import Worker
 
@@ -78,11 +80,15 @@ def test_later_wake_acknowledgment_does_not_jump_over_an_earlier_hold(tmp_path) 
         asyncio.run(worker.instance.secretary.activate())
         first = say(world, room, "worker", "Earlier held context")
         asyncio.run(_step(worker))
+        assert worker.instance.receipts.get("pending") == []
+        assert archived_summary_count(world.baton) == 0
         second = say(world, room, "reviewer", "A later wake")
 
+        before = table_hashes(world.baton, exclude={"secretary_summaries"})
         assert asyncio.run(_step(worker)) is None
         [decision] = worker.instance.receipts.get("pending")
-        summary = asyncio.run(worker.instance.secretary.pending(decision))
+        [summary] = asyncio.run(receive(worker.instance))
+        assert summary["decision_id"] == decision
         assert len(model.requests) == 2 and summary is not None
         assert f"message:{second['message_id']}" in summary["sources"]
         assert f"message:{first['message_id']}" not in summary["sources"]
@@ -93,6 +99,11 @@ def test_later_wake_acknowledgment_does_not_jump_over_an_earlier_hold(tmp_path) 
             summary["floor"],
             summary["floor"],
         )
+
+        backlog = Backlog(AttentionLog(world.state_path, world.config.data_dir, "planner"))
+        assert backlog.due(time.time() + 3601, held=True)[0].since == summary["floor"]
+        assert table_hashes(world.baton, exclude={"secretary_summaries"}) == before
+        assert archived_summary_count(world.baton) == 1
 
 
 def test_failed_page_is_recorded_and_does_not_block_later_new_work(tmp_path, monkeypatch) -> None:

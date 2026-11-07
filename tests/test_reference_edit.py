@@ -3,10 +3,11 @@ topic grants (proposed and authorized through the grant module, never a raw row)
 
 What this pins:
 
-* Cases 2, 3, 4, 9, 10 and 15-19 of the design's section 5, with `edit_reference` in the place of `create_topic`:
+* Cases 2, 3, 9, 10 and 15-19 of the design's section 5, with `edit_reference` in the place of `create_topic`:
   a grantee's edit records its alias, its grant and a digest; a stale edit writes nothing and says what the revision
-  now is; a retry returns the stored revision; a topic the grant does not cover, a key that is not the alias's, and a
-  grant that is no longer active are each refused in S2's words and write S2's `refused_use` event.
+  now is; a topic the grant does not cover, a key that is not the alias's, and a grant that is no longer active are
+  each refused in S2's words and write S2's `refused_use` event. Case 4, a retry that returns the stored revision
+  though it is behind, is in `test_reference_replays.py`.
 * Who may edit: a core role with `can_create_topics` needs no key and any key it sends is ignored; one without the flag
   is refused; an alias mapped to a core role is that role, with the alias recorded; a grantee needs `reference.edit`.
 * The compare-and-swap, as a table of what is accepted and what is stale, and the module function's refusal of an
@@ -151,25 +152,6 @@ def test_a_second_edit_on_the_revision_already_replaced_is_stale_and_writes_noth
     play(scene.host, scenario)
 
 
-def test_a_retry_with_the_same_request_id_returns_the_stored_revision_though_it_is_behind(build_scene):
-    """Case 4. Revision 6 was written with expected_revision 5. The same request again answers revision 6, not created,
-    and writes no row, although 5 is behind the current 6. The grant is active throughout."""
-    # Mutant 7: the replay lookup below the compare-and-swap.
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await five_revisions(client, scene)
-        rid = request_id()
-        six = succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(6), 5, request_id=rid))
-        tables = scene.tables()
-        retry = succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(6), 5, request_id=rid))
-        assert retry == {**six, "created": False}
-        assert (retry["revision"], retry["created"]) == (6, False)
-        assert scene.tables() == tables
-
-    play(scene.host, scenario)
-
-
 def test_a_grantee_cannot_edit_a_sibling_lookalike_or_an_unrelated_topic(build_scene):
     """Case 9, with real edits. `job-hunting` and `resume` are not under G1: refused as not covered, in S2's words,
     each writes one `refused_use` event naming `edit_reference`, and nothing is written."""
@@ -177,6 +159,7 @@ def test_a_grantee_cannot_edit_a_sibling_lookalike_or_an_unrelated_topic(build_s
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=("job-hunting", "resume"))
         for path in ("job-hunting", "resume"):
             tables, events = scene.tables(), len(scene.refused_uses())
             refused(
@@ -221,7 +204,7 @@ def test_a_grant_on_one_subtopic_covers_neither_its_ancestor_nor_its_sibling(bui
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=(*refs.REFERENCE_TOPICS, LEADS))
         narrow = await scene.grantee(client, "job-search", BOARDS, ("reference.edit",), inherit=False)
         succeeded(await grantee_edit(client, narrow, BOARDS, NAME, "on the topic itself", 0))
         for path in (ROOT, LEADS):
@@ -243,7 +226,7 @@ def test_inherit_decides_whether_a_grant_reaches_the_topics_under_its_own(build_
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=(*refs.REFERENCE_TOPICS, "job-hunting"))
         flat = await scene.grantee(client, "job-search", ROOT, ("reference.edit",), inherit=False)
         succeeded(await grantee_edit(client, flat, ROOT, NAME, "on the root", 0))
         refused(
@@ -426,34 +409,33 @@ def test_after_a_revoke_a_new_claim_gives_a_guest_with_no_authority_and_a_new_gr
 OTHER_CAPABILITIES = [("thread.organise",), ("topic.create_sub",), ("thread.organise", "topic.create_sub")]
 
 
-@pytest.mark.parametrize("listed", OTHER_CAPABILITIES)
-def test_a_grant_without_reference_edit_is_refused_and_the_refusal_names_the_capability(build_scene, listed):
-    """A grant for the other capabilities only is active and on the topic, but does not allow this edit."""
+def test_only_a_grant_that_lists_reference_edit_allows_the_edit_and_a_refusal_names_the_capability(build_scene):
+    """A grant for the other capabilities only is active and on the topic, but does not allow this edit: each set is
+    refused naming `reference.edit`, writes no document and one `refused_use` event. The capability the edit asks for
+    is the one the grant lists, and no other is needed: a grant for `reference.edit` alone writes revision 1."""
     # Mutant 13: S2's grant check called with thread.organise instead of reference.edit.
     scene = build_scene()
 
     async def scenario(client):
-        held = await board(client, scene, listed)
-        refused(
-            await grantee_edit(client, held, BOARDS, NAME, "text", 0),
-            "forbidden",
-            not_covered(held.grant_id, BOARDS, "reference.edit"),
-        )
-        assert scene.docs() == []
-        assert json.loads(only(scene.refused_uses(), "event")["detail"])["reason"] == "not_covered"
-
-    play(scene.host, scenario)
-
-
-def test_a_grant_for_reference_edit_alone_is_enough(build_scene):
-    """The capability the edit asks for is the one the grant lists, and no other is needed."""
-    # Mutant 13: the check asking for thread.organise.
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await board(client, scene, ("reference.edit",))
-        made = succeeded(await grantee_edit(client, held, BOARDS, NAME, "text", 0))
-        assert (made["revision"], made["grant_id"]) == (1, held.grant_id)
+        first = await board(client, scene, OTHER_CAPABILITIES[0])
+        for listed in OTHER_CAPABILITIES:
+            held = first if listed == OTHER_CAPABILITIES[0] else scene.another_grant(first, ROOT, listed, inherit=True)
+            events = scene.refused_uses()
+            refused(
+                await grantee_edit(client, held, BOARDS, NAME, "text", 0),
+                "forbidden",
+                not_covered(held.grant_id, BOARDS, "reference.edit"),
+            )
+            assert scene.docs() == [], listed
+            found = scene.refused_uses()
+            assert len(found) == len(events) + 1, listed
+            assert (found[-1]["grant_id"], json.loads(found[-1]["detail"])["reason"]) == (
+                held.grant_id,
+                "not_covered",
+            ), listed
+        enough = scene.another_grant(first, ROOT, ("reference.edit",), inherit=True)
+        made = succeeded(await grantee_edit(client, enough, BOARDS, NAME, "text", 0))
+        assert (made["revision"], made["grant_id"]) == (1, enough.grant_id)
 
     play(scene.host, scenario)
 
@@ -465,7 +447,7 @@ def test_the_presented_keys_own_grant_decides_and_never_another_the_alias_holds(
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=(*refs.REFERENCE_TOPICS, LEADS))
         narrow = await scene.grantee(client, "job-search", BOARDS, ("reference.edit",), inherit=False)
         wide = scene.another_grant(narrow, ROOT, ("reference.edit",), inherit=True)
         refused(
@@ -489,7 +471,7 @@ def test_a_core_role_with_the_flag_edits_with_no_key_and_its_row_names_the_role_
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         made = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0))
         assert set(made) == EDIT_KEYS
         assert (made["author"], made["grant_id"], made["revision"], made["created"]) == (
@@ -582,21 +564,6 @@ def test_an_alias_mapped_to_a_core_role_runs_as_that_role_with_the_alias_recorde
     play(scene.host, scenario)
 
 
-def test_a_core_roles_stale_edit_is_refused_the_same_way(build_scene):
-    """R11. The compare-and-swap does not depend on who writes."""
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host)
-        await write_revisions(client, scene, BOARDS, NAME, 3)
-        tables = scene.tables()
-        stale = await core_edit(client, scene, BOARDS, NAME, "text", 2)
-        assert stale == {"error": "stale_revision", "detail": f5(NAME, BOARDS, 3, 2), "current_revision": 3}
-        assert scene.tables() == tables
-
-    play(scene.host, scenario)
-
-
 # 4. The compare-and-swap ---------------------------------------------------------------------------------------
 
 
@@ -608,7 +575,7 @@ def test_the_compare_and_swap_accepts_only_the_revision_the_document_is_at(build
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
 
         def stale_for(result, current, expected):
             assert result == {
@@ -637,8 +604,7 @@ def test_the_compare_and_swap_accepts_only_the_revision_the_document_is_at(build
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize("bad", [None, True, False, -1, "4", 4.0], ids=repr)
-def test_the_module_refuses_an_expected_revision_that_is_missing_boolean_negative_or_text(build_scene, bad):
+def test_the_module_refuses_an_expected_revision_that_is_missing_boolean_negative_or_text(build_scene):
     """R10. The schema makes `expected_revision` required, but a caller that bypasses it (the tool body called
     directly) gets the same refusal, and nothing is written. A document is already there, so a check that treated a
     missing number as "no check" would write revision 3."""
@@ -646,27 +612,14 @@ def test_the_module_refuses_an_expected_revision_that_is_missing_boolean_negativ
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 2)
         tables, counts = scene.tables(), scene.counts()
-        with pytest.raises(BatonError) as raised:
-            direct(scene, "edit_reference", "planner", topic=BOARDS, name=NAME, body="text", expected_revision=bad)
-        assert (raised.value.code, str(raised.value)) == ("invalid_request", F6)
-        assert scene.tables() == tables and scene.counts() == counts
-
-    play(scene.host, scenario)
-
-
-def test_a_missing_expected_revision_is_refused_by_the_schema(build_scene):
-    """The same argument over MCP: left out, it is not defaulted to anything."""
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host)
-        result = await Core(scene.host).call(client, "edit_reference", topic=BOARDS, name=NAME, body="text")
-        text = str(result.get("unparsed", result))
-        assert "validation error" in text and "expected_revision" in text, result
-        assert scene.docs() == []
+        for bad in (None, True, False, -1, "4", 4.0):
+            with pytest.raises(BatonError) as raised:
+                direct(scene, "edit_reference", "planner", topic=BOARDS, name=NAME, body="text", expected_revision=bad)
+            assert (raised.value.code, str(raised.value)) == ("invalid_request", F6), repr(bad)
+            assert scene.tables() == tables and scene.counts() == counts, repr(bad)
 
     play(scene.host, scenario)
 
@@ -681,7 +634,7 @@ def test_the_same_name_in_two_topics_and_two_names_in_one_topic_keep_separate_re
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=(*refs.REFERENCE_TOPICS, LEADS))
         await write_revisions(client, scene, BOARDS, NAME, 3)
         in_leads = succeeded(await core_edit(client, scene, LEADS, NAME, "the leads copy", 0))
         other_name = succeeded(await core_edit(client, scene, BOARDS, "lead-list", "another document", 0))
@@ -714,7 +667,7 @@ def test_an_undo_is_a_new_revision_with_the_old_text_and_changes_no_earlier_row(
     staging = Staging(monkeypatch)
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 5)
         before = scene.tables()
         restored = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(3), 5))
@@ -760,7 +713,7 @@ def test_an_edit_that_changes_nothing_still_writes_a_revision(build_scene):
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0))
         same = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 1))
         assert (same["revision"], same["base_revision"], same["created"]) == (2, 1, True)

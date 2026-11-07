@@ -8,6 +8,7 @@ import time
 
 import pytest
 from secretary_support import archived_summary_count, conversation, make_world, say
+from test_secretary_model import KILL_TIMEOUT, PAST_KILL
 from test_secretary_recovery import _backlog, _step, _worker
 
 from baton.agents.secretary.attention.decide import SecretaryUnavailable
@@ -38,9 +39,9 @@ def test_six_message_page_retries_transport_failures_without_splitting_or_notici
         worker, model = _worker(
             world,
             tmp_path,
-            plan={"steps": [{"exit": 1}, {"sleep": 1}, {"exit": 1}, {}]},
+            plan={"steps": [{"exit": 1}, PAST_KILL, {"exit": 1}, {}]},
         )
-        model.set_timeout(0.25)
+        model.set_timeout(KILL_TIMEOUT)
         _policy(world, max_attempts=2, max_events=10, retry_initial_seconds=1, retry_max_seconds=60)
         now = [100.0]
         monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
@@ -80,7 +81,7 @@ def test_standalone_decide_retries_failed_page_after_backoff(tmp_path, monkeypat
     with make_world(tmp_path) as world:
         room = conversation(world)
         worker, model = _worker(world, tmp_path, plan={"steps": [{"exit": 1}, {}]})
-        model.set_timeout(0.25)
+        model.set_timeout(KILL_TIMEOUT)
         _policy(world, retry_initial_seconds=1, retry_max_seconds=1)
         now = [100.0]
         monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
@@ -106,7 +107,7 @@ def test_standalone_oversized_first_event_recovers_after_context_bound_increases
     with make_world(tmp_path) as world:
         room = conversation(world)
         worker, model = _worker(world, tmp_path)
-        model.set_timeout(0.25)
+        model.set_timeout(KILL_TIMEOUT)
         _policy(world, context_bytes=1024, retry_initial_seconds=1, retry_max_seconds=1)
         now = [100.0]
         monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
@@ -131,7 +132,7 @@ def test_invalid_json_content_still_splits_after_content_failure_limit(tmp_path,
     with make_world(tmp_path) as world:
         room = conversation(world)
         worker, model = _worker(world, tmp_path, plan={"steps": [{"raw": "not json"}]})
-        model.set_timeout(0.25)
+        model.set_timeout(KILL_TIMEOUT)
         _policy(world, max_attempts=2, max_events=10, retry_initial_seconds=1, retry_max_seconds=1)
         now = [100.0]
         monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
@@ -168,7 +169,7 @@ def test_digest_failure_notice_preserves_mode_and_prior_hold(tmp_path, monkeypat
             tmp_path,
             plan={"steps": [{"decision": "hold", "summary": "", "sources": []}, {"raw": "not json"}]},
         )
-        model.set_timeout(0.25)
+        model.set_timeout(KILL_TIMEOUT)
         _policy(
             world,
             max_attempts=2,
@@ -207,7 +208,7 @@ def test_terminal_notice_persist_crash_recovers_idempotently_without_model_call(
     with make_world(tmp_path) as world:
         room = conversation(world)
         worker, model = _worker(world, tmp_path, plan={"steps": [{"raw": "not json"}]})
-        model.set_timeout(0.25)
+        model.set_timeout(KILL_TIMEOUT)
         _policy(world, max_attempts=1, retry_initial_seconds=1, retry_max_seconds=1)
         now = [100.0]
         monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
@@ -254,10 +255,11 @@ def test_poll_uses_one_full_budget_lane_then_switches_to_other_due_lane(tmp_path
                 "steps": [
                     {"decision": "hold", "summary": "", "sources": []},
                     {"exit": 1},
-                    {"sleep": 4},
+                    {"sleep": 2},
                     {},
                 ]
             },
+            budget_seconds=3,
         )
         _policy(
             world,
@@ -286,7 +288,7 @@ def test_poll_uses_one_full_budget_lane_then_switches_to_other_due_lane(tmp_path
         started = time.monotonic()
         asyncio.run(_step(worker))
         elapsed = time.monotonic() - started
-        assert elapsed >= 3.5  # The retry used most of the five-second poll budget.
+        assert elapsed >= 1.5  # The retry ran its two-second step inside the three-second poll budget.
         assert len(model.requests) == 3
         assert model.requests[2]["context"]["mode"] == "alert"
         assert f"message:{retry_message['message_id']}" in {

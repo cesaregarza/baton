@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import sys
 import time
 from dataclasses import replace
+from pathlib import Path
 
 from secretary_support import conversation, make_world, say
 from test_secretary_delivery import _worker
@@ -208,22 +210,44 @@ def test_cancelling_worker_reaps_inflight_delivery(tmp_path) -> None:
             raise AssertionError("delivery command is still alive after worker cancellation")
 
 
-def test_status_heartbeat_budget_includes_slow_successful_delivery(tmp_path) -> None:
-    from test_secretary_integration import _cli, _install
+def _secretary(capsys, *argv: str) -> dict:
+    """`python -m baton.integrations.secretary ARGV`, run in this process, and the JSON it printed.
+
+    The entry point sets the umask and the httpx and httpcore log levels, and may configure the root logger, for its
+    own process; all of them are put back so later tests in this process see what they set themselves. The module
+    entry still runs as a real process in test_secretary_integration.
+    """
+    from baton.integrations.secretary.__main__ import main
+
+    loggers = [logging.getLogger(name) for name in ("", "httpx", "httpcore")]
+    levels = [logger.level for logger in loggers]
+    handlers = list(logging.getLogger().handlers)
+    umask = os.umask(0o077)
+    try:
+        code = main(list(argv))
+    finally:
+        os.umask(umask)
+        for logger, level in zip(loggers, levels, strict=True):
+            logger.setLevel(level)
+        logging.getLogger().handlers[:] = handlers
+    out = capsys.readouterr()
+    assert code == 0, out.err
+    return json.loads(out.out)
+
+
+def test_status_heartbeat_budget_includes_slow_successful_delivery(tmp_path, capsys) -> None:
+    from test_secretary_integration import _install_args
 
     from baton.integrations.secretary.instance import Instance
 
     with make_world(tmp_path) as world:
-        _, instance_path, *_ = _install(world, tmp_path, "codex")
+        *_, args = _install_args(world, tmp_path, "codex")
+        instance_path = Path(_secretary(capsys, *args)["instance"])
         settings = json.loads(instance_path.read_text())
         settings.update(budget_seconds=20, delivery_timeout_seconds=20)
         instance_path.write_text(json.dumps(settings))
         instance = Instance.load(instance_path)
         instance.receipts.set("health", {"status": "running", "checked_at": time.time() - 45})
-        status = _cli(instance_path, "status")
-        assert status.returncode == 0, status.stderr
-        assert json.loads(status.stdout)["heartbeat_stale"] is False
+        assert _secretary(capsys, "--instance", str(instance_path), "status")["heartbeat_stale"] is False
         instance.receipts.set("health", {"status": "running", "checked_at": time.time() - 80})
-        stale = _cli(instance_path, "status")
-        assert stale.returncode == 0, stale.stderr
-        assert json.loads(stale.stdout)["heartbeat_stale"] is True
+        assert _secretary(capsys, "--instance", str(instance_path), "status")["heartbeat_stale"] is True

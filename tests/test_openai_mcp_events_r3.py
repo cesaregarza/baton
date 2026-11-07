@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import time
+import types
 from dataclasses import replace
 from typing import Any
 
@@ -54,9 +55,9 @@ def events_of(host, events: Any = None) -> Any:
 # --- R2-1: one canonical callback, checked and sent as the same string ------------------------------
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
+def test_non_canonical_callbacks_are_refused_before_any_request(events_host, receiver) -> None:
+    host = events_host()
+    for path in [
         "/hooks/../outside",
         "/hooks/./a",
         "/hooks/%2e%2e/outside",
@@ -70,14 +71,11 @@ def events_of(host, events: Any = None) -> Any:
         "/hooks/a?x=1",
         "/hooks/a#f",
         "/hooks/%252e%252e/outside",
-    ],
-)
-def test_non_canonical_callbacks_are_refused_before_any_request(events_host, receiver, path: str) -> None:
-    host = events_host()
-    error = subscribe(host, "worker", receiver.url(path), new_secret()).get("error", {})
-    assert error.get("code") == integration.CALLBACK_ENDPOINT_ERROR, error
-    assert receiver.requests == []
-    assert state(host)["subscriptions"] == {}
+    ]:
+        error = subscribe(host, "worker", receiver.url(path), new_secret()).get("error", {})
+        assert error.get("code") == integration.CALLBACK_ENDPOINT_ERROR, (path, error)
+        assert receiver.requests == [], path
+        assert state(host)["subscriptions"] == {}, path
 
 
 @pytest.mark.parametrize("url", ["HTTPS://callback.test:{port}/hooks/a", "https://CALLBACK.test:{port}/hooks/a"])
@@ -216,7 +214,10 @@ def test_the_occurrence_time_is_stable_across_retries(events_host, receiver, mon
     receiver.statuses = {"/hooks/flaky": 503}
     send(host, "worker", "hello")
     dispatch(host)
-    time.sleep(1.1)
+    # The retry is sent two seconds later by the integration's clock; the stored occurrence time must not follow it.
+    # The integration reads time.time, time.monotonic and time.sleep from this module; only the wall clock moves.
+    later = types.SimpleNamespace(time=lambda: time.time() + 2, monotonic=time.monotonic, sleep=time.sleep)
+    monkeypatch.setattr(integration, "time", later)
     receiver.statuses = {}
     dispatch(host)
     first, second = receiver.events()

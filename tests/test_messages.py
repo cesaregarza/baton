@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from baton import messages
-from baton.errors import IdempotencyConflict, InvalidRequest, MailboxFull, RequestTooOld
+from baton.errors import BatonError, IdempotencyConflict, InvalidRequest, MailboxFull, RequestTooOld
 from baton.messages import inbox
 from baton.messages import limits as message_limits
 
@@ -53,23 +53,23 @@ def test_a_retry_replays_and_a_changed_retry_conflicts(conn) -> None:
     assert len(messages.read(conn, "worker")["messages"]) == 1
 
 
-@pytest.mark.parametrize(
-    "request_id", ["no-time", "20261399T000000Z-x", rid("future", datetime.now(UTC) + timedelta(hours=1))]
-)
-def test_malformed_or_future_request_ids_are_refused(conn, request_id: str) -> None:
-    with pytest.raises(InvalidRequest):
-        messages.send(conn, sender="planner", recipient="worker", text="x", request_id=request_id)
-
-
-def test_an_old_request_id_is_refused(conn) -> None:
-    with pytest.raises(RequestTooOld):
-        messages.send(
-            conn,
-            sender="planner",
-            recipient="worker",
-            text="x",
-            request_id=rid("old", datetime.now(UTC) - timedelta(days=31)),
-        )
+def test_malformed_future_and_old_request_ids_are_refused_without_a_write(conn) -> None:
+    # Built at run time: a dated id in a parametrize would change between collections.
+    now = datetime.now(UTC)
+    refusals = [
+        ("no-time", InvalidRequest),
+        ("20261399T000000Z-x", InvalidRequest),
+        (rid("future", now + timedelta(hours=1)), InvalidRequest),
+        (rid("old", now - timedelta(days=31)), RequestTooOld),
+    ]
+    for request_id, error in refusals:
+        try:
+            messages.send(conn, sender="planner", recipient="worker", text="x", request_id=request_id)
+        except BatonError as refused:
+            assert type(refused) is error, (request_id, refused)
+        else:
+            pytest.fail(f"{request_id} was accepted")
+        assert messages.read(conn, "worker", after_seq=0)["messages"] == [], request_id
 
 
 def test_oversized_messages_are_refused(conn) -> None:

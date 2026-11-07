@@ -241,16 +241,16 @@ def test_viewing_moves_no_cursor_and_writes_nothing(tmp_path) -> None:
         conn.close()
 
 
-@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
-def test_there_are_no_write_endpoints(tmp_path, method) -> None:
+def test_there_are_no_write_endpoints(tmp_path) -> None:
     config = view_config(tmp_path, view_all=True)
     mine, _ = seeded(config)
     before = snapshot(config)
-    for target in ("/", f"/c/{mine}", "/c", "/send", "/api/messages"):
-        response = get(config, target, method=method)
-        assert response.status == 405
-        assert response.headers["Allow"] == "GET, HEAD"
-    assert snapshot(config) == before
+    for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+        for target in ("/", f"/c/{mine}", "/c", "/send", "/api/messages"):
+            response = get(config, target, method=method)
+            assert response.status == 405, (method, target)
+            assert response.headers["Allow"] == "GET, HEAD", (method, target)
+        assert snapshot(config) == before, method
 
 
 def test_a_request_for_another_host_name_is_refused(tmp_path) -> None:
@@ -362,7 +362,7 @@ def test_a_real_loopback_server_serves_the_pages(tmp_path) -> None:
     config = view_config(tmp_path, port=free_port())
     mine, _ = seeded(config)
     server = dashboard.server(config)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:
         for method, target, status in (("GET", f"/c/{mine}", 200), ("HEAD", "/", 200), ("POST", "/", 405)):
@@ -418,17 +418,17 @@ def test_the_last_page_has_no_onward_link(tmp_path) -> None:
     assert "Later messages" not in text(get(config, f"/c/{mine}"))
 
 
-@pytest.mark.parametrize(
-    "value", ["%C2%B2", "9223372036854775808", "-1", "", "abc", "1e3", "%201", "0x10", "%EF%BC%91"]
-)
-def test_after_seq_must_be_an_ascii_decimal_within_64_bits(tmp_path, value) -> None:
+def test_after_seq_must_be_an_ascii_decimal_within_64_bits(tmp_path) -> None:
     config = view_config(tmp_path)
     mine, _ = seeded(config)
-    response = get(config, f"/c/{mine}?after_seq={value}")
-    assert response.status == 400
-    assert response.headers["Content-Security-Policy"].startswith("default-src 'none'")
-    assert response.headers["X-Frame-Options"] == "DENY"
-    assert "Traceback" not in text(response) and "Error" not in text(response)
+    before = snapshot(config)
+    for value in ("%C2%B2", "9223372036854775808", "-1", "", "abc", "1e3", "%201", "0x10", "%EF%BC%91"):
+        response = get(config, f"/c/{mine}?after_seq={value}")
+        assert response.status == 400, value
+        assert response.headers["Content-Security-Policy"].startswith("default-src 'none'"), value
+        assert response.headers["X-Frame-Options"] == "DENY", value
+        assert "Traceback" not in text(response) and "Error" not in text(response), value
+        assert snapshot(config) == before, value
 
 
 def test_after_seq_accepts_the_largest_64_bit_value(tmp_path) -> None:

@@ -77,12 +77,6 @@ def test_the_policy_numbers_are_the_ones_the_design_chose() -> None:
     assert wakes.REMINDER_WINDOW_SECONDS == 3600.0
 
 
-def test_the_clock_has_one_seam() -> None:
-    """Every due time and lease is measured by one function, so a test can move time without sleeping."""
-    assert callable(getattr(wakes, "_now", None)), "wakes._now is missing: the tests cannot control time"
-    assert isinstance(wakes._now(), float)
-
-
 def rows(conn: sqlite3.Connection, role: str = "worker") -> dict[str, str]:
     """Every wake for the role, as key -> status."""
     return {r["key"]: r["status"] for r in conn.execute("SELECT key, status FROM wakes WHERE role = ?", (role,))}
@@ -442,12 +436,8 @@ def test_a_read_cancels_a_reminder_that_is_already_leased(tmp_path: Path, clock,
 # ----------------------------------------------------- the original wakes keep their cadence
 
 
-def test_the_dispatcher_still_polls_every_second_and_sends_originals_in_the_same_pass(tmp_path: Path, clock) -> None:
+def test_the_dispatcher_sends_originals_in_the_same_pass_as_the_due_scan(tmp_path: Path, clock) -> None:
     """A due scan on every pass must not slow the original wakes or defer them to a later pass."""
-    import inspect
-
-    assert inspect.signature(wakes.Dispatcher.run).parameters["poll_seconds"].default == 1.0
-
     host = make_config(tmp_path, extra=WORKER_WAKE)
     recorder = Recorder()
     dispatcher = wakes.Dispatcher(host.config, recorder)

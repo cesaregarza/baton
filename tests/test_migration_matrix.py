@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from test_conversations import group_config
 from test_messages import rid
+from topic_backing import back_topics
 
 from baton import conversations, events, messages
 from baton.config import Config
@@ -134,8 +135,27 @@ def test_every_older_schema_there_is_a_fixture_for_reaches_the_current_one_whole
 
     db = connect(config.db_path)
     assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+    tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    for step, names in WHOLE_TABLES.items():
+        assert names <= tables, f"step {step} left out {sorted(names - tables)}"
+    assert "holders" in {row["name"] for row in db.execute("PRAGMA table_info(seat_requests)")}
+    if version < 17:  # v17 carries real grant rows, unlike older fixture schemas
+        for name in ("topic_grants", "topic_grant_events"):
+            assert db.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] == 0, name
+    for name in ("reference_docs", "reference_revisions"):
+        assert db.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] == 0, name
     columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
     assert set(ADDED) <= columns, f"version {version} did not pick up every step: missing {set(ADDED) - columns}"
+    assert "topic" in {row["name"] for row in db.execute("PRAGMA table_info(conversations)")}
+    # Every topic the old database held, if any, now has its own non-empty id.
+    assert "id" in {row["name"] for row in db.execute("PRAGMA table_info(topics)")}, "topics has no id column"
+    topic_ids = [row["id"] for row in db.execute("SELECT id FROM topics")]
+    assert all(isinstance(one, str) and one for one in topic_ids), f"an empty or missing topic id in {topic_ids}"
+    assert len(set(topic_ids)) == len(topic_ids), f"two topics share an id: {topic_ids}"
+    summaries = {row["name"] for row in db.execute("PRAGMA table_info(secretary_summaries)")}
+    assert summaries == {"cursor", "secretary_id", "principal", "decision_id", "result", "created_at"}
+    indexes = {row["name"] for row in db.execute("PRAGMA index_list(secretary_summaries)")}
+    assert "secretary_summaries_by_principal" in indexes, f"version {version} did not gain the summaries index"
 
     # Every row is still there, and every message a role sent now reads as an agent's.
     kinds = {
@@ -175,6 +195,13 @@ def test_every_older_schema_there_is_a_fixture_for_reaches_the_current_one_whole
         assert shown["seq"] == 3 and shown["reply_to"] == {"message_id": "msg_group", "seq": 1}
         assert (shown["attention"], shown["needs_decision"], shown["author_kind"]) == (["orchestrator"], True, "agent")
         assert answer["seqs"]["assistant"] == 4
+        # It has no topic yet, and can be given one straight away once the topic exists.
+        [listed] = conversations.list_for(db, "reviewer")
+        assert listed["conversation_id"] == CONVERSATION
+        assert (listed["title"], listed["topic"]) == ("Carried over", None)
+        back_topics(db, "project/carried")
+        filed = conversations.set_topic(db, config, CONVERSATION, "project/carried", actor="orchestrator")
+        assert filed["topic"] == "project/carried"
     db.close()
     connect(config.db_path).close()  # a second open changes nothing
 
@@ -212,6 +239,7 @@ def test_the_upgrade_steps_cover_every_version_there_is_a_fixture_for() -> None:
     assert store._STEPS, "no upgrade steps are declared"
     assert max(store._STEPS) == SCHEMA_VERSION, "the newest step is not the current version"
     assert min(FIXTURE_VERSIONS) < min(store._STEPS), "nothing climbs from the oldest version baton accepts"
+    assert {step: set(names) for step, names in store._ADDED_TABLES.items()} == WHOLE_TABLES
 
 
 def test_schema_22_adds_message_identity_index_to_old_and_fresh_databases(tmp_path: Path) -> None:
@@ -283,24 +311,3 @@ WHOLE_TABLES = {
     19: {"alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes", "events_receipts"},
     21: {"secretary_summaries"},  # shared secretary summary archive
 }  # records kept instead of overwritten or expired
-
-
-@pytest.mark.parametrize("version", FIXTURE_VERSIONS)
-def test_every_older_schema_gains_every_added_table(tmp_path: Path, version: int) -> None:
-    """Each step that adds tables whole creates them on upgrade from any version, every step and not only
-    the newest."""
-    config = group_config(tmp_path)
-    old_database(config, version, rid(f"seat-from-v{version}"))
-    db = connect(config.db_path)
-    assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
-    tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert {step: set(names) for step, names in store._ADDED_TABLES.items()} == WHOLE_TABLES
-    for step, names in WHOLE_TABLES.items():
-        assert names <= tables, f"step {step} left out {sorted(names - tables)}"
-    assert "holders" in {row["name"] for row in db.execute("PRAGMA table_info(seat_requests)")}
-    db.close()
-
-
-def test_the_seat_tables_are_step_8() -> None:
-    # Named by its own version, not the current one, so a later step that adds tables doesn't break it.
-    assert set(store._ADDED_TABLES[8]) == {"seat_sessions", "seat_prelogin", "seat_receipts", "seat_requests"}

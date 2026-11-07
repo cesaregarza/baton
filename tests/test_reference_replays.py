@@ -81,23 +81,30 @@ def test_the_same_request_twice_writes_one_row_and_answers_the_stored_revision_e
 
 
 def test_the_same_request_id_with_anything_else_changed_is_an_idempotency_conflict(build_scene):
-    """R12, F8. A different body, a different `expected_revision` with the same body, a different name and a
-    different topic each give a different digest, so the stored request is not answered and nothing is written."""
+    """R12, F8. A different body, a different `expected_revision` with the same body, a different name, a different
+    topic and another core role with the flag each give a different digest, so the stored request is not answered and
+    nothing is written: the actor role is in the digest, so a second role reusing the request id with the same body,
+    topic, name and number is a conflict, not a replay of the planner's revision."""
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=(*refs.REFERENCE_TOPICS, refs.LEADS))
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
         tables = scene.tables()
-        for arguments in (
-            (BOARDS, NAME, "another body", 0),
-            (BOARDS, NAME, body_of(1), 1),
-            (BOARDS, "lead-list", body_of(1), 0),
-            (refs.LEADS, NAME, body_of(1), 0),
+        for arguments, role in (
+            ((BOARDS, NAME, "another body", 0), "planner"),
+            ((BOARDS, NAME, body_of(1), 1), "planner"),
+            ((BOARDS, "lead-list", body_of(1), 0), "planner"),
+            ((refs.LEADS, NAME, body_of(1), 0), "planner"),
+            ((BOARDS, NAME, body_of(1), 0), "steward"),
         ):
-            refused(await core_edit(client, scene, *arguments, request_id=rid), "idempotency_conflict", f8(rid))
-            assert scene.tables() == tables
+            refused(
+                await core_edit(client, scene, *arguments, role=role, request_id=rid),
+                "idempotency_conflict",
+                f8(rid),
+            )
+            assert scene.tables() == tables, (arguments, role)
 
     play(scene.host, scenario)
 
@@ -125,26 +132,6 @@ def test_a_retry_with_a_renewed_binding_token_is_still_a_replay(build_scene):
             )
         )
         assert again == {**first, "created": False}
-        assert scene.tables() == tables
-
-    play(scene.host, scenario)
-
-
-def test_another_core_role_cannot_replay_a_request_it_did_not_make(build_scene):
-    """R12. The actor role is in the digest: a second role with the flag, reusing the request id with the same body,
-    topic, name and number, is a conflict, not a replay of the planner's revision."""
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host)
-        rid = request_id()
-        succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
-        tables = scene.tables()
-        refused(
-            await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, role="steward", request_id=rid),
-            "idempotency_conflict",
-            f8(rid),
-        )
         assert scene.tables() == tables
 
     play(scene.host, scenario)
@@ -185,7 +172,11 @@ def test_a_retry_after_a_rename_names_the_new_path_and_is_answered_from_the_stor
     scene = build_scene()
 
     async def scenario(client):
-        held = await board(client, scene) if who == "grantee" else await support.stage(client, scene.host)
+        held = (
+            await board(client, scene)
+            if who == "grantee"
+            else await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
+        )
         edit = editing_as(who, client, scene, held)
         rid = request_id()
         first = succeeded(await edit(BOARDS, NAME, body_of(1), 0, request_id=rid))
@@ -199,48 +190,42 @@ def test_a_retry_after_a_rename_names_the_new_path_and_is_answered_from_the_stor
     play(scene.host, scenario)
 
 
-def test_a_core_retry_naming_a_path_another_topic_now_holds_is_a_conflict(build_scene):
-    """Q10. `job-hunt` is renamed and a new topic is opened at `job-hunt/boards`, with a new id. The retry naming that
-    path resolves to the new topic, whose digest differs: a conflict, never the old topic's revision."""
+def test_a_retry_naming_a_path_another_topic_now_holds_is_a_conflict_for_a_core_role_and_not_covered_for_a_grantee(
+    build_scene,
+):
+    """Q10. `job-hunt` is renamed and a new topic is opened at `job-hunt/boards`, with a new id. A core role's retry
+    naming that path resolves to the new topic, whose digest differs: a conflict, never the old topic's revision. For
+    the grantee the new topic is not under G1, whose topic is now `job-hunt-old`, so its retry is refused as not
+    covered and logged against the grant."""
     # Mutant 8: the digest dropping the topic id. Q10.
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host)
-        rid = request_id()
-        succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
-        succeeded(await rename(client, scene, ROOT, "job-hunt-old"))
-        await open_topic(client, scene, ROOT)
-        await open_topic(client, scene, BOARDS)
-        tables = scene.tables()
-        refused(
-            await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid), "idempotency_conflict", f8(rid)
-        )
-        assert scene.tables() == tables
-
-    play(scene.host, scenario)
-
-
-def test_a_grantees_retry_naming_a_path_another_topic_now_holds_is_denied_as_not_covered(build_scene):
-    """Q10. The same, for the grantee: the new topic at `job-hunt/boards` is not under G1, whose topic is now
-    `job-hunt-old`, so the retry is refused as not covered and logged against the grant."""
     scene = build_scene()
 
     async def scenario(client):
         held = await board(client, scene)
         rid = request_id()
         succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0, request_id=rid))
+        other = request_id()
+        succeeded(await core_edit(client, scene, BOARDS, "lead-list", body_of(1), 0, request_id=other))
         succeeded(await rename(client, scene, ROOT, "job-hunt-old", [held.grant_id]))
         await open_topic(client, scene, ROOT)
         await open_topic(client, scene, BOARDS)
         tables = scene.tables()
+        refused(
+            await core_edit(client, scene, BOARDS, "lead-list", body_of(1), 0, request_id=other),
+            "idempotency_conflict",
+            f8(other),
+        )
+        assert scene.tables() == tables
+        events = len(scene.refused_uses())
         refused(
             await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0, request_id=rid),
             "forbidden",
             not_covered(held.grant_id, BOARDS),
         )
         assert scene.tables() == tables
-        assert json.loads(scene.refused_uses()[-1]["detail"]) == {"tool": "edit_reference", "reason": "not_covered"}
+        found = scene.refused_uses()
+        assert len(found) == events + 1
+        assert json.loads(found[-1]["detail"]) == {"tool": "edit_reference", "reason": "not_covered"}
 
     play(scene.host, scenario)
 
@@ -281,7 +266,7 @@ def test_a_retry_by_a_core_role_whose_flag_has_been_removed_is_refused(build_sce
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
         scene.set_role("planner", can_create_topics=False)
@@ -298,7 +283,7 @@ def test_a_call_with_no_request_id_gets_a_fresh_one_each_time(build_scene):
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         first = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0))
         second = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 1))
         assert (first["created"], second["created"]) == (True, True)
