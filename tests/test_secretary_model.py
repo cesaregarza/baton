@@ -19,6 +19,11 @@ from baton.agents.secretary import Secretary, show
 from baton.agents.secretary.attention.decide import SecretaryUnavailable
 
 FAKE = Path(__file__).parent / "fixtures" / "secretary_fake_model.py"
+# A model timeout for scenarios that kill the fake model. It logs its request only after the interpreter starts
+# and reads stdin, which took up to 0.65 s on a loaded two-CPU machine; a kill before that loses the request
+# and shifts every later scripted step. A step that must time out sleeps past it.
+KILL_TIMEOUT = 2.75
+PAST_KILL = {"sleep": KILL_TIMEOUT + 0.5}
 
 
 class Model:
@@ -198,13 +203,13 @@ def test_hold_and_keep_do_not_cover_pending_events(tmp_path, decision) -> None:
         assert _decide(world)["cached"] is True
 
 
-@pytest.mark.parametrize(("step", "timeout"), [({"raw": "not json"}, 5), ({"sleep": 2}, 0.2)])
+@pytest.mark.parametrize(("step", "timeout"), [({"raw": "not json"}, 5), (PAST_KILL, KILL_TIMEOUT)])
 def test_transport_failure_does_not_advance_and_retry_calls_model_again(tmp_path, step, timeout) -> None:
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path, plan={"steps": [step, {}]}, timeout=timeout)
         messages.send(world.baton, sender="worker", recipient="planner", text="Retry this note")
         with pytest.raises(SecretaryUnavailable):
-            _decide(world, budget_seconds=3)
+            _decide(world, budget_seconds=5)
         assert _positions(world) == (0, 0)
         model.set_timeout(5)
         model.set_plan({"steps": [{}, {}]})
@@ -252,11 +257,11 @@ def test_engine_wake_below_configured_confidence_threshold_does_not_override_hol
         assert result["engine_verdict"] == {"decision": "wake", "wake_probability": 0.79}
 
 
-@pytest.mark.parametrize("step", [{"exit": 1}, {"sleep": 2}])
+@pytest.mark.parametrize("step", [{"exit": 1}, PAST_KILL])
 def test_confident_engine_wake_survives_language_model_outage_with_notice(tmp_path, step) -> None:
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path, plan={"steps": [step]})
-        model.set_timeout(0.2)
+        model.set_timeout(KILL_TIMEOUT)
         model.set_engine_plan({"decision": "wake", "wake_probability": 0.95})
         sent = messages.send(world.baton, sender="worker", recipient="planner", text="Urgent synthetic notice")
 
@@ -318,7 +323,7 @@ def test_responses_http_wire_uses_strict_schema_and_skips_reasoning_output(tmp_p
         sent = messages.send(world.baton, sender="worker", recipient="planner", text="HTTP path")
         message_id = [sent["message_id"]]
         server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         thread.start()
         try:
             monkeypatch.setenv("SECRETARY_TEST_KEY", "synthetic-key")

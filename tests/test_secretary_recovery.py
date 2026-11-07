@@ -21,7 +21,7 @@ from baton.integrations.secretary.instance import Instance
 from baton.integrations.secretary.worker import Worker
 
 
-def _worker(world, tmp_path: Path, *, plan: dict | None = None) -> tuple[Worker, Model]:
+def _worker(world, tmp_path: Path, *, plan: dict | None = None, budget_seconds: float = 5) -> tuple[Worker, Model]:
     model = Model(world, tmp_path, plan=plan)
     project = tmp_path / "project"
     project.mkdir(exist_ok=True)
@@ -35,7 +35,7 @@ def _worker(world, tmp_path: Path, *, plan: dict | None = None) -> tuple[Worker,
                 project=project,
                 secretary=Secretary(world.config, world.state_path, world.policy_path),
                 poll_seconds=0.1,
-                budget_seconds=5,
+                budget_seconds=budget_seconds,
                 delivery_timeout_seconds=7,
                 codex=None,
             )

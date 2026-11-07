@@ -31,7 +31,7 @@ def served(tmp_path: Path):
         )
     )
     bound = seat.server(host.config)
-    threading.Thread(target=bound.serve_forever, daemon=True).start()
+    threading.Thread(target=bound.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     try:
         yield host, port
     finally:
