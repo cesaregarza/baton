@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import time
+import types
 from dataclasses import replace
 from typing import Any
 
@@ -213,7 +214,9 @@ def test_the_occurrence_time_is_stable_across_retries(events_host, receiver, mon
     receiver.statuses = {"/hooks/flaky": 503}
     send(host, "worker", "hello")
     dispatch(host)
-    time.sleep(1.1)
+    # The retry is sent two seconds later by the integration's clock; the stored occurrence time must not follow it.
+    later = types.SimpleNamespace(time=lambda: time.time() + 2, monotonic=time.monotonic, sleep=time.sleep)
+    monkeypatch.setattr(integration, "time", later)
     receiver.statuses = {}
     dispatch(host)
     first, second = receiver.events()

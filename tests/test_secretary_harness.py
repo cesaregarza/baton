@@ -295,7 +295,7 @@ def test_malformed_jev_result_is_unavailable_and_model_can_finish(tmp_path, monk
     with make_world(tmp_path) as world:
         model = Model(world, tmp_path, plan={"steps": [{"tool_calls": [_call()]}, {"decision": "wake"}]})
         server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         thread.start()
         monkeypatch.setenv("SECRETARY_JEV_TEST_KEY", "synthetic-only")
         value = json.loads(world.policy_path.read_text())
@@ -405,7 +405,7 @@ def test_responses_keeps_append_only_prefix_reasoning_cache_usage_and_tool_schem
 
     with make_world(tmp_path) as world:
         server = HTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         thread.start()
         monkeypatch.setenv("SECRETARY_OPENAI_TEST_KEY", "synthetic-only")
         monkeypatch.setenv("SECRETARY_JEV_TEST_KEY", "synthetic-only")

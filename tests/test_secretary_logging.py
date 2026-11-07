@@ -58,7 +58,7 @@ def test_http_client_request_url_does_not_reach_process_stderr(tmp_path) -> None
             pass
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     server_thread.start()
     try:
         with make_world(tmp_path) as world:
