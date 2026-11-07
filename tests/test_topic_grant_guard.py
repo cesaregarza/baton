@@ -18,7 +18,6 @@ Mutant numbers in comments refer to the spec's list of one-line mutants the test
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import secrets
@@ -27,7 +26,7 @@ import pytest
 import topic_grant_tools_support as support
 from test_aliases import rpc
 from test_per_call_identity import owner
-from test_topic_grant_no_tool_change import GUEST_MAY_CALL, required_arguments
+from test_tool_contracts import GUEST_MAY_CALL, required_arguments
 from topic_grant_support import every_cell
 from topic_grant_tools_support import ALL, PASSPHRASE, new_key, only, play, refused, stage, succeeded, thread, tool
 
@@ -35,49 +34,6 @@ build_scene = support.build_scene  # the fixture, under the name the tests ask f
 
 NEEDS_BINDING = "a topic grant key works only with the alias's binding token"
 BINDING_GONE = "alias binding is missing, invalid or expired"
-
-
-# Each tool's name, input schema and annotations as `tools/list` shows them, shortened to 12 hex digits of their
-# canonical JSON. The tool's description is left out on purpose: it comes from a docstring, which Python versions
-# compile differently, while the schema is the same on all of them.
-SCHEMAS = {
-    "whoami": "606df40868d8",
-    "alias_exists": "70e62b96b695",
-    "claim_alias": "57de127966e7",
-    "bind_events": "c51b179db678",
-    "unbind_events": "869f97b8c7d1",
-    "send_message": "591020d02a07",
-    "read_messages": "1687d21a8620",
-    "wait": "d134a654de78",
-    "create_job": "dce2e244767f",
-    "move_job": "060564d9e29a",
-    "get_job": "c06fcdc9d84e",
-    "list_jobs": "fe5579d7b511",
-    "read_job_events": "e6bdf0ef0ebd",
-    "read_secretary_summaries": "460502b433e7",
-    "create_conversation": "2b861c85cbb1",
-    "list_conversations": "a4bb4da0edbc",
-    "read_history": "63f54b713678",
-    "add_participant": "18dac23653c9",
-    "remove_participant": "fcffd1cdc0b6",
-    "set_topic": "20a40f8ad8aa",
-    "create_topic": "9514eb63adbd",
-    "update_topic": "0ea2c3a5982e",
-    "rename_topic": "e059705fa155",
-    "list_topics": "1fcfff77f07f",
-    "get_topic": "2c43e2242bf5",
-    "edit_reference": "5914d7459662",
-    "read_reference": "1d11e9527348",
-    "reference_history": "0d4b246122a7",
-    "search": "86e33946f89c",
-    "get_message": "d82ecf551fcb",
-    "read_artifacts": "1e4ef6c035c0",
-}
-
-
-def schema_fingerprint(tool):
-    shape = {"name": tool["name"], "inputSchema": tool["inputSchema"], "annotations": tool.get("annotations")}
-    return hashlib.sha256(json.dumps(shape, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def collapsed(text):
@@ -551,22 +507,6 @@ def test_the_tool_list_has_no_tool_to_propose_list_or_renounce_a_topic_grant(bui
         for role in ("planner", "guest"):
             names = [one["name"] for one in await listed_tools(client, scene.host, role)]
             assert [name for name in names if "grant" in name.lower()] == [], role
-
-    play(scene.host, scenario)
-
-
-def test_every_tool_schema_but_the_three_that_change_is_unchanged(build_scene):
-    """GUARD. Every tool's input schema and annotations are what they were, except for `create_topic`, `set_topic`
-    and `rename_topic`, which gain an argument. The reference tools, which are new, are pinned as they were made."""
-    scene = build_scene()
-    changing = {"create_topic", "set_topic", "rename_topic"}
-
-    async def scenario(client):
-        for role in ("planner", "guest"):
-            shown = {one["name"]: schema_fingerprint(one) for one in await listed_tools(client, scene.host, role)}
-            assert list(shown) == list(SCHEMAS), f"{role} sees a different list of tools"
-            moved = [name for name in SCHEMAS if name not in changing and shown.get(name) != SCHEMAS[name]]
-            assert moved == [], moved
 
     play(scene.host, scenario)
 

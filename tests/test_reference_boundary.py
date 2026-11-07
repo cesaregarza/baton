@@ -71,7 +71,6 @@ EXPECTED = [False, True, "0", "1", 0.0, 1.0]
 REVISION = [True, False, "1", 1.0]
 LIMIT = [True, "5", 5.0]
 CURSOR = [False, True, "0", 0.0]
-PAGING = [("limit", value) for value in LIMIT] + [("after_revision", value) for value in CURSOR]
 MALFORMED_ID = {"error": "invalid_request", "detail": F13}
 
 
@@ -81,11 +80,16 @@ def audit_lines(scene):
     return path.read_bytes().decode("utf-8").split("\n")[:-1] if path.exists() else []
 
 
-def refused_as_mistyped(result, argument):
+def refused_as_mistyped(result, argument, value):
     """`refused_by_schema`, and by the SDK's `int_type` error, not a bound's. `revision=false` was refused before this
-    change too, as 0 is below 1, so only the kind of error shows the type was looked at."""
-    refused_by_schema(result, argument)
-    assert "int_type" in str(result.get("unparsed", result)), result
+    change too, as 0 is below 1, so only the kind of error shows the type was looked at. Add the rejected input to any
+    assertion's traceback notes."""
+    try:
+        refused_by_schema(result, argument)
+        assert "int_type" in str(result.get("unparsed", result)), result
+    except AssertionError as error:
+        error.add_note(f"{argument}={value!r}")
+        raise
 
 
 def schema_refusal(tool_name):
@@ -107,8 +111,7 @@ def what_it_raised(call):
 
 
 @pytest.mark.parametrize("existing", [False, True], ids=["new", "at-revision-1"])
-@pytest.mark.parametrize("wrong", EXPECTED, ids=repr)
-def test_a_mistyped_expected_revision_is_refused_by_the_schema_and_writes_nothing(build_scene, wrong, existing):
+def test_mistyped_expected_revisions_are_refused_by_the_schema_and_write_nothing(build_scene, existing):
     """`expected_revision` is a whole number and nothing else. `false`, `true`, "0", "1", 0.0 and 1.0 are each refused
     by the schema, whether the reference is new or already at revision 1, and no document, revision or audit line is
     written. The compare-and-swap must not run on a number the caller did not send."""
@@ -119,14 +122,16 @@ def test_a_mistyped_expected_revision_is_refused_by_the_schema_and_writes_nothin
         if existing:
             await write_revisions(client, scene, BOARDS, NAME, 1)
         tables, lines = scene.tables(), audit_lines(scene)
-        refused_as_mistyped(await core_edit(client, scene, BOARDS, NAME, "text", wrong), "expected_revision")
-        assert scene.tables() == tables and audit_lines(scene) == lines
+        for wrong in EXPECTED:
+            result = await core_edit(client, scene, BOARDS, NAME, "text", wrong)
+            refused_as_mistyped(result, "expected_revision", wrong)
+            assert scene.tables() == tables, f"expected_revision={wrong!r} changed tables"
+            assert audit_lines(scene) == lines, f"expected_revision={wrong!r} wrote an audit line"
 
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize("wrong", REVISION, ids=repr)
-def test_a_mistyped_revision_is_refused_by_the_schema_and_no_text_comes_back(build_scene, wrong):
+def test_mistyped_revisions_are_refused_by_the_schema_and_no_text_comes_back(build_scene):
     """`revision` is a whole number from 1 and nothing else. `true`, `false`, "1" and 1.0 are each refused by the
     schema and the answer holds no text. `true` used to read revision 1."""
     scene = build_scene()
@@ -134,16 +139,21 @@ def test_a_mistyped_revision_is_refused_by_the_schema_and_no_text_comes_back(bui
     async def scenario(client):
         await support.stage(client, scene.host)
         await write_revisions(client, scene, BOARDS, NAME, 2)
-        lines = audit_lines(scene)
-        result = await read_reference(client, Core(scene.host, "worker"), BOARDS, NAME, wrong)
-        refused_as_mistyped(result, "revision")
-        assert "board list" not in str(result).lower() and audit_lines(scene) == lines
+        tables, lines = scene.tables(), audit_lines(scene)
+        for wrong in REVISION:
+            result = await read_reference(client, Core(scene.host, "worker"), BOARDS, NAME, wrong)
+            refused_as_mistyped(result, "revision", wrong)
+            assert "board list" not in str(result).lower(), f"revision={wrong!r} returned text: {result!r}"
+            assert scene.tables() == tables, f"revision={wrong!r} changed tables"
+            assert audit_lines(scene) == lines, f"revision={wrong!r} wrote an audit line"
 
     play(scene.host, scenario)
 
 
-@pytest.mark.parametrize("argument,wrong", PAGING, ids=[f"{argument}={wrong!r}" for argument, wrong in PAGING])
-def test_a_mistyped_limit_or_cursor_is_refused_by_the_schema(build_scene, argument, wrong):
+@pytest.mark.parametrize(
+    "argument,values", [("limit", LIMIT), ("after_revision", CURSOR)], ids=["limit", "after_revision"]
+)
+def test_mistyped_limit_or_cursor_values_are_refused_by_the_schema(build_scene, argument, values):
     """`limit` and `after_revision` are whole numbers and nothing else. `true`, "5" and 5.0 for the first, and `false`,
     `true`, "0" and 0.0 for the second, are each refused by the schema and list no revision."""
     scene = build_scene()
@@ -151,10 +161,12 @@ def test_a_mistyped_limit_or_cursor_is_refused_by_the_schema(build_scene, argume
     async def scenario(client):
         await support.stage(client, scene.host)
         await write_revisions(client, scene, BOARDS, NAME, 2)
-        lines = audit_lines(scene)
-        result = await reference_history(client, Core(scene.host, "worker"), BOARDS, NAME, **{argument: wrong})
-        refused_as_mistyped(result, argument)
-        assert audit_lines(scene) == lines
+        tables, lines = scene.tables(), audit_lines(scene)
+        for wrong in values:
+            result = await reference_history(client, Core(scene.host, "worker"), BOARDS, NAME, **{argument: wrong})
+            refused_as_mistyped(result, argument, wrong)
+            assert scene.tables() == tables, f"{argument}={wrong!r} changed tables"
+            assert audit_lines(scene) == lines, f"{argument}={wrong!r} wrote an audit line"
 
     play(scene.host, scenario)
 
@@ -380,7 +392,7 @@ def test_the_grant_check_refuses_a_key_with_no_utf8_form_before_it_hashes_it_or_
 def refused_as_text(result, argument):
     """`refused_as_mistyped`, and for a string the schema saw as one: its error says `input_type=str`. Read as the JSON
     it spells, "null" is refused as a null (`NoneType`) or, for `revision`, not refused at all."""
-    refused_as_mistyped(result, argument)
+    refused_as_mistyped(result, argument, "null")
     assert "input_type=str" in str(result.get("unparsed", result)), result
 
 

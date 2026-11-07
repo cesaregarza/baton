@@ -142,7 +142,7 @@ The [code map](docs/code-map.md) lists feature owners, shows where to make commo
 from the CLI or MCP tool through the domain objects to the database.
 
 ```sh
-uv sync
+uv sync --locked
 make check
 make test
 ```
@@ -151,6 +151,8 @@ make test
 imports and formats Python files. The same checks run in CI, with tool versions pinned in `pyproject.toml`
 and `uv.lock`. Without Make, run `uv run --locked ruff check .`, `uv run --locked ruff format --check .`,
 and `uv run --locked ty check` directly. See [Code quality](docs/code-quality.md) for the limits and typing conventions.
+The [testing guide](tests/README.md) explains which behaviors to protect, how to consolidate scenarios,
+and how to keep feedback fast.
 
 <a name="licence"></a>
 

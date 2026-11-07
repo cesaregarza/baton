@@ -16,6 +16,7 @@ from secretary_support import archived_summary_count, conversation, make_world, 
 from test_secretary_model import Model
 
 from baton.agents.secretary.attention.state import AttentionLog
+from baton.integrations.secretary.instance import Receipts
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSION = "synthetic_session"
@@ -153,6 +154,12 @@ def _status(instance: Path) -> dict:
     return json.loads(run.stdout)
 
 
+def _wait_for_receipt(instance: Path, name: str, predicate=bool) -> None:
+    """Poll durable worker state; explicit status assertions still exercise the CLI."""
+    receipts = Receipts(instance.parent / "delivery.sqlite")
+    _wait(lambda: predicate(receipts.get(name)))
+
+
 @pytest.mark.skipif(shutil.which("systemd-analyze") is None, reason="systemd service parser is not installed")
 def test_generated_service_accepts_project_paths_with_spaces_and_specifier_characters(tmp_path) -> None:
     with make_world(tmp_path) as world:
@@ -204,7 +211,7 @@ def test_install_generated_hook_worker_receive_and_explicit_ack_lifecycle(tmp_pa
         model = _model(world, tmp_path)
         worker = _start_worker(instance)
         try:
-            _wait(lambda: bool(_status(instance)["pending"]))
+            _wait_for_receipt(instance, "pending")
             received = _cli(instance, "receive")
             summaries = json.loads(received.stdout)
             summary = summaries[0]
@@ -221,12 +228,10 @@ def test_install_generated_hook_worker_receive_and_explicit_ack_lifecycle(tmp_pa
             assert ack.returncode == 0
             second = say(world, room, "reviewer", "A new follow-up after acknowledgment")
             source_before = table_hashes(world.baton, exclude={"secretary_summaries"})
-            _wait(
-                lambda: (
-                    len(model.requests) >= 2
-                    and summary["decision_id"] not in (_status(instance)["pending"] or [])
-                    and bool(_status(instance)["pending"])
-                )
+            _wait_for_receipt(
+                instance,
+                "pending",
+                lambda pending: len(model.requests) >= 2 and bool(pending) and summary["decision_id"] not in pending,
             )
             after = next(
                 item
@@ -253,26 +258,24 @@ def test_pending_result_survives_worker_kill_restart_and_duplicate_lock(tmp_path
         first = _start_worker(instance)
         second = None
         try:
-            _wait(
-                lambda: (
-                    bool(_status(instance)["pending"])
-                    and codex_log.exists()
-                    and _status(instance)["health"] is not None
-                )
-            )
+            _wait_for_receipt(instance, "queued")
+            _wait_for_receipt(instance, "health")
+            assert codex_log.exists()
             duplicate = _start_worker(instance)
             try:
                 _wait(lambda: duplicate.poll() is not None)
                 assert duplicate.returncode == 1
             finally:
                 _stop_worker(duplicate)
-            last_health = _status(instance)["health"]["checked_at"]
-            assert _status(instance)["queued"] == {"session": SESSION, "decisions": _status(instance)["pending"]}
+            status = _status(instance)
+            last_health = status["health"]["checked_at"]
+            assert status["pending"]
+            assert status["queued"] == {"session": SESSION, "decisions": status["pending"]}
             _stop_worker(first, force=True)
             first = None
             restart = _start_worker(instance)
             second = restart
-            _wait(lambda: _status(instance)["health"]["checked_at"] > last_health)
+            _wait_for_receipt(instance, "health", lambda health: health and health["checked_at"] > last_health)
             received = json.loads(_cli(instance, "receive").stdout)[0]
             assert f"message:{sent['message_id']}" in received["sources"]
             assert len(model.requests) == 1
@@ -296,13 +299,17 @@ def test_older_unacknowledged_summary_does_not_block_a_new_wake(tmp_path, produc
         model = _model(world, tmp_path)
         worker = _start_worker(instance)
         try:
-            _wait(lambda: len(model.requests) >= 1 and len(_status(instance)["pending"]) == 1)
+            _wait_for_receipt(instance, "pending", lambda pending: len(model.requests) >= 1 and len(pending or []) == 1)
             first_pending = _status(instance)["pending"][0]
+            if product == "codex":
+                # Codex records completed delivery; Claude wakes through the pending file instead.
+                _wait_for_receipt(instance, "queued", lambda queued: queued and first_pending in queued["decisions"])
             second = say(world, room, "reviewer", "A distinct update arrives before acknowledgment")
-            _wait(lambda: len(model.requests) >= 2 and len(_status(instance)["pending"]) == 2)
+            _wait_for_receipt(instance, "pending", lambda pending: len(model.requests) >= 2 and len(pending or []) == 2)
             summaries = json.loads(_cli(instance, "receive").stdout)
-            assert set(_status(instance)["pending"]) == {summary["decision_id"] for summary in summaries}
-            assert first_pending in _status(instance)["pending"]
+            pending = _status(instance)["pending"]
+            assert set(pending) == {summary["decision_id"] for summary in summaries}
+            assert first_pending in pending
             assert any(f"message:{first['message_id']}" in item["sources"] for item in summaries)
             assert any(f"message:{second['message_id']}" in item["sources"] for item in summaries)
             if product == "codex":
@@ -326,7 +333,7 @@ def test_hold_remains_unacknowledged_while_a_new_page_wakes(tmp_path) -> None:
             assert not codex_log.exists()
             second = say(world, room, "reviewer", "This new note needs attention")
             before = table_hashes(world.baton, exclude={"secretary_summaries"})
-            _wait(lambda: len(model.requests) >= 2 and bool(_status(instance)["pending"]))
+            _wait_for_receipt(instance, "pending", lambda pending: len(model.requests) >= 2 and bool(pending))
             result = next(
                 item
                 for item in json.loads(_cli(instance, "receive").stdout)
@@ -363,7 +370,7 @@ def test_claude_file_changed_wake_and_stop_loop_guard_are_session_scoped(tmp_pat
         assert initial_output is not None
         worker = _start_worker(instance)
         try:
-            _wait(lambda: bool(_status(instance)["pending"]))
+            _wait_for_receipt(instance, "pending")
             assert initial_output["hookSpecificOutput"]["watchPaths"] == [str(instance.parent / "pending.json")]
             changed = {
                 "hook_event_name": "FileChanged",
@@ -400,7 +407,7 @@ def test_visibility_revocation_before_receive_discards_brief_and_rejects_ack(tmp
         say(world, room, "worker", "Visibility must be checked at delivery")
         worker = _start_worker(instance)
         try:
-            _wait(lambda: bool(_status(instance)["pending"]))
+            _wait_for_receipt(instance, "pending")
             [decision_id] = _status(instance)["pending"]
             from baton import conversations
 

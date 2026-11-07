@@ -134,6 +134,15 @@ def test_every_older_schema_there_is_a_fixture_for_reaches_the_current_one_whole
 
     db = connect(config.db_path)
     assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+    tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    for step, names in WHOLE_TABLES.items():
+        assert names <= tables, f"step {step} left out {sorted(names - tables)}"
+    assert "holders" in {row["name"] for row in db.execute("PRAGMA table_info(seat_requests)")}
+    if version < 17:  # v17 carries real grant rows, unlike older fixture schemas
+        for name in ("topic_grants", "topic_grant_events"):
+            assert db.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] == 0, name
+    for name in ("reference_docs", "reference_revisions"):
+        assert db.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] == 0, name
     columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
     assert set(ADDED) <= columns, f"version {version} did not pick up every step: missing {set(ADDED) - columns}"
 
@@ -212,6 +221,7 @@ def test_the_upgrade_steps_cover_every_version_there_is_a_fixture_for() -> None:
     assert store._STEPS, "no upgrade steps are declared"
     assert max(store._STEPS) == SCHEMA_VERSION, "the newest step is not the current version"
     assert min(FIXTURE_VERSIONS) < min(store._STEPS), "nothing climbs from the oldest version baton accepts"
+    assert {step: set(names) for step, names in store._ADDED_TABLES.items()} == WHOLE_TABLES
 
 
 def test_schema_22_adds_message_identity_index_to_old_and_fresh_databases(tmp_path: Path) -> None:
@@ -283,22 +293,6 @@ WHOLE_TABLES = {
     19: {"alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes", "events_receipts"},
     21: {"secretary_summaries"},  # shared secretary summary archive
 }  # records kept instead of overwritten or expired
-
-
-@pytest.mark.parametrize("version", FIXTURE_VERSIONS)
-def test_every_older_schema_gains_every_added_table(tmp_path: Path, version: int) -> None:
-    """Each step that adds tables whole creates them on upgrade from any version, every step and not only
-    the newest."""
-    config = group_config(tmp_path)
-    old_database(config, version, rid(f"seat-from-v{version}"))
-    db = connect(config.db_path)
-    assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
-    tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert {step: set(names) for step, names in store._ADDED_TABLES.items()} == WHOLE_TABLES
-    for step, names in WHOLE_TABLES.items():
-        assert names <= tables, f"step {step} left out {sorted(names - tables)}"
-    assert "holders" in {row["name"] for row in db.execute("PRAGMA table_info(seat_requests)")}
-    db.close()
 
 
 def test_the_seat_tables_are_step_8() -> None:

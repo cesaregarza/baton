@@ -64,19 +64,6 @@ def topic_grammar_text(value):
     return str(raised.value)
 
 
-def test_the_module_names_the_limits_the_spec_gives():
-    """The module exists with the limits as constants, the spec's numbers and no others, and the three functions the
-    tools call."""
-    module = refs.references_module()
-    assert (module.MAX_BODY_BYTES, module.MAX_DOCS_PER_TOPIC, module.MAX_NAME, module.MAX_HISTORY_PAGE) == (
-        refs.MAX_BODY,
-        refs.MAX_DOCS,
-        40,
-        100,
-    )
-    assert all(callable(getattr(module, name)) for name in ("edit", "read", "history"))
-
-
 # 1. The name ------------------------------------------------------------------------------------------------
 
 

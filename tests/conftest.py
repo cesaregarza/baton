@@ -9,6 +9,7 @@ import textwrap
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,12 @@ class Host:
         return self.config.resource_url
 
 
+@cache
+def oauth_passphrase_hash() -> str:
+    """Reuse the fixture's verifier; authentication still checks the real scrypt hash."""
+    return hash_passphrase(PASSPHRASE)
+
+
 def make_config(
     tmp_path: Path,
     *,
@@ -66,7 +73,7 @@ def make_config(
         textwrap.dedent(f"""
         [auth.oauth]
         enabled = true
-        passphrase_hash = "{hash_passphrase(PASSPHRASE)}"
+        passphrase_hash = "{oauth_passphrase_hash()}"
         roles = {json.dumps(list(oauth_roles))}
         redirect_uris = ["{REDIRECT}"]
     """)

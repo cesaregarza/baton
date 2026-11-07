@@ -51,15 +51,15 @@ def test_an_accepted_path_reaches_the_receiver_byte_for_byte(events_host, receiv
     assert [r["path"] for r in receiver.requests] == [path, path]  # the challenge and the event
 
 
-@pytest.mark.parametrize("character", [";", "=", "@", ":", "+", "!", "$", "&", "'", "(", ")", "*", ","])
-def test_a_reserved_character_is_refused_before_any_request(events_host, receiver, character: str) -> None:
+def test_reserved_characters_are_refused_before_any_request(events_host, receiver) -> None:
     host = events_host()
-    for path in (f"/hooks/a{character}b", f"/hooks/authorized{character}scope"):
-        error = subscribe(host, "worker", receiver.url(path), new_secret()).get("error", {})
-        assert error.get("code") == integration.CALLBACK_ENDPOINT_ERROR, (path, error)
-        assert repr(character) in error.get("data", {}).get("detail", ""), f"the refusal should name {character!r}"
-    assert receiver.requests == []
-    assert state(host)["subscriptions"] == {}
+    for character in [";", "=", "@", ":", "+", "!", "$", "&", "'", "(", ")", "*", ","]:
+        for path in (f"/hooks/a{character}b", f"/hooks/authorized{character}scope"):
+            error = subscribe(host, "worker", receiver.url(path), new_secret()).get("error", {})
+            assert error.get("code") == integration.CALLBACK_ENDPOINT_ERROR, (path, error)
+            assert repr(character) in error.get("data", {}).get("detail", ""), f"the refusal should name {character!r}"
+            assert receiver.requests == [], path
+            assert state(host)["subscriptions"] == {}, path
 
 
 # --- R4-2: delivery outcomes come from the status alone ---------------------------------------

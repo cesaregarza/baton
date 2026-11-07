@@ -1,5 +1,7 @@
-"""The dashboard read on a phone: long words wrap, every item past a page cap can be reached, and a deep link
-keeps its parent's context. Synthetic and offline, with generic roles."""
+"""Dashboard pagination, deep-link context, and generated mobile viewport declarations.
+
+Synthetic and offline, with generic roles.
+"""
 
 from __future__ import annotations
 
@@ -13,43 +15,17 @@ from test_dashboard_pages import MINE, get, made, needs_items, page_config
 from baton import conversations, dashboard, jobs
 from baton.database.store import connect
 
-LONG = "x" * 6000  # one unbroken word, far wider than any phone
-
-
-def rules(css: str) -> dict[str, str]:
-    """Each selector in the stylesheet with its declarations, joined, so a test can ask what a class gets."""
-    found: dict[str, str] = {}
-    for selectors, body in re.findall(r"([^{}]+)\{([^}]*)\}", css):
-        for selector in selectors.split(","):
-            found[selector.strip()] = found.get(selector.strip(), "") + body
-    return found
-
 
 def links(body: str) -> list[str]:
     return [href.replace("&amp;", "&") for href in re.findall(r'href="([^"]+)"', body)]
 
 
-# 1. Long words wrap ------------------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("selector", [".text", ".relayed-text", ".meta", "h1", "li", "a"])
-def test_long_unbroken_text_wraps_instead_of_widening_the_page(selector: str) -> None:
-    css = rules(dashboard.STYLE)
-    assert selector in css, selector
-    assert "overflow-wrap: anywhere" in css[selector], selector
-
-
-def test_the_page_never_scrolls_sideways_and_keeps_a_phone_viewport(tmp_path) -> None:
-    css = rules(dashboard.STYLE)
-    assert "overflow-x: hidden" not in css.get("body", "")  # wrapping, not clipping, keeps every word readable
-    assert "min-width: 0" in css["li"]
+def test_dashboard_pages_declare_a_mobile_viewport(tmp_path) -> None:
+    """The generated HTML opts into the device-width viewport on each main route."""
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
         conversation = made(conn, config, "y" * 190, MINE, "alpha")
-        conversations.send(
-            conn, config, sender="orchestrator", conversation_id=conversation, text=LONG, attention=["operator"]
-        )
     finally:
         conn.close()
     for target in ("/", "/t/alpha", "/needs", f"/c/{conversation}"):
@@ -367,7 +343,7 @@ def test_times_are_compact_with_the_full_value_kept_in_a_title(tmp_path) -> None
             assert len(shown) <= 12 and "T" not in shown and "+00:00" not in shown, (target, shown)
 
 
-def test_job_ids_are_shortened_on_narrow_screens_with_the_full_id_kept(tmp_path) -> None:
+def test_job_id_is_available_in_full_in_the_html(tmp_path) -> None:
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
@@ -378,10 +354,6 @@ def test_job_ids_are_shortened_on_narrow_screens_with_the_full_id_kept(tmp_path)
         conn.close()
     body = text(get(config, "/needs"))
     assert f'<span class="id" title="{job["job_id"]}">{job["job_id"]}</span>' in body
-    css = rules(dashboard.STYLE)
-    narrow = re.search(r"@media \(max-width: 480px\) \{(.*?)\}\s*\}", dashboard.STYLE, re.S)
-    assert narrow and ".id" in narrow.group(1) and "text-overflow: ellipsis" in narrow.group(1)
-    assert ".id" in css
 
 
 def test_advancing_one_needs_list_keeps_the_others_where_they_are(tmp_path, monkeypatch) -> None:

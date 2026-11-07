@@ -151,7 +151,7 @@ class Receiver:
         context.load_cert_chain(self.ca_file, key_file)
         self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
         self.port = self.server.server_address[1]
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
     def url(self, path: str = "/hooks/a") -> str:
         return f"https://{NAME}:{self.port}{path}"
@@ -177,6 +177,7 @@ def receiver(tmp_path: Path) -> Receiver:
     receiver = Receiver(tmp_path)
     yield receiver
     receiver.server.shutdown()
+    receiver.server.server_close()
 
 
 TEST_ONLY = ("allow_private_callbacks", "ca_file")

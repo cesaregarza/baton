@@ -1,11 +1,6 @@
 """Shared setup for the reference tests: the same hosts, scenes, grantees and grant clock as the topic grant tests, plus
 what references add.
 
-Nothing here imports `baton.topics.references` or touches a reference table at the top level. `references_module()`,
-`body_method()` and `require_reference_tables()` assert that the module, the tool and the tables exist first, as S1's
-`grants_module()` does, so against a base without them a test fails on that assertion and never as an ImportError, an
-AttributeError or an OperationalError.
-
 What is in here:
 
 * the refusal texts of the spec's table (F1-F15) as functions of what they name, written out once;
@@ -20,7 +15,6 @@ Nothing secret is written here: keys, binding tokens and passphrases are made at
 from __future__ import annotations
 
 import importlib
-import importlib.util
 import queue
 import secrets
 import sqlite3
@@ -135,30 +129,12 @@ def revoked(grant_id: str) -> str:
 
 
 def references_module() -> ModuleType:
-    """The module under test, or a failed assertion saying it is not there."""
-    assert importlib.util.find_spec("baton.topics.references") is not None, (
-        "baton/topics/references.py does not exist yet"
-    )
-    module = importlib.import_module("baton.topics.references")
-    for name in ("edit", "read", "history", "MAX_BODY_BYTES", "MAX_DOCS_PER_TOPIC", "MAX_NAME", "MAX_HISTORY_PAGE"):
-        assert hasattr(module, name), f"baton.topics.references has no {name}"
-    return module
-
-
-def reference_tools_module() -> ModuleType:
-    """The module the three tool methods live in, or a failed assertion saying it is not there."""
-    assert importlib.util.find_spec("baton.app.reference_tools") is not None, (
-        "baton/app/reference_tools.py does not exist yet"
-    )
-    module = importlib.import_module("baton.app.reference_tools")
-    for name in ("ReferenceTools", "REFERENCE_TOOLS", "REFERENCE_GUEST_TOOLS"):
-        assert hasattr(module, name), f"baton.app.reference_tools has no {name}"
-    return module
+    """Load the domain API used by direct-call scenarios."""
+    return importlib.import_module("baton.topics.references")
 
 
 def body_method(name: str) -> Callable[..., Any]:
-    """A tool's body as a plain function of (tools, role, **arguments), or a failed assertion saying it is missing."""
-    assert hasattr(app_module.Tools, name), f"baton.app.Tools has no {name}: the tool is not there yet"
+    """A tool's body as a plain function of (tools, role, **arguments)."""
     return getattr(app_module.Tools, name)
 
 

@@ -30,30 +30,14 @@ from reference_support import (
     write_revisions,
 )
 from test_aliases import rpc
-from test_topic_grant_no_tool_change import TOOLS
 from topic_grant_tools_support import play, stage, succeeded, tool
 
-from baton import app as app_module
 from baton import auth
 from baton.app import guard, tools
 
 build_scene = refs.build_scene  # the fixture, under the name the tests ask for
 
 NEW = ["edit_reference", "read_reference", "reference_history"]
-OLD = [name for name in TOOLS if name not in NEW]
-ELEVEN = {
-    "whoami",
-    "alias_exists",
-    "claim_alias",
-    "list_conversations",
-    "read_history",
-    "get_message",
-    "search",
-    "send_message",
-    "create_conversation",
-    "list_topics",
-    "get_topic",
-}
 
 
 async def listed(client, host, role):
@@ -94,20 +78,6 @@ def only_scopes(monkeypatch, *scopes):
 
 
 # 1. The list and the schemas ------------------------------------------------------------------------------
-
-
-def test_the_tool_list_gains_exactly_the_three_tools_after_get_topic_in_their_order(build_scene):
-    """The earlier tools are listed as they were; the new ones sit right after `get_topic`, in the conversation
-    group, as `edit_reference`, `read_reference`, `reference_history`; and a guest sees the same list as a core role."""
-    scene = build_scene()
-    after = OLD.index("get_topic") + 1
-
-    async def scenario(client):
-        for role in ("planner", "guest"):
-            names = [one["name"] for one in await listed(client, scene.host, role)]
-            assert names == OLD[:after] + NEW + OLD[after:], (role, names)
-
-    play(scene.host, scenario)
 
 
 def test_the_two_new_refusals_are_errors_of_their_own_and_the_stale_one_is_a_stale_revision():
@@ -216,28 +186,6 @@ def test_the_reference_tools_are_listed_only_when_conversations_are_enabled(tmp_
 
 
 # 2. Who may call them, at the guard -----------------------------------------------------------------------
-
-
-def test_the_tools_are_registered_through_the_tuples_of_the_module_the_spec_names():
-    """The layout the spec fixes: the bodies are a mixin `Tools` inherits, and the module offers the registration
-    tuples of (name, scope, read-only) and the names of the guest tools, so `baton/app.py` only adds them."""
-    module = refs.reference_tools_module()
-    assert tuple(module.REFERENCE_TOOLS) == (
-        ("edit_reference", auth.SCOPE_WRITE, False),
-        ("read_reference", auth.SCOPE_READ, True),
-        ("reference_history", auth.SCOPE_READ, True),
-    )
-    assert set(module.REFERENCE_GUEST_TOOLS) == {"read_reference", "reference_history"}
-    assert issubclass(app_module.Tools, module.ReferenceTools)
-
-
-def test_the_two_read_tools_are_guest_tools_and_edit_reference_is_not():
-    """A guest may call the read tools (with its binding) and may call `edit_reference` only with a key, which the
-    guard's tool set for keys decides; so `edit_reference` is not among the plain guest tools."""
-    # Mutant 18: read_reference left out of the guest tool list.
-    assert ELEVEN <= app_module.GUEST_TOOLS
-    assert app_module.GUEST_TOOLS - ELEVEN == {"read_reference", "reference_history"}
-    assert "edit_reference" not in app_module.GUEST_TOOLS
 
 
 def test_a_bound_guest_is_let_through_the_guard_to_read_and_an_unbound_one_is_not(build_scene):

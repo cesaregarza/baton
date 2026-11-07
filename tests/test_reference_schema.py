@@ -1,26 +1,8 @@
-"""The two reference tables: what a fresh database declares, how every older database gains them, and that no row of
-either is ever changed.
+"""Reference-table migrations and storage constraints.
 
-`tests/fixtures/schema_v17.sql` is the schema as the topic grant checks (head ebdf531a) left it, with rows: two topics
-that have ids (`job-hunt` and `job-hunt/boards`), one alias, one conversation, and one authorized topic grant with its
-events. Every older fixture must still upgrade, and every upgrade must leave `reference_docs` and `reference_revisions`
-empty, create no document for any topic, and leave everything else as it was, the grant rows byte for byte.
-
-The current schema version is never written here as a number. The fixture's own version is, and everything about the
-current one goes through `store.SCHEMA_VERSION` and `store.MIGRATES_FROM`, so another change landing first cannot make
-these wrong. If one does land first and the reference tables take a later version, the fixture's name and `S2_VERSION`
-below are what to renumber.
-
-Three existing checks follow from this and are the code writer's to update:
-* `test_migration_matrix.py::WHOLE_TABLES` must list the two reference tables for the new step;
-* the new fixture's own version must be in `MIGRATES_FROM`
-  (`test_the_upgrade_steps_cover_every_version_there_is_a_fixture_for`);
-* `test_topic_grant_migration.py::test_every_older_schema_gains_both_grant_tables_empty` runs over every fixture, and
-  the new one carries a grant, so it must stop at the versions below this fixture's.
-
-Tests whose docstring starts with GUARD pin behaviour that must not change, and pass before and after the change.
-Mutant numbers in comments refer to the spec's list of one-line mutants the tests must kill. Q numbers refer to its open
-questions: the test pins the question's default, so a ruling changes only the tests that carry that number.
+The shared migration matrix checks table creation and empty reference tables across historical fixtures.
+These scenarios preserve populated v17 data, compare fresh and upgraded declarations, and exercise
+revision history, uniqueness, and rollback through the reference API.
 """
 
 from __future__ import annotations
@@ -48,7 +30,7 @@ from reference_support import (
     tables_of,
     write_revisions,
 )
-from test_migration_matrix import FIXTURE_VERSIONS, WHOLE_TABLES
+from test_migration_matrix import FIXTURE_VERSIONS
 from test_topic_containers import topic_config
 from test_topic_id_migration import install, snapshot, snapshot_plan
 from topic_grant_tools_support import play, refused, succeeded
@@ -153,29 +135,7 @@ def test_the_reference_tables_are_declared_as_the_step_above_the_v17_fixture():
     assert NEW_STEP not in store._BACKFILL and NEW_STEP not in store._PROCEDURES, "no backfill and no procedure"
 
 
-def test_the_migration_matrix_lists_the_reference_step():
-    """The existing matrix spells out the tables each step adds, so a step cannot quietly stand in for them."""
-    assert WHOLE_TABLES.get(NEW_STEP) == NEW_TABLES, f"WHOLE_TABLES has no entry for step {NEW_STEP}"
-    assert {step: set(names) for step, names in store._ADDED_TABLES.items()} == WHOLE_TABLES
-
-
-# 2. Every fixture reaches the current schema with both tables, empty -----------------------------------------
-
-
-@pytest.mark.parametrize("version", FIXTURE_VERSIONS)
-def test_every_older_schema_gains_both_reference_tables_empty(tmp_path, version):
-    """The upgrade writes no reference row and makes no document for any topic, from every older version."""
-    config = topic_config(tmp_path)
-    install(config, f"schema_v{version}.sql")
-    db = connect(config.db_path)
-    try:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == store.SCHEMA_VERSION
-        missing = NEW_TABLES - tables_of(db)
-        assert not missing, f"version {version} did not gain {sorted(missing)}"
-        for name in sorted(NEW_TABLES):
-            assert db.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] == 0, name
-    finally:
-        db.close()
+# 2. The reference tables remain empty and match their fresh declarations --------------------------------------
 
 
 def test_the_v17_fixture_upgrades_with_the_grant_rows_and_every_other_row_unchanged(tmp_path):

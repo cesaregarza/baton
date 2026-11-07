@@ -18,7 +18,6 @@ from test_aliases import (
     rpc,
 )
 
-from baton import app
 from baton.config import Role
 
 TOPIC = "reviews"
@@ -69,20 +68,6 @@ def refusal(result):
     if isinstance(result, dict) and "content" in result:
         return " ".join(part.get("text", "") for part in result["content"])
     return str(result)
-
-
-def test_create_conversation_is_a_guest_tool():
-    assert "create_conversation" in app.GUEST_TOOLS
-
-
-def test_the_topic_tools_are_not_guest_tools():
-    for name in ("create_topic", "update_topic", "rename_topic"):
-        assert name not in app.GUEST_TOOLS, f"{name} must stay core-only"
-
-
-def test_reading_topics_is_open_to_a_guest():
-    for name in ("list_topics", "get_topic"):
-        assert name in app.GUEST_TOOLS
 
 
 def test_an_anonymous_guest_cannot_start_a_thread(topic_host):

@@ -1,17 +1,8 @@
-"""Schema 17: the two topic grant tables, on a fresh database and on every upgrade.
+"""Grant-table migrations and storage constraints.
 
-`tests/fixtures/schema_v16.sql` is the schema as the stable-topic-ids change (head 41a8a87f) created it, with
-rows: three topics that have ids, a guest alias and four conversations filed in them or in none. Every older
-fixture must still upgrade, and every upgrade must leave `topic_grants` and `topic_grant_events` empty and
-everything else as it was.
-
-The current schema version is never written here as a number. The fixture's own version is, and everything
-about the current one goes through `store.SCHEMA_VERSION` and `store.MIGRATES_FROM`, so another change
-landing first cannot make these wrong.
-
-Two existing checks follow from this and are the code writer's to update:
-* `test_migration_matrix.py::WHOLE_TABLES` must list `topic_grants` and `topic_grant_events` for the new step;
-* the new fixture needs 16 in `MIGRATES_FROM` (`test_the_upgrade_steps_cover_every_version_there_is_a_fixture_for`).
+The shared migration matrix checks every historical fixture and verifies that upgrades from versions below
+17 invent no grants. These scenarios preserve the populated v16 fixture, exercise grants after upgrading,
+and compare fresh and upgraded table declarations.
 """
 
 from __future__ import annotations
@@ -77,25 +68,6 @@ def test_the_grant_tables_are_declared_as_the_step_above_the_v16_fixture():
     assert NEW_STEP in store._STEPS
 
 
-# 2. Every older fixture reaches the current schema with both tables, empty ---------------------------------
-
-
-# Only the fixtures below the step that adds the grant tables: a fixture from that step on carries grants.
-@pytest.mark.parametrize("version", [version for version in FIXTURE_VERSIONS if version < NEW_STEP])
-def test_every_older_schema_gains_both_grant_tables_empty(tmp_path, version):
-    config = topic_config(tmp_path)
-    install(config, f"schema_v{version}.sql")
-    db = connect(config.db_path)
-    try:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == store.SCHEMA_VERSION
-        missing = NEW_TABLES - tables_of(db)
-        assert not missing, f"version {version} did not gain {sorted(missing)}"
-        for name in sorted(NEW_TABLES):
-            assert db.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] == 0, name
-    finally:
-        db.close()
-
-
 def test_the_v16_fixture_upgrades_with_nothing_but_the_grant_tables_changing(tmp_path):
     config = topic_config(tmp_path)
     install(config, "schema_v16.sql")
@@ -136,7 +108,7 @@ def test_an_upgraded_database_takes_a_grant_for_the_fixtures_own_alias_and_topic
         db.close()
 
 
-# 3. The tables a fresh database declares -------------------------------------------------------------------
+# 2. The tables a fresh database declares -------------------------------------------------------------------
 
 
 def test_a_fresh_database_declares_topic_grants_as_the_spec_lists_it(tmp_path):

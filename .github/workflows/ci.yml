@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
-      - run: uv run pytest -q
+      - run: uv run pytest -q --durations=10
 
   secret-scan:
     runs-on: ubuntu-latest

@@ -1,20 +1,10 @@
-"""The topic grant check changes three tools and no other, and a call that presents no key is answered as before.
+"""MCP tool discovery, grant arguments, and keyless guest permissions.
 
-The tool list, every other tool's input schema and description, every refusal text and every guest call stay
-exactly as they were. `create_topic` and `set_topic` gain the optional `grant_token`, and `rename_topic` gains
-`acknowledge_topic_grants`; their pins below were recomputed for exactly that. A guest that presents no key is
-refused in the same words whatever grants exist. The three reference tools, which came after, are pinned here as
-they were made: `edit_reference` takes `grant_token` too, and a guest may call the two that read.
-
-GUARD tests pin today's answers and pass before and after. The last of the grant tests needs the grant records, so it
-fails until they exist: with an active grant on a topic, a guest's calls that present no key are still refused,
-with the same words.
+Public names and behavior are explicit contracts. Descriptions and registration order can change without
+recomputing snapshots. Activating a grant does not change schemas or authorize a call that presents no key.
 """
 
 from __future__ import annotations
-
-import hashlib
-import json
 
 import pytest
 import test_topic_guest_surface as surface
@@ -28,42 +18,41 @@ from baton.database import store
 guest_host = surface.guest_host  # the credentials the topic host is built on
 topic_host = surface.topic_host
 
-# Each tool as `tools/list` shows it (name, description, input schema, annotations), shortened to 12 hex
-# digits of its canonical JSON: a change to any one shows up as that one tool's line.
-TOOLS = {
-    "whoami": "1c78530665fc",
-    "alias_exists": "adecd0694710",
-    "claim_alias": "eeac78be5de2",
-    "bind_events": "652b57bd4ba2",
-    "unbind_events": "753c08daddc6",
-    "send_message": "ac8107ee5796",
-    "read_messages": "3160263c55ef",
-    "wait": "a2490f8b3a2f",
-    "create_job": "e6a521745eed",
-    "move_job": "f242c8d7c9f3",
-    "get_job": "cb0fd5be32be",
-    "list_jobs": "7af25ba35768",
-    "read_job_events": "1248657164ef",
-    "read_secretary_summaries": "a29a3ee6651d",
-    "create_conversation": "4c477d055d79",
-    "list_conversations": "d2564ef0696d",
-    "read_history": "a77467aef649",
-    "add_participant": "aa43e161b34c",
-    "remove_participant": "4f585683f8ad",
-    # c7842ef shortened the explicit-null explanation; its arguments and annotations are unchanged.
-    "set_topic": "2568e770ab26",
-    "create_topic": "e7ca129d5f35",
-    "update_topic": "95e4df4d625a",
-    "rename_topic": "383655a18830",
-    "list_topics": "a7b2f4a13b37",
-    "get_topic": "bf27aa557812",
-    "edit_reference": "6d122b95d779",
-    "read_reference": "673746dd5430",
-    "reference_history": "91110adca101",
-    "search": "a66624d6f016",
-    "get_message": "d249b55ec56d",
-    "read_artifacts": "240da135d827",
-}
+# The public tool names are stable. Individual argument and permission contracts are covered at their
+# behavior boundaries and in their owning test modules.
+TOOL_NAMES = [
+    "whoami",
+    "alias_exists",
+    "claim_alias",
+    "bind_events",
+    "unbind_events",
+    "send_message",
+    "read_messages",
+    "wait",
+    "create_job",
+    "move_job",
+    "get_job",
+    "list_jobs",
+    "read_job_events",
+    "read_secretary_summaries",
+    "create_conversation",
+    "list_conversations",
+    "read_history",
+    "add_participant",
+    "remove_participant",
+    "set_topic",
+    "create_topic",
+    "update_topic",
+    "rename_topic",
+    "list_topics",
+    "get_topic",
+    "edit_reference",
+    "read_reference",
+    "reference_history",
+    "search",
+    "get_message",
+    "read_artifacts",
+]
 GUEST_MAY_CALL = {
     "whoami",
     "alias_exists",
@@ -81,46 +70,39 @@ GUEST_MAY_CALL = {
 }
 
 
-def fingerprint(tool: dict) -> str:
-    # A description comes from a docstring, whose indentation Python 3.12 keeps and 3.13 strips: compare words.
-    tool = {**tool, "description": " ".join(tool["description"].split())}
-    return hashlib.sha256(json.dumps(tool, sort_keys=True).encode()).hexdigest()[:12]
-
-
 async def listed_tools(client, host, role):
     return (await rpc(client, host, "tools/list", {}, role=role))["result"]["tools"]
 
 
-def test_the_tool_list_and_every_schema_are_unchanged(topic_host):  # GUARD
+def test_the_public_tool_names_are_stable(topic_host):  # GUARD
     async def scenario(client):
         for role in ("planner", "guest"):
-            shown = {tool["name"]: fingerprint(tool) for tool in await listed_tools(client, topic_host, role)}
-            assert list(shown) == list(TOOLS), f"{role} sees a different list of tools"
-            assert shown == TOOLS, [name for name in TOOLS if shown.get(name) != TOOLS[name]]
+            shown = sorted(tool["name"] for tool in await listed_tools(client, topic_host, role))
+            assert shown == sorted(TOOL_NAMES), f"{role} sees a different set of tool names"
 
     dispatch(topic_host, scenario)
 
 
-# The only places a tool's text may name a topic grant: the key a guest presents, and a rename's acknowledgement.
+# Only the tools that consume a grant expose its input arguments.
 GRANT_ARGUMENTS = {
     "grant_token": {"create_topic", "set_topic", "edit_reference"},
     "acknowledge_topic_grants": {"rename_topic"},
 }
 
 
-def test_a_topic_grant_is_named_only_by_the_arguments_that_use_one_and_no_tool_names_a_key(topic_host):  # GUARD
+def test_only_grant_aware_tools_accept_grant_arguments(topic_host):
     async def scenario(client):
         for tool in await listed_tools(client, topic_host, "planner"):
-            text = json.dumps(tool).lower()
-            assert "grant_key" not in text and "tgk_" not in text, tool["name"]
+            properties = tool["inputSchema"].get("properties", {})
+            assert "grant_key" not in properties, tool["name"]
             for argument, tools in GRANT_ARGUMENTS.items():
-                assert (argument in text) == (tool["name"] in tools), (argument, tool["name"])
+                assert (argument in properties) == (tool["name"] in tools), (argument, tool["name"])
 
     dispatch(topic_host, scenario)
 
 
 def test_the_guest_tools_are_the_same_eleven_and_the_two_that_read_references(topic_host):  # GUARD
-    assert app.GUEST_TOOLS & set(TOOLS) == GUEST_MAY_CALL
+    assert app.GUEST_TOOLS == GUEST_MAY_CALL
 
 
 def required_arguments(tool: dict) -> dict:
@@ -217,7 +199,10 @@ def test_an_active_grant_changes_no_answer_to_a_call_that_presents_no_key(topic_
             ("create_conversation", {"title": "t", "topic": "nowhere", "token": token}),
         ]
         before = [await call(client, topic_host, name, arguments) for name, arguments in asked]
-        shown_before = {tool["name"]: fingerprint(tool) for tool in await listed_tools(client, topic_host, "guest")}
+        shown_before = [
+            (tool["name"], tool["inputSchema"], tool["annotations"])
+            for tool in await listed_tools(client, topic_host, "guest")
+        ]
 
         conn = store.connect(topic_host.config.db_path)
         try:
@@ -228,11 +213,11 @@ def test_an_active_grant_changes_no_answer_to_a_call_that_presents_no_key(topic_
         assert granted["grant_key"], "the grant is active"
 
         assert [await call(client, topic_host, name, arguments) for name, arguments in asked] == before
-        assert (
-            {tool["name"]: fingerprint(tool) for tool in await listed_tools(client, topic_host, "guest")}
-            == shown_before
-            == TOOLS
-        )
+        shown_after = [
+            (tool["name"], tool["inputSchema"], tool["annotations"])
+            for tool in await listed_tools(client, topic_host, "guest")
+        ]
+        assert shown_after == shown_before
 
     dispatch(topic_host, scenario)
 

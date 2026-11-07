@@ -54,9 +54,9 @@ def events_of(host, events: Any = None) -> Any:
 # --- R2-1: one canonical callback, checked and sent as the same string ------------------------------
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
+def test_non_canonical_callbacks_are_refused_before_any_request(events_host, receiver) -> None:
+    host = events_host()
+    for path in [
         "/hooks/../outside",
         "/hooks/./a",
         "/hooks/%2e%2e/outside",
@@ -70,14 +70,11 @@ def events_of(host, events: Any = None) -> Any:
         "/hooks/a?x=1",
         "/hooks/a#f",
         "/hooks/%252e%252e/outside",
-    ],
-)
-def test_non_canonical_callbacks_are_refused_before_any_request(events_host, receiver, path: str) -> None:
-    host = events_host()
-    error = subscribe(host, "worker", receiver.url(path), new_secret()).get("error", {})
-    assert error.get("code") == integration.CALLBACK_ENDPOINT_ERROR, error
-    assert receiver.requests == []
-    assert state(host)["subscriptions"] == {}
+    ]:
+        error = subscribe(host, "worker", receiver.url(path), new_secret()).get("error", {})
+        assert error.get("code") == integration.CALLBACK_ENDPOINT_ERROR, (path, error)
+        assert receiver.requests == [], path
+        assert state(host)["subscriptions"] == {}, path
 
 
 @pytest.mark.parametrize("url", ["HTTPS://callback.test:{port}/hooks/a", "https://CALLBACK.test:{port}/hooks/a"])

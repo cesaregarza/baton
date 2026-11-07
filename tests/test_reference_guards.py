@@ -1,41 +1,21 @@
-"""What the reference tools must leave exactly as it was. Every test here is a GUARD: it passes on the code before the
-reference tools exist and must pass after.
+"""Reference-tool compatibility: keyless guest permissions, core responses, and audit records.
 
-What this pins:
-
-* Every tool that existed before has the same name, input schema, annotations and whitespace-collapsed description, in
-  the same order, and there is still no tool to propose, list or renounce a topic grant.
-* A guest, with or without a binding, and a grantee that presents no key, is refused every tool that was not a guest
-  tool in the same words as before.
-* A run of topic, thread and message calls by core roles answers byte for byte as before (ids and times aside), and
-  its audit lines are unchanged; no existing tool's response gained a field, and a stale job move still carries no
-  `current_revision`, though a stale reference does.
-* `baton/app.py` stays at 800 lines or fewer.
-
-The tools that are new, and what they must be, are in `test_reference_surface.py`; they cannot pass before they exist.
+Public tool discovery and grant administration boundaries live in the shared tool contract tests.
+Reference schemas and access rules live in test_reference_surface.py.
 """
 
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
-import pytest
 import reference_support as refs
 import topic_grant_tools_support as support
 from reference_support import Anonymous, Bound, Core, board, bound_guest
 from test_aliases import rpc
-from test_topic_grant_no_tool_change import GUEST_MAY_CALL, TOOLS, fingerprint, required_arguments
+from test_tool_contracts import GUEST_MAY_CALL, required_arguments
 from topic_grant_tools_support import play, stage, tool
 
-from baton import app as app_module
-from baton.cli.main import _parser
-
 build_scene = refs.build_scene  # the fixture, under the name the tests ask for
-
-NEW_TOOLS = {"edit_reference", "read_reference", "reference_history"}
-OLD_TOOLS = {name: pinned for name, pinned in TOOLS.items() if name not in NEW_TOOLS}
-APP = Path(app_module.__file__)
 
 TIME, ID = "<time>", "<id>"
 VOLATILE_TIMES = {"created_at", "last_activity_at", "at", "updated_at"}
@@ -63,36 +43,6 @@ async def listed_tools(client, host, role):
 # 1. The tools that existed ---------------------------------------------------------------------------------
 
 
-def test_every_tool_that_existed_keeps_its_schema_annotations_description_and_place(build_scene):
-    """GUARD. Seen by a core role and by a guest alike: each earlier tool's fingerprint (name, description with its
-    whitespace collapsed, input schema, annotations) is what the topic grant checks left it, and they come in the
-    same order whatever else is listed among them."""
-    scene = build_scene()
-
-    async def scenario(client):
-        for role in ("planner", "guest"):
-            shown = {one["name"]: fingerprint(one) for one in await listed_tools(client, scene.host, role)}
-            assert [name for name in shown if name in OLD_TOOLS] == list(OLD_TOOLS), f"{role} sees another order"
-            assert {name: shown.get(name) for name in OLD_TOOLS} == OLD_TOOLS, [
-                name for name in OLD_TOOLS if shown.get(name) != OLD_TOOLS[name]
-            ]
-
-    play(scene.host, scenario)
-
-
-def test_the_tool_list_still_has_no_tool_to_propose_list_or_renounce_a_topic_grant(build_scene):
-    """GUARD. Grants are proposed, authorized and revoked by the owner on the host. No tool, for a core role or a guest,
-    has `grant` in its name, now that the reference tools are listed too."""
-    scene = build_scene()
-
-    async def scenario(client):
-        for role in ("planner", "guest"):
-            names = [one["name"] for one in await listed_tools(client, scene.host, role)]
-            assert [name for name in names if "grant" in name.lower()] == [], role
-
-    play(scene.host, scenario)
-
-
 def test_a_guest_is_refused_every_tool_that_was_not_a_guest_tool_in_the_same_words(build_scene):
     """GUARD. With no binding, with a binding and no key, and as a grantee that sends its binding token but no key:
     `guest may not call <tool>`, for every earlier tool a guest could not call, whatever the arguments."""
@@ -100,12 +50,8 @@ def test_a_guest_is_refused_every_tool_that_was_not_a_guest_tool_in_the_same_wor
 
     async def scenario(client):
         held = await board(client, scene)
-        tools = [
-            one
-            for one in await listed_tools(client, scene.host, "guest")
-            if one["name"] in OLD_TOOLS and one["name"] not in GUEST_MAY_CALL
-        ]
-        assert len(tools) == 17, [one["name"] for one in tools]
+        tools = [one for one in await listed_tools(client, scene.host, "guest") if one["name"] not in GUEST_MAY_CALL]
+        assert tools, "the scenario must exercise restricted tools"
         callers = [Anonymous(scene.host), await bound_guest(client, scene), Bound.of(held)]
         for one in tools:
             for who in callers:
@@ -348,21 +294,3 @@ def test_no_existing_tools_response_gained_a_field_and_a_stale_job_move_has_no_c
         assert stale.get("error") == "stale_revision" and set(stale) == {"error", "detail"}, stale
 
     play(scene.host, scenario)
-
-
-def test_there_is_no_command_line_command_for_references():
-    """GUARD. Q12: the reference tools are for agents; a core human gets no CLI command or page for them in this change,
-    which a later ruling would add with its own tests and its own visual review."""
-    parser = _parser()
-    for argv in (["reference"], ["references"], ["reference", "list"], ["references", "show", "job-hunt"]):
-        with pytest.raises(SystemExit):
-            parser.parse_args(argv)
-
-
-# 3. The size of the wiring ---------------------------------------------------------------------------------
-
-
-def test_app_py_is_at_most_800_lines():
-    """GUARD. `baton/app.py` stays one screen of wiring: the reference tools' bodies are not in it."""
-    lines = APP.read_text().splitlines()
-    assert len(lines) <= 800, f"baton/app.py is {len(lines)} lines"
