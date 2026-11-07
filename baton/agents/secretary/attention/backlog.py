@@ -44,6 +44,8 @@ class Backlog:
             "content_failures": "INTEGER NOT NULL DEFAULT 0",
             "model_successes": "INTEGER NOT NULL DEFAULT 0",
             "model_policy": "TEXT NOT NULL DEFAULT ''",
+            # A due retry that the hourly's scheduled lane passed over for a digest, since its last attempt.
+            "passed_over": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, declaration in additions.items():
             if name not in columns:
@@ -115,7 +117,7 @@ class Backlog:
                 status, mode, due, decision = "held", "digest", scheduled or now + digest_seconds, None
             conn.execute(
                 "UPDATE backlog_windows SET status=?,mode=?,next_attempt=?,decision=?,"
-                "attempts=0,content_failures=0,model_successes=0,model_policy='',error=NULL "
+                "attempts=0,content_failures=0,model_successes=0,model_policy='',error=NULL,passed_over=0 "
                 "WHERE principal=? AND since=? AND through=? AND status='retry'",
                 (status, mode, due, decision, self.log.principal, page.since, page.through),
             )
@@ -149,7 +151,7 @@ class Backlog:
             self._initialize(conn)
             changed = conn.execute(
                 "UPDATE backlog_windows SET status='retry',attempts=?,content_failures=?,next_attempt=?,error=?,"
-                "model_successes=?,model_policy=? "
+                "model_successes=?,model_policy=?,passed_over=0 "
                 "WHERE principal=? AND since=? AND through=? AND mode=? AND status='retry' "
                 "AND attempts=? AND model_successes=? AND model_policy=?",
                 (
@@ -185,6 +187,32 @@ class Backlog:
                 (self.log.principal, "held" if held else "retry", now, position, position, position, mode, mode, limit),
             )
             return [Page(*row) for row in rows]
+
+    def passed_over(self, now: float) -> bool:
+        """Whether a due retry was passed over for a digest since its last attempt."""
+        with self.log.connection() as conn, conn.transaction():
+            self._initialize(conn)
+            return (
+                conn.execute(
+                    "SELECT 1 FROM backlog_windows WHERE principal=? AND status='retry' AND next_attempt<=? "
+                    "AND passed_over=1 LIMIT 1",
+                    (self.log.principal, now),
+                ).fetchone()
+                is not None
+            )
+
+    def pass_over(self, now: float) -> None:
+        """Mark the earliest due retry, the one `due` returns first, as passed over for a digest.
+
+        It stays first until it is attempted: any page that becomes due later has a later next attempt.
+        """
+        with self.log.connection() as conn, conn.transaction():
+            self._initialize(conn)
+            conn.execute(
+                "UPDATE backlog_windows SET passed_over=1 WHERE rowid=(SELECT rowid FROM backlog_windows "
+                "WHERE principal=? AND status='retry' AND next_attempt<=? ORDER BY next_attempt,since LIMIT 1)",
+                (self.log.principal, now),
+            )
 
     def waiting_retry(self, position: int | None = None, *, mode: str | None = None) -> bool:
         """Whether this trigger belongs to retained failed work, even during its backoff."""

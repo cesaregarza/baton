@@ -6,7 +6,8 @@ lane, then the ready summaries). These tests drive only those entry points, on a
 sequence a host goes through when a range that fit the old bounds no longer fits the new ones: the range refused
 before any model call and split at once, its parts assessed, a digest change under a pending summary, a crash before
 a split, a duplicate callback, a reply whose parent outweighs the byte bound, an event larger than the byte bound,
-newer work going ahead of the old range, and callbacks that move a scan backlog.
+newer work going ahead of the old range, callbacks that move a scan backlog, and an hourly whose scheduled lane
+alternates a due digest and a due retry when new events reach no callback.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ CANDIDATE_BOUNDS = {"max_events": 10, "context_bytes": 24 * 1024}
 BACKOFF = {"max_attempts": 3, "retry_initial_seconds": 5, "retry_max_seconds": 300}
 BUDGET = 10
 RANGE_EVENTS = 41
+HOLD = {"decision": "hold", "summary": "", "sources": []}
 # Two replies whose parents fall outside the page they end up in. One parent was delivered before the range; the other
 # is inside the range until a split puts it in another part. Each then counts against max_events, never toward the
 # split, which divides only the visible events.
@@ -63,12 +65,14 @@ class Retained:
 
 @dataclass
 class Hourly:
-    """What each of the hourly's two lanes ended with, whether each asked the model, and what is ready after them."""
+    """What each of the hourly's two lanes ended with, whether each asked the model, the modes of the scheduled lane's
+    model requests, and what is ready after them."""
 
     scan: Exception | None
     scheduled: Exception | None
     pending: list[dict]
     asked: tuple[bool, bool] = (False, False)
+    scheduled_modes: tuple[str, ...] = ()
 
 
 def _rows(world) -> list[dict]:
@@ -136,7 +140,8 @@ async def _hourly(secretary: Secretary, model=None) -> Hourly:
                 scheduled = await _lane(queue, action)
                 break
         asked = (between > before, calls() > between)
-        return Hourly(scan, scheduled, await queue.pending(), asked)
+        modes = tuple(request["context"]["mode"] for request in model.requests[between:]) if model is not None else ()
+        return Hourly(scan, scheduled, await queue.pending(), asked, modes)
 
 
 async def _lane(queue: AttentionQueue, action) -> Exception | None:
@@ -550,41 +555,85 @@ def test_duplicate_concurrent_callbacks_on_a_retried_range_split_it_once(tmp_pat
         assert len(leaves) == 7 and all(row["status"] == "ready" for row in leaves)
 
 
-def test_an_hourly_with_nothing_new_to_scan_reaches_a_due_retry_while_a_digest_takes_its_scheduled_lane(
+def test_the_scheduled_lane_alternates_a_due_digest_and_a_due_retry_when_new_events_reach_no_callback(
     tmp_path, monkeypatch
 ) -> None:
     with make_world(tmp_path) as world:
-        worker, model = _worker(world, tmp_path, plan={"decision": "hold", "summary": "", "sources": []})
+        worker, model = _worker(world, tmp_path, plan=HOLD)
         policy(world, **CANDIDATE_BOUNDS, **BACKOFF, digest_seconds=60)
         secretary = worker.instance.secretary
         now = [1000.0]
         monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
         asyncio.run(secretary.activate())
-        room = conversation(world)
-        held = [say(world, room, "worker", f"A routine update {number}") for number in range(3)]
-        result, error, _ = asyncio.run(_callback(secretary, _trigger(held[-1])))
-        assert error is None and result["decision"] == "hold"
-        model.set_plan({"steps": [{"exit": 1}]})
-        failed = [say(world, room, "reviewer", f"An update whose assessment failed {number}") for number in range(2)]
-        result, error, _ = asyncio.run(_callback(secretary, _trigger(failed[-1])))
-        assert result is None and isinstance(error, SecretaryUnavailable)
-        model.set_plan({})
-        now[0] += 120  # both the held page's digest and the failed page's retry are due; no callback comes
+        rooms = [conversation(world) for _ in range(3)]
 
-        # Nothing new to scan, so the scan lane's budget goes to the due retry, while the digest takes the scheduled
-        # lane: one hourly reaches both, with no callback and no timer of its own.
-        calls = len(model.requests)
-        hourly = asyncio.run(_hourly(secretary, model))
-        assert hourly.scan is None and hourly.scheduled is None and hourly.asked == (True, True)
-        assert len(model.requests) == calls + 2 and not _retrying(world)
-        assert [request["context"]["mode"] for request in model.requests[calls:]] == ["alert", "digest"]
-        assert sorted(summary["mode"] for summary in hourly.pending) == ["alert", "digest"]
-        covered = _event_keys(hourly.pending)
-        assert covered == Counter(f"message:{sent['message_id']}" for sent in [*held, *failed])
+        # Held pages with a failed page between each two, so that each digest takes one run of held pages and stops at
+        # a retry: held, retry, held, retry, held. Every held page is due with the first.
+        held, failed = [], []
+        for number in range(3):
+            model.set_plan(HOLD)
+            held.append([say(world, rooms[0], "worker", f"Routine update {number}.{n}") for n in range(3)])
+            result, error, _ = asyncio.run(_callback(secretary, _trigger(held[-1][-1])))
+            assert error is None and result is not None and result["decision"] == "hold"
+            if number == 2:
+                break
+            model.set_plan({"steps": [{"exit": 1}]})
+            failed.append([say(world, rooms[1], "reviewer", f"A failed update {number}.{n}") for n in range(2)])
+            result, error, _ = asyncio.run(_callback(secretary, _trigger(failed[-1][-1])))
+            assert result is None and isinstance(error, SecretaryUnavailable)
+        assert [row["status"] for row in _rows(world)] == ["held", "retry", "held", "retry", "held"]
 
-        # With nothing due, an idle scan lane asks nothing, as before.
-        hourly = asyncio.run(_hourly(secretary, model))
-        assert hourly.asked == (False, False) and len(model.requests) == calls + 2
+        def hourly(new_events: int, scheduled: dict | None = None) -> Hourly:
+            """One hour later, with new events that reached no callback (a forced wake or a job event makes none). The
+            scan lane holds them; the scheduled lane's model answer is valid for a digest and for an alert."""
+            now[0] += 3600
+            for n in range(new_events):
+                say(world, rooms[2], "worker", f"An update with no callback {now[0]}.{n}")
+            done = len(model.requests)
+            model.set_plan({"steps": [{}] * done + ([HOLD] if new_events else []) + [scheduled or {}]})
+            return asyncio.run(_hourly(secretary, model))
+
+        def waiting(pages: list[list[dict]]) -> list[bool]:
+            starts = [_position(world, page[0]["message_id"]) for page in pages]
+            return [any(row["since"] < start <= row["through"] for row in _retrying(world)) for start in starts]
+
+        # Both failed pages are due from the start. The first hourly digests, and its scan lane, with nothing new to
+        # scan, never takes the retry: its budget is the smaller, so a page that fits the scheduled lane could time out
+        # there, and a timeout counts toward the gate's latch.
+        first = hourly(0)
+        assert first.asked == (False, True) and first.scheduled_modes == ("digest",)
+        assert waiting(failed) == [True, True]
+
+        # From then on the scan lane holds new events every hour, so a digest is due at every scheduled lane, and no
+        # callback comes. The digest marked the earliest due retry it passed over, so the next scheduled lane takes
+        # that retry first; then the due digest, though the second retry is due too, and it marks that one.
+        second = hourly(3)
+        assert second.asked == (True, True) and second.scheduled_modes == ("alert",)
+        assert waiting(failed) == [False, True]
+        third = hourly(3)
+        assert third.scheduled_modes == ("digest",) and waiting(failed) == [False, True]
+        assert all(lane.scan is None and lane.scheduled is None for lane in (first, second, third))
+
+        # A retry that fails again loses its mark with the attempt, so it never holds the lane: the next one digests.
+        fourth = hourly(3, {"exit": 1})
+        assert fourth.scheduled_modes == ("alert",) and isinstance(fourth.scheduled, SecretaryUnavailable)
+        assert waiting(failed) == [False, True]
+        fifth = hourly(3)
+        assert fifth.scheduled_modes == ("digest",) and waiting(failed) == [False, True]
+        sixth = hourly(3)
+        assert sixth.scheduled_modes == ("alert",) and waiting(failed) == [False, False]
+
+        # So neither waited behind more than one of the other. Three digests and both retries are ready, and no event
+        # is in two results: each of the first pages in exactly one, and the later held pages wait their turn.
+        assert sorted(summary["mode"] for summary in sixth.pending) == ["alert", "alert", "digest", "digest", "digest"]
+        covered = _event_keys(sixth.pending)
+        assert set(covered.values()) == {1}
+        assert all(
+            covered[f"message:{sent['message_id']}"] == 1
+            for page in [held[0], failed[0], held[1], held[2], failed[1]]
+            for sent in page
+        )
+        assert [row["status"] for row in _rows(world)][-1] == "held"
 
 
 def test_an_idle_scan_lane_leaves_a_lone_due_retry_to_the_scheduled_lane(tmp_path, monkeypatch) -> None:
@@ -605,7 +654,8 @@ def test_an_idle_scan_lane_leaves_a_lone_due_retry_to_the_scheduled_lane(tmp_pat
         calls = len(model.requests)
 
         # No digest is due, so the scheduled lane takes the retry, with a budget never smaller than the scan lane's.
-        # The idle scan lane leaves it there: a page that fits the scheduled lane could time out in the scan lane.
+        # The idle scan lane leaves it there, as it leaves every retry: a page that fits the scheduled lane could time
+        # out in the scan lane.
         hourly = asyncio.run(_hourly(secretary, model))
         assert hourly.scan is None and hourly.scheduled is None and hourly.asked == (False, True)
         assert len(model.requests) == calls + 1 and not _retrying(world)
@@ -713,15 +763,15 @@ def test_an_alert_decide_with_nothing_new_to_scan_never_takes_a_due_digest(tmp_p
         calls = len(model.requests)
 
         # An alert decide, untriggered or for a trigger already assessed, finds nothing new and returns the empty
-        # assessment it always has. Spending an idle scan on scheduled work is the hourly's alone: an alert call has
-        # already resumed what was due, and never returns a digest.
+        # assessment it always has. A scan never takes scheduled work: an alert call has already resumed what was due,
+        # and never returns a digest.
         for trigger in (None, _trigger(held[-1])):
             result = asyncio.run(secretary.decide(budget_seconds=BUDGET, trigger=trigger))
             assert result["mode"] == "alert" and result["event_count"] == 0
         assert len(model.requests) == calls
         assert [row["status"] for row in _rows(world)] == ["held"]
 
-        # The hourly's scheduled lane takes it; with no retry due, its idle scan lane asks nothing.
+        # The hourly's scheduled lane takes it, and its idle scan lane asks nothing.
         hourly = asyncio.run(_hourly(secretary, model))
         assert hourly.asked == (False, True)
         assert [request["context"]["mode"] for request in model.requests[calls:]] == ["digest"]

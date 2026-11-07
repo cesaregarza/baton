@@ -41,7 +41,7 @@ class AttentionQueue:
         _, floor = await database.call(log.activate, epoch, head)
         return cls(secretary, database, policy, Backlog(log), floor)
 
-    async def scan(self, budget: float, *, trigger: str | None = None, scheduled: bool = True) -> dict | None:
+    async def scan(self, budget: float, *, trigger: str | None = None) -> dict | None:
         since = await self.database.call(self.backlog.scanned)
         try:
             window = await self.database.call(InboxWindow.read, self.secretary.config, self.policy, since)
@@ -50,35 +50,14 @@ class AttentionQueue:
             await self.database.call(self.backlog.enqueue, page, time.time())
             return await self._failed(page, error)
         run = DecisionRun(self.secretary, budget, since, self.floor, trigger, through=window.through)
-        if window.events:
-            page = Page(since, window.through)
-            await self.database.call(self.backlog.enqueue, page, time.time())
-            return await self._attempt(page, budget, trigger=trigger)  # a trigger beyond this page makes it catch-up
-        if window.through != since:
-            page = Page(since, window.through)
-            await self.database.call(self.backlog.enqueue, page, time.time())
+        if window.through == since:
+            return await run.run()
+        page = Page(since, window.through)
+        await self.database.call(self.backlog.enqueue, page, time.time())
+        if not window.events:
             await self.database.call(self.backlog.discard_empty, page)
-        if trigger is None and scheduled:
-            result = await self._scheduled(budget)
-            if result is not None or self.last_error is not None:
-                return result
-        return await run.run()
-
-    async def _scheduled(self, budget: float) -> dict | None:
-        """An untriggered scan with nothing new to read takes the due retry that the scheduled lane will pass over.
-
-        The hourly runs its scan, then one scheduled lane, and that lane takes a digest whenever one is due. A held page
-        makes one due a minute later, so with any traffic it never reached a retry: retained work waited on callbacks,
-        or with none at all on alternate hours. While a digest is due, a scan lane with nothing to scan now takes the
-        earliest due retry, within its own budget and deadline, with no new timer. Any other scheduled work stays with
-        the scheduled lane, whose budget is never the smaller: a page that fits there could time out here, and a
-        timeout is a counted failure. A triggered scan never does this, and a scan never digests here, so an alert
-        decide never returns a digest. The worker's `poll` turns it off: its own scheduled lane alternates, each lane
-        with a full budget, so neither kind waits there.
-        """
-        if not await self.database.call(self.backlog.due, time.time(), held=True):
-            return None  # a due retry is the scheduled lane's own, with its larger budget
-        return await self.retry(budget)
+            return await run.run()
+        return await self._attempt(page, budget, trigger=trigger)  # a trigger beyond this page makes it catch-up
 
     async def assess(self, budget: float, *, trigger: str | None = None, hourly: bool = False) -> dict | None:
         """The host API resumes retained work before scanning another page."""
@@ -94,13 +73,31 @@ class AttentionQueue:
                 return result
         if await self.database.call(self.backlog.waiting_retry, position, mode="digest" if hourly else None):
             raise SecretaryUnavailable("the retained page is waiting for retry backoff")
-        return await self.digest(budget) if hourly else await self.scan(budget, trigger=trigger)
+        return await self._digest(budget) if hourly else await self.scan(budget, trigger=trigger)
 
     async def retry(self, budget: float) -> dict | None:
         due = await self.database.call(self.backlog.due, time.time())
         return await self._attempt(due[0], budget) if due else None
 
     async def digest(self, budget: float) -> dict | None:
+        """The hourly's scheduled lane: the due digest, unless a digest already passed over the earliest due retry.
+
+        The host's scheduled lane calls this whenever a held page is due, and `retry` only when none is. With any
+        traffic a held page is due almost every hour, callbacks or not: the hourly's own scan holds pages for events
+        that never reach a callback, such as job events and forced wakes. So a due retry could wait there without
+        bound. Now a digest marks the earliest due retry it passes over, and the next scheduled lane takes that retry
+        first; its attempt clears the mark. The mark is stored with the page, since each hourly is a fresh process.
+        While both are due the lane alternates: a due retry waits behind at most one digest for each retry due before
+        it, and a digest behind at most one retry, in the same lane and budget, with no new timer. The scan lane never
+        takes scheduled work, because its budget is the smaller: a page that fits the scheduled lane could time out
+        there, and a timeout counts toward the gate's latch.
+        """
+        if await self.database.call(self.backlog.passed_over, time.time()):
+            return await self.retry(budget)
+        await self.database.call(self.backlog.pass_over, time.time())
+        return await self._digest(budget)
+
+    async def _digest(self, budget: float) -> dict | None:
         due = await self.database.call(self.backlog.due, time.time(), held=True, limit=self.policy.max_events)
         if not due:
             return None
@@ -127,9 +124,9 @@ class AttentionQueue:
         New traffic cannot consume the recovery budget. The worker alternates which
         scheduled lane goes first so retries and digests also get time under load.
         """
-        await self.scan(budget, scheduled=False)  # the scheduled lane below is this call's only scheduled work
+        await self.scan(budget)
         scheduled = (
-            ((True, self.digest), (False, self.retry)) if digest_first else ((False, self.retry), (True, self.digest))
+            ((True, self._digest), (False, self.retry)) if digest_first else ((False, self.retry), (True, self._digest))
         )
         for held, action in scheduled:
             if await self.database.call(self.backlog.due, time.time(), held=held):
