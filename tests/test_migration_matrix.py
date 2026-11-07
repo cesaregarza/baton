@@ -195,9 +195,9 @@ def test_every_older_schema_there_is_a_fixture_for_reaches_the_current_one_whole
         assert shown["seq"] == 3 and shown["reply_to"] == {"message_id": "msg_group", "seq": 1}
         assert (shown["attention"], shown["needs_decision"], shown["author_kind"]) == (["orchestrator"], True, "agent")
         assert answer["seqs"]["assistant"] == 4
-        # It has no topic yet, and can be given one straight away once the topic exists. Picked by id: some
-        # fixtures carry conversations of their own.
-        [listed] = [c for c in conversations.list_for(db, "reviewer") if c["conversation_id"] == CONVERSATION]
+        # It has no topic yet, and can be given one straight away once the topic exists.
+        [listed] = conversations.list_for(db, "reviewer")
+        assert listed["conversation_id"] == CONVERSATION
         assert (listed["title"], listed["topic"]) == ("Carried over", None)
         back_topics(db, "project/carried")
         filed = conversations.set_topic(db, config, CONVERSATION, "project/carried", actor="orchestrator")

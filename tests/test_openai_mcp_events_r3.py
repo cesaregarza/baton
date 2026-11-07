@@ -215,6 +215,7 @@ def test_the_occurrence_time_is_stable_across_retries(events_host, receiver, mon
     send(host, "worker", "hello")
     dispatch(host)
     # The retry is sent two seconds later by the integration's clock; the stored occurrence time must not follow it.
+    # The integration reads time.time, time.monotonic and time.sleep from this module; only the wall clock moves.
     later = types.SimpleNamespace(time=lambda: time.time() + 2, monotonic=time.monotonic, sleep=time.sleep)
     monkeypatch.setattr(integration, "time", later)
     receiver.statuses = {}
