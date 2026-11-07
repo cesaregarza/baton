@@ -142,28 +142,73 @@ def test_the_byte_bound_holds_with_at_least_one_summary():
 
 @pytest.mark.parametrize("state", ["not_reached", "retry", "not_visible", None])
 def test_an_unassessed_trigger_keeps_the_rereads_and_is_named_with_its_state(state):
-    chosen = delivery.reading(decided_by="secretary", trigger="message:42", trigger_state=state, historical=1)
+    chosen = delivery.reading(
+        decided_by="secretary", trigger="message:42", trigger_state=state, carried=[summary(1, catch_up=True)]
+    )
     assert not chosen.replaces_rereads
     assert (
         f"Not assessed by the secretary: message:42, this wake's own event (trigger_state {state or 'unknown'})"
         in chosen.note
     )
     assert "additional historical context" in chosen.note and "existing fallback" in chosen.note
+    assert "read the current inbox and any held replay" in chosen.note
     assert delivery.lead("a brief", chosen) == (chosen.note, False)
 
 
 def test_only_an_assessed_trigger_the_secretary_decided_lets_the_brief_replace_the_rereads():
-    assessed = delivery.reading(decided_by="secretary", trigger="message:42", trigger_state="assessed", historical=1)
+    carried = [summary(1, catch_up=True), summary(42)]
+    assessed = delivery.reading(decided_by="secretary", trigger="message:42", trigger_state="assessed", carried=carried)
     assert assessed == delivery.Reading(True) and delivery.lead("a brief", assessed) == ("", True)
-    fallback = delivery.reading(decided_by="jev_gate", trigger="message:42", trigger_state="assessed", historical=0)
+    fallback = delivery.reading(
+        decided_by="fallback", trigger="message:42", trigger_state="assessed", carried=[summary(42)]
+    )
     assert not fallback.replaces_rereads and "additional context" in fallback.note
     assert "historical" not in fallback.note
 
 
+def test_an_assessed_trigger_whose_own_result_is_left_for_next_time_keeps_the_rereads():
+    older = [summary(n, brief="x" * 5000) for n in range(1, 5)]
+    trigger = summary(42, brief="y" * 5000, message="msg_trigger")
+    pending = [*older, trigger]
+    framed = delivery.frame(pending, START, END)
+    assert trigger["decision_id"] not in framed.ids and "more next time" in framed.text
+    carried = [item for item in pending if item["decision_id"] in framed.ids]
+    left = [item for item in pending if item["decision_id"] not in framed.ids]
+    chosen = delivery.reading(
+        decided_by="secretary", trigger="message:42", trigger_state="assessed", carried=carried, left=left
+    )
+    assert not chosen.replaces_rereads
+    assert "Assessed by the secretary, but its own result is not in this brief: message:42" in chosen.note
+    assert "read the current inbox and any held replay stand" in chosen.note
+    assert delivery.lead("a brief", chosen) == (chosen.note, False)
+    # The text kept the rereads, so its confirmed queue announces on the inbox basis, as any such text does.
+    admission = ["msg_trigger", "msg_later"]
+    assert delivery.announceable(admission, replaced_rereads=False, covered_ids=[]) == admission
+    # Another trigger's result left for later, or a historical one, does not hold back this trigger's brief.
+    assert delivery.reading(
+        decided_by="secretary", trigger="message:43", trigger_state="assessed", carried=carried, left=left
+    ).replaces_rereads
+
+
+def test_the_trigger_s_own_result_is_one_stored_for_that_trigger_and_not_catch_up():
+    assert delivery.own(summary(42), "message:42")
+    assert not delivery.own(summary(42), "message:41") and not delivery.own(summary(42), None)
+    assert not delivery.own({**summary(42), "catch_up": True}, "message:42")
+    assert not delivery.own(summary(42, catch_up=True), "message:42")
+
+
 def test_a_scheduled_turn_replaces_the_rereads_only_without_history():
-    assert delivery.reading(decided_by="secretary", trigger=None, trigger_state=None, historical=0).replaces_rereads
-    held = delivery.reading(decided_by="secretary", trigger=None, trigger_state=None, historical=2)
+    assert delivery.reading(
+        decided_by="secretary", trigger=None, trigger_state=None, carried=[summary(1), summary(2)]
+    ).replaces_rereads
+    held = delivery.reading(
+        decided_by="secretary",
+        trigger=None,
+        trigger_state=None,
+        carried=[summary(1, catch_up=True), summary(2, catch_up=True), summary(3)],
+    )
     assert not held.replaces_rereads and "2 historical catch-up summaries" in held.note
+    assert "each for a wake whose own event was not on its page" in held.note
     assert "does not replace the instructions below to read the current inbox" in held.note
 
 
