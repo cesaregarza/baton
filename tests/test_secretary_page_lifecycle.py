@@ -131,6 +131,14 @@ def _reassessed_once(world, model, secretary, trigger: str, stale: dict, invalid
     assert asyncio.run(_pending(secretary)) == []
 
 
+def _baseline(world) -> tuple[int, str]:
+    """The stored page's model baseline: the successes count and policy its last answer or failure recorded."""
+    log = AttentionLog(world.state_path, world.config.data_dir, "planner")
+    with log.connection() as conn:
+        row = conn.execute("SELECT model_successes,model_policy FROM backlog_windows WHERE principal='planner'").one()
+    return row[0], row[1]
+
+
 @pytest.mark.parametrize("stale", ["hold", "summary"])
 def test_a_stalled_answer_never_finishes_a_page_that_was_finished_and_invalidated_since(
     tmp_path, monkeypatch, stale
@@ -160,7 +168,7 @@ def test_a_stalled_answer_never_finishes_a_page_that_was_finished_and_invalidate
 
 def test_a_stalled_restore_never_finishes_a_page_that_was_finished_and_invalidated_since(tmp_path, monkeypatch) -> None:
     with make_world(tmp_path) as world:
-        worker, model = _worker(world, tmp_path)
+        worker, model = _worker(world, tmp_path, plan={"steps": [{"exit": 1}]})
         policy(world, **BACKOFF)
         secretary = worker.instance.secretary
         now = [1000.0]
@@ -170,8 +178,10 @@ def test_a_stalled_restore_never_finishes_a_page_that_was_finished_and_invalidat
         sent = [say(world, room, "worker", f"Saved update {number}") for number in range(2)]
         trigger = _trigger(sent[-1])
 
-        # A callback's process saves its summary and is killed before it finishes the page: a fresh retry, with no
-        # attempt, due at once, beside a saved result.
+        # The engine requires attention and the model is down, so a callback's process saves the engine's notice, with
+        # no model answer and so no model baseline, and is killed before it finishes the page: a fresh retry with no
+        # attempt, due at once, every counter and baseline zero, beside a saved result.
+        model.set_engine_plan({"decision": "wake", "wake_probability": 0.95})
         original = Backlog.finish
 
         def killed(self, *args, **kwargs):
@@ -181,9 +191,12 @@ def test_a_stalled_restore_never_finishes_a_page_that_was_finished_and_invalidat
         with pytest.raises(RuntimeError, match="synthetic kill"):
             asyncio.run(secretary.decide(budget_seconds=BUDGET, trigger=trigger))
         monkeypatch.setattr(Backlog, "finish", original)
+        model.set_plan({})
         [read] = _rows(world)
         assert (read["status"], read["attempts"], read["next_attempt"]) == ("retry", 0, now[0])
+        assert _baseline(world) == (0, "")
         [saved] = _saved(world)
+        assert saved["kind"] == "engine_wake" and saved["trigger"] == trigger
 
         # Callback A, for the same message, finds that result and stalls before it finishes the page with it.
         # Meanwhile callback B, for the other message, finishes the page with it, and a policy edit invalidates it.
@@ -199,7 +212,7 @@ def test_a_stalled_restore_never_finishes_a_page_that_was_finished_and_invalidat
         assert {key: value for key, value in invalidated.items() if key != "next_attempt"} == {
             key: value for key, value in read.items() if key != "next_attempt"
         }
-        assert invalidated["next_attempt"] == now[0] > read["next_attempt"]
+        assert invalidated["next_attempt"] == now[0] > read["next_attempt"] and _baseline(world) == (0, "")
 
         # The due time tells them apart, so A's restore finishes nothing, and A gets nothing from the page.
         outcome = stalled.resume()
@@ -246,14 +259,6 @@ def test_a_valid_answer_that_a_failure_recorded_since_refuses_is_restored_only_u
         # After a policy edit the saved answer is never restored or delivered: the page is assessed again.
         policy(world, summary_bytes=4096)
         _reassessed_once(world, model, secretary, trigger, answer, failed)
-
-
-def _baseline(world) -> tuple[int, str]:
-    """The stored page's model baseline: the successes count and policy its last answer or failure recorded."""
-    log = AttentionLog(world.state_path, world.config.data_dir, "planner")
-    with log.connection() as conn:
-        row = conn.execute("SELECT model_successes,model_policy FROM backlog_windows WHERE principal='planner'").one()
-    return row[0], row[1]
 
 
 def test_a_stalled_answers_baseline_on_a_reassessed_page_never_delays_its_reassessment(tmp_path, monkeypatch) -> None:
