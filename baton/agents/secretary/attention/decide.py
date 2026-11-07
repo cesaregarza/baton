@@ -64,6 +64,8 @@ class DecisionRun:
     # The baseline this attempt wrote, so later failures can still match its retained page.
     model_successes: int | None = field(default=None, init=False)
     model_policy: str = field(default="", init=False)
+    # Set when the caller's trigger is not on this page: the page is backlog catch-up, never the trigger's assessment.
+    catch_up: bool = field(default=False, init=False)
 
     async def run(self) -> dict:
         self.model_successes = None
@@ -94,7 +96,11 @@ class DecisionRun:
         assert self.floor is not None  # Explicit positions are validated together; activation supplies both.
         window = await database.call(InboxWindow.read, config, policy, self.since, through=self.through)
         await database.call(log.bind, window.epoch, self.floor)
-        self._check_trigger(window)
+        if not self._on_page(window):
+            # A trigger that is not a visible event is still refused, for every caller; a visible one elsewhere is
+            # left unassessed, so this page is catch-up and its result never carries that trigger.
+            await database.call(sources.trigger_position, config, policy.principal, self.trigger)
+            self.trigger, self.catch_up = None, True
         context = self._context(policy, window)
         harness = SecretaryHarness(policy)
         verdict = None
@@ -119,9 +125,11 @@ class DecisionRun:
         cached = await database.call(log.get, key)
         if cached is not None:
             await database.call(persist, self.secretary, policy, cached)
-            return {**cached, "cached": True}
+            return {**cached, "cached": True, **({"catch_up": True} if self.catch_up else {})}
         outcome = Outcome(policy, window, self.floor, context["mode"], self.trigger)
         result = await self._infer(database, harness, context, outcome, key, forced)
+        if self.catch_up:
+            result["catch_up"] = True
         if not window.events:
             return result
         current = await database.call(InboxWindow.read, config, policy, self.since, through=window.through)
@@ -208,28 +216,25 @@ class DecisionRun:
         self.model_policy = policy.digest
         return assessment
 
-    def _check_trigger(self, window: InboxWindow) -> None:
-        """Keep the trigger only when it is on this bounded page; otherwise assess the page without it.
+    def _on_page(self, window: InboxWindow) -> bool:
+        """Whether the caller's trigger, if it names an event, is one of this bounded page's events.
 
-        Refusing a trigger beyond the page left that page unqueued, so while a backlog existed no callback moved it
-        and only the hourly scan did. Every caller now assesses the earliest bounded page instead. The trigger stays
-        unassessed: the result carries no trigger, and the caller decides that wake as it decides any trigger the
-        secretary has not reached. The model is never told of a trigger that is not on its page.
+        A trigger elsewhere used to be refused before its page was queued, so while a backlog existed no callback moved
+        it. Its page is now assessed as catch-up instead: the model is never told of the trigger, the result names no
+        trigger and is marked catch_up, and the trigger stays unassessed, so the caller decides that wake as any wake
+        the secretary has not reached, and a later page covers it.
         """
         if self.trigger is None or self.trigger == "conversation":
-            return
+            return True
         parts = self.trigger.split(":")
         if parts[0] == "message":
-            included = any(
+            return any(
                 event["kind"] == "message"
                 and event["seq"] == int(parts[1])
                 and sources.delivered_to(window.principal, event["audience"])
                 for event in window.events
             )
-        else:
-            included = any(event["job_id"] == parts[1] and event["seq"] == int(parts[2]) for event in window.events)
-        if not included:
-            self.trigger = None
+        return any(event["job_id"] == parts[1] and event["seq"] == int(parts[2]) for event in window.events)
 
     def _remaining(self) -> float:
         remaining = self.deadline - self.clock()

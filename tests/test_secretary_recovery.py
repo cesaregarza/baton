@@ -70,15 +70,18 @@ def test_standalone_decide_advances_scan_past_hold_and_assesses_the_earliest_pag
         trigger = f"message:{second['seqs']['planner']}"
 
         # This call used to refuse a trigger beyond the bounded page before queueing the page, so while a backlog
-        # existed no callback moved it. It now assesses the earliest page, without the trigger: the model is not
-        # told of it, and the result names none, so the caller decides that wake as one not yet reached.
+        # existed no callback moved it. It now assesses the earliest page as catch-up, without the trigger: the model
+        # is not told of it, and the result names none and says it is catch-up, so the caller decides that wake as
+        # one not yet reached.
         first_result = asyncio.run(secretary.decide(budget_seconds=5, trigger=trigger))
         assert first_result["decision"] == "hold" and first_result["trigger"] is None
+        assert first_result["catch_up"] is True
         assert model.requests[0]["context"]["trigger"] is None
         assert [event["message"]["id"] for event in model.requests[0]["context"]["events"]] == [first["message_id"]]
 
         second_result = asyncio.run(secretary.decide(budget_seconds=5, trigger=trigger))
         assert second_result["decision"] == "wake" and second_result["trigger"] == trigger
+        assert "catch_up" not in second_result
         assert second_result["since"] == first_result["through_pos"]
         assert second_result["sources"] == [f"message:{second['message_id']}"]
         assert len(model.requests) == 2

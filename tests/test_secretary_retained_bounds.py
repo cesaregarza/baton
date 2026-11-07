@@ -541,7 +541,7 @@ def test_duplicate_concurrent_callbacks_on_a_retried_range_split_it_once(tmp_pat
         assert len(leaves) == 7 and all(row["status"] == "ready" for row in leaves)
 
 
-def test_each_callback_behind_a_scan_backlog_assesses_the_earliest_page_until_its_trigger_is_reached(
+def test_each_callback_behind_a_scan_backlog_assesses_the_earliest_page_as_catch_up_until_its_trigger_is_reached(
     tmp_path, monkeypatch
 ) -> None:
     with make_world(tmp_path) as world:
@@ -553,24 +553,35 @@ def test_each_callback_behind_a_scan_backlog_assesses_the_earliest_page_until_it
         rooms = [conversation(world) for _ in range(2)]
         # Twenty-four events arrived while no callback ran, so the scan cursor is more than two pages behind.
         backlog = [say(world, rooms[number % 2], "worker", f"Backlog update {number}") for number in range(24)]
+        log = AttentionLog(world.state_path, world.config.data_dir, "planner")
 
         # Each arriving message's callback assesses the next bounded page from the cursor. Its own trigger is not on
-        # that page, so the page is assessed without it: the model is not told of it and the result names none, and
-        # the trigger stays beyond the cursor for the host's admission to decide.
+        # that page, so the page is historical catch-up: the model is not told of the trigger, the result names none
+        # and is marked catch_up, stored so too, and the trigger stays beyond the cursor, unassessed, for the host's
+        # admission to decide as it decides any wake the secretary has not reached.
         arrivals, results = [], []
         for number in range(2):
             arrivals.append(say(world, rooms[number % 2], "reviewer", f"Arriving message {number}"))
             result, error, _ = asyncio.run(_callback(secretary, _trigger(arrivals[-1])))
             assert error is None and result is not None and result["kind"] == "summary"
             assert result["trigger"] is None and model.requests[-1]["context"]["trigger"] is None
+            assert result["catch_up"] is True and log.get(result["decision_id"])["catch_up"] is True
             assert len(model.requests[-1]["context"]["events"]) == CANDIDATE_BOUNDS["max_events"]
             assert _position(world, arrivals[-1]["message_id"]) > _scanned(world)
             results.append(result)
 
-        # The third callback's page reaches its trigger, which is then assessed on its page as before.
+        # Delivering the catch-up summaries never covers the waiting triggers: delivery stops at the cursor.
+        for result in results:
+            asyncio.run(secretary.acknowledge(result["decision_id"]))
+        assert _delivered(world) == results[-1]["covered_through"] < _position(world, arrivals[0]["message_id"])
+        waiting = Counter(f"message:{sent['message_id']}" for sent in arrivals)
+        assert not waiting & _event_keys(results)
+
+        # The third callback's page reaches its trigger, which is then assessed on its page as before, as its own.
         arrivals.append(say(world, rooms[0], "reviewer", "Arriving message 2"))
         result, error, _ = asyncio.run(_callback(secretary, _trigger(arrivals[-1])))
         assert error is None and result is not None and result["trigger"] == _trigger(arrivals[-1])
+        assert "catch_up" not in result and "catch_up" not in log.get(result["decision_id"])
         assert model.requests[-1]["context"]["trigger"] == _trigger(arrivals[-1])
         results.append(result)
 
@@ -578,6 +589,67 @@ def test_each_callback_behind_a_scan_backlog_assesses_the_earliest_page_until_it
         assert _event_keys(results) == Counter(f"message:{sent['message_id']}" for sent in [*backlog, *arrivals])
         assert [result["since"] for result in results[1:]] == [result["through_pos"] for result in results[:-1]]
         assert len(model.requests) == 3
+
+
+def test_a_trigger_that_is_not_a_visible_event_is_still_refused_by_every_caller(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF)
+        secretary = worker.instance.secretary
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: 1000.0)
+        _, floor = asyncio.run(secretary.activate())
+        room = conversation(world)
+        sent = [say(world, room, "worker", f"Backlog update {number}") for number in range(12)]
+        missing = f"message:{sent[-1]['seqs']['planner'] + 1000}"
+
+        # Catch-up admits a visible trigger beyond the page, never one that names no visible event: the queue's
+        # callers and an explicit-position caller refuse it alike, before any page is queued or any model call.
+        for options in ({}, {"since": floor, "floor": floor}):
+            with pytest.raises(InvalidRequest, match="not a visible event"):
+                asyncio.run(secretary.decide(budget_seconds=BUDGET, trigger=missing, **options))
+        assert _scanned(world) == floor and not _rows(world) and not model.requests
+
+        # The same rule for both callers: a visible trigger beyond the explicit page makes that page catch-up.
+        beyond = _trigger(sent[-1])
+        result = asyncio.run(secretary.decide(budget_seconds=BUDGET, trigger=beyond, since=floor, floor=floor))
+        assert result["trigger"] is None and result["catch_up"] is True
+        assert model.requests[-1]["context"]["trigger"] is None
+        assert len(result["sources"]) == CANDIDATE_BOUNDS["max_events"]
+
+
+@pytest.mark.parametrize(
+    ("step", "content_failures"), [({"sleep": 2}, 0), ({"raw": "{}"}, 1)], ids=["timeout", "invalid-response"]
+)
+def test_a_range_that_fits_is_never_split_early_by_a_timeout_or_an_invalid_response(
+    tmp_path, monkeypatch, step, content_failures
+) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path, plan={"steps": [step]})
+        model.set_timeout(0.5)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        room = conversation(world)
+        sent = [say(world, room, "worker", f"Update {number} on a page that fits") for number in range(6)]
+        first, last = (_position(world, sent[index]["message_id"]) for index in (0, -1))
+
+        # The early split is for a deterministic refusal before any model call. A model that timed out or answered
+        # unusably may do better on a retry, so the page keeps today's path: its counted failures and backoff, whole,
+        # and a split only after max_attempts content failures.
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(sent[-1])))
+        assert result is None and isinstance(error, SecretaryUnavailable) and not isinstance(error, InboxTooLarge)
+        for attempts in (1, 2):
+            [page] = _retrying(world)
+            assert page["since"] < first and last <= page["through"]  # one page still holds all six
+            assert (page["attempts"], page["content_failures"]) == (attempts, content_failures * attempts)
+            assert page["next_attempt"] > now[0]
+            if attempts == 1:
+                _at_next_retry(world, now)
+                hourly = asyncio.run(_hourly(secretary))
+                assert isinstance(hourly.scheduled, SecretaryUnavailable)
+        assert len(model.requests) == 2
 
 
 def test_a_short_reply_whose_parent_outweighs_the_byte_bound_gets_a_cited_notice_never_a_summary(
