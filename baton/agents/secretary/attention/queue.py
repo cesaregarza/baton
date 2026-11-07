@@ -71,8 +71,8 @@ class AttentionQueue:
         makes one due a minute later, so with any traffic it never reached a retry, and retained work waited on
         callbacks, or with none at all on alternate hours; it also digested at most one page of held events an hour.
         A scan lane with nothing to scan now reaches either, within its own budget and deadline, with no new timer.
-        A callback's scan is left alone: its decide already resumes a due retry before it scans. So is `poll`'s, whose
-        own scheduled lane alternates between retries and digests.
+        Only a bare scan, the hourly's own lane, does this: `assess` has already resumed a due retry before it scans,
+        and its alert decide must never return a digest; `poll`'s own scheduled lane alternates between the two.
         """
         now = time.time()
         if await self.database.call(self.backlog.due, now):
@@ -87,13 +87,16 @@ class AttentionQueue:
         due = await self.database.call(self.backlog.due, time.time(), mode="digest" if hourly else None)
         if due:
             page = due[0]
-            matches = page.mode == "alert" and position is not None and page.since < position <= page.through
-            result = await self._attempt(page, budget, trigger=trigger if matches else None)
+            # An alert page gets the event trigger whether or not it holds it, so the run applies its one rule: a page
+            # without the trigger is catch-up, as a scanned page is. A digest page never carries a trigger.
+            event_trigger = trigger if page.mode == "alert" and position is not None else None
+            result = await self._attempt(page, budget, trigger=event_trigger)
             if result is not None or self.last_error is not None:
                 return result
         if await self.database.call(self.backlog.waiting_retry, position, mode="digest" if hourly else None):
             raise SecretaryUnavailable("the retained page is waiting for retry backoff")
-        return await self.digest(budget) if hourly else await self.scan(budget, trigger=trigger)
+        # This scan never takes scheduled work: the call has already resumed what was due, and must not digest.
+        return await self.digest(budget) if hourly else await self.scan(budget, trigger=trigger, scheduled=False)
 
     async def retry(self, budget: float) -> dict | None:
         due = await self.database.call(self.backlog.due, time.time())

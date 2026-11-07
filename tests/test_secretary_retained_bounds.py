@@ -637,6 +637,71 @@ def test_each_callback_behind_a_scan_backlog_assesses_the_earliest_page_as_catch
         assert len(model.requests) == 3
 
 
+def test_a_callback_that_resumes_a_due_retry_for_a_later_trigger_assesses_it_as_catch_up(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        room = conversation(world)
+        failed = [say(world, room, "worker", f"An update whose assessment failed {number}") for number in range(3)]
+        model.set_plan({"steps": [{"exit": 1}]})
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(failed[-1])))
+        assert result is None and isinstance(error, SecretaryUnavailable)
+        model.set_plan({})
+        later = say(world, room, "reviewer", "A later message whose callback finds that retry due")
+        _at_next_retry(world, now)
+        log = AttentionLog(world.state_path, world.config.data_dir, "planner")
+
+        # The callback resumes the due page before it scans. Its trigger is not on that page, so the page is catch-up
+        # by the same rule as a scanned page without it: the model is not told of the trigger, the result names none
+        # and is marked catch_up, stored so too, and the trigger stays beyond the cursor for the host's own fallback.
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(later)))
+        assert error is None and result is not None and result["kind"] == "summary"
+        assert result["trigger"] is None and result["catch_up"] is True
+        assert log.get(result["decision_id"])["catch_up"] is True
+        assert model.requests[-1]["context"]["trigger"] is None
+        assert _event_keys([result]) == Counter(f"message:{sent['message_id']}" for sent in failed)
+        assert _position(world, later["message_id"]) > _scanned(world)
+
+        # The next callback reaches its trigger and assesses it as its own.
+        own, error, _ = asyncio.run(_callback(secretary, _trigger(later)))
+        assert error is None and own is not None and own["trigger"] == _trigger(later) and "catch_up" not in own
+        assert _event_keys([own]) == Counter([f"message:{later['message_id']}"])
+
+
+def test_an_alert_decide_with_nothing_new_to_scan_never_takes_a_due_digest(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path, plan={"decision": "hold", "summary": "", "sources": []})
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF, digest_seconds=60)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        room = conversation(world)
+        held = [say(world, room, "worker", f"A routine update {number}") for number in range(3)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(held[-1])))
+        assert error is None and result is not None and result["decision"] == "hold"
+        now[0] += 120  # the held page's digest is due
+        calls = len(model.requests)
+
+        # An alert decide, untriggered or for a trigger already assessed, finds nothing new and returns the empty
+        # assessment it always has. Spending an idle scan on scheduled work is the hourly's alone: an alert call has
+        # already resumed what was due, and never returns a digest.
+        for trigger in (None, _trigger(held[-1])):
+            result = asyncio.run(secretary.decide(budget_seconds=BUDGET, trigger=trigger))
+            assert result["mode"] == "alert" and result["event_count"] == 0
+        assert len(model.requests) == calls
+        assert [row["status"] for row in _rows(world)] == ["held"]
+
+        # The hourly's idle scan lane takes it.
+        hourly = asyncio.run(_hourly(secretary, model))
+        assert hourly.asked == (True, False)
+        assert [request["context"]["mode"] for request in model.requests[calls:]] == ["digest"]
+
+
 def test_a_trigger_that_is_not_a_visible_event_is_still_refused_by_every_caller(tmp_path, monkeypatch) -> None:
     with make_world(tmp_path) as world:
         worker, model = _worker(world, tmp_path)
