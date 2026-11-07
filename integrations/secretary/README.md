@@ -179,10 +179,12 @@ Host contract:
   be answered (`late`, `not_outstanding`) says to stop and return to `receive`.
 
 To adopt a new version, install the bridge file at the host's existing bridge path while `secretary_bridge.py status`
-reports the spool `idle`, then resume the thread with the guidance, preceded by one line naming the host's command:
+reports the spool `idle`, then resume the thread with the guidance, preceded by one line naming the host's command.
+[`thread/resume_message.py`](thread/resume_message.py) renders that message: `BRIDGE: ` and its one argument, a blank
+line, then the guidance's bytes; it refuses an empty or multi-line command.
 
 ```sh
-{ printf 'BRIDGE: %s\n\n' "$BRIDGE_COMMAND"; cat integrations/secretary/thread/GUIDANCE.md; } > resume-message.txt
+python3 -I integrations/secretary/thread/resume_message.py "$BRIDGE_COMMAND" > resume-message.txt
 ```
 
 `BRIDGE_COMMAND` is the interpreter, `-I` and the installed bridge's path. The thread acknowledges with the

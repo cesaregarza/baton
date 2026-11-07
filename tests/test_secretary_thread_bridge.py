@@ -29,6 +29,7 @@ TESTS = Path(__file__).resolve().parent
 THREAD = TESTS.parent / "integrations" / "secretary" / "thread"
 BRIDGE_SOURCE = Path(os.environ.get("SECRETARY_THREAD_BRIDGE", THREAD / "secretary_bridge.py"))
 GUIDANCE = THREAD / "GUIDANCE.md"
+RESUME_MESSAGE = THREAD / "resume_message.py"
 STUB = TESTS / "secretary_thread_gate_stub.py"
 POLICY_TEXT = "Synthetic attribution policy: name who said or asked what."
 UNOFFERED_DELIMITER = "BATON_REPLY_JSON"  # the fixed word an earlier proposal used; nothing may rely on it
@@ -972,6 +973,24 @@ def test_every_command_cell_asks_for_escalation_with_its_own_justification_and_n
     assert "SANDBOX" not in text
     for command, justification in (CELL_JUSTIFICATIONS[0], CELL_JUSTIFICATIONS[2]):  # receive and reply
         assert not re.search(r"\d", justification) and "version" not in justification.lower(), command
+
+
+def render_resume_message(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "-I", str(RESUME_MESSAGE), *args], capture_output=True, timeout=20, cwd=cwd)
+
+
+def test_the_resume_message_is_the_bridge_line_a_blank_line_and_the_guidance_bytes(tmp_path):
+    command = "python3 -I 'synthetic bridge dir/secretary_bridge.py'"
+    done = render_resume_message(tmp_path, command)
+    assert done.returncode == 0 and done.stderr == b""
+    assert done.stdout == b"BRIDGE: " + command.encode() + b"\n\n" + GUIDANCE.read_bytes()
+
+
+@pytest.mark.parametrize("command", ["", "python3 -I secretary_bridge.py\nstatus", "python3 -I bridge.py\n"])
+def test_the_resume_message_refuses_an_empty_or_multi_line_bridge_command(tmp_path, command):
+    done = render_resume_message(tmp_path, command)
+    assert done.returncode != 0 and done.stdout == b""
+    assert done.stderr.endswith(b"\n") and done.stderr.count(b"\n") == 1 and done.stderr.strip()
 
 
 def test_the_guidance_covers_the_loop_the_replies_and_the_coverage_rule():
