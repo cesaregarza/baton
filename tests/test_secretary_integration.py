@@ -48,7 +48,7 @@ def _cli(instance: Path, action: str, *args: str, input_text: str | None = None)
 
 
 def _install_args(world, tmp_path: Path, product: str, *, project_name: str = "project"):
-    """A project with existing hooks, a fake codex and a model policy, and the `install` arguments for them."""
+    """A project with existing hooks, a fake agent command and a model policy, and the `install` arguments for them."""
     project = tmp_path / project_name
     project.mkdir()
     codex = tmp_path / "fake-codex"
