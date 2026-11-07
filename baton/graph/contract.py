@@ -24,6 +24,8 @@ them in relevance_updates. Never silently remove statements or decisions. Existi
 decision text are immutable: supersede an old decision and allocate a new D ID to change its text.
 Decision changes also require refreshed summaries for every old/new applicability strand (all means
 all strands). All proposal arrays are required, including empty arrays for unchanged collections.
+Strings must be nonempty and string/reference arrays must be duplicate-free; local validation
+enforces those semantic requirements even where provider JSON Schema supports fewer keywords.
 Edges point from response/support/contradiction/superseder/dependent TO its semantic target;
 use separate edges for multiple targets. Raw reply metadata is not a semantic edge. All semantic
 edges must form a DAG, including across strands. Evidence must reference available post:N or
@@ -40,9 +42,9 @@ def array(items):
     return {"type": "array", "items": items}
 
 
-STRING = {"type": "string", "minLength": 1}
+STRING = {"type": "string"}
 INTEGER = {"type": "integer", "minimum": 1}
-REFS = {"type": "array", "items": STRING, "minItems": 1, "uniqueItems": True}
+REFS = {"type": "array", "items": STRING, "minItems": 1}
 RELEVANCE = {"type": "string", "enum": ["directly_relevant", "partially_superseded", "completely_superseded"]}
 SURVIVING = {"type": ["string", "null"]}
 BINDING = obj(
@@ -142,9 +144,9 @@ def validate_shape(value, schema=SCHEMA, path="proposal"):
         require(len(value) >= schema.get("minItems", 0), f"{path}: empty array")
         for item in value:
             validate_shape(item, schema["items"], f"{path}[]")
-        if schema.get("uniqueItems"):
+        if schema["items"].get("type") == "string":
             require(len(set(value)) == len(value), f"{path}: duplicate values")
     elif isinstance(value, str):
-        require(len(value.strip()) >= schema.get("minLength", 0), f"{path}: empty string")
+        require(bool(value.strip()), f"{path}: empty string")
     elif type(value) is int:
         require(value >= schema.get("minimum", value), f"{path}: below minimum")
