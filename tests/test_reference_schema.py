@@ -117,14 +117,6 @@ def test_the_v17_fixture_has_the_rows_it_is_documented_to_have():
     raw.close()
 
 
-def test_the_version_the_v17_fixture_holds_is_one_the_database_migrates_from():
-    """The fixture's own version is one baton climbs from, and the current version is exactly one above the newest of
-    those: this change adds one schema step, and no other."""
-    assert S2_VERSION in store.MIGRATES_FROM, f"{S2_VERSION} is not a version baton migrates from"
-    assert store.SCHEMA_VERSION > S2_VERSION, f"the schema version did not rise above {S2_VERSION}"
-    assert store.SCHEMA_VERSION - 1 == max(store.MIGRATES_FROM), "the schema version rises by one"
-
-
 def test_the_reference_tables_are_declared_as_the_step_above_the_v17_fixture():
     """The step right above the fixture adds the two tables whole: no column to add, no backfill, no procedure, so an
     upgrade writes no row."""

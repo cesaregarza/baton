@@ -1,9 +1,10 @@
 """Topic ids on upgrade: every older database gains `topics.id` and `topic_changes`.
 
 `tests/fixtures/schema_v15.sql` is the schema as main e17bbfb created it, with rows: three topics (a root
-with a subtopic, and another root) and four conversations filed in them or in none. Every older
-fixture must still upgrade. After an upgrade every existing topic has its own non-empty id and nothing
-else about the database has changed.
+with a subtopic, and another root) and four conversations filed in them or in none. After an upgrade every
+existing topic has its own non-empty id and nothing else about the database has changed. That every older
+fixture gains the column, distinct ids and `topic_changes` is checked once per fixture in
+`test_migration_matrix.py`.
 
 The schema version is never written here as a number: the fixture's own version is, as
 test_topic_migration.py does, and everything about the current one goes through `store.SCHEMA_VERSION`
@@ -20,8 +21,6 @@ import os
 import sqlite3
 from pathlib import Path
 
-import pytest
-from test_migration_matrix import FIXTURE_VERSIONS
 from test_topic_containers import make_topic, topic_config
 from test_topic_migration import v14_database
 
@@ -75,43 +74,13 @@ def assert_good_ids(found: dict[str, str]) -> None:
     assert len(set(found.values())) == len(found), f"two topics share an id: {found}"
 
 
-# 1. The version relationship ----------------------------------------------------------------------------
-
-
-def test_the_version_the_v15_fixture_holds_is_one_the_database_migrates_from():  # FAILS-ON-MAIN
-    raw = sqlite3.connect(":memory:")
-    raw.executescript((FIXTURES / "schema_v15.sql").read_text())
-    assert raw.execute("SELECT version FROM schema_version").fetchone()[0] == V15_VERSION
-    raw.close()
-    assert V15_VERSION in store.MIGRATES_FROM, "the previous schema is not a version baton migrates from"
-    assert store.SCHEMA_VERSION > V15_VERSION
-    assert store.SCHEMA_VERSION - 1 == max(store.MIGRATES_FROM), "the schema version rises by one"
-
-
-# 2. Every fixture reaches the current schema with ids and history ---------------------------------------
-
-
-@pytest.mark.parametrize("version", FIXTURE_VERSIONS)
-def test_every_older_schema_gains_the_topic_id_and_the_history_table(tmp_path, version):  # FAILS-ON-MAIN
-    config = topic_config(tmp_path)
-    install(config, f"schema_v{version}.sql")
-    db = connect(config.db_path)
-    try:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == store.SCHEMA_VERSION
-        found = ids_in(db)
-        assert_good_ids(found)
-        tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert "topic_changes" in tables, f"version {version} did not gain topic_changes"
-    finally:
-        db.close()
-
-
-# 3. The v15 fixture: ids are new, everything else is as it was ----------------------------------------------
+# 1. The v15 fixture: ids are new, everything else is as it was ----------------------------------------------
 
 
 def test_the_v15_fixture_has_the_topics_and_threads_it_is_documented_to_have():  # GUARD
     raw = sqlite3.connect(":memory:")
     raw.executescript((FIXTURES / "schema_v15.sql").read_text())
+    assert raw.execute("SELECT version FROM schema_version").fetchone()[0] == V15_VERSION
     assert [row[0] for row in raw.execute("SELECT path FROM topics ORDER BY path")] == [
         "baton",
         "baton/development",
@@ -234,7 +203,7 @@ def test_a_migrated_topic_keeps_its_id_through_a_rename_and_a_new_topic_gets_ano
         db.close()
 
 
-# 4. A database that has to discover its topics, as the version-15 upgrade did ---------------------------------
+# 2. A database that has to discover its topics, as the version-15 upgrade did ---------------------------------
 
 
 def test_discovered_topics_each_get_an_id_including_implicit_parents(tmp_path):  # FAILS-ON-MAIN

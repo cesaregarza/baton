@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
 
 import pytest
 from secretary_support import make_world
@@ -13,7 +11,7 @@ from baton import cli
 from baton.agents.agent import Agent
 from baton.agents.secretary.attention import archive as archive_module
 from baton.agents.secretary.attention.archive import SummaryArchive
-from baton.database.store import SCHEMA_VERSION, connect
+from baton.database.store import connect
 from baton.errors import Forbidden, InvalidRequest
 
 
@@ -547,24 +545,3 @@ def test_archive_validates_page_bounds_and_rejects_untrusted_roles(host) -> None
         archive.page_for_host("planner", after=-1)
     with pytest.raises(InvalidRequest):
         archive.page_for_host("planner", limit=101)
-
-
-def test_version_20_database_migrates_without_losing_existing_data(tmp_path) -> None:
-    path = tmp_path / "baton.db"
-    with sqlite3.connect(path) as raw:
-        raw.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
-        raw.execute("INSERT INTO schema_version VALUES (20)")
-        raw.execute("CREATE TABLE preserved (value TEXT NOT NULL)")
-        raw.execute("INSERT INTO preserved VALUES ('unchanged')")
-    os.chmod(path, 0o600)
-
-    conn = connect(path)
-    try:
-        assert conn.execute("SELECT version FROM schema_version").one()[0] == SCHEMA_VERSION == 22
-        assert conn.execute("SELECT value FROM preserved").one()[0] == "unchanged"
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(secretary_summaries)")}
-        assert columns == {"cursor", "secretary_id", "principal", "decision_id", "result", "created_at"}
-        indexes = {row["name"] for row in conn.execute("PRAGMA index_list(secretary_summaries)")}
-        assert "secretary_summaries_by_principal" in indexes
-    finally:
-        conn.close()

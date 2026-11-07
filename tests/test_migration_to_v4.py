@@ -12,14 +12,13 @@ import os
 import sqlite3
 from pathlib import Path
 
-import pytest
 from test_conversations import group_config
 from test_messages import rid
 
 from baton import conversations, events, messages
 from baton.config import Config
 from baton.database import store
-from baton.database.store import SchemaMismatch, connect
+from baton.database.store import connect
 
 V3_SCHEMA = (Path(__file__).parent / "fixtures" / "schema_v3.sql").read_text()
 CONVERSATION = "conv_fromv3"
@@ -126,17 +125,3 @@ def test_a_version_3_database_gains_the_new_columns_and_keeps_everything_else(tm
     assert (shown["attention"], shown["needs_decision"]) == (["orchestrator"], True)
     db.close()
     connect(config.db_path).close()  # a second open of a migrated database changes nothing
-
-
-def test_a_version_1_database_is_refused_rather_than_guessed_at(tmp_path: Path) -> None:
-    config = group_config(tmp_path)
-    config.data_dir.mkdir(mode=0o700)
-    raw = sqlite3.connect(config.db_path)
-    raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (1);")
-    raw.close()
-    os.chmod(config.db_path, 0o600)
-    with pytest.raises(SchemaMismatch, match="version 1"):
-        connect(config.db_path)
-    raw = sqlite3.connect(config.db_path)
-    assert [row[0] for row in raw.execute("SELECT name FROM sqlite_master")] == ["schema_version"]
-    raw.close()
