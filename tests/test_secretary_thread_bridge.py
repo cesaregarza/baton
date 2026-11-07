@@ -37,6 +37,21 @@ MARGIN = 0.85  # the share of that budget a page may use: the rest is the tools'
 # What printed text costs, by kind, as the bridge must count it at least: words and spaces, other runs of letters and
 # digits (ids, digests, encodings), other ASCII characters, and every other byte a token.
 WORD_BYTES_PER_TOKEN, DENSE_BYTES_PER_TOKEN, SYMBOL_BYTES_PER_TOKEN, WORD_LETTERS = 3.0, 1.15, 1.25, 12
+# A command cell of the guidance: its command, its output budget, its sandbox permission and its justification.
+COMMAND_CELL = re.compile(
+    r"(?m)^    const out = await tools\.exec_command\(\{ cmd: (.+?), yield_time_ms: \d+, max_output_tokens: (\d+), "
+    r'sandbox_permissions: "([^"]*)", justification: "([^"]*)" \}\);$'
+)
+# Each command cell's command and the justification it carries, in the guidance's order.
+CELL_JUSTIFICATIONS = [
+    ('"BRIDGE receive --wait 600"', "Run the single receive loop for the existing secretary bridge."),
+    ('"BRIDGE read REQUEST_ID --page N"', "Read every page of the newly offered protocol-4 turn before deciding."),
+    (
+        'form.command + "\\n" + JSON.stringify(answer) + "\\n" + form.closing_line',
+        "Submit the assessment using the turn's supplied reply form.",
+    ),
+    ('"BRIDGE status"', "Read bridge status as required to acknowledge the updated protocol."),
+]
 
 
 def message(number: int, text: str = "Synthetic text.", sender: str = "worker") -> dict:
@@ -920,20 +935,12 @@ def test_the_guidance_names_the_bridge_version_and_holds_no_host_path():
 def test_the_guidance_holds_the_cells_the_deadline_and_the_drafting_rule():
     text = GUIDANCE.read_text(encoding="utf-8")
     budget = '// @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}'
-    cells = re.findall(
-        r"(?m)^    const out = await tools\.exec_command\(\{ cmd: (.+?), "
-        r"yield_time_ms: \d+, max_output_tokens: (\d+), \.\.\.SANDBOX \}\);$",
-        text,
-    )
-    assert cells == [
-        ('"BRIDGE receive --wait 600"', "12000"),
-        ('"BRIDGE read REQUEST_ID --page N"', "12000"),
-        ('form.command + "\\n" + JSON.stringify(answer) + "\\n" + form.closing_line', "12000"),
-    ]
-    assert text.count(budget) == 4, "a cell asks the cell layer for no budget"
+    cells = [(command, tokens) for command, tokens, _, _ in COMMAND_CELL.findall(text)]
+    assert cells == [(command, "12000") for command, _ in CELL_JUSTIFICATIONS]
+    assert text.count(budget) == 5, "a cell asks the cell layer for no budget"
     assert "max_output_tokens: 12000 });" in text.split("tools.write_stdin(", 1)[1].split("\n", 1)[0]
     assert "max_tokens: 12000" in text
-    assert text.count("text(typeof out") == 4 and "console." not in text, "a cell prints other than once"
+    assert text.count("text(typeof out") == 5 and "console." not in text, "a cell prints other than once"
     assert "TextEncoder" not in text
     for needle in (
         "never measure bytes",
@@ -948,13 +955,23 @@ def test_the_guidance_holds_the_cells_the_deadline_and_the_drafting_rule():
         "merging only one author's continuing point",
         "approval step stays",
         "never to\n  merge events of different authors",
-        "`sandbox_permissions` and `justification`",
         "detail `usage`",
         "summary_size",
         "no_such_page",
         '"status": "fault"',
     ):
         assert needle in text, needle
+
+
+def test_every_command_cell_asks_for_escalation_with_its_own_justification_and_no_placeholder_remains():
+    text = GUIDANCE.read_text(encoding="utf-8")
+    cells = COMMAND_CELL.findall(text)
+    assert text.count("tools.exec_command(") == len(cells), "a command cell lacks the literal sandbox fields"
+    assert [permission for _, _, permission, _ in cells] == ["require_escalated"] * len(CELL_JUSTIFICATIONS)
+    assert [(command, justification) for command, _, _, justification in cells] == CELL_JUSTIFICATIONS
+    assert "SANDBOX" not in text
+    for command, justification in (CELL_JUSTIFICATIONS[0], CELL_JUSTIFICATIONS[2]):  # receive and reply
+        assert not re.search(r"\d", justification) and "version" not in justification.lower(), command
 
 
 def test_the_guidance_covers_the_loop_the_replies_and_the_coverage_rule():

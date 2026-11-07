@@ -36,20 +36,19 @@ yourself.
 
 Use these cells exactly, with only the capitals replaced. Each runs one command and prints its result once, as it
 came. Each asks every layer for a 12,000-token output budget, as headroom: the first line asks it of the cell, and
-`max_output_tokens` of the command. Never ask for less. SANDBOX is the `sandbox_permissions` and `justification`
-your successful commands in this session have used, as one object with those two fields, unchanged, or `{}` if they
-used neither. Never invent them.
+`max_output_tokens` of the command. Never ask for less. Each command cell carries its own `sandbox_permissions` and
+`justification`: keep them as written.
 
 Receive:
 
     // @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}
-    const out = await tools.exec_command({ cmd: "BRIDGE receive --wait 600", yield_time_ms: 30000, max_output_tokens: 12000, ...SANDBOX });
+    const out = await tools.exec_command({ cmd: "BRIDGE receive --wait 600", yield_time_ms: 30000, max_output_tokens: 12000, sandbox_permissions: "require_escalated", justification: "Run the single receive loop for the existing secretary bridge." });
     text(typeof out === "string" ? out : JSON.stringify(out));
 
 Read page N of the turn REQUEST_ID (N is 1, then 2, up to the header's `pages`):
 
     // @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}
-    const out = await tools.exec_command({ cmd: "BRIDGE read REQUEST_ID --page N", yield_time_ms: 10000, max_output_tokens: 12000, ...SANDBOX });
+    const out = await tools.exec_command({ cmd: "BRIDGE read REQUEST_ID --page N", yield_time_ms: 10000, max_output_tokens: 12000, sandbox_permissions: "require_escalated", justification: "Read every page of the newly offered protocol-4 turn before deciding." });
     text(typeof out === "string" ? out : JSON.stringify(out));
 
 Reply, with FORM the `reply_form` object exactly as the bridge last printed it for this turn, and ANSWER your answer
@@ -58,7 +57,7 @@ as an object:
     // @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}
     const form = FORM;
     const answer = ANSWER;
-    const out = await tools.exec_command({ cmd: form.command + "\n" + JSON.stringify(answer) + "\n" + form.closing_line, yield_time_ms: 10000, max_output_tokens: 12000, ...SANDBOX });
+    const out = await tools.exec_command({ cmd: form.command + "\n" + JSON.stringify(answer) + "\n" + form.closing_line, yield_time_ms: 10000, max_output_tokens: 12000, sandbox_permissions: "require_escalated", justification: "Submit the assessment using the turn's supplied reply form." });
     text(typeof out === "string" ? out : JSON.stringify(out));
 
 Waiting, with the same budgets:
@@ -245,5 +244,9 @@ asks again later, with backoff. Nothing is lost, and there is nothing to write a
 
 ## Acknowledge this update
 
-When you have read it, run `BRIDGE status` and answer with one line, `protocol-4 ready, bridge version 4.2`, followed
-by its output. Then start your loop.
+When you have read it, run `BRIDGE status` with this cell and answer with one line,
+`protocol-4 ready, bridge version 4.2`, followed by its output. Then start your loop.
+
+    // @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}
+    const out = await tools.exec_command({ cmd: "BRIDGE status", yield_time_ms: 10000, max_output_tokens: 12000, sandbox_permissions: "require_escalated", justification: "Read bridge status as required to acknowledge the updated protocol." });
+    text(typeof out === "string" ? out : JSON.stringify(out));
