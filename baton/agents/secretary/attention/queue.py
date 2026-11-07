@@ -41,7 +41,7 @@ class AttentionQueue:
         _, floor = await database.call(log.activate, epoch, head)
         return cls(secretary, database, policy, Backlog(log), floor)
 
-    async def scan(self, budget: float, *, trigger: str | None = None) -> dict | None:
+    async def scan(self, budget: float, *, trigger: str | None = None, scheduled: bool = True) -> dict | None:
         since = await self.database.call(self.backlog.scanned)
         try:
             window = await self.database.call(InboxWindow.read, self.secretary.config, self.policy, since)
@@ -58,7 +58,7 @@ class AttentionQueue:
             page = Page(since, window.through)
             await self.database.call(self.backlog.enqueue, page, time.time())
             await self.database.call(self.backlog.discard_empty, page)
-        if trigger is None:
+        if trigger is None and scheduled:
             result = await self._scheduled(budget)
             if result is not None or self.last_error is not None:
                 return result
@@ -73,7 +73,8 @@ class AttentionQueue:
         earliest due retry, within its own budget and deadline, with no new timer. Any other scheduled work stays with
         the scheduled lane, whose budget is never the smaller: a page that fits there could time out here, and a
         timeout is a counted failure. A triggered scan never does this, and a scan never digests here, so an alert
-        decide never returns a digest.
+        decide never returns a digest. The worker's `poll` turns it off: its own scheduled lane alternates, each lane
+        with a full budget, so neither kind waits there.
         """
         if not await self.database.call(self.backlog.due, time.time(), held=True):
             return None  # a due retry is the scheduled lane's own, with its larger budget
@@ -126,7 +127,7 @@ class AttentionQueue:
         New traffic cannot consume the recovery budget. The worker alternates which
         scheduled lane goes first so retries and digests also get time under load.
         """
-        await self.scan(budget)
+        await self.scan(budget, scheduled=False)  # the scheduled lane below is this call's only scheduled work
         scheduled = (
             ((True, self.digest), (False, self.retry)) if digest_first else ((False, self.retry), (True, self.digest))
         )
