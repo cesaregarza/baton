@@ -31,7 +31,7 @@ from baton.agents.secretary.attention.decide import SecretaryUnavailable
 from baton.agents.secretary.attention.queue import AttentionQueue
 from baton.agents.secretary.attention.runtime import DatabaseWorker
 from baton.agents.secretary.attention.state import AttentionLog
-from baton.agents.secretary.inbox.window import InboxTooLarge
+from baton.agents.secretary.inbox.window import InboxTooLarge, InboxWindow
 from baton.agents.secretary.service import Secretary
 from baton.errors import BatonError, InvalidRequest
 
@@ -960,3 +960,66 @@ def test_an_event_larger_than_the_byte_bound_gets_a_cited_failure_notice_never_a
         assert asyncio.run(secretary.acknowledge(newer["decision_id"])) == first["covered_through"]
         assert asyncio.run(secretary.acknowledge(notice["decision_id"])) == newer["covered_through"]
         assert not _retrying(world)
+
+
+def test_a_callback_stalled_inside_its_split_never_puts_back_a_part_another_callback_split(
+    tmp_path, monkeypatch
+) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path)
+        policy(world, **OLD_BOUNDS, **BACKOFF)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        rooms = [conversation(world) for _ in range(4)]
+        sent = [say(world, rooms[number % 4], "worker", f"Range update {number}") for number in range(30)]
+        trigger = _trigger(sent[-1])
+        model.set_plan({"steps": [{"exit": 1}]})
+        result, error, _ = asyncio.run(_callback(secretary, trigger))
+        assert result is None and isinstance(error, SecretaryUnavailable)
+        model.set_plan({})
+        policy(world, **CANDIDATE_BOUNDS)
+        _at_next_retry(world, now)
+
+        # One callback records its refusal, then stalls before its split, past its own backoff.
+        original = InboxWindow.split_position.__func__
+        entered, release, first = threading.Event(), threading.Event(), [True]
+
+        def stalled(cls, *args):
+            position = original(cls, *args)
+            if first[0]:
+                first[0] = False
+                entered.set()
+                assert release.wait(30)
+            return position
+
+        monkeypatch.setattr(InboxWindow, "split_position", classmethod(stalled))
+        outcome: list[BaseException | dict] = []
+
+        def stalled_callback() -> None:
+            try:
+                other = Secretary(world.config, world.state_path, world.policy_path)
+                outcome.append(asyncio.run(other.decide(budget_seconds=BUDGET, trigger=trigger)))
+            except BaseException as raised:  # the outcome is asserted below
+                outcome.append(raised)
+
+        thread = threading.Thread(target=stalled_callback)
+        thread.start()
+        assert entered.wait(30)
+        _at_next_retry(world, now)
+
+        # Meanwhile two other callbacks refuse and split: the range into halves, then its first half again.
+        for _ in range(2):
+            result, error, _ = asyncio.run(_callback(secretary, trigger))
+            assert result is None and isinstance(error, InboxTooLarge)
+        split = _rows(world)
+        release.set()
+        thread.join(30)
+        assert outcome and isinstance(outcome[0], InboxTooLarge)
+
+        # The stalled split finds the range no longer stored as it read it, and changes nothing: no event is in two
+        # stored pages.
+        assert _rows(world) == split
+        positions = [_position(world, item["message_id"]) for item in sent]
+        assert [sum(row["since"] < pos <= row["through"] for row in split) for pos in positions] == [1] * len(sent)

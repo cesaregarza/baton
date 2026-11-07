@@ -227,12 +227,34 @@ class Backlog:
                 is not None
             )
 
-    def replace(self, originals: list[Page], replacements: list[Page], now: float) -> None:
-        """Partition failed work or combine held pages without deleting assessments."""
+    def replace(self, originals: list[Page], replacements: list[Page], now: float) -> bool:
+        """Partition failed work or combine held pages without deleting assessments.
+
+        A compare-and-set: every original must still be stored as it was read, or nothing changes and this returns
+        False. A caller that stalled between reading a page and replacing it could otherwise put back a part that
+        another caller had already split further, so that two stored pages held the same events.
+        """
         if not originals or not replacements or _spans(originals) != _spans(replacements):
             raise InvalidRequest("replacement pages must cover exactly the same event range")
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
+            for page in originals:
+                stored = conn.execute(
+                    "SELECT 1 FROM backlog_windows WHERE principal=? AND since=? AND through=? AND mode=? "
+                    "AND attempts=? AND content_failures=? AND model_successes=? AND model_policy=?",
+                    (
+                        self.log.principal,
+                        page.since,
+                        page.through,
+                        page.mode,
+                        page.attempts,
+                        page.content_failures,
+                        page.model_successes,
+                        page.model_policy,
+                    ),
+                ).fetchone()
+                if stored is None:
+                    return False
             for page in originals:
                 conn.execute(
                     "DELETE FROM backlog_windows WHERE principal=? AND since=? AND through=?",
@@ -240,6 +262,7 @@ class Backlog:
                 )
             for page in replacements:
                 self._insert(conn, page, now)
+        return True
 
     def discard_empty(self, page: Page) -> None:
         self.log.acknowledge_empty(page.since, page.through)

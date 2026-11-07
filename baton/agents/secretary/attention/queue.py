@@ -115,7 +115,8 @@ class AttentionQueue:
                 break
             group.append(page)
         combined = Page(group[0].since, group[-1].through, "digest")
-        await self.database.call(self.backlog.replace, group, [combined], time.time())
+        if not await self.database.call(self.backlog.replace, group, [combined], time.time()):
+            return None  # another call combined or changed these pages since they were read
         return await self._attempt(combined, budget)
 
     async def poll(self, budget: float, *, digest_first: bool = False) -> list[dict]:
@@ -200,7 +201,8 @@ class AttentionQueue:
         )
         if split is not None:
             children = [Page(page.since, split, page.mode), Page(split, page.through, page.mode)]
-            await self.database.call(self.backlog.replace, [page], children, time.time())
+            # The page as this failure stored it: a caller that refused it again since, or split it, changed that.
+            await self.database.call(self.backlog.replace, [failed], children, time.time())
             return None
         if not exhausted:
             # One event over the bounds cannot split: it keeps its counted refusals and backoff, so a widened bound
