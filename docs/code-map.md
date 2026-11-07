@@ -166,9 +166,10 @@ Installation binds the activation floor to the current database head. Standalone
 retries first and then resume from durable scan progress; explicit `since` and `floor` request an exact replay.
 One due retry takes precedence over a newer trigger; the host handles its result then calls again for the new
 event. A visible trigger that is not on the bounded page makes that page historical catch-up (`trigger` null,
-`catch_up` true) and stays pending; a trigger that is not a visible event fails. An untriggered call during failed-page backoff reports retryable unavailability. The worker reads complete bounded pages and reserves model output space for citations.
+`catch_up` true), never covered by it: one beyond the page stays pending, one behind it was covered earlier or waits
+in a retry page. A trigger that is not a visible event fails. An untriggered call during failed-page backoff reports retryable unavailability. The worker reads complete bounded pages and reserves model output space for citations.
 Provider outages back off in their original mode. Invalid model content/output and oversized windows count
-toward `max_attempts`; an oversized range that can split splits on its first refusal. Timeouts, rejected requests, and failed commands also count after another page succeeds
+toward `max_attempts`; an oversized range that can split splits on its first refusal before any engine or model call. Timeouts, rejected requests, and failed commands also count after another page succeeds
 under the same policy since that page last failed. Saved results recover before either provider runs again. Held contiguous pages combine into
 bounded digests; digest failures remain digest work and eventually yield a keep notice. Worker health is tracked
 separately from page retry state. Each poll reserves one full budget for a fresh alert and one for scheduled work;

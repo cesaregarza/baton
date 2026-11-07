@@ -9,11 +9,14 @@ notification itself or advances the principal's inbox.
 
 1. Baton builds an authorized, bounded, complete page of visible events, including visible reply parents and
    context about the principal's own sends. Page size also reserves model output space for required citations.
-   Pages are never truncated. A stored range over the bounds splits on its first `InboxTooLarge`, before any model
-   call; a single event that cannot split keeps its counted refusals and backoff, then receives an operational
-   notice after `max_attempts`. A trigger that is not a visible event is an error. A visible trigger that is not on
-   the bounded page, beyond it or already behind it, makes that page historical catch-up: its result has `trigger`
-   null and `catch_up` true, and the trigger stays pending until a page that holds it is assessed.
+   Pages are never truncated. A stored range over the bounds splits on its first `InboxTooLarge` raised before any
+   engine or model call; a refusal from the re-read after inference keeps the counted path, as a timeout or an
+   invalid answer does. A single event that cannot split keeps its counted refusals and backoff, then receives an
+   operational notice after `max_attempts`. A trigger that is not a visible event is an error. A visible trigger
+   that is not on the bounded page, beyond it or already behind it, makes that page historical catch-up: its result
+   has `trigger` null and `catch_up` true, and it never covers the trigger. A trigger beyond the page stays pending
+   until a page that holds it is assessed; one already behind it was covered by an earlier page, or waits in a
+   retry page.
 2. The harness sends four ordered prompt layers: stable secretary system instructions, operator-authored contextual
    knowledge, principal-specific instructions and summary limit, then the current event window. The first three
    layers are intended to remain stable across assessments; layered caching puts explicit breakpoints on them
@@ -203,14 +206,15 @@ earlier unacknowledged gap.
 
 `trigger` may identify `message:SEQ`, `job:JOB_ID:SEQ`, or `conversation`. It must name a visible event. If it is
 not on the bounded page, that page is assessed as historical catch-up: the model is not told of the trigger, the
-result has `trigger` null and `catch_up` true, and the trigger is not covered, so handle that wake as one the
-secretary has not assessed, and call again.
+result has `trigger` null and `catch_up` true, and it never covers the trigger. A trigger beyond the page stays
+pending, so handle that wake as one the secretary has not assessed. A trigger already behind the page was covered by
+an earlier page, or waits in a retry page, and the catch-up page leaves it as it was.
 Use `hourly=True` for a digest of contiguous due held pages. The host chooses a callback budget greater than zero
 and at most 60 seconds; the engine timeout must be shorter than the assessment budget. Installed integrations check
 this at install and startup. Integration delivery has a separate required `delivery_timeout_seconds` setting; it
 does not inherit the engine timeout. Standalone decisions process one due retry before scanning new work, even
-when called with a newer trigger. In that case the returned page has no newer trigger attached and is marked
-`catch_up`; handle its result,
+when called with a newer trigger. In that case the returned page, an alert or a digest retry, has no newer trigger
+attached and is marked `catch_up`; handle its result,
 then call again for the newer event. An untriggered call while failed work is in backoff raises retryable
 `secretary_unavailable`. Calls for a different new event may still assess that fresh page during the backoff.
 Hourly calls consider only digest retries, so an alert waiting for retry cannot block a due digest.
