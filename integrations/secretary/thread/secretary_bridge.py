@@ -20,9 +20,9 @@ this behavior for the thread's guidance.
 Every printed line stays within what the thread's tools show whole (PAGE_TOKENS), because a page they cut loses
 events or the contract without a sign; a turn whose header would not fit is never offered. A turn is a fixed
 sequence of pages, counted in its header: the layers, then every event once, in window order, each page with an
-index line per event. An event or layer too large for one page is split across consecutive pages in numbered parts,
-never dropped or shortened. Every output carries a `status`, and each one for a turn that can no longer be answered
-says to stop and go back to `receive`.
+index line per event, of at most INDEX_TOKENS. An event or layer too large for one page is split across consecutive
+pages in numbered parts, never dropped or shortened. Every output carries a `status`, and each one for a turn that
+can no longer be answered says to stop and go back to `receive`.
 
 One deadline covers every turn of an assessment: the secretary host sets it in SECRETARY_DEADLINE_AT, which the
 policy's model.env passes through, and Baton kills a turn's process at that deadline. The bridge never gives up
@@ -93,6 +93,12 @@ WAIT = (1, 600)  # receive's bound, in seconds
 # that counts somewhat above the count below, and every read page, layers, index, reply form and metadata included,
 # stays within it, as the cell prints it at worst (`_printed`).
 PAGE_TOKENS = 8500
+# The most one event's index line costs, a part's number included, whatever its message's attention list holds: the
+# names stop where the line would pass this bound, and the line counts the rest, which the event itself still lists.
+# Every part of a split event repeats its line, so the line must not grow with the event. 400 holds the line's other
+# fields as Baton writes them (positions, kinds, role names) and, whole, the attention of a conversation of Baton's
+# default eight participants at the longest role name, and leaves over 95% of a page to the event.
+INDEX_TOKENS = 400
 # What printed text is taken to cost, by what it is made of, since no one rate is safe for all of it: prose spends
 # about five bytes a token, while ids, digests and encodings spend under two, and punctuation little more than one.
 # A word is a run of letters of one case shape, at most WORD_LETTERS long, never four consonants in a row, and with a
@@ -443,12 +449,39 @@ def _part_line(line: str | None, number: int, count: int) -> str | None:
 
 def _index_line(number: int, total: int, entry: dict) -> str:
     """One event in a line the thread can enumerate: its place in the turn, position, kind, author, audience and,
-    for a message, whom it asks for attention."""
+    for a message, whom it asks for attention. An attention list too long for INDEX_TOKENS is shown as far as it
+    fits, in order, and the line counts the names it leaves out; the event's own list keeps them all."""
     message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
     attention = message.get("attention") if isinstance(message.get("attention"), list) else []
+    names = [str(name) for name in attention]
     line = f"{number}/{total} pos {entry.get('pos')} {entry.get('kind')} from {entry.get('actor')}"
     line += f" to {entry.get('audience')}" if entry.get("audience") is not None else ""
-    return line + (f" attention {', '.join(str(name) for name in attention)}" if attention else "")
+    if not names:
+        return line
+    whole = f"{line} attention {', '.join(names)}"
+    if _index_cost(whole) <= INDEX_TOKENS:
+        return whole
+    # A shown name adds exactly its own cost, since the text on either side of it never joins its printed runs; the
+    # count is reserved at its widest, every name left out.
+    spare = INDEX_TOKENS - _index_cost(_abridged(line, [], len(names)))
+    shown: list[str] = []
+    for name in names:
+        spare -= _share_cost(f"{name}, ")
+        if spare < 0:
+            break
+        shown.append(name)
+    return _abridged(line, shown, len(names))
+
+
+def _abridged(line: str, shown: list[str], count: int) -> str:
+    left = count - len(shown)
+    named = "".join(f"{name}, " for name in shown)
+    return f"{line} attention {named}{left} more not shown here; the event's own attention list names all {count}"
+
+
+def _index_cost(line: str) -> float:
+    """An index line's cost as a page prints it, at its widest: with a part's number at PLACEHOLDER."""
+    return _cost(_line(_part_line(line, PLACEHOLDER, PLACEHOLDER)))
 
 
 def _item_cost(contents: dict[str, list], field: str, value: dict, line: str | None) -> float:

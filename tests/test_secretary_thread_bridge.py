@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import math
 import os
 import pty
 import re
@@ -24,6 +25,7 @@ import pytest
 import secretary_thread_fixtures as fixtures
 
 from baton.agents.secretary.harness.prompt import RESPONSE_SCHEMA, PromptLayers
+from baton.config import ROLE_NAME, ConfigError, Conversations, parse
 
 TESTS = Path(__file__).resolve().parent
 THREAD = TESTS.parent / "integrations" / "secretary" / "thread"
@@ -53,9 +55,16 @@ CELL_JUSTIFICATIONS = [
     ),
     ('"BRIDGE status"', "Read bridge status as required to acknowledge the updated protocol."),
 ]
+# The most participants `conversations.max_participants` may allow; a message's attention names distinct participants.
+MAX_PARTICIPANTS = 1000
+# An index line that leaves attention names out: the names it shows, how many it left out and how many there are.
+ABRIDGED = re.compile(
+    r" attention (?P<shown>(?:[a-z][a-z0-9_-]*, )*)(?P<left>\d+) more not shown here; "
+    r"the event's own attention list names all (?P<count>\d+)(?: \(part \d+ of \d+\))?$"
+)
 
 
-def message(number: int, text: str = "Synthetic text.", sender: str = "worker") -> dict:
+def message(number: int, text: str = "Synthetic text.", sender: str = "worker", attention: list | None = None) -> dict:
     key = f"msg_{number:016x}"
     return {
         "source_key": f"message:{key}",
@@ -64,8 +73,21 @@ def message(number: int, text: str = "Synthetic text.", sender: str = "worker") 
         "at": "2026-01-01T00:00:00Z",
         "actor": sender,
         "seq": number,
-        "message": {"id": key, "conversation_id": "conv_00000000000000aa", "sender": sender, "text": text},
+        "message": {
+            "id": key,
+            "conversation_id": "conv_00000000000000aa",
+            "sender": sender,
+            "text": text,
+            **({"attention": attention} if attention else {}),
+        },
     }
+
+
+def longest_roles(count: int) -> list[str]:
+    """`count` distinct role names, each as long as a role name may be and in the costliest shape: one dense run."""
+    names = [f"r{number:031d}" for number in range(count)]
+    assert all(ROLE_NAME.fullmatch(name) and not ROLE_NAME.fullmatch(name + "0") for name in names)
+    return names
 
 
 def request(
@@ -298,6 +320,12 @@ def assert_within_the_tools(read: list[tuple[str, dict]]) -> None:
     bound = page_bound()
     for number, (line, _) in enumerate(read, 1):
         assert tool_tokens(line) <= bound, f"page {number} costs {tool_tokens(line):.0f} tokens against {bound}"
+
+
+def index_bound() -> float:
+    bound = module_constant("INDEX_TOKENS")
+    assert isinstance(bound, int | float) and 0 < bound <= page_bound() / 20, f"no small index bound: {bound!r}"
+    return bound
 
 
 def form_of(output: dict | None) -> dict:
@@ -580,6 +608,60 @@ def test_the_index_lists_every_event_once_in_order_with_its_author_and_attention
     assert lines == wanted
     for _, page in read:
         assert len(page["index"]) == len(page["events"])
+
+
+def test_guard_an_ordinary_attention_list_prints_whole_on_its_index_line(host):
+    """Regression guard: a short list, and a conversation of Baton's default size with every name at the longest role
+    name, print whole, as before the index was bounded."""
+    eight = longest_roles(Conversations().max_participants)
+    _, header = host.start([message(1, attention=["reviewer", "coordinator"]), message(2, attention=eight)])
+    lines = [line for _, page in read_all(host, header) for line in page["index"]]
+    assert lines == [
+        "1/2 pos 1 message from worker attention reviewer, coordinator",
+        f"2/2 pos 2 message from worker attention {', '.join(eight)}",
+    ]
+
+
+def test_guard_the_widest_supported_attention_list_is_a_thousand_names_of_32_characters(tmp_path):
+    """Regression guard: the boundary below is Baton's. Attention names distinct participants of the conversation,
+    which config allows at most MAX_PARTICIPANTS of, and a role name is at most 32 characters."""
+    site = {"public_url": "http://127.0.0.1:8765", "data_dir": str(tmp_path / "data")}
+    raw = {"host": site, "roles": {"reviewer": {}}}
+    allowed = parse({**raw, "conversations": {"enabled": True, "max_participants": MAX_PARTICIPANTS}})
+    assert allowed.conversations.max_participants == MAX_PARTICIPANTS
+    with pytest.raises(ConfigError):
+        parse({**raw, "conversations": {"enabled": True, "max_participants": MAX_PARTICIPANTS + 1}})
+    assert len(longest_roles(1)[0]) == 32
+
+
+@pytest.mark.parametrize("count", [275, 280, MAX_PARTICIPANTS], ids=["275_roles", "280_roles", "boundary"])
+def test_a_long_attention_list_keeps_every_index_line_bounded_and_every_name_in_the_event(host, count):
+    """One message whose attention names `count` roles at the longest role name. Its index line, repeated on every
+    part, shows what fits under INDEX_TOKENS and counts the rest; the event's JSON keeps every name, and the event
+    takes no more pages than its own size needs at what a page leaves it after that bounded overhead, plus one."""
+    names = longest_roles(count)
+    event = message(2, attention=names)
+    events = [message(1), event, message(3)]
+    _, header = host.start(events)
+    read = read_all(host, header)
+    assert_within_the_tools(read)
+    assert delivered(read) == printed_as_a_page(events)
+    assert json.loads(delivered(read)[1])["message"]["attention"] == names
+    holding = [page for _, page in read if any(item["source_key"] == event["source_key"] for item in page["events"])]
+    part = next(item for item in holding[0]["events"] if item["source_key"] == event["source_key"])
+    empty = {**holding[0], "events": [{**part, "json": ""}], "index": []}  # the page with no share and no index line
+    frame = tool_tokens(json.dumps(empty, sort_keys=True, ensure_ascii=False))
+    need = tool_tokens(json.dumps(printed_as_a_page([event])[0], ensure_ascii=False)[1:-1])  # as a part's share prints
+    most = math.ceil(need / (page_bound() - frame - index_bound())) + 1
+    assert len(holding) <= most, f"{len(holding)} pages hold an event that needs at most {most}"
+    lines = [line for _, page in read for line in page["index"]]
+    assert all(tool_tokens(json.dumps(line, ensure_ascii=False)) <= index_bound() for line in lines)
+    for line in (line for line in lines if line.startswith("2/3 ")):
+        abridged = ABRIDGED.search(line)
+        assert abridged is not None and line.startswith("2/3 pos 2 message from worker attention "), line
+        shown = abridged["shown"].split(", ")[:-1]
+        assert shown and shown == names[: len(shown)], line
+        assert (int(abridged["left"]), int(abridged["count"])) == (count - len(shown), count), line
 
 
 def test_the_nine_event_window_keeps_the_refusal_the_approval_and_both_requests_in_view(host):

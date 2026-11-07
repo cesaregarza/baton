@@ -99,7 +99,8 @@ A page prints `{"status": "page", "page": N, "pages": ..., "more": ..., "seconds
 - `events`: this page's events, in order. A message event comes whole. Any other event comes as metadata only;
   `withheld` names what you don't see.
 - `index`: one line per event on the page: its number in the turn (`17/41`), position, kind, author, audience and,
-  for a message, whom it asks for attention. Use it as your checklist.
+  for a message, whom it asks for attention. Use it as your checklist. An index line may abbreviate attention; the
+  event's own `attention` list is the complete record to use when drafting.
 - An event or layer too long for one page comes in parts, on consecutive pages: each part has `part` and `parts`.
   A layer part carries its `text`; an event part carries `json`, a share of the event's JSON. Join the shares in
   order to read the whole. Nothing is dropped or shortened.
