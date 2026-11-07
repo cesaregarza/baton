@@ -36,18 +36,20 @@ yourself.
 
 Use these cells exactly, with only the capitals replaced. Each runs one command and prints its result once, as it
 came. Each asks every layer for a 12,000-token output budget, as headroom: the first line asks it of the cell, and
-`max_output_tokens` of the command. Never ask for less.
+`max_output_tokens` of the command. Never ask for less. SANDBOX is the `sandbox_permissions` and `justification`
+your successful commands in this session have used, as one object with those two fields, unchanged, or `{}` if they
+used neither. Never invent them.
 
 Receive:
 
     // @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}
-    const out = await tools.exec_command({ cmd: "BRIDGE receive --wait 600", yield_time_ms: 30000, max_output_tokens: 12000 });
+    const out = await tools.exec_command({ cmd: "BRIDGE receive --wait 600", yield_time_ms: 30000, max_output_tokens: 12000, ...SANDBOX });
     text(typeof out === "string" ? out : JSON.stringify(out));
 
 Read page N of the turn REQUEST_ID (N is 1, then 2, up to the header's `pages`):
 
     // @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}
-    const out = await tools.exec_command({ cmd: "BRIDGE read REQUEST_ID --page N", yield_time_ms: 10000, max_output_tokens: 12000 });
+    const out = await tools.exec_command({ cmd: "BRIDGE read REQUEST_ID --page N", yield_time_ms: 10000, max_output_tokens: 12000, ...SANDBOX });
     text(typeof out === "string" ? out : JSON.stringify(out));
 
 Reply, with FORM the `reply_form` object exactly as the bridge last printed it for this turn, and ANSWER your answer
@@ -56,7 +58,7 @@ as an object:
     // @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}
     const form = FORM;
     const answer = ANSWER;
-    const out = await tools.exec_command({ cmd: form.command + "\n" + JSON.stringify(answer) + "\n" + form.closing_line, yield_time_ms: 10000, max_output_tokens: 12000 });
+    const out = await tools.exec_command({ cmd: form.command + "\n" + JSON.stringify(answer) + "\n" + form.closing_line, yield_time_ms: 10000, max_output_tokens: 12000, ...SANDBOX });
     text(typeof out === "string" ? out : JSON.stringify(out));
 
 Waiting, with the same budgets:
@@ -150,7 +152,8 @@ Draft it this way, as you read:
    actors makes two requests: state both.
 4. Then write the prose within `summary_bytes`, merging only one author's continuing point. Every distinct actor,
    request and approval step stays.
-- Cover the whole offered page, not the last exchange. Group related events by thread; say who said or asked what.
+- Cover the whole offered page, not the last exchange. Group events by thread only to order your clauses, never to
+  merge events of different authors or steps; say who said or asked what.
 - Say an event is routine or already handled only when the sources show it. Do not invent completion, assignments,
   approvals or decisions, and do not present a reported claim as independently verified.
 - State each unresolved request: who asked whom, for what, and what is still open. Follow the attribution policy in
@@ -215,16 +218,18 @@ answer. Use the form of the turn you are answering: each turn has its own.
 carry `next`: the turn is over. Stop work on it: say `late` or `not_outstanding` in one line of visible output, do
 not resubmit and do not retry. Write no file. Go back to receive.
 
-A `read` of a page the turn doesn't have prints `invalid` with detail `no_such_page` and the turn's `pages`. Any
-command that fails prints `{"status": "fault", "type": ...}`: say so in one line and go back to receive, which hands
-the turn back if it is still live.
+A `read` of a page the turn doesn't have prints `invalid` with detail `no_such_page` and the turn's `pages`. A
+command with arguments the bridge doesn't take prints `invalid` with detail `usage`: build it again from its cell.
+Any command that fails prints `{"status": "fault", "type": ...}`: say so in one line and go back to receive, which
+hands the turn back if it is still live.
 
 ## Time
 
 Answer by `deadline_at`. `seconds_left` already keeps the half second the bridge needs. Up to 60 seconds are
 available, less when the callback has less to spare; about 44 is usual. Each tool call takes a few seconds, your own
 time included, so spend them on one pass: receive, read each page once in order while you note its clauses, then
-reply. Reread nothing.
+reply. Reread nothing. A turn of many pages may not fit its time: read on in order all the same, and stop as below
+when the time is gone.
 
 Before each read and before replying, look at the `seconds_left` the bridge last printed. If it is 0, or the output
 says `late` or `not_outstanding`, the turn's time is gone: stop work on it, say so in one line, and go back to

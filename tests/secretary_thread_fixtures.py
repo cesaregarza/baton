@@ -3,12 +3,15 @@
 `forty_one_events` reproduces a turn whose two read pages, at the earlier 48 KiB event bound, each printed more than
 the thread's tools display: sixteen long messages fill the first page, twenty-five shorter ones the second.
 `nine_events` holds the two shapes a summary dropped: a change held after an approval refusal, before a later
-approval, and one message asking two different actors for two different things. Names, ids, positions and text are
-invented.
+approval, and one message asking two different actors for two different things. The DENSE_WINDOWS carry the text
+that costs the most per byte: digests, ids, an encoding, quotes and backslashes, and line breaks. Names, ids,
+positions and text are invented.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 
 OLD_PAGE_BYTES = 48 * 1024  # the earlier bridge's bound on one page's events
@@ -142,6 +145,49 @@ def nine_events() -> list[dict]:
 
 
 REFUSAL, APPROVAL, TWO_ACTORS = 4, 5, 7  # indexes in nine_events of the shapes a summary dropped
+
+
+def digest_listing() -> list[dict]:
+    """One message listing 600 file digests, the densest text a review relays: hex runs cost far more per byte."""
+    lines = [f"{hashlib.sha256(str(number).encode()).hexdigest()}  file{number}.py" for number in range(600)]
+    return [message(FIRST_POS, "reviewer", "\n".join(lines))]
+
+
+def id_listing() -> list[dict]:
+    """40 messages, each naming 60 Baton-shaped ids."""
+    names = ("msg", "job", "conv")
+    return [
+        message(
+            FIRST_POS + 3 * number,
+            "coordinator",
+            " ".join(f"{names[k % 3]}_{_hex(number, k)}" for k in range(60)),
+        )
+        for number in range(40)
+    ]
+
+
+def encoded_blob() -> list[dict]:
+    """One message carrying 30,000 bytes as base64."""
+    raw = b"".join(hashlib.sha256(str(number).encode()).digest() for number in range(938))[:30000]
+    return [message(FIRST_POS, "operator", base64.b64encode(raw).decode())]
+
+
+def escapes() -> list[dict]:
+    """One message of quotes and backslashes, which each print escaped twice: once in the page's line and once more
+    if the cell prints the command's result as an object."""
+    return [message(FIRST_POS, "operator", '"\\' * 30000)]
+
+
+def line_breaks() -> list[dict]:
+    """One message of 15,000 short lines: a line break prints as an escape whose last letter joins the next word."""
+    return [message(FIRST_POS, "operator", "\nOk" * 15000)]
+
+
+DENSE_WINDOWS = ("digest_listing", "id_listing", "encoded_blob", "escapes", "line_breaks")
+
+
+def _hex(number: int, k: int) -> str:
+    return hashlib.sha256(f"{number}:{k}".encode()).hexdigest()[:16]
 
 
 def old_pages(events: list[dict]) -> list[list[dict]]:

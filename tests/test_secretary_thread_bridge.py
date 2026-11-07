@@ -33,7 +33,10 @@ STUB = TESTS / "secretary_thread_gate_stub.py"
 POLICY_TEXT = "Synthetic attribution policy: name who said or asked what."
 UNOFFERED_DELIMITER = "BATON_REPLY_JSON"  # the fixed word an earlier proposal used; nothing may rely on it
 TOOL_TOKENS = 10_000  # the default output budget of each of the thread's two tool layers
-ASCII_BYTES_PER_TOKEN = 2.5  # the fewest ASCII bytes of this JSON one token is taken to hold
+MARGIN = 0.85  # the share of that budget a page may use: the rest is the tools' wrapping and a tokenizer's excess
+# What printed text costs, by kind, as the bridge must count it at least: words and spaces, other runs of letters and
+# digits (ids, digests, encodings), other ASCII characters, and every other byte a token.
+WORD_BYTES_PER_TOKEN, DENSE_BYTES_PER_TOKEN, SYMBOL_BYTES_PER_TOKEN, WORD_LETTERS = 3.0, 1.15, 1.25, 12
 
 
 def message(number: int, text: str = "Synthetic text.", sender: str = "worker") -> dict:
@@ -206,10 +209,28 @@ def submit(host: Host, form: dict, body: str) -> tuple[int, dict | None]:
     return done.returncode, json.loads(done.stdout) if done.stdout.strip() else None
 
 
-def tool_tokens(text: str) -> float:
-    """What printed text may cost the thread's tools: ASCII at ASCII_BYTES_PER_TOKEN, any other byte a token."""
-    ascii_bytes = len(text.encode("ascii", "ignore"))
-    return ascii_bytes / ASCII_BYTES_PER_TOKEN + (len(text.encode()) - ascii_bytes)
+def tool_tokens(line: str) -> float:
+    """What a printed line costs the thread's tools at worst: as the cell prints a result object, escaped once more
+    inside its JSON, then counted run by run. A word is letters of one case shape, at most WORD_LETTERS, never four
+    consonants in a row, and a vowel in any of three letters or more."""
+    total = 0.0
+    for run in re.findall(r"[A-Za-z0-9]+|[^A-Za-z0-9]", json.dumps(line, ensure_ascii=False)[1:-1]):
+        if run.isascii() and run.isalnum():
+            lower = run.lower()
+            word = (
+                len(run) <= WORD_LETTERS
+                and re.fullmatch(r"[A-Z]?[a-z]+|[A-Z]+", run) is not None
+                and re.search(r"[^aeiouy]{4}", lower) is None
+                and (len(run) < 3 or re.fullmatch(r"[^aeiouy]+", lower) is None)
+            )
+            total += len(run) / (WORD_BYTES_PER_TOKEN if word else DENSE_BYTES_PER_TOKEN)
+        elif run == " ":
+            total += 1 / WORD_BYTES_PER_TOKEN
+        elif run.isascii():
+            total += 1 / SYMBOL_BYTES_PER_TOKEN
+        else:
+            total += len(run.encode("utf-8", "surrogatepass"))
+    return total
 
 
 def read_all(host: Host, header: dict) -> list[tuple[str, dict]]:
@@ -252,7 +273,7 @@ def printed_as_a_page(events: list[dict]) -> list[str]:
 
 def page_bound() -> float:
     bound = module_constant("PAGE_TOKENS")
-    assert isinstance(bound, int | float) and 0 < bound <= TOOL_TOKENS, f"no page bound within the tools: {bound!r}"
+    assert isinstance(bound, int | float) and 0 < bound <= MARGIN * TOOL_TOKENS, f"no margin under the tools: {bound!r}"
     return bound
 
 
@@ -410,7 +431,7 @@ def test_guard_the_41_event_fixture_reproduces_the_two_oversized_pages_of_the_ea
     old = fixtures.old_pages(fixtures.forty_one_events())
     assert [len(page) for page in old] == [16, 25]
     for page in old:
-        assert sum(fixtures.printed_size(event) for event in page) > TOOL_TOKENS * ASCII_BYTES_PER_TOKEN
+        assert tool_tokens(", ".join(json.dumps(event, ensure_ascii=False) for event in page)) > TOOL_TOKENS
 
 
 def test_every_printed_line_of_the_41_event_turn_fits_the_tools(host):
@@ -423,6 +444,30 @@ def test_every_printed_line_of_the_41_event_turn_fits_the_tools(host):
     assert read[0][0] == first or {**json.loads(first), "seconds_left": 0} == {**read[0][1], "seconds_left": 0}
     assert_within_the_tools(read)
     assert len(read) > 2
+
+
+@pytest.mark.parametrize("window", fixtures.DENSE_WINDOWS)
+def test_pages_of_digests_ids_an_encoding_and_escapes_fit_the_tools_as_printed_and_arrive_whole(host, window):
+    """The text that costs the most per byte, counted as the cell prints a result object at worst."""
+    events = getattr(fixtures, window)()
+    _, header = host.start(events)
+    read = read_all(host, header)
+    assert_within_the_tools(read)
+    assert delivered(read) == printed_as_a_page(events)
+
+
+def test_a_header_too_wide_for_the_tools_is_never_offered_and_the_operator_sees_why(host):
+    turn = Turn(host, request([message(number) for number in range(1, 801)]), 30)
+    host.turns.append(turn)
+    try:
+        ended = turn.process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        ended = None
+    assert ended == 1, "the turn was offered"
+    assert turn.finish() == (1, None)
+    assert host.run("receive", "--wait", "1") == (0, {"status": "none"})
+    code, out = host.run("timing")
+    assert code == 0 and out.get("oversized") == 1 and out["requests"] == [], out
 
 
 @pytest.mark.parametrize("window", ["forty_one_events", "nine_events"])
@@ -754,6 +799,25 @@ def test_a_late_or_not_outstanding_reply_says_the_turn_is_over(host):
     assert out["status"] == "not_outstanding" and "receive" in out.get("next", ""), out
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("read", "thr_" + "0" * 32, "--page", "x"),
+        ("read", "thr_" + "0" * 32, "--after", "0"),
+        ("receive", "--wait", "0"),
+    ],
+)
+def test_a_command_the_bridge_does_not_take_prints_a_usage_status(host, args):
+    assert host.run(*args) == (2, {"status": "invalid", "detail": "usage"})
+
+
+def test_half_of_a_pair_in_an_event_still_gives_the_header_and_its_read_fails_with_a_status(host):
+    _, header = host.start([message(1, "a\ud800b")])
+    assert header.get("pages") == 1, header
+    fault = {"status": "fault", "type": "UnicodeEncodeError"}
+    assert host.run("read", header["request_id"], "--page", "1") == (1, fault)
+
+
 def test_a_fault_carries_a_status(host):
     turn, header = host.start()
     (host.gate / "thread" / "protocol4" / "request.json").write_text("{")
@@ -846,7 +910,7 @@ def test_the_guidance_holds_the_cells_the_deadline_and_the_drafting_rule():
     budget = '// @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}'
     cells = re.findall(
         r"(?m)^    const out = await tools\.exec_command\(\{ cmd: (.+?), "
-        r"yield_time_ms: \d+, max_output_tokens: (\d+) \}\);$",
+        r"yield_time_ms: \d+, max_output_tokens: (\d+), \.\.\.SANDBOX \}\);$",
         text,
     )
     assert cells == [
@@ -868,6 +932,12 @@ def test_the_guidance_holds_the_cells_the_deadline_and_the_drafting_rule():
         "one clause",
         "A refusal and a later approval are two events",
         "who asked whom",
+        "makes two requests: state both",
+        "merging only one author's continuing point",
+        "approval step stays",
+        "never to\n  merge events of different authors",
+        "`sandbox_permissions` and `justification`",
+        "detail `usage`",
         "summary_size",
         "no_such_page",
         '"status": "fault"',

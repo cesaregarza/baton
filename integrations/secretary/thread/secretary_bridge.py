@@ -18,10 +18,11 @@ three trusted layers, so the contract is in front of the thread when it decides,
 this behavior for the thread's guidance.
 
 Every printed line stays within what the thread's tools show whole (PAGE_TOKENS), because a page they cut loses
-events or the contract without a sign. A turn is a fixed sequence of pages, counted in its header: the layers, then
-every event once, in window order, each page with an index line per event. An event or layer too large for one page
-is split across consecutive pages in numbered parts, never dropped or shortened. Every output carries a `status`, and
-each one for a turn that can no longer be answered says to stop and go back to `receive`.
+events or the contract without a sign; a turn whose header would not fit is never offered. A turn is a fixed
+sequence of pages, counted in its header: the layers, then every event once, in window order, each page with an
+index line per event. An event or layer too large for one page is split across consecutive pages in numbered parts,
+never dropped or shortened. Every output carries a `status`, and each one for a turn that can no longer be answered
+says to stop and go back to `receive`.
 
 One deadline covers every turn of an assessment: the secretary host sets it in SECRETARY_DEADLINE_AT, which the
 policy's model.env passes through, and Baton kills a turn's process at that deadline. The bridge never gives up
@@ -59,8 +60,9 @@ import unicodedata
 from collections import Counter
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
-from functools import cache
+from functools import lru_cache
 from pathlib import Path
+from typing import NoReturn
 
 BRIDGE_PATH = Path(__file__).resolve()
 HERE = BRIDGE_PATH.parent
@@ -87,10 +89,27 @@ WAIT = (1, 600)  # receive's bound, in seconds
 # The most one printed line may cost, in tokens as `_tokens` counts them. It protects what the thread sees: its command
 # tool and the cell that prints the command's output each cut a longer output, both at a default of 10,000 tokens,
 # and a cut page silently loses events or the contract. A call may ask for more, but policy may cap that, so the bound
-# never relies on it. 8,500 keeps 1,500 tokens (15%) for the tools' own wrapping of the output, and every read page,
-# layers, index, reply form and metadata included, stays within it.
+# never relies on it. 8,500 keeps 1,500 tokens (15%) for the tools' own wrapping of the output and for a tokenizer
+# that counts somewhat above the count below, and every read page, layers, index, reply form and metadata included,
+# stays within it, as the cell prints it at worst (`_printed`).
 PAGE_TOKENS = 8500
-BYTES_PER_TOKEN = 2.5  # the fewest ASCII bytes of this JSON one token is taken to hold
+# What printed text is taken to cost, by what it is made of, since no one rate is safe for all of it: prose spends
+# about five bytes a token, while ids, digests and encodings spend under two, and punctuation little more than one.
+# A word is a run of letters of one case shape, at most WORD_LETTERS long, never four consonants in a row, and with a
+# vowel when three letters or longer; any other run of letters and digits is dense. Every other ASCII character is a
+# symbol, and every byte of a non-ASCII character a token of its own, the most a byte-level tokenizer can spend on it.
+# Set against a public byte-pair tokenizer on pages of prose, digests, ids, encodings, JSON, code and random text,
+# this count came out above it on every page, by 10% at the least.
+WORD_BYTES_PER_TOKEN = 3.0  # words and spaces
+DENSE_BYTES_PER_TOKEN = 1.15  # any other run of letters and digits
+SYMBOL_BYTES_PER_TOKEN = 1.25  # punctuation and escapes
+WORD_LETTERS = 12
+RUN = re.compile(r"[A-Za-z0-9]+")
+WORD = re.compile(r"[A-Z]?[a-z]+|[A-Z]+")
+NOT_A_WORD = re.compile(r"[^aeiouy]{4}|^[^aeiouy]{3,}$")  # matched case-folded: how random letters look
+# What a long text is cut between: a run of letters and digits, with the control character before it, whose escape
+# ends in a letter or digit and so joins the run as printed, or any one other character.
+ATOM = re.compile(r"[\x00-\x1f]?[A-Za-z0-9]+|[^A-Za-z0-9]")
 PLACEHOLDER = 10**6  # wider than any page or part number, so a page's size is fixed before the pages are counted
 TURN_OVER = "This turn is over. Stop work on it and go back to receive."
 BUSY = 75  # EX_TEMPFAIL: another turn is live
@@ -128,6 +147,13 @@ def model(spool: Path, raw: bytes) -> int:
             return BUSY
         _discard(spool)  # anything here is a dead bridge's: this process now holds the lease
         offer = _offer(turn, deadline)
+        if _cost(_line(offered(offer)) + "\n") > PAGE_TOKENS:
+            # A header the tools would cut loses the contract's fields unseen, so the turn fails as a fault does
+            # rather than reach the thread in part. Its `required_sources` names every event, so only a window of
+            # some hundreds of events does this.
+            _record(spool, offer["request_id"], "oversized", turn=offer["turn"])
+            os.close(lease)
+            return 1
         secretary_gate._write_private(spool / "request.json", offer)
         _record(spool, offer["request_id"], "offered", turn=offer["turn"], deadline=round(deadline, 3))
     try:
@@ -252,10 +278,14 @@ def receive(spool: Path, wait: float) -> dict:
                     held["received_at"] = time.time()
                     secretary_gate._write_private(spool / "request.json", held)
                     _record(spool, held["request_id"], "received")
-                return {"status": "offered", "request": header(held)}
+                return offered(held)
         if time.monotonic() >= stop:
             return {"status": "none"}
         time.sleep(POLL)
+
+
+def offered(held: dict) -> dict:
+    return {"status": "offered", "request": header(held)}
 
 
 def header(held: dict) -> dict:
@@ -337,7 +367,7 @@ def pages(held: dict) -> list[dict]:
     large for a page of its own is split across consecutive pages, in parts. The same turn always pages the same way,
     so the header's count holds for every read."""
     form = reply_form(held["request_id"])
-    room = PAGE_TOKENS - _tokens(_line(_page(held["request_id"], form, PLACEHOLDER, PLACEHOLDER)) + "\n")
+    room = PAGE_TOKENS - _cost(_line(_page(held["request_id"], form, PLACEHOLDER, PLACEHOLDER)) + "\n")
     laid_out: list[dict] = []
     current: dict[str, list] = _contents()
     used = 0.0
@@ -394,24 +424,15 @@ def _items(held: dict, room: float):
 
 
 def _parts(whole: dict, head: dict, field: str, text: str, line: str | None, room: float):
-    """`whole` with its index line when it fits a page of its own; else `text` cut at whole characters into the
-    fewest parts that each fit one, each part `head` with its number, the count and its share of `text` under
-    `field`. Joined in order, the shares are `text` exactly: a layer's text, or an event as a whole page prints it."""
+    """`whole` with its index line when it fits a page of its own; else `text` cut at whole characters into parts
+    that each fit one, each part `head` with its number, the count and its share of `text` under `field`. Joined in
+    order, the shares are `text` exactly: a layer's text, or an event as a whole page prints it."""
     if _item_cost(_contents(), "index", whole, line) <= room:  # alone on a page: no separators
         yield whole, line
         return
     frame = {**head, "part": PLACEHOLDER, "parts": PLACEHOLDER, field: ""}
     budget = room - _item_cost(_contents(), "index", frame, _part_line(line, PLACEHOLDER, PLACEHOLDER))
-    shares, start, spent = [], 0, 0.0
-    for at, char in enumerate(text):
-        cost = _char_cost(char)
-        if cost > budget:
-            raise Invalid("a page cannot hold one character")  # only a frame wider than the bound itself does this
-        if spent + cost > budget:
-            shares.append(text[start:at])
-            start, spent = at, 0.0
-        spent += cost
-    shares.append(text[start:])
+    shares = _shares(text, budget)
     for number, share in enumerate(shares, 1):
         yield {**head, "part": number, "parts": len(shares), field: share}, _part_line(line, number, len(shares))
 
@@ -433,23 +454,91 @@ def _index_line(number: int, total: int, entry: dict) -> str:
 def _item_cost(contents: dict[str, list], field: str, value: dict, line: str | None) -> float:
     """What adding `value`, and its index line, adds to a page's printed line: each item, plus a separator after
     the first in its list."""
-    cost = _tokens(_line(value)) + (_tokens(", ") if contents[field] else 0.0)
+    cost = _cost(_line(value)) + (_cost(", ") if contents[field] else 0.0)
     if line is not None:
-        cost += _tokens(_line(line)) + (_tokens(", ") if contents["index"] else 0.0)
+        cost += _cost(_line(line)) + (_cost(", ") if contents["index"] else 0.0)
     return cost
 
 
+def _shares(text: str, budget: float) -> list[str]:
+    """`text` cut at whole characters into consecutive shares that each cost at most `budget` as a page prints them.
+    A share is whole atoms (`ATOM`), which print with a symbol on either side, so a share costs exactly what its
+    atoms cost; an atom too costly for a share of its own fills the share with its longest prefix that fits, measured
+    whole, since a cut changes the run it falls in."""
+    shares: list[str] = []
+    start, spent = 0, 0.0
+    for atom in ATOM.finditer(text):
+        begin, end = atom.span()
+        cost = _atom_cost(atom.group())
+        if spent + cost > budget and cost <= budget:  # the next share starts with it
+            shares.append(text[start:begin])
+            start, spent = begin, 0.0
+        while spent + cost > budget:
+            cut = _longest(text, begin, end, budget - spent)
+            if cut == begin and spent == 0:
+                raise Invalid("a page cannot hold one character")  # only a frame wider than the bound does this
+            shares.append(text[start:cut])
+            start, begin, spent = cut, cut, 0.0
+            cost = _share_cost(text[begin:end])
+        spent += cost
+    shares.append(text[start:])
+    return shares
+
+
+def _longest(text: str, begin: int, end: int, room: float) -> int:
+    """The end of the longest prefix of text[begin:end] the search finds within `room`, or `begin` for none."""
+    low, high = begin, end - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _share_cost(text[begin:middle]) <= room:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+@lru_cache(maxsize=4096)
+def _atom_cost(atom: str) -> float:
+    return _share_cost(atom)
+
+
+def _share_cost(share: str) -> float:
+    """A share's cost as its page prints it: a JSON string inside the page's line."""
+    return _cost(json.dumps(share, ensure_ascii=False)[1:-1])
+
+
+def _cost(text: str) -> float:
+    """What a piece of a printed line costs the thread's tools at worst, as the cell prints it."""
+    return _tokens(_printed(text))
+
+
+def _printed(text: str) -> str:
+    """Text as the cell prints it at worst: escaped once more, inside the JSON of an object the command tool returns
+    in place of a string. Escaping goes character by character, so the pieces of a line print as the line does."""
+    return json.dumps(text, ensure_ascii=False)[1:-1]
+
+
 def _tokens(text: str) -> float:
-    """What printed text may cost the thread's tools, in tokens: ASCII at BYTES_PER_TOKEN bytes a token, and every
-    byte of any other character a token of its own, the most a byte-level tokenizer can spend on it."""
-    ascii_bytes = len(text.encode("ascii", "ignore"))
-    return ascii_bytes / BYTES_PER_TOKEN + (len(text.encode()) - ascii_bytes)
+    """What text costs the thread's tools, in tokens: each run of letters and digits at its rate, each space as a
+    word's, each other ASCII character as a symbol, and every byte of any other character a token."""
+    runs = RUN.findall(text)
+    words = sum(len(run) for run in runs if _word(run))
+    dense = sum(map(len, runs)) - words
+    spaces = text.count(" ")
+    ascii_chars = len(text.encode("ascii", "ignore"))
+    other_bytes = len(text.encode("utf-8", "surrogatepass")) - ascii_chars  # half of a pair counts: it fails later
+    symbols = ascii_chars - words - dense - spaces
+    return (
+        (words + spaces) / WORD_BYTES_PER_TOKEN
+        + dense / DENSE_BYTES_PER_TOKEN
+        + symbols / SYMBOL_BYTES_PER_TOKEN
+        + other_bytes
+    )
 
 
-@cache
-def _char_cost(char: str) -> float:
-    """One character's cost inside a printed JSON string, escaped as the printed line escapes it."""
-    return _tokens(json.dumps(char, ensure_ascii=False)[1:-1])
+@lru_cache(maxsize=65536)
+def _word(run: str) -> bool:
+    return len(run) <= WORD_LETTERS and WORD.fullmatch(run) is not None and not NOT_A_WORD.search(run.casefold())
 
 
 def _line(value: object) -> str:
@@ -650,10 +739,11 @@ def timing(spool: Path) -> dict:
     path = spool / "timing.jsonl"
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line] if path.exists() else []
     steps: dict[str, dict] = {}
-    busy = 0
+    busy = oversized = 0
     for row in rows:
-        if row["step"] == "busy":
-            busy += 1
+        if row["step"] in ("busy", "oversized"):
+            busy += row["step"] == "busy"
+            oversized += row["step"] == "oversized"
             continue
         if row.get("request_id") is None:
             continue
@@ -688,7 +778,8 @@ def timing(spool: Path) -> dict:
                 "refused": entry["refused"],
             }
         )
-    return {"requests": requests, "outcomes": dict(Counter(row["outcome"] for row in requests)), "busy": busy}
+    outcomes = dict(Counter(row["outcome"] for row in requests))
+    return {"requests": requests, "outcomes": outcomes, "busy": busy, "oversized": oversized}
 
 
 def _offer(turn: dict, deadline: float) -> dict:
@@ -850,9 +941,17 @@ def _ms(start: float | None, end: float | None) -> int | None:
     return None if start is None or end is None else round((end - start) * 1000)
 
 
+class _Parser(argparse.ArgumentParser):
+    """A usage error prints a status on stdout as every other failure does, so a mistyped command still answers."""
+
+    def error(self, message: str) -> NoReturn:
+        print(_line({"status": "invalid", "detail": "usage"}), flush=True)
+        self.exit(2, f"{self.prog}: error: {message}\n")
+
+
 def _parser() -> argparse.ArgumentParser:
     """The commands' only arguments: no option names a config, policy, path or token."""
-    parser = argparse.ArgumentParser(prog="secretary_bridge.py", allow_abbrev=False)
+    parser = _Parser(prog="secretary_bridge.py", allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("model", allow_abbrev=False)  # Baton's: the policy's command model
     commands.add_parser("receive", allow_abbrev=False).add_argument("--wait", type=float, default=30)
@@ -901,9 +1000,11 @@ def main(argv: list[str]) -> int:
             result, code = status(spool), 0
         else:
             result, code = timing(spool), 0
+        printed = _line(result)
+        printed.encode()  # a line stdout can't carry, such as half of a pair, is a fault and said as one
     except Exception as error:  # the kind of fault alone: its message could hold a path
-        result, code = {"status": "fault", "type": type(error).__name__}, 1
-    print(_line(result), flush=True)
+        printed, code = _line({"status": "fault", "type": type(error).__name__}), 1
+    print(printed, flush=True)
     return code
 
 
