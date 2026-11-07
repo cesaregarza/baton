@@ -26,37 +26,48 @@ Your tools have two levels, and each has its own id:
 Keep the two ids apart: a cell id is never a session id. Run every command in the default pipe mode; none of them
 needs a terminal.
 
-Every line the bridge prints fits what your tools show whole, so print it once, exactly as it came. Never map,
-reformat, shorten or combine outputs, and never print two outputs in one cell: a combined print is cut, and what is
-cut is lost. Never build output from a field you expect but don't see: print the bridge's line as it came, and read
-its `status`. Your cell runtime has no byte encoder, and you never need one: never measure bytes yourself.
+Every line the bridge prints fits what your tools show whole at their default budgets, so print it once, exactly as
+it came. Never map, reformat, shorten or combine outputs, and never print two outputs in one cell: a combined print
+is cut, and what is cut is lost. Never build output from a field you expect but don't see: print the bridge's line as
+it came, and read its `status`. Your cell runtime has no byte encoder, and you never need one: never measure bytes
+yourself.
 
 ## The cells
 
-Use these cells exactly, with only the capitals replaced. `cmd` is your command tool's command argument; if your tool
-names it differently, use its name and change nothing else. Each cell runs one command and prints its output once,
-as it came.
+Use these cells exactly, with only the capitals replaced. Each runs one command and prints its result once, as it
+came. Each asks every layer for a 12,000-token output budget, as headroom: the first line asks it of the cell, and
+`max_output_tokens` of the command. Never ask for less.
 
 Receive:
 
-    const out = await tools.exec_command({ cmd: "BRIDGE receive --wait 600" });
-    console.log(typeof out === "string" ? out : JSON.stringify(out));
+    // @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}
+    const out = await tools.exec_command({ cmd: "BRIDGE receive --wait 600", yield_time_ms: 30000, max_output_tokens: 12000 });
+    text(typeof out === "string" ? out : JSON.stringify(out));
 
 Read page N of the turn REQUEST_ID (N is 1, then 2, up to the header's `pages`):
 
-    const out = await tools.exec_command({ cmd: "BRIDGE read REQUEST_ID --page N" });
-    console.log(typeof out === "string" ? out : JSON.stringify(out));
+    // @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}
+    const out = await tools.exec_command({ cmd: "BRIDGE read REQUEST_ID --page N", yield_time_ms: 10000, max_output_tokens: 12000 });
+    text(typeof out === "string" ? out : JSON.stringify(out));
 
 Reply, with FORM the `reply_form` object exactly as the bridge last printed it for this turn, and ANSWER your answer
 as an object:
 
+    // @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}
     const form = FORM;
     const answer = ANSWER;
-    const out = await tools.exec_command({ cmd: form.command + "\n" + JSON.stringify(answer) + "\n" + form.closing_line });
-    console.log(typeof out === "string" ? out : JSON.stringify(out));
+    const out = await tools.exec_command({ cmd: form.command + "\n" + JSON.stringify(answer) + "\n" + form.closing_line, yield_time_ms: 10000, max_output_tokens: 12000 });
+    text(typeof out === "string" ? out : JSON.stringify(out));
 
-If a command returns before it finishes, poll its command session by the session id it gave until it prints, then
-print that output once, as it came.
+Waiting, with the same budgets:
+- A command result with a `session_id` is still running: poll it in a cell, and print that result once, as it came:
+
+      // @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}
+      const out = await tools.write_stdin({ session_id: SESSION_ID, yield_time_ms: 60000, max_output_tokens: 12000 });
+      text(typeof out === "string" ? out : JSON.stringify(out));
+
+- A cell that answers "Script running with cell ID ..." is still running: wait on it outside any cell, with
+  `functions.wait({ cell_id: CELL_ID, yield_time_ms: 60000, max_tokens: 12000 })`.
 
 ## One receive loop
 

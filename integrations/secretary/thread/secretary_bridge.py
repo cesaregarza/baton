@@ -85,10 +85,11 @@ RETURN_SECONDS = 0.5  # kept before the deadline for the bridge to print an answ
 GRACE = 5  # a safety stop past the deadline, for a bridge whose caller is gone without killing it
 WAIT = (1, 600)  # receive's bound, in seconds
 # The most one printed line may cost, in tokens as `_tokens` counts them. It protects what the thread sees: its command
-# tool and the cell that prints the command's output each cut a longer output, and the smaller limit, the cell's, is
-# taken as 8,000 tokens until its exact value is known. A cut page silently loses events or the contract. 7,000 keeps
-# 1,000 tokens (12.5%) of margin, and every read page, layers, index, reply form and metadata included, stays within it.
-PAGE_TOKENS = 7000
+# tool and the cell that prints the command's output each cut a longer output, both at a default of 10,000 tokens,
+# and a cut page silently loses events or the contract. A call may ask for more, but policy may cap that, so the bound
+# never relies on it. 8,500 keeps 1,500 tokens (15%) for the tools' own wrapping of the output, and every read page,
+# layers, index, reply form and metadata included, stays within it.
+PAGE_TOKENS = 8500
 BYTES_PER_TOKEN = 2.5  # the fewest ASCII bytes of this JSON one token is taken to hold
 PLACEHOLDER = 10**6  # wider than any page or part number, so a page's size is fixed before the pages are counted
 TURN_OVER = "This turn is over. Stop work on it and go back to receive."

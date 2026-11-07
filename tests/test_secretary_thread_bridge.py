@@ -32,8 +32,8 @@ GUIDANCE = THREAD / "GUIDANCE.md"
 STUB = TESTS / "secretary_thread_gate_stub.py"
 POLICY_TEXT = "Synthetic attribution policy: name who said or asked what."
 UNOFFERED_DELIMITER = "BATON_REPLY_JSON"  # the fixed word an earlier proposal used; nothing may rely on it
-TOOL_TOKENS = 8000  # the smaller of the thread's two tool output limits, as the operator's stated assumption
-ASCII_BYTES_PER_TOKEN = 2.5  # the fewest ASCII bytes of this JSON one token holds, by the same assumption
+TOOL_TOKENS = 10_000  # the default output budget of each of the thread's two tool layers
+ASCII_BYTES_PER_TOKEN = 2.5  # the fewest ASCII bytes of this JSON one token is taken to hold
 
 
 def message(number: int, text: str = "Synthetic text.", sender: str = "worker") -> dict:
@@ -843,13 +843,21 @@ def test_the_guidance_names_the_bridge_version_and_holds_no_host_path():
 
 def test_the_guidance_holds_the_cells_the_deadline_and_the_drafting_rule():
     text = GUIDANCE.read_text(encoding="utf-8")
-    cells = re.findall(r"(?m)^    const out = await tools\.exec_command\(\{ cmd: (.+) \}\);\n    console\.log\(", text)
+    budget = '// @exec: {"max_output_tokens": 12000, "yield_time_ms": 60000}'
+    cells = re.findall(
+        r"(?m)^    const out = await tools\.exec_command\(\{ cmd: (.+?), "
+        r"yield_time_ms: \d+, max_output_tokens: (\d+) \}\);$",
+        text,
+    )
     assert cells == [
-        '"BRIDGE receive --wait 600"',
-        '"BRIDGE read REQUEST_ID --page N"',
-        'form.command + "\\n" + JSON.stringify(answer) + "\\n" + form.closing_line',
+        ('"BRIDGE receive --wait 600"', "12000"),
+        ('"BRIDGE read REQUEST_ID --page N"', "12000"),
+        ('form.command + "\\n" + JSON.stringify(answer) + "\\n" + form.closing_line', "12000"),
     ]
-    assert text.count("console.log(") == 3, "a cell prints more than once"
+    assert text.count(budget) == 4, "a cell asks the cell layer for no budget"
+    assert "max_output_tokens: 12000 });" in text.split("tools.write_stdin(", 1)[1].split("\n", 1)[0]
+    assert "max_tokens: 12000" in text
+    assert text.count("text(typeof out") == 4 and "console." not in text, "a cell prints other than once"
     assert "TextEncoder" not in text
     for needle in (
         "never measure bytes",
