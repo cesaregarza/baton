@@ -1,10 +1,11 @@
-# Offline conversation graphs
+# Manual conversation graphs
 
 The graph builder turns a saved Baton thread into a local, incremental graph. Use an
 OpenAI-compatible API for generation or let Codex/Claude Code produce the proposal directly.
 Both modes consume the same versioned instructions and proposal schema, and commit through
 the same validator. They produce the same state format; model interpretations can still differ.
-This is separate from the live Baton host, inboxes and derived-index publishing.
+The graph stays local. Host-local export and publication commands connect its completed frontier to
+Baton’s existing derived summaries; generation never runs inside the host or an open derived batch.
 
 Run from this checkout with Python 3.12 or newer and Baton's dependencies available:
 
@@ -162,8 +163,114 @@ resolved context. The input limit measures serialized UTF-8 bytes, not model tok
 context or one post cannot fit, prepare fails instead of dropping context or skipping the post.
 Increase the explicit budget or use a smaller batch. Output tokens are a separate provider limit.
 
-V1 runs one bounded batch at a time. It does not fetch linked artifacts, synchronize a live board,
-publish to the derived index, schedule follow-up work, install hooks or change global configuration.
+V1 runs one bounded batch at a time. The manual host commands below export source and publish the
+completed graph. Nothing schedules follow-up work, fetches linked artifacts, installs hooks or changes
+global configuration.
 The validator enforces references, coverage, quotes, state binding and structural invariants; it
 cannot prove that every model interpretation or summary is semantically correct. Review the compact
 view and drill down to raw posts for consequential decisions.
+
+
+## Export, publish and open a real thread manually
+
+These commands run on the host with its local configuration and database access. `index` commands
+are host-local; they are unavailable through MCP or the remote CLI. Store graph artifacts outside
+Baton's `data_dir`, keep them private, and use distinct source, checkpoint and receipt paths.
+No daemon, timer, model credentials or new artifact type is involved in publication.
+
+A later operator rollout can enable one producer and reader access with this minimal configuration.
+Apply it only to the intended host configuration; these examples do not install or change anything:
+
+```toml
+[search]
+enabled = true
+
+[indexer]
+producers = ["graph-manual"]
+max_artifact_bytes = 32000
+max_citations = 200
+max_manifest_items = 1000
+page_items = 100
+```
+
+`max_artifact_bytes` measures the rendered UTF-8 body; `max_citations` bounds deduplicated native
+message IDs referenced by rendered evidence. A long graph can exceed either limit and publication
+then refuses the entire summary. The full graph remains local. Manifest and provenance bounds still
+apply; `max_manifest_items` must accommodate the new interval since this producer's prior summary.
+The new batch must reach graph **W** exactly. A smaller manifest never publishes a body claiming a
+larger frontier. Increase explicit bounded settings or produce a smaller completed checkpoint.
+Only producers named in `indexer.producers` may publish. Readers require search enabled and the
+existing core-role artifact visibility policy; derived summaries never grant access to source posts.
+
+```sh
+# Export a complete prefix; omit --through-seq to capture the current native head.
+baton --config /path/to/baton.toml index graph-export \
+  --conversation CONVERSATION_ID --file /private/graphs/source.json \
+  --max-posts 10000 --max-bytes 20000000
+
+# Generate outside the host: use the native skill above, or the existing API run command.
+# Repeat prepare/apply with fresh request/proposal paths to process more posts.
+python -m baton.graph prepare --source /private/graphs/source.json \
+  --state /private/graphs/graph.json --request /private/graphs/request-1.json \
+  --batch-size 20 --max-input-bytes 100000
+# Native agent reads request-1.json and writes proposal-1.json.
+python -m baton.graph apply --source /private/graphs/source.json \
+  --state /private/graphs/graph.json --request /private/graphs/request-1.json \
+  --proposal /private/graphs/proposal-1.json
+
+# Model generation is complete before begin-batch; later native posts may remain beyond W.
+baton --config /path/to/baton.toml index graph-publish --producer graph-manual \
+  --source /private/graphs/source.json --state /private/graphs/graph.json
+
+# Local core-role consumer, or remote consumer using its ordinary authenticated token.
+baton --config /path/to/baton.toml conversation context CONVERSATION_ID --as reviewer --limit 50
+baton --host https://baton.example/mcp conversation context CONVERSATION_ID --limit 50
+```
+
+`graph-export --through-seq N` exports seqs 1 through N only. Export uses one database snapshot,
+deduplicates recipient copies by native seq and message ID, and refuses holes or copies with
+inconsistent identity, persisted author attribution, text or raw reply ID. Guest authors use the existing
+`guest · alias · code` label; a host notice uses `the host`. Copies naturally have different delivery
+timestamps, so the canonical `at` is the earliest retained copy's timestamp. If later retention changes
+that canonical timestamp, publication/export refuses the changed prefix rather than silently rewriting
+provenance. The export has explicit whole-prefix post and byte limits and never truncates implicitly.
+Publication accepts at most 10000 source posts and 20000000 source bytes.
+
+An existing source path can only be extended with its entire earlier normalized prefix unchanged;
+shortening or editing it fails. Re-export the same path after more posts arrive, then use new
+request/proposal paths and the same graph checkpoint. `graph-publish` loads a stable graph snapshot,
+checks its completed W and source binding, and compares every normalized source post through W
+with current authoritative SQLite records before creating the batch and immediately before commit.
+It records every manifest page. The published body contains active strand IDs, summaries, open work,
+individual strand summary frontiers, and active applicable shared decision IDs with deduplicated native
+evidence IDs. Resolved graph history and full raw posts stay in local artifacts.
+
+Publication preserves its batch and deterministic commit payload before delivery/commit. Default
+attempt files live beside the checkpoint in `graph.json.publications/<identity>.json`; identical retries
+reuse that batch and existing commit receipt, creating no additional summary version. Later graph
+revisions automatically use another attempt file. A crash after commit but before saving the local
+result is recoverable through the existing derived receipt. Keep the attempt files for retries within
+configured `receipt_retention_days`; expired or removed batches/receipts may require operator recovery
+and are not silently republished. `--receipt /private/graphs/attempt.json` chooses an explicit path; using
+it with a different publication identity or altered payload fails. `--generation GEN` targets that
+producer's existing generation; select it explicitly when switching generations. An inactive generation
+still requires the ordinary generation activation process before consumers can see it. Publication
+never changes the graph checkpoint or advertises a new W after a failed commit.
+
+`conversation context` returns summary metadata/body with `covered_through_seq` W, captured
+`head_seq` H, and earliest ascending raw messages `W < seq <= H`. It falls back to authorized raw
+history with W=0 when search is disabled or no usable summary is accessible. The summary is derived
+interpretation; use existing `conversation history`/MCP `read_history` for explicit raw drilldown.
+If `continuation` is present, consume its paired bounds together:
+
+```sh
+baton --host https://baton.example/mcp conversation context CONVERSATION_ID \
+  --after-seq AFTER_SEQ --through-seq CAPTURED_HEAD_SEQ --limit 50
+```
+
+Use the returned `continuation.after_seq` and `continuation.through_seq` literally. Continuations
+recheck current permissions and return only the next raw page at the fixed H, without introducing a
+newer summary. Their `summary` and `covered_through_seq` are null. Inspect `tail_complete` and
+`retention_gaps`; never treat a bounded page as acknowledgement of unseen messages. MCP consumers
+can use `read_context` with `conversation_id`, optional `producer` and `limit`, and the same paired
+`after_seq`/`through_seq` continuation fields.

@@ -44,16 +44,11 @@ def begin_batch(
     conversation_id: str,
     kinds: list[str],
     generation: str | None = None,
+    through_seq: int | None = None,
 ) -> dict[str, Any]:
     """Issue a manifest naming exactly which messages the batch reads, and what each kind builds on."""
     generations._require_producer(config, producer)
-    if isinstance(kinds, list) and RECENT in kinds:
-        if not config.search.rolling_window_messages:
-            raise InvalidRequest(f"{RECENT} needs [search] rolling_window_messages")
-        if kinds != [RECENT]:
-            raise InvalidRequest(f"{RECENT} is a batch of its own")
-    elif not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds) or not set(kinds) <= set(KINDS):
-        raise InvalidRequest(f"kinds is a non-empty list of distinct kinds from {', '.join(KINDS)}")
+    _validate_kinds(config, kinds, through_seq)
     limits = config.indexer
     with conn.transaction():
         generations._retire_generations(conn, config)
@@ -64,6 +59,8 @@ def begin_batch(
         ).fetchone()
         if conversation is None:
             raise UnknownConversation(f"there is no conversation {conversation_id}")
+        if through_seq is not None and through_seq > conversation["last_seq"]:
+            raise InvalidRequest("through_seq exceeds the conversation head")
         if not _has_copies(conn, conversation_id):  # a summary of nothing is never required, so never made
             raise NothingToIndex(f"no message in {conversation_id} has a copy left")
         open_batches = conn.execute(
@@ -82,7 +79,11 @@ def begin_batch(
             }
         else:
             plans = {kind: provenance._kind_plan(conn, producer, generation, conversation_id, kind) for kind in kinds}
-        window = provenance._window(conn, config, conversation_id, plans, conversation["last_seq"])
+        window = provenance._window(
+            conn, config, conversation_id, plans, through_seq if through_seq is not None else conversation["last_seq"]
+        )
+        if through_seq is not None and window["window"]["to_seq"] != through_seq:
+            raise InvalidRequest("manifest limits stop before through_seq; adjust limits or use a smaller checkpoint")
         if generation is None:  # the first batch makes the producer's one generation; `dirty` never does
             generations._require_slot(conn, config, producer)
             generation = "gen_" + secrets.token_hex(8)
@@ -124,6 +125,19 @@ def begin_batch(
         )
         conn.execute("UPDATE generations SET last_write_at = ? WHERE id = ?", (storage._now(), generation))
     return manifest
+
+
+def _validate_kinds(config: Config, kinds: list[str], through_seq: int | None) -> None:
+    if isinstance(kinds, list) and RECENT in kinds:
+        if not config.search.rolling_window_messages:
+            raise InvalidRequest(f"{RECENT} needs [search] rolling_window_messages")
+        if kinds != [RECENT]:
+            raise InvalidRequest(f"{RECENT} is a batch of its own")
+    elif not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds) or not set(kinds) <= set(KINDS):
+        raise InvalidRequest(f"kinds is a non-empty list of distinct kinds from {', '.join(KINDS)}")
+    if through_seq is not None:
+        if type(through_seq) is not int or through_seq < 1 or kinds != ["summary"]:
+            raise InvalidRequest("through_seq is a positive integer for a cumulative summary batch only")
 
 
 def read_batch(conn: Connection, config: Config, producer: str, batch_id: str, page: int) -> dict[str, Any]:
