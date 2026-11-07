@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 baton = "baton.cli:main"
+baton-graph = "baton.graph.cli:main"
 
 [dependency-groups]
 dev = [

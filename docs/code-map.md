@@ -18,6 +18,7 @@ baton/
   jobs.py              Job creation, transitions, revisions and events
   database/            Connection driver, checked files, schema and migrations
   derived/             Index generations, batches, artifacts and vectors
+  graph/               Offline source-bound graph producer, local state and API/native contract
   integrations/        Outbound service integrations
   auth.py              Credentials, OAuth and token lifetime
   aliases.py           Guest aliases and role bindings
@@ -60,6 +61,7 @@ import from those canonical modules. The separate Python API exports `Secretary`
 | Change connection mechanics | `database/driver.py` | `files.py` checks private database files |
 | Change the authoritative schema | `database/schema.py`, `database/migrations.py` | `database/store.py` opens and initializes the database |
 | Change secretary policy validation or installed-instance configuration | `config/secretary.py` | Owns `Policy`, `load_policy`, `fingerprint`, and `IntegrationConfig`; the Baton host TOML format is unchanged |
+| Change offline graph extraction, validation, local persistence or provider calls | `graph/contract.py`, `graph/operations.py`, `graph/validation.py` | `graph/source.py`, `graph/storage.py`, `graph/provider.py`; `python -m baton.graph` and `baton-graph` share `graph/cli.py` |
 | Change the model's inbox context or size limits | `agents/secretary/inbox/window.py` | `inbox/read.py` and `inbox/sources.py` load visible records and source context; oversized full windows fail |
 | Change wake/hold/keep assessment and callback lifecycle | `agents/secretary/attention/decide.py` | Coordinates the window, model call, cache and visibility recheck |
 | Change model or independent decision-engine transport | `agents/secretary/connections/` | `connections/model.py` selects model transport; `connections/decisions.py` owns typed engine adapters; `connections/transport.py` bounds I/O |
