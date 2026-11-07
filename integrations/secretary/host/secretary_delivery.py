@@ -10,9 +10,11 @@ and this module owns them:
 - `announceable`: which of the host's own admission ids a text whose queue was confirmed may mark as announced.
 
 A summary is historical catch-up when the core stored it with `catch_up`: its page was assessed for a wake whose
-trigger lay elsewhere, so it says nothing about that trigger. Only a trigger the secretary actually assessed lets the
-summaries replace the rereads. Queue acceptance, announced admission ids, the secretary's coverage and delivery to
-the principal stay four separate facts here: nothing in this module turns one into another.
+trigger lay elsewhere, so it says nothing about that trigger. The label is relative to the wake that assessed the
+page: a page newer than a later wake's trigger, or a trigger's own page assessed by another wake, is catch-up too.
+Only a trigger the secretary actually assessed, whose own result the text does not leave for later, lets the
+summaries replace the rereads. Queue acceptance, announced admission ids, the secretary's coverage and delivery to the
+principal stay four separate facts here: nothing in this module turns one into another.
 
 It uses the standard library only and imports nothing from Baton, so an adapter running under any Python 3.12 or
 later can import a copy installed beside it. The host passes its own wording and markers in; nothing here names a
@@ -105,38 +107,59 @@ class Reading:
     note: str = ""
 
 
-def reading(*, decided_by: str | None, trigger: str | None, trigger_state: str | None, historical: int) -> Reading:
+def own(summary: dict, trigger: str | None) -> bool:
+    """Whether this summary is the wake's own result: stored for that trigger, and not historical catch-up."""
+    return trigger is not None and summary.get("trigger") == trigger and not historical(summary)
+
+
+def reading(
+    *,
+    decided_by: str | None,
+    trigger: str | None,
+    trigger_state: str | None,
+    carried: list[dict],
+    left: list[dict] | tuple = (),
+) -> Reading:
     """Choose a text's read responsibility from the call's facts.
 
     `decided_by` is who decided the wake ("secretary", or the host's own fallback by any other name); `trigger` is
     the wake's event (message:SEQ, job:JOB_ID:SEQ or conversation), None for a scheduled turn with no trigger;
     `trigger_state` is the host's report of that event ("assessed", "not_reached", "retry", "not_visible", or None
-    when there was no report); `historical` counts the carried summaries that are historical catch-up.
+    when there was no report); `carried` are the summaries the text carries, `left` those the byte bound left for
+    next time.
 
-    For a wake, the summaries replace the rereads only when the secretary decided it and its own trigger was
-    assessed. Otherwise the rereads stand and the note names the trigger and its state: the trigger is still the
-    host's to handle through its existing fallback. For a scheduled turn, they replace the rereads unless one of them
-    is historical catch-up, which means the secretary's pages were behind the inbox when it was made.
+    For a wake, the summaries replace the rereads only when the secretary decided it, its own trigger was assessed,
+    and the trigger's own result is not among those left for next time. Otherwise the rereads stand and the note
+    names the trigger and its state: the trigger is still the host's to handle through its existing fallback, the
+    usual rereads. For a scheduled turn, they replace the rereads unless one of them is historical catch-up.
     """
+    old = sum(1 for item in carried if historical(item))
     if trigger is None:
-        if decided_by == "secretary" and not historical:
+        if decided_by == "secretary" and not old:
             return Reading(True)
-        count = f"{historical} historical catch-up summar{'y' if historical == 1 else 'ies'}"
+        count = f"{old} historical catch-up summar{'y' if old == 1 else 'ies'}"
         return Reading(
             False,
-            f"\n[The digest above includes {count}: pages assessed before the secretary reached the "
-            "current inbox. It is additional historical context and does not replace the instructions "
-            "below to read the current inbox.]",
+            f"\n[The digest above includes {count}: pages assessed as catch-up, each for a wake whose own event "
+            "was not on its page, so not a reading of the current inbox. It is additional historical context and "
+            "does not replace the instructions below to read the current inbox.]",
         )
+    context = "additional historical context" if old else "additional context"
     if decided_by == "secretary" and trigger_state == "assessed":
-        return Reading(True)
-    context = "additional historical context" if historical else "additional context"
+        if not any(own(item, trigger) for item in left):
+            return Reading(True)
+        return Reading(
+            False,
+            f"\n[Assessed by the secretary, but its own result is not in this brief: {trigger}, this wake's own "
+            f"event (trigger_state assessed). That result goes out in a later text. The brief above is {context}; "
+            "the instructions below to read the current inbox and any held replay stand.]",
+        )
     return Reading(
         False,
         f"\n[Not assessed by the secretary: {trigger}, this wake's own event (trigger_state "
         f"{trigger_state or 'unknown'}). The brief above is {context} and does not cover it; {trigger} is "
-        "still handled through the existing fallback, so the instructions below to read the current "
-        "inbox and any held replay stand.]",
+        "still handled through the existing fallback, which is the instructions below to read the current "
+        "inbox and any held replay.]",
     )
 
 
@@ -149,7 +172,7 @@ def lead(brief: str, chosen: Reading | None) -> tuple[str, bool]:
     if not brief:
         return "", False
     if chosen is None:
-        chosen = reading(decided_by=None, trigger="unknown", trigger_state=None, historical=0)
+        chosen = reading(decided_by=None, trigger="unknown", trigger_state=None, carried=[])
     return ("", True) if chosen.replaces_rereads else (chosen.note, False)
 
 
