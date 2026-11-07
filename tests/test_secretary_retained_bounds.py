@@ -63,11 +63,12 @@ class Retained:
 
 @dataclass
 class Hourly:
-    """What each of the hourly's two lanes ended with, and the summaries ready after them."""
+    """What each of the hourly's two lanes ended with, whether each asked the model, and what is ready after them."""
 
     scan: Exception | None
     scheduled: Exception | None
     pending: list[dict]
+    asked: tuple[bool, bool] = (False, False)
 
 
 def _rows(world) -> list[dict]:
@@ -119,19 +120,23 @@ async def _callback(secretary: Secretary, trigger: str) -> tuple[dict | None, Ba
         return result, error, await queue.pending()
 
 
-async def _hourly(secretary: Secretary) -> Hourly:
+async def _hourly(secretary: Secretary, model=None) -> Hourly:
     """The hourly as the host runs it: the scan lane, then the digest lane if a held page is due, else the retry lane
     if a retry is due, then what is ready. Each lane starts with no error of its own, and a refusal in the scan lane
     does not keep the scheduled lane from running, so each lane's error is its own."""
+    calls = (lambda: len(model.requests)) if model is not None else (lambda: 0)
     async with DatabaseWorker() as database:
         queue = await AttentionQueue.open(secretary, database, budget_seconds=BUDGET)
+        before = calls()
         scan = await _lane(queue, queue.scan)
+        between = calls()
         scheduled = None
         for held, action in ((True, queue.digest), (False, queue.retry)):
             if await database.call(queue.backlog.due, time.time(), held=held):
                 scheduled = await _lane(queue, action)
                 break
-        return Hourly(scan, scheduled, await queue.pending())
+        asked = (between > before, calls() > between)
+        return Hourly(scan, scheduled, await queue.pending(), asked)
 
 
 async def _lane(queue: AttentionQueue, action) -> Exception | None:
@@ -235,20 +240,19 @@ def _calls(limit: int = 40):
 
 
 def _drain_range(retained: Retained, *, limit: int = 80) -> list[str]:
-    """Hourlies at each next retry until no page waits; what each call's scheduled lane did to the retained work."""
+    """Hourlies at each next retry until no page waits; what each lane of each call did to the retained work."""
     steps = []
     for _ in range(limit):
         if not _retrying(retained.world):
             return steps
         _at_next_retry(retained.world, retained.now)
-        calls = len(retained.model.requests)
-        hourly = asyncio.run(_hourly(retained.secretary))
-        if len(retained.model.requests) > calls:
-            steps.append("assessed")
-        elif isinstance(hourly.scheduled, InboxTooLarge):
-            steps.append("oversized")
-        else:
-            steps.append(type(hourly.scheduled).__name__ if hourly.scheduled else "nothing")
+        hourly = asyncio.run(_hourly(retained.secretary, retained.model))
+        done = [
+            "assessed" if asked else "oversized" if isinstance(error, InboxTooLarge) else type(error).__name__
+            for error, asked in zip((hourly.scan, hourly.scheduled), hourly.asked, strict=True)
+            if asked or error is not None
+        ]
+        steps.extend(done or ["nothing"])
     raise AssertionError(f"the retained range did not recover within {limit} host calls: {steps}")
 
 
@@ -275,8 +279,8 @@ def test_an_oversized_retained_range_splits_on_its_first_refusal_until_every_par
         [old] = _range_rows(retained)
         _at_next_retry(world, retained.now)
         assert retained.now[0] == old["next_attempt"]
-        hourly = asyncio.run(_hourly(retained.secretary))
-        assert hourly.scan is None and isinstance(hourly.scheduled, InboxTooLarge)
+        result, error, _ = asyncio.run(_callback(retained.secretary, _trigger(retained.events[-1])))
+        assert result is None and isinstance(error, InboxTooLarge)
         halves = _range_rows(retained)
         assert [len(_event_numbers(retained, row)) for row in halves] == [21, 20]
         assert all((row["attempts"], row["content_failures"], row["status"]) == (0, 0, "retry") for row in halves)
@@ -363,7 +367,12 @@ def test_policy_edit_reassesses_a_pending_summary_and_refuses_its_old_acknowledg
                 if invalidated["since"] <= summary["since"] and summary["through_pos"] <= invalidated["through"]:
                     reassessed[summary["decision_id"]] = summary
         parts = 1 if earlier_count <= CANDIDATE_BOUNDS["max_events"] else 2
-        assert len(reassessed) == parts and len(model.requests) == calls + parts
+        own = [
+            request
+            for request in model.requests[calls:]
+            if invalidated["since"] <= request["context"]["since"] < invalidated["through"]
+        ]
+        assert len(reassessed) == parts and len(own) == parts
         assert all(summary["kind"] == "summary" for summary in reassessed.values())
         assert all(summary["policy_digest"] != retained.old_digest for summary in reassessed.values())
         assert retained.earlier_id not in reassessed
@@ -478,8 +487,8 @@ def test_a_crash_between_the_first_refusal_and_its_split_resumes_from_stored_sta
         # A new process, with nothing but the stored state: its next refusal splits the range.
         retained.secretary = Secretary(world.config, world.state_path, world.policy_path)
         _at_next_retry(world, retained.now)
-        hourly = asyncio.run(_hourly(retained.secretary))
-        assert isinstance(hourly.scheduled, InboxTooLarge)
+        result, error, _ = asyncio.run(_callback(retained.secretary, _trigger(retained.events[-1])))
+        assert result is None and isinstance(error, InboxTooLarge)
         halves = _range_rows(retained)
         assert [len(_event_numbers(retained, row)) for row in halves] == [21, 20]
         assert all((row["attempts"], row["content_failures"]) == (0, 0) for row in halves)
@@ -539,6 +548,43 @@ def test_duplicate_concurrent_callbacks_on_a_retried_range_split_it_once(tmp_pat
             range(1, RANGE_EVENTS + 1)
         )
         assert len(leaves) == 7 and all(row["status"] == "ready" for row in leaves)
+
+
+def test_an_hourly_with_nothing_new_to_scan_reaches_a_due_retry_while_a_digest_takes_its_scheduled_lane(
+    tmp_path, monkeypatch
+) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path, plan={"decision": "hold", "summary": "", "sources": []})
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF, digest_seconds=60)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        room = conversation(world)
+        held = [say(world, room, "worker", f"A routine update {number}") for number in range(3)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(held[-1])))
+        assert error is None and result["decision"] == "hold"
+        model.set_plan({"steps": [{"exit": 1}]})
+        failed = [say(world, room, "reviewer", f"An update whose assessment failed {number}") for number in range(2)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(failed[-1])))
+        assert result is None and isinstance(error, SecretaryUnavailable)
+        model.set_plan({})
+        now[0] += 120  # both the held page's digest and the failed page's retry are due; no callback comes
+
+        # Nothing new to scan, so the scan lane's budget goes to the due retry, while the digest takes the scheduled
+        # lane: one hourly reaches both, with no callback and no timer of its own.
+        calls = len(model.requests)
+        hourly = asyncio.run(_hourly(secretary, model))
+        assert hourly.scan is None and hourly.scheduled is None and hourly.asked == (True, True)
+        assert len(model.requests) == calls + 2 and not _retrying(world)
+        assert [request["context"]["mode"] for request in model.requests[calls:]] == ["alert", "digest"]
+        assert sorted(summary["mode"] for summary in hourly.pending) == ["alert", "digest"]
+        covered = _event_keys(hourly.pending)
+        assert covered == Counter(f"message:{sent['message_id']}" for sent in [*held, *failed])
+
+        # With nothing due, an idle scan lane asks nothing, as before.
+        hourly = asyncio.run(_hourly(secretary, model))
+        assert hourly.asked == (False, False) and len(model.requests) == calls + 2
 
 
 def test_each_callback_behind_a_scan_backlog_assesses_the_earliest_page_as_catch_up_until_its_trigger_is_reached(
@@ -648,7 +694,7 @@ def test_a_range_that_fits_is_never_split_early_by_a_timeout_or_an_invalid_respo
             if attempts == 1:
                 _at_next_retry(world, now)
                 hourly = asyncio.run(_hourly(secretary))
-                assert isinstance(hourly.scheduled, SecretaryUnavailable)
+                assert isinstance(hourly.scan or hourly.scheduled, SecretaryUnavailable)
         assert len(model.requests) == 2
 
 
@@ -693,7 +739,7 @@ def test_a_short_reply_whose_parent_outweighs_the_byte_bound_gets_a_cited_notice
         for refusal in (2, 3):
             _at_next_retry(world, now)
             hourly = asyncio.run(_hourly(secretary))
-            assert isinstance(hourly.scheduled, InboxTooLarge)
+            assert isinstance(hourly.scan or hourly.scheduled, InboxTooLarge)
             if refusal == 2:
                 [page] = _retrying(world)
                 assert (page["attempts"], page["content_failures"]) == (2, 2)
@@ -754,7 +800,7 @@ def test_an_event_larger_than_the_byte_bound_gets_a_cited_failure_notice_never_a
         assert _event_keys([newer]) == Counter([f"message:{after['message_id']}"])
         now[0] = _retrying(world)[0]["next_attempt"]
         hourly = asyncio.run(_hourly(secretary))
-        assert isinstance(hourly.scheduled, InboxTooLarge)
+        assert isinstance(hourly.scan or hourly.scheduled, InboxTooLarge)
         assert len(model.requests) == calls + 1 and len(model.engine_requests) == engine_calls + 1  # the newer page
 
         # The notice cites the event, says no judgment was made, and is kept apart from the summaries.

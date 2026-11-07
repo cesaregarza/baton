@@ -41,7 +41,7 @@ class AttentionQueue:
         _, floor = await database.call(log.activate, epoch, head)
         return cls(secretary, database, policy, Backlog(log), floor)
 
-    async def scan(self, budget: float, *, trigger: str | None = None) -> dict | None:
+    async def scan(self, budget: float, *, trigger: str | None = None, scheduled: bool = True) -> dict | None:
         since = await self.database.call(self.backlog.scanned)
         try:
             window = await self.database.call(InboxWindow.read, self.secretary.config, self.policy, since)
@@ -50,14 +50,36 @@ class AttentionQueue:
             await self.database.call(self.backlog.enqueue, page, time.time())
             return await self._failed(page, error)
         run = DecisionRun(self.secretary, budget, since, self.floor, trigger, through=window.through)
-        if window.through == since:
-            return await run.run()
-        page = Page(since, window.through)
-        await self.database.call(self.backlog.enqueue, page, time.time())
-        if not window.events:
+        if window.events:
+            page = Page(since, window.through)
+            await self.database.call(self.backlog.enqueue, page, time.time())
+            return await self._attempt(page, budget, trigger=trigger)  # a trigger beyond this page makes it catch-up
+        if window.through != since:
+            page = Page(since, window.through)
+            await self.database.call(self.backlog.enqueue, page, time.time())
             await self.database.call(self.backlog.discard_empty, page)
-            return await run.run()
-        return await self._attempt(page, budget, trigger=trigger)  # a trigger beyond this page makes it catch-up
+        if trigger is None and scheduled:
+            result = await self._scheduled(budget)
+            if result is not None or self.last_error is not None:
+                return result
+        return await run.run()
+
+    async def _scheduled(self, budget: float) -> dict | None:
+        """An untriggered scan with nothing new to read spends its budget on scheduled work: a due retry, else a digest.
+
+        The hourly runs its scan, then one scheduled lane, and that lane takes a digest whenever one is due. A held page
+        makes one due a minute later, so with any traffic it never reached a retry, and retained work waited on
+        callbacks, or with none at all on alternate hours; it also digested at most one page of held events an hour.
+        A scan lane with nothing to scan now reaches either, within its own budget and deadline, with no new timer.
+        A callback's scan is left alone: its decide already resumes a due retry before it scans. So is `poll`'s, whose
+        own scheduled lane alternates between retries and digests.
+        """
+        now = time.time()
+        if await self.database.call(self.backlog.due, now):
+            return await self.retry(budget)
+        if await self.database.call(self.backlog.due, now, held=True):
+            return await self.digest(budget)
+        return None
 
     async def assess(self, budget: float, *, trigger: str | None = None, hourly: bool = False) -> dict | None:
         """The host API resumes retained work before scanning another page."""
@@ -104,7 +126,7 @@ class AttentionQueue:
         New traffic cannot consume the recovery budget. The worker alternates which
         scheduled lane goes first so retries and digests also get time under load.
         """
-        await self.scan(budget)
+        await self.scan(budget, scheduled=False)  # the scheduled lane below alternates, so neither kind waits
         scheduled = (
             ((True, self.digest), (False, self.retry)) if digest_first else ((False, self.retry), (True, self.digest))
         )
