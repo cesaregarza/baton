@@ -7,7 +7,9 @@ sequence a host goes through when a range that fit the old bounds no longer fits
 before any model call and split at once, its parts assessed, a digest change under a pending summary, a crash before
 a split, a duplicate callback, a reply whose parent outweighs the byte bound, an event larger than the byte bound,
 newer work going ahead of the old range, callbacks that move a scan backlog, and an hourly whose scheduled lane
-alternates a due digest and a due retry when new events reach no callback.
+alternates a due digest and a due retry when new events reach no callback. Later scenarios pin the edges of those
+rules: a catch-up label per call, a split that compares every stored counter, a refusal after inference, a store
+written before the passed-over mark, and a retry lane cut off before its attempt records anything.
 """
 
 from __future__ import annotations
@@ -27,10 +29,11 @@ from test_secretary_recovery import _worker
 
 from baton import conversations, jobs
 from baton.agents.secretary.attention.backlog import Backlog
-from baton.agents.secretary.attention.decide import SecretaryUnavailable
+from baton.agents.secretary.attention.decide import DecisionRun, SecretaryUnavailable
 from baton.agents.secretary.attention.queue import AttentionQueue
 from baton.agents.secretary.attention.runtime import DatabaseWorker
 from baton.agents.secretary.attention.state import AttentionLog
+from baton.agents.secretary.connections.model import SecretaryModel
 from baton.agents.secretary.inbox.window import InboxTooLarge, InboxWindow
 from baton.agents.secretary.service import Secretary
 from baton.errors import BatonError, InvalidRequest
@@ -1125,3 +1128,382 @@ def test_a_callback_stalled_inside_its_split_never_puts_back_a_part_another_call
         assert _rows(world) == split
         positions = [_position(world, item["message_id"]) for item in sent]
         assert [sum(row["since"] < pos <= row["through"] for row in split) for pos in positions] == [1] * len(sent)
+
+
+def _marks(world) -> list[tuple[int, int, str, int]]:
+    """Each stored page's range, status and passed-over mark, as the private state holds them."""
+    backlog = Backlog(AttentionLog(world.state_path, world.config.data_dir, "planner"))
+    with backlog.log.connection() as conn:
+        rows = conn.execute(
+            "SELECT since,through,status,passed_over FROM backlog_windows WHERE principal='planner' ORDER BY since"
+        ).fetchall()
+    return [tuple(row) for row in rows]
+
+
+@pytest.mark.parametrize("engine_wake", [False, True], ids=["summary", "engine-wake-notice"])
+@pytest.mark.parametrize("catch_up_first", [False, True], ids=["untriggered-first", "catch-up-first"])
+def test_a_catch_up_call_and_an_untriggered_call_on_one_page_each_keep_their_own_label(
+    tmp_path, monkeypatch, catch_up_first, engine_wake
+) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF)
+        if engine_wake:
+            # The engine requires a wake that the model does not choose, so the page's result is the engine's notice.
+            model.set_plan(HOLD)
+            model.set_engine_plan({"decision": "wake", "wake_probability": 0.9})
+        secretary = worker.instance.secretary
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: 1000.0)
+        _, floor = asyncio.run(secretary.activate())
+        room = conversation(world)
+        sent = [say(world, room, "worker", f"Backlog update {number}") for number in range(12)]
+        explicit = {"since": floor, "floor": floor}
+        calls = {
+            "catch_up": lambda: secretary.decide(budget_seconds=BUDGET, trigger=_trigger(sent[-1]), **explicit),
+            "untriggered": lambda: secretary.decide(budget_seconds=BUDGET, **explicit),
+        }
+        order = ["catch_up", "untriggered"] if catch_up_first else ["untriggered", "catch_up"]
+
+        # Neither page names a trigger, so the two calls give the model the same context. Each still gets a result
+        # labelled for itself, whichever came first: catch-up only when its own trigger is not on the page. The label
+        # is keyed, so the second call is a separate assessment and never returns the first call's stored label.
+        results = {}
+        for name in order:
+            result = asyncio.run(calls[name]())
+            assert result["cached"] is False and result["trigger"] is None
+            assert result["kind"] == ("engine_wake" if engine_wake else "summary")
+            results[name] = result
+        assert results["catch_up"]["catch_up"] is True and "catch_up" not in results["untriggered"]
+        assert results["catch_up"]["decision_id"] != results["untriggered"]["decision_id"]
+        assert all(request["context"]["trigger"] is None for request in model.requests)
+        assert "catch_up" not in json.dumps([request["context"] for request in model.requests])
+
+        # Asked again in either order, each call finds its own stored result, with its own label. A summary is found
+        # by its key before any model call; a notice is keyed by its window, so it is found as the model answers.
+        calls_before = len(model.requests)
+        for name in reversed(order):
+            again = asyncio.run(calls[name]())
+            assert again["decision_id"] == results[name]["decision_id"]
+            assert again.get("catch_up") == results[name].get("catch_up")
+        if not engine_wake:
+            assert len(model.requests) == calls_before
+
+
+def test_a_stalled_split_never_deletes_a_page_another_callback_finished_since(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        invalid = {"raw": "{}"}
+        worker, model = _worker(world, tmp_path, plan={"steps": [invalid] * BACKOFF["max_attempts"] + [{}]})
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        room = conversation(world)
+        sent = [say(world, room, "worker", f"Update {number} on a page that fits") for number in range(6)]
+        trigger = _trigger(sent[-1])
+
+        # Two invalid answers leave the page that fits one content failure short of max_attempts.
+        result, error, _ = asyncio.run(_callback(secretary, trigger))
+        assert result is None and isinstance(error, SecretaryUnavailable)
+        _at_next_retry(world, now)
+        assert isinstance(asyncio.run(_hourly(secretary)).scheduled, SecretaryUnavailable)
+        _at_next_retry(world, now)
+
+        # A third callback's invalid answer exhausts the page, and that callback stalls before its split.
+        original = InboxWindow.split_position.__func__
+        entered, release = threading.Event(), threading.Event()
+
+        def stalled(cls, *args):
+            entered.set()
+            assert release.wait(30)
+            return original(cls, *args)
+
+        monkeypatch.setattr(InboxWindow, "split_position", classmethod(stalled))
+        outcome: list[BaseException | dict] = []
+
+        def stalled_callback() -> None:
+            try:
+                other = Secretary(world.config, world.state_path, world.policy_path)
+                outcome.append(asyncio.run(other.decide(budget_seconds=BUDGET, trigger=trigger)))
+            except BaseException as raised:  # the outcome is asserted below
+                outcome.append(raised)
+
+        thread = threading.Thread(target=stalled_callback)
+        thread.start()
+        assert entered.wait(30)
+        [exhausted] = _retrying(world)
+        assert (exhausted["attempts"], exhausted["content_failures"]) == (3, 3)
+
+        # Past its backoff, another callback finishes the same range with a valid answer: one stored page, ready,
+        # with the same range and mode it had, its counters reset.
+        _at_next_retry(world, now)
+        finished, error, pending = asyncio.run(_callback(secretary, trigger))
+        assert error is None and finished is not None and finished["kind"] == "summary"
+        ready = _rows(world)
+        assert [(row["since"], row["through"], row["status"]) for row in ready] == [
+            (exhausted["since"], exhausted["through"], "ready")
+        ]
+        release.set()
+        thread.join(30)
+        assert outcome and isinstance(outcome[0], SecretaryUnavailable)
+
+        # The stalled split compares the counters its failure stored, not only the range, so it finds the page
+        # changed and leaves it: no part goes back to retry, and no event is assessed twice or in two results.
+        assert _rows(world) == ready
+        _, _, after = asyncio.run(_callback(secretary, trigger))
+        assert [summary["decision_id"] for summary in after] == [finished["decision_id"]]
+        assert _event_keys(after) == Counter(f"message:{item['message_id']}" for item in sent)
+        assert len(model.requests) == BACKOFF["max_attempts"] + 1
+
+
+def test_a_store_written_before_the_passed_over_mark_digests_first_after_the_upgrade(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path, plan=HOLD)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF, digest_seconds=60)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        rooms = [conversation(world) for _ in range(2)]
+        held = [say(world, rooms[0], "worker", f"Routine update {number}") for number in range(3)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(held[-1])))
+        assert error is None and result is not None and result["decision"] == "hold"
+        model.set_plan({"steps": [{}] * len(model.requests) + [{"exit": 1}]})
+        failed = [say(world, rooms[1], "reviewer", f"A failed update {number}") for number in range(2)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(failed[-1])))
+        assert result is None and isinstance(error, SecretaryUnavailable)
+
+        # The previous build's store has no passed_over column: drop it, as that build never wrote one.
+        log = AttentionLog(world.state_path, world.config.data_dir, "planner")
+        with log.connection() as conn, conn.transaction():
+            conn.execute("ALTER TABLE backlog_windows DROP COLUMN passed_over")
+        with log.connection() as conn:
+            assert "passed_over" not in {row["name"] for row in conn.execute("PRAGMA table_info(backlog_windows)")}
+        now[0] += 120  # the held page's digest and the failed page's retry are both due
+        model.set_plan({})
+
+        # The first open adds the column unmarked, so a retry stored before the upgrade has not been passed over:
+        # the first scheduled lane digests and marks it, and the next one takes it.
+        _scanned(world)
+        assert [(status, mark) for *_, status, mark in _marks(world)] == [("held", 0), ("retry", 0)]
+        first = asyncio.run(_hourly(secretary, model))
+        assert first.scheduled is None and first.scheduled_modes == ("digest",)
+        assert _event_keys(first.pending) == Counter(f"message:{sent['message_id']}" for sent in held)
+        assert [(status, mark) for *_, status, mark in _marks(world)] == [("ready", 0), ("retry", 1)]
+        now[0] += 3600
+        second = asyncio.run(_hourly(secretary, model))
+        assert second.scheduled is None and second.scheduled_modes == ("alert",)
+        assert not _retrying(world)
+
+
+def test_split_parts_start_unmarked_so_a_due_digest_goes_first(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path, plan=HOLD)
+        policy(world, **OLD_BOUNDS, **BACKOFF, digest_seconds=60)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        rooms = [conversation(world) for _ in range(2)]
+        held = [say(world, rooms[0], "worker", f"Routine update {number}") for number in range(3)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(held[-1])))
+        assert error is None and result is not None and result["decision"] == "hold"
+        model.set_plan({"steps": [{}] * len(model.requests) + [{"exit": 1}]})
+        ranged = [say(world, rooms[1], "reviewer", f"A range update {number}") for number in range(12)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(ranged[-1])))
+        assert result is None and isinstance(error, SecretaryUnavailable)
+        policy(world, **CANDIDATE_BOUNDS)
+        model.set_plan({})
+        now[0] += 120  # the held page's digest and the range's retry are both due
+
+        # A callback resumes the range, which no longer fits, and splits it before any model call. Its parts are new
+        # pages that no digest has passed over, so the hourly's scheduled lane digests first.
+        calls = len(model.requests)
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(ranged[-1])))
+        assert result is None and isinstance(error, InboxTooLarge) and len(model.requests) == calls
+        assert [(status, mark) for *_, status, mark in _marks(world)] == [("held", 0), ("retry", 0), ("retry", 0)]
+        hourly = asyncio.run(_hourly(secretary, model))
+        assert hourly.scheduled is None and hourly.scheduled_modes == ("digest",)
+        assert [(status, mark) for *_, status, mark in _marks(world)] == [("ready", 0), ("retry", 1), ("retry", 0)]
+
+
+def test_a_refusal_after_the_model_answered_keeps_the_counted_path_and_never_splits_early(
+    tmp_path, monkeypatch
+) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        room = conversation(world)
+        sent = [say(world, room, "worker", f"Update {number} on a page that fits") for number in range(6)]
+        first, last = (_position(world, sent[index]["message_id"]) for index in (0, -1))
+
+        # The page fits when it is read, and the model answers. The re-read that checks the sources did not change
+        # during inference is refused as over the bounds, as when a visibility change grows the page meanwhile.
+        original = InboxWindow.read.__func__
+        answered = [False]
+
+        def refused_after_the_answer(cls, *args, **kwargs):
+            if answered[0]:
+                answered[0] = False
+                raise InboxTooLarge("pending inbox and reply context exceed the configured input bounds")
+            return original(cls, *args, **kwargs)
+
+        original_turn = SecretaryModel.turn
+
+        async def answer(self, *args, **kwargs):
+            reply = await original_turn(self, *args, **kwargs)
+            answered[0] = True
+            return reply
+
+        monkeypatch.setattr(InboxWindow, "read", classmethod(refused_after_the_answer))
+        monkeypatch.setattr(SecretaryModel, "turn", answer)
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(sent[-1])))
+        assert result is None and isinstance(error, InboxTooLarge)
+        assert len(model.requests) == 1 and len(model.engine_requests) == 1
+
+        # The early split is for a refusal before any model call. This one came after the engine and the model were
+        # asked, so the page keeps today's path whole: a counted content failure and its backoff, never a split.
+        pages = _retrying(world)
+        assert len(pages) == 1
+        [page] = pages
+        assert page["since"] < first and last <= page["through"]
+        assert (page["attempts"], page["content_failures"]) == (1, 1)
+        assert page["next_attempt"] > now[0]
+
+
+def test_a_callback_that_resumes_a_due_digest_retry_labels_it_catch_up(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path, plan=HOLD)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF, digest_seconds=60)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        room = conversation(world)
+        held = [say(world, room, "worker", f"Routine update {number}") for number in range(3)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(held[-1])))
+        assert error is None and result is not None and result["decision"] == "hold"
+        now[0] += 120
+        model.set_plan({"steps": [{}] * len(model.requests) + [{"exit": 1}]})
+        assert isinstance(asyncio.run(_hourly(secretary, model)).scheduled, SecretaryUnavailable)
+        [digest] = _retrying(world)
+        assert digest["mode"] == "digest"
+        model.set_plan({})
+        later = say(world, room, "reviewer", "A later message whose callback finds the digest retry due")
+        _at_next_retry(world, now)
+        log = AttentionLog(world.state_path, world.config.data_dir, "planner")
+
+        # The callback resumes the due digest before it scans. A digest never carries a trigger, so the page is
+        # historical catch-up for this callback, labelled so and stored so, and its trigger stays beyond the cursor.
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(later)))
+        assert error is None and result is not None and result["mode"] == "digest"
+        assert result["trigger"] is None and result["catch_up"] is True
+        assert log.get(result["decision_id"])["catch_up"] is True
+        assert model.requests[-1]["context"]["trigger"] is None and model.requests[-1]["context"]["mode"] == "digest"
+        assert _event_keys([result]) == Counter(f"message:{sent['message_id']}" for sent in held)
+        assert _position(world, later["message_id"]) > _scanned(world)
+
+
+def test_a_retry_lane_cut_off_before_its_attempt_records_anything_never_holds_later_lanes(
+    tmp_path, monkeypatch
+) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path, plan=HOLD)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF, digest_seconds=60)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        rooms = [conversation(world) for _ in range(3)]
+        held = [say(world, rooms[0], "worker", f"Routine update {number}") for number in range(3)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(held[-1])))
+        assert error is None and result is not None and result["decision"] == "hold"
+        model.set_plan({"steps": [{}] * len(model.requests) + [{"exit": 1}]})
+        failed = [say(world, rooms[1], "reviewer", f"A failed update {number}") for number in range(2)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(failed[-1])))
+        assert result is None and isinstance(error, SecretaryUnavailable)
+
+        def hourly() -> Hourly:
+            """An hour later, with new events that reached no callback; the scan lane holds them."""
+            now[0] += 3600
+            for number in range(3):
+                say(world, rooms[2], "worker", f"An update with no callback {now[0]}.{number}")
+            model.set_plan({"steps": [{}] * len(model.requests) + [HOLD, {}]})
+            return asyncio.run(_hourly(secretary, model))
+
+        first = hourly()
+        assert first.scheduled_modes == ("digest",) and [mark for *_, mark in _marks(world)][1] == 1
+        [retry] = _retrying(world)
+
+        # The next lane takes the marked retry, and the host's lane timeout cuts its attempt off before it records
+        # any outcome: no failure, no backoff, the page still due.
+        original_run = DecisionRun.run
+        cut = [True]
+
+        async def cut_off(self):
+            if cut[0] and self.since == retry["since"]:
+                cut[0] = False
+                raise TimeoutError("the host's lane timeout")
+            return await original_run(self)
+
+        monkeypatch.setattr(DecisionRun, "run", cut_off)
+        with pytest.raises(TimeoutError):
+            hourly()
+        monkeypatch.setattr(DecisionRun, "run", original_run)
+        [stalled] = _retrying(world)
+        assert stalled["attempts"] == 1 and stalled["next_attempt"] <= now[0]
+
+        # The lane cleared the mark as it took the retry, so the cut-off attempt cannot hold the lane: the next one
+        # digests, and marks the retry again, and the one after takes it.
+        assert all(mark == 0 for *_, mark in _marks(world))
+        third = hourly()
+        assert third.scheduled_modes == ("digest",)
+        fourth = hourly()
+        assert fourth.scheduled_modes == ("alert",) and not _retrying(world)
+
+
+def test_a_reassessed_page_starts_unmarked_after_a_digest_change(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path, plan=HOLD)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF, digest_seconds=60)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        rooms = [conversation(world) for _ in range(3)]
+
+        # Held, failed, held: the first digest stops at the failed page and marks it.
+        first_held = [say(world, rooms[0], "worker", f"Routine update {number}") for number in range(3)]
+        assert asyncio.run(_callback(secretary, _trigger(first_held[-1])))[0]["decision"] == "hold"
+        model.set_plan({"steps": [{}] * len(model.requests) + [{"exit": 1}]})
+        failed = [say(world, rooms[1], "reviewer", f"A failed update {number}") for number in range(2)]
+        assert isinstance(asyncio.run(_callback(secretary, _trigger(failed[-1])))[1], SecretaryUnavailable)
+        model.set_plan(HOLD)
+        second_held = [say(world, rooms[0], "worker", f"Another routine update {number}") for number in range(3)]
+        assert asyncio.run(_callback(secretary, _trigger(second_held[-1])))[0]["decision"] == "hold"
+        now[0] += 120
+        model.set_plan({})
+        first = asyncio.run(_hourly(secretary, model))
+        assert first.scheduled_modes == ("digest",)
+        assert [(status, mark) for *_, status, mark in _marks(world)] == [("ready", 0), ("retry", 1), ("held", 0)]
+
+        # A callback finishes the marked retry, and a digest change then turns both ready pages back into retries.
+        # A reassessed page has not been passed over, so the next scheduled lane digests the held page that is due.
+        later = say(world, rooms[2], "reviewer", "A later message whose callback finds the retry due")
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(later)))
+        assert error is None and result is not None and result["catch_up"] is True
+        policy(world, summary_bytes=2048)
+        asyncio.run(_callback(secretary, _trigger(later)))
+        assert [(status, mark) for *_, status, mark in _marks(world)][:3] == [
+            ("retry", 0),
+            ("retry", 0),
+            ("held", 0),
+        ]
+        calls = len(model.requests)
+        asyncio.run(_hourly(secretary, model))
+        [scheduled] = [request for request in model.requests[calls:] if request["context"]["mode"] == "digest"]
+        assert scheduled["context"]["since"] == _marks(world)[2][0]

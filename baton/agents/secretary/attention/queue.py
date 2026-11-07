@@ -48,7 +48,7 @@ class AttentionQueue:
         except InboxTooLarge as error:
             page = Page(since, error.extra["through_pos"])
             await self.database.call(self.backlog.enqueue, page, time.time())
-            return await self._failed(page, error)
+            return await self._failed(page, error, split_now=True)
         run = DecisionRun(self.secretary, budget, since, self.floor, trigger, through=window.through)
         if window.through == since:
             return await run.run()
@@ -64,11 +64,11 @@ class AttentionQueue:
         position = await self.database.call(trigger_position, self.secretary.config, self.policy.principal, trigger)
         due = await self.database.call(self.backlog.due, time.time(), mode="digest" if hourly else None)
         if due:
-            page = due[0]
-            # An alert page gets the event trigger whether or not it holds it, so the run applies its one rule: a page
-            # without the trigger is catch-up, as a scanned page is. A digest page never carries a trigger.
-            event_trigger = trigger if page.mode == "alert" and position is not None else None
-            result = await self._attempt(page, budget, trigger=event_trigger)
+            # The page gets the event trigger whether or not it holds it, so the run applies its one rule: a page
+            # without the trigger is catch-up, as a scanned page is. A digest page never carries one, so for a caller
+            # with a trigger it is catch-up too.
+            event_trigger = trigger if position is not None else None
+            result = await self._attempt(due[0], budget, trigger=event_trigger)
             if result is not None or self.last_error is not None:
                 return result
         if await self.database.call(self.backlog.waiting_retry, position, mode="digest" if hourly else None):
@@ -86,13 +86,16 @@ class AttentionQueue:
         traffic a held page is due almost every hour, callbacks or not: the hourly's own scan holds pages for events
         that never reach a callback, such as job events and forced wakes. So a due retry could wait there without
         bound. Now a digest marks the earliest due retry it passes over, and the next scheduled lane takes that retry
-        first; its attempt clears the mark. The mark is stored with the page, since each hourly is a fresh process.
+        first, clearing the mark as it does. The mark is stored with the page, since each hourly is a fresh process.
         While both are due the lane alternates: a due retry waits behind at most one digest for each retry due before
         it, and a digest behind at most one retry, in the same lane and budget, with no new timer. The scan lane never
         takes scheduled work, because its budget is the smaller: a page that fits the scheduled lane could time out
         there, and a timeout counts toward the gate's latch.
         """
         if await self.database.call(self.backlog.passed_over, time.time()):
+            # Cleared as the lane takes the retry, not by the attempt's outcome: an attempt cut off by the host's lane
+            # timeout records none, and a mark it left would take every later lane while the digest waited.
+            await self.database.call(self.backlog.clear_passed_over)
             return await self.retry(budget)
         await self.database.call(self.backlog.pass_over, time.time())
         return await self._digest(budget)
@@ -150,29 +153,32 @@ class AttentionQueue:
         if restored is not None:
             acknowledged = await self.database.call(self.backlog.log.is_acknowledged, restored["decision_id"])
             return None if acknowledged else restored
+        digest = page.mode == "digest"
         run = DecisionRun(
             self.secretary,
             budget,
             page.since,
             self.floor,
-            trigger,
-            hourly=page.mode == "digest",
+            None if digest else trigger,
+            hourly=digest,
             through=page.through,
         )
+        # A digest never carries a trigger, so a caller with one that resumes a digest page is catching up.
+        run.catch_up = digest and trigger is not None
         try:
             result = await run.run()
         except (SecretaryUnavailable, InboxTooLarge) as error:
             if run.model_successes is not None:
                 # Accept our own baseline update, while still rejecting a later concurrent callback's write.
                 page = replace(page, model_successes=run.model_successes, model_policy=run.model_policy)
-            return await self._failed(page, error)
+            return await self._failed(page, error, split_now=isinstance(error, InboxTooLarge) and not run.consulted)
         if result["event_count"] == 0:
             await self.database.call(self.backlog.discard_empty, page)
         else:
             await self.database.call(self.backlog.finish, page, result, time.time(), self.policy.digest_seconds)
         return result
 
-    async def _failed(self, page: Page, error: Exception) -> dict | None:
+    async def _failed(self, page: Page, error: Exception, *, split_now: bool = False) -> dict | None:
         health = await self.database.call(ModelHealth(self.backlog.log, self.policy.digest).read)
         category = error.category if isinstance(error, SecretaryUnavailable) else "oversized"
         failed = await self.database.call(
@@ -192,9 +198,11 @@ class AttentionQueue:
         self.last_error = error
         exhausted = failed.content_failures >= self.policy.max_attempts
         # A range over the input bounds stays over them however often it is retried, and halving it needs no model
-        # call, so it splits on its first refusal rather than after max_attempts backoffs. The split still follows
-        # the failure's compare-and-set above, so a duplicate callback that read the same page splits nothing.
-        if not exhausted and not isinstance(error, InboxTooLarge):
+        # call, so a refusal before any model call splits it at once rather than after max_attempts backoffs. A
+        # refusal after the engine or the model was asked keeps the counted path, as a timeout and an invalid answer
+        # do. The split still follows the failure's compare-and-set above, so a duplicate callback that read the same
+        # page splits nothing.
+        if not exhausted and not split_now:
             return None
         split = await self.database.call(
             InboxWindow.split_position, self.secretary.config, self.policy, page.since, page.through

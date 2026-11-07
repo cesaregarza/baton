@@ -44,7 +44,7 @@ class Backlog:
             "content_failures": "INTEGER NOT NULL DEFAULT 0",
             "model_successes": "INTEGER NOT NULL DEFAULT 0",
             "model_policy": "TEXT NOT NULL DEFAULT ''",
-            # A due retry that the hourly's scheduled lane passed over for a digest, since its last attempt.
+            # A due retry that the hourly's scheduled lane passed over for a digest, until a lane or callback takes it.
             "passed_over": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, declaration in additions.items():
@@ -117,7 +117,7 @@ class Backlog:
                 status, mode, due, decision = "held", "digest", scheduled or now + digest_seconds, None
             conn.execute(
                 "UPDATE backlog_windows SET status=?,mode=?,next_attempt=?,decision=?,"
-                "attempts=0,content_failures=0,model_successes=0,model_policy='',error=NULL,passed_over=0 "
+                "attempts=0,content_failures=0,model_successes=0,model_policy='',error=NULL "
                 "WHERE principal=? AND since=? AND through=? AND status='retry'",
                 (status, mode, due, decision, self.log.principal, page.since, page.through),
             )
@@ -214,6 +214,12 @@ class Backlog:
                 (self.log.principal, now),
             )
 
+    def clear_passed_over(self) -> None:
+        """The scheduled lane is taking the passed-over retry, so no mark holds any later lane."""
+        with self.log.connection() as conn, conn.transaction():
+            self._initialize(conn)
+            conn.execute("UPDATE backlog_windows SET passed_over=0 WHERE principal=?", (self.log.principal,))
+
     def waiting_retry(self, position: int | None = None, *, mode: str | None = None) -> bool:
         """Whether this trigger belongs to retained failed work, even during its backoff."""
         with self.log.connection() as conn, conn.transaction():
@@ -290,7 +296,7 @@ class Backlog:
             self._prune(conn)
             conn.execute(
                 "UPDATE backlog_windows SET decision=NULL,status='retry',attempts=0,content_failures=0,"
-                "model_successes=0,model_policy='',next_attempt=? "
+                "model_successes=0,model_policy='',passed_over=0,next_attempt=? "
                 "WHERE principal=? AND decision=?",
                 (now, self.log.principal, decision),
             )

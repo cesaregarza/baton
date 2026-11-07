@@ -66,9 +66,12 @@ class DecisionRun:
     model_policy: str = field(default="", init=False)
     # Set when the caller's trigger is not on this page: the page is backlog catch-up, never the trigger's assessment.
     catch_up: bool = field(default=False, init=False)
+    # Set once the engine or the model is asked about this page. A refusal after that, from the re-read after
+    # inference, is not the deterministic refusal before any model call that an early split is for.
+    consulted: bool = field(default=False, init=False)
 
     async def run(self) -> dict:
-        self.model_successes = None
+        self.model_successes, self.consulted = None, False
         self._check()
         async with DatabaseWorker() as database:
             policy = await database.call(load_policy, self.secretary.config, self.secretary.policy_path)
@@ -105,6 +108,7 @@ class DecisionRun:
         harness = SecretaryHarness(policy)
         verdict = None
         if window.events and not self.hourly:
+            self.consulted = True
             verdict = await harness.tools.evaluate(context, min(policy.decision_timeout, self._remaining()))
             await database.call(EngineHealth(log).record, harness.tools.health)
         forced = bool(
@@ -112,6 +116,9 @@ class DecisionRun:
         )
         context["engine_verdict"] = harness.tools.verdict
         context["wake_required"] = forced
+        # A catch-up page and an untriggered one have the same context, since neither names a trigger, so the label is
+        # keyed too: a cached result then always carries the label of the call that asks for it. The model is never
+        # told of it, and a call that is not catch-up keeps the key it always had.
         key = fingerprint(
             {
                 "policy": policy.digest,
@@ -120,16 +127,15 @@ class DecisionRun:
                 "prompt": INSTRUCTIONS,
                 "schema": RESPONSE_SCHEMA,
                 "harness": HARNESS_VERSION,
+                **({"catch_up": True} if self.catch_up else {}),
             }
         )
         cached = await database.call(log.get, key)
         if cached is not None:
             await database.call(persist, self.secretary, policy, cached)
-            return {**cached, "cached": True}  # a catch-up result was stored with its catch_up label
-        outcome = Outcome(policy, window, self.floor, context["mode"], self.trigger)
+            return {**cached, "cached": True}
+        outcome = Outcome(policy, window, self.floor, context["mode"], self.trigger, catch_up=self.catch_up)
         result = await self._infer(database, harness, context, outcome, key, forced)
-        if self.catch_up:
-            result["catch_up"] = True
         if not window.events:
             return result
         current = await database.call(InboxWindow.read, config, policy, self.since, through=window.through)
@@ -199,6 +205,7 @@ class DecisionRun:
         log = AttentionLog(self.secretary.state_path, self.secretary.config.data_dir, policy.principal)
         health = ModelHealth(log, policy.digest)
         try:
+            self.consulted = True
             answer = await harness.assess(context, self._remaining())
             assessment = Assessment.parse(
                 answer,
@@ -221,8 +228,9 @@ class DecisionRun:
 
         A trigger elsewhere used to be refused before its page was queued, so while a backlog existed no callback moved
         it. Its page is now assessed as catch-up instead: the model is never told of the trigger, the result names no
-        trigger and is marked catch_up, and the trigger stays unassessed, so the caller decides that wake as any wake
-        the secretary has not reached, and a later page covers it.
+        trigger and is marked catch_up, and never covers it. A trigger beyond the page stays unassessed, so the caller
+        decides that wake as any wake the secretary has not reached, and a later page covers it; one behind the page
+        was covered by an earlier page, or waits in a retry page.
         """
         if self.trigger is None or self.trigger == "conversation":
             return True
