@@ -239,7 +239,7 @@ for a fresh alert and another for scheduled work. It runs one eligible scheduled
 and digest priority, so a lane receives the full reserved budget rather than leftover time. An hourly host that
 runs the queue's digest lane whenever a held page is due gets the same alternation from stored state: a digest marks
 the earliest due retry it passes over, and the next digest lane takes that retry first, clearing the mark as it
-does.
+does. A callback that attempts the marked retry in between clears the mark too, so the next lane digests.
 
 The worker batches contiguous due held pages into one bounded hourly digest at `digest_seconds` intervals.
 Hold, keep, and model-error pages remain eligible while scanning continues. Pending wake IDs stay queued, with

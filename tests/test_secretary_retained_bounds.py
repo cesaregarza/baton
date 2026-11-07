@@ -1507,3 +1507,46 @@ def test_a_reassessed_page_starts_unmarked_after_a_digest_change(tmp_path, monke
         asyncio.run(_hourly(secretary, model))
         [scheduled] = [request for request in model.requests[calls:] if request["context"]["mode"] == "digest"]
         assert scheduled["context"]["since"] == _marks(world)[2][0]
+
+
+def test_a_callback_whose_retry_fails_again_clears_the_mark_so_the_next_lane_digests_first(
+    tmp_path, monkeypatch
+) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path, plan=HOLD)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF, digest_seconds=60)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        rooms = [conversation(world) for _ in range(3)]
+        held = [say(world, rooms[0], "worker", f"Routine update {number}") for number in range(3)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(held[-1])))
+        assert error is None and result is not None and result["decision"] == "hold"
+        model.set_plan({"steps": [{}] * len(model.requests) + [{"exit": 1}]})
+        failed = [say(world, rooms[1], "reviewer", f"A failed update {number}") for number in range(2)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(failed[-1])))
+        assert result is None and isinstance(error, SecretaryUnavailable)
+
+        def hourly() -> Hourly:
+            """An hour later, with new events that reached no callback; the scan lane holds them."""
+            now[0] += 3600
+            for number in range(3):
+                say(world, rooms[2], "worker", f"An update with no callback {now[0]}.{number}")
+            model.set_plan({"steps": [{}] * len(model.requests) + [HOLD, {}]})
+            return asyncio.run(_hourly(secretary, model))
+
+        first = hourly()
+        assert first.scheduled_modes == ("digest",) and [mark for *_, mark in _marks(world)][1] == 1
+
+        # A callback inside the marked retry takes it and fails again. That attempt was the retry's turn, so the mark
+        # goes with it and the next lane digests first.
+        model.set_plan({"steps": [{}] * len(model.requests) + [{"exit": 1}]})
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(failed[-1])))
+        assert result is None and isinstance(error, SecretaryUnavailable)
+        [retry] = _retrying(world)
+        assert retry["attempts"] == 2 and all(mark == 0 for *_, mark in _marks(world))
+        second = hourly()
+        assert second.scheduled_modes == ("digest",)
+        third = hourly()
+        assert third.scheduled_modes == ("alert",) and not _retrying(world)
