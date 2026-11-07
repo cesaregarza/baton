@@ -38,6 +38,22 @@ def trigger_position(config: Config, principal: str, trigger: str | None) -> int
     raise InvalidRequest("trigger is not a visible event for this principal")
 
 
+def holds_trigger(position: int | None, since: int, through: int) -> bool:
+    """Whether the page from `since` to `through` holds a trigger at this position, as `trigger_position` gives it.
+
+    A trigger that names no event is held by every page. Any other is held only by the page whose range contains its
+    event, from the position after `since` up to and including `through`, so a trigger at `since` belongs to the page
+    before. A page that does not hold the caller's trigger is assessed as catch-up: the model is never told of the
+    trigger, and the result names no trigger, is marked catch_up and never covers it. A trigger beyond the page stays
+    unassessed, so the caller decides that wake as any wake the secretary has not reached, and a later page covers
+    it; one behind the page was covered by an earlier page, or waits in a retry page.
+
+    The assessment and the queue both label a page by this rule from this position, so a saved result, a cached one
+    and a failure notice for the page carry the labels that a fresh assessment for the same call would.
+    """
+    return position is None or since < position <= through
+
+
 def _epoch(baton: Connection) -> str:
     row = baton.execute("SELECT value FROM log_meta WHERE key='log_epoch'").fetchone()
     if row is None:

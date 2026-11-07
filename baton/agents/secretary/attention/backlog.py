@@ -304,13 +304,24 @@ class Backlog:
                 self._insert(conn, page, now)
             return [self._stored(conn, page) for page in replacements]
 
-    def discard_empty(self, page: Page) -> None:
-        self.log.acknowledge_empty(page.since, page.through)
+    def discard_empty(self, page: Page) -> bool:
+        """Delete a page whose events are no longer visible and acknowledge its range as empty; whether it did.
+
+        A compare-and-set in one transaction, as a failure is: the page must still be stored as it was read, in every
+        column but the passed-over mark. A caller that read the range as empty and stalled could otherwise delete the
+        ready page that another caller finished since, so that its summary is never delivered, or acknowledge as empty
+        a range that another caller split or combined since.
+        """
         with self.log.connection() as conn, conn.transaction():
+            self._initialize(conn)
+            if not self._unchanged(conn, page, _ATTEMPTED):
+                return False
             conn.execute(
                 "DELETE FROM backlog_windows WHERE principal=? AND since=? AND through=?",
                 (self.log.principal, page.since, page.through),
             )
+            self.log.acknowledge_empty_within(conn, page.since, page.through)
+            return True
 
     def ready(self) -> list[str]:
         with self.log.connection() as conn, conn.transaction():

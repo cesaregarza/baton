@@ -99,10 +99,11 @@ class DecisionRun:
         assert self.floor is not None  # Explicit positions are validated together; activation supplies both.
         window = await database.call(InboxWindow.read, config, policy, self.since, through=self.through)
         await database.call(log.bind, window.epoch, self.floor)
-        if not self._on_page(window):
-            # A trigger that is not a visible event is still refused, for every caller; a visible one elsewhere is
-            # left unassessed, so this page is catch-up and its result never carries that trigger.
-            await database.call(sources.trigger_position, config, policy.principal, self.trigger)
+        # A trigger that is not a visible event is refused, for every caller. A visible one elsewhere is left
+        # unassessed, so this page is catch-up and its result never carries that trigger. The queue labels a saved
+        # result or a failure notice for the page by the same rule, from the same position.
+        position = await database.call(sources.trigger_position, config, policy.principal, self.trigger)
+        if not sources.holds_trigger(position, window.since, window.through):
             self.trigger, self.catch_up = None, True
         context = self._context(policy, window)
         harness = SecretaryHarness(policy)
@@ -222,27 +223,6 @@ class DecisionRun:
         self.model_successes = recorded["successes"]
         self.model_policy = policy.digest
         return assessment
-
-    def _on_page(self, window: InboxWindow) -> bool:
-        """Whether the caller's trigger, if it names an event, is one of this bounded page's events.
-
-        A trigger elsewhere used to be refused before its page was queued, so while a backlog existed no callback moved
-        it. Its page is now assessed as catch-up instead: the model is never told of the trigger, the result names no
-        trigger and is marked catch_up, and never covers it. A trigger beyond the page stays unassessed, so the caller
-        decides that wake as any wake the secretary has not reached, and a later page covers it; one behind the page
-        was covered by an earlier page, or waits in a retry page.
-        """
-        if self.trigger is None or self.trigger == "conversation":
-            return True
-        parts = self.trigger.split(":")
-        if parts[0] == "message":
-            return any(
-                event["kind"] == "message"
-                and event["seq"] == int(parts[1])
-                and sources.delivered_to(window.principal, event["audience"])
-                for event in window.events
-            )
-        return any(event["job_id"] == parts[1] and event["seq"] == int(parts[2]) for event in window.events)
 
     def _remaining(self) -> float:
         remaining = self.deadline - self.clock()

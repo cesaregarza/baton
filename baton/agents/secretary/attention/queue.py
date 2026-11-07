@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from baton.config.secretary import Policy, load_policy, validate_decision_budget
 
 from ..inbox.references import ReferenceWindow
-from ..inbox.sources import trigger_position
+from ..inbox.sources import holds_trigger, trigger_position
 from ..inbox.window import InboxTooLarge, InboxWindow
 from ..service import _current_window
 from .backlog import Backlog, Page
@@ -225,7 +225,8 @@ class AttentionQueue:
             return None
         result = await self._failure_notice(page, labels)
         if result is None:
-            await self.database.call(self.backlog.discard_empty, page)
+            # The page as this failure stored it, as for a split.
+            await self.database.call(self.backlog.discard_empty, failed)
             return None
         return await self._finish_result(page, result)
 
@@ -260,15 +261,14 @@ class AttentionQueue:
         """The trigger and catch-up label that this call's result for the page carries, as DecisionRun assigns them.
 
         A digest never names a trigger, so for a caller with one it is catch-up. An alert page names the caller's
-        trigger when it holds that event, and is catch-up when the event is elsewhere. A trigger that is not a
-        visible event is refused here, before any saved result is considered, as the run would refuse it.
+        trigger when it holds that event, and is catch-up when the event is elsewhere: `holds_trigger`, the rule the
+        run applies, from the same position. A trigger that is not a visible event is refused here, before any saved
+        result is considered, as the run would refuse it.
         """
         if page.mode == "digest":
             return None, trigger is not None
         position = await self.database.call(trigger_position, self.secretary.config, self.policy.principal, trigger)
-        if position is None or page.since < position <= page.through:
-            return trigger, False
-        return None, True
+        return (trigger, False) if holds_trigger(position, page.since, page.through) else (None, True)
 
     async def _restore_result(self, page: Page, labels: tuple[str | None, bool]) -> tuple[dict | None, bool]:
         """Finish a saved assessment or notice before asking either provider again; the result, and whether it is
