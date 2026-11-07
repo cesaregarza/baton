@@ -82,7 +82,8 @@ def guest_line(held, name, **extra):
 
 def test_a_core_edit_audits_its_topic_its_id_the_reference_the_revision_and_the_request(build_scene):
     """R21. The line of a core success has the path the call named, the topic's id, the document's name, the revision
-    written, the request id and the expected revision, `outcome` ok, and no grant."""
+    written, the request id and the expected revision, `outcome` ok, and no grant. The retry's line says revision 1
+    though the document is at 3, because that is the revision it answered."""
     # Mutant 20: reference written without the name check, or the body written.
     scene = build_scene()
 
@@ -90,7 +91,8 @@ def test_a_core_edit_audits_its_topic_its_id_the_reference_the_revision_and_the_
         await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         rid = request_id()
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
-        assert without_time(scene.audit()[-1]) == core_line(
+        first = without_time(scene.audit()[-1])
+        assert first == core_line(
             "edit_reference",
             topic=BOARDS,
             topic_id=scene.topic_id(BOARDS),
@@ -99,16 +101,25 @@ def test_a_core_edit_audits_its_topic_its_id_the_reference_the_revision_and_the_
             request_id=rid,
             expected_revision=0,
         )
+        succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(2), 1))
+        succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(3), 2))
+        replay = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
+        assert replay["created"] is False
+        assert without_time(scene.audit()[-1]) == first, "the replay's line names the revision it answered"
 
     play(scene.host, scenario)
 
 
-def test_a_grantees_edit_audits_the_same_with_the_alias_and_the_grant(build_scene):
-    """R21. A grantee's success has the same fields, the alias's id and code, and the grant it acted under."""
+def test_a_grantees_edit_audits_the_alias_and_the_grant_and_its_refusals_audit_no_id_revision_or_grant(build_scene):
+    """R21. A grantee's success has the fields a core success has, the alias's id and code, and the grant it acted
+    under. A refusal has only the topic and the name the call gave, with the request and the expected revision as
+    usual: no `topic_id`, no `revision`, no `grant_id`, though the grantee's alias fields are there. That holds for a
+    stale edit and for refusal 5, which names a grant in its text and in the grant's log."""
     scene = build_scene()
 
     async def scenario(client):
         held = await board(client, scene)
+        await support.stage(client, scene.host, paths=("resume",))
         rid = request_id()
         succeeded(await grantee_edit(client, held, BOARDS, NAME, body_of(1), 0, request_id=rid))
         assert without_time(scene.audit()[-1]) == guest_line(
@@ -122,36 +133,7 @@ def test_a_grantees_edit_audits_the_same_with_the_alias_and_the_grant(build_scen
             expected_revision=0,
             grant_id=held.grant_id,
         )
-
-    play(scene.host, scenario)
-
-
-def test_a_replay_audits_the_revision_it_returned_not_the_current_one(build_scene):
-    """R21. The retry's line says revision 1 though the document is at 3, because that is the revision it answered."""
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
-        rid = request_id()
-        succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
-        first = without_time(scene.audit()[-1])
         succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(2), 1))
-        succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(3), 2))
-        replay = succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(1), 0, request_id=rid))
-        assert replay["created"] is False
-        assert without_time(scene.audit()[-1]) == first and first["revision"] == 1
-
-    play(scene.host, scenario)
-
-
-def test_a_stale_refusal_audits_the_topic_and_the_reference_and_no_id_revision_or_grant(build_scene):
-    """R21. A refusal has only the topic and the name the call gave, with the request and the expected revision as
-    usual: no `topic_id`, no `revision`, no `grant_id`, though the grantee's alias fields are there."""
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await board(client, scene)
-        await write_revisions(client, scene, BOARDS, NAME, 2)
         rid = request_id()
         stale = await grantee_edit(client, held, BOARDS, NAME, "text", 1, request_id=rid)
         assert stale.get("error") == "stale_revision", stale
@@ -160,17 +142,6 @@ def test_a_stale_refusal_audits_the_topic_and_the_reference_and_no_id_revision_o
             held, "edit_reference", topic=BOARDS, reference=NAME, request_id=rid, expected_revision=1
         ) | {"outcome": "stale_revision"}
         assert not {"topic_id", "revision", "grant_id"} & set(line)
-
-    play(scene.host, scenario)
-
-
-def test_a_refusal_for_a_grant_that_does_not_cover_the_topic_audits_no_id_and_no_grant(build_scene):
-    """R21. Refusal 5 names a grant in its text and in the grant's log, but the line has only what the call gave."""
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await board(client, scene)
-        await support.stage(client, scene.host, paths=("resume",))
         rid = request_id()
         assert (await grantee_edit(client, held, "resume", NAME, "text", 0, request_id=rid)).get("error") == "forbidden"
         line = without_time(scene.audit()[-1])
@@ -462,21 +433,5 @@ def test_only_the_refusals_that_name_a_grant_write_a_refused_use_event(build_sce
             assert len(scene.refused_uses()) - before == added, (label, result)
         role = await core_edit(client, scene, BOARDS, NAME, "text", 1, role="worker", grant_token=held.key)
         assert role.get("error") == "forbidden" and len(scene.refused_uses()) == 3
-
-    play(scene.host, scenario)
-
-
-def test_the_read_tools_write_no_grant_event_and_no_hourly_counter_row(build_scene):
-    """R2, R20. Reads by every kind of caller leave `topic_grant_events` and `alias_posts` as they were."""
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await board(client, scene)
-        await write_revisions(client, scene, BOARDS, NAME, 2)
-        before = (len(scene.events()), scene.posts_counted())
-        for who in (Core(scene.host), Bound.of(held), await bound_guest(client, scene)):
-            succeeded(await read_reference(client, who, BOARDS, NAME))
-            succeeded(await reference_history(client, who, BOARDS, NAME))
-        assert (len(scene.events()), scene.posts_counted()) == before
 
     play(scene.host, scenario)

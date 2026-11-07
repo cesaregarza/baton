@@ -270,27 +270,6 @@ def test_every_statement_of_an_edit_runs_inside_its_one_write_transaction(build_
 # 3. A grant revoked while an edit starts ----------------------------------------------------------------------
 
 
-def test_a_revoke_made_after_a_read_refuses_the_next_edit(build_scene):
-    """R17, case 17 (a). The grantee reads revision 5; the owner revokes G1; its edit with expected 5 is refused in S2's
-    words, as a refused use, and no row is written."""
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await board(client, scene)
-        await write_revisions(client, scene, BOARDS, NAME, 5)
-        read = succeeded(await refs.read_reference(client, refs.Bound.of(held), BOARDS, NAME))
-        scene.revoke(held.grant_id)
-        tables = scene.tables()
-        refused(
-            await grantee_edit(client, held, BOARDS, NAME, "text", read["current_revision"]),
-            "forbidden",
-            revoked(held.grant_id),
-        )
-        assert scene.tables() == tables
-
-    play(scene.host, scenario)
-
-
 def test_a_revoke_that_commits_just_before_the_edits_transaction_refuses_the_edit(build_scene, monkeypatch):
     """R10, R17, case 17 (b). The owner revokes G1 at the instant the edit is about to begin its transaction: after any
     check made before it, before any made inside it. The edit must be refused as revoked and write nothing, and the

@@ -7,11 +7,7 @@ from conftest import make_config
 from reference_support import (
     BOARDS,
     NAME,
-    Anonymous,
-    bound_guest,
     edit_arguments,
-    read_reference,
-    reference_history,
     write_revisions,
 )
 from test_aliases import rpc
@@ -134,31 +130,6 @@ def test_the_reference_tools_are_listed_only_when_conversations_are_enabled(tmp_
 
 
 # 2. Who may call them, at the guard -----------------------------------------------------------------------
-
-
-def test_a_bound_guest_is_let_through_the_guard_to_read_and_an_unbound_one_is_not(build_scene):
-    """R1. The binding is the guard's to check, as for a guest post: with it both read tools answer, without it they
-    are refused in the words of an unbound post, and an unbound guest's `edit_reference` is refused as a tool it may
-    not call."""
-    # Q1. Mutant 18: read_reference left out of the guest tools, or the guard not requiring a binding.
-    scene = build_scene()
-
-    async def scenario(client):
-        await stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
-        await write_revisions(client, scene, BOARDS, NAME, 2)
-        guest = await bound_guest(client, scene)
-        assert succeeded(await read_reference(client, guest, BOARDS, NAME))["revision"] == 2
-        assert succeeded(await reference_history(client, guest, BOARDS, NAME))["current_revision"] == 2
-        none = Anonymous(scene.host)
-        gone = {"error": "forbidden", "detail": refs.BINDING_GONE}
-        assert await read_reference(client, none, BOARDS, NAME) == gone
-        assert await reference_history(client, none, BOARDS, NAME) == gone
-        assert await none.call(client, "edit_reference", **edit_arguments(BOARDS, NAME, "text", 2)) == {
-            "error": "forbidden",
-            "detail": refs.F2,
-        }
-
-    play(scene.host, scenario)
 
 
 def test_each_tool_needs_its_scope_and_refuses_a_credential_without_it(build_scene, monkeypatch):

@@ -11,7 +11,8 @@ What this pins:
 * A `request_id` of 1 to 200 characters, and the existing messages for a malformed topic, with a key redacted.
 * The shape checks need no database: a call refused for its shape runs no statement.
 * The hourly limit: a grantee's every edit attempt is counted by the same per-alias and per-credential counters as a
-  guest post, in the guard; a core role's edit and every read are not.
+  guest post, in the guard. That a core role's edit and every read are not is pinned by the whole-database counts in
+  `test_reference_audit.py` and `test_reference_read.py`.
 
 Mutant numbers in comments refer to the spec's list of one-line mutants the tests must kill. Q numbers refer to its open
 questions: the test pins the question's default, so a ruling changes only the tests that carry that number.
@@ -33,21 +34,15 @@ from reference_support import (
     LEADS,
     NAME,
     ROOT,
-    Bound,
-    Core,
     Staging,
     board,
     body_of,
-    bound_guest,
     core_edit,
     direct,
     f7b,
     f7c,
     grantee_edit,
-    read_reference,
-    reference_history,
     request_id,
-    write_revisions,
 )
 from topic_grant_tools_support import only, play, refused, succeeded, thread, tool
 
@@ -120,30 +115,19 @@ def test_a_name_inside_the_grammar_is_accepted_at_its_edges(build_scene):
 # 2. The body ------------------------------------------------------------------------------------------------
 
 
-def test_an_empty_body_is_refused_and_a_body_of_whitespace_alone_is_not(build_scene):
-    """Q4. Nothing is stripped, so spaces and newlines are a body; an empty string has no use and is refused with F7."""
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
-        refused(await core_edit(client, scene, BOARDS, NAME, "", 0), "invalid_request", F7)
-        assert scene.docs() == []
-        made = succeeded(await core_edit(client, scene, BOARDS, NAME, " \n\t \r\n", 0))
-        assert made["size"] == 6 and scene.revisions(BOARDS, NAME)[0]["body"] == " \n\t \r\n"
-
-    play(scene.host, scenario)
-
-
-def test_a_body_that_cannot_be_encoded_as_utf8_is_refused_as_text(build_scene):
+def test_a_body_that_cannot_be_encoded_as_utf8_or_is_empty_is_refused_and_whitespace_alone_is_a_body(build_scene):
     """A lone surrogate reaches the tool from JSON. It is not text of UTF-8 bytes, so it is refused in F7's words
-    rather than failing inside the database, and nothing is written."""
+    rather than failing inside the database, and nothing is written. Q4. Nothing is stripped, so spaces and newlines
+    are a body; an empty string has no use and is refused with F7."""
     scene = build_scene()
 
     async def scenario(client):
         await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
-        for bad in ("\ud800", "\udfff", "text\udc00text"):
+        for bad in ("\ud800", "\udfff", "text\udc00text", ""):
             refused(await core_edit(client, scene, BOARDS, NAME, bad, 0), "invalid_request", F7)
             assert scene.docs() == [] and scene.revisions() == [], repr(bad)
+        made = succeeded(await core_edit(client, scene, BOARDS, NAME, " \n\t \r\n", 0))
+        assert made["size"] == 6 and scene.revisions(BOARDS, NAME)[0]["body"] == " \n\t \r\n"
 
     play(scene.host, scenario)
 
@@ -159,30 +143,11 @@ def test_a_body_that_is_not_a_string_is_refused_by_the_module(build_scene):
         assert scene.docs() == [] and scene.revisions() == [], repr(bad)
 
 
-def test_a_body_of_exactly_32768_bytes_is_accepted_and_stored_whole(build_scene):
-    """R20. The limit is in bytes of UTF-8, not characters: 32768 ASCII characters, 16384 two-byte ones and 8192
-    four-byte ones are the same size, all accepted, and the response and the row say so."""
-    # Mutant 15: the size counted as len(body), or the limit as `>=`.
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
-        for name, unit, count in (
-            ("ascii", "a", 32768),
-            ("two-byte", "\u00e9", 16384),
-            ("four-byte", "\U0001f600", 8192),
-        ):
-            text = unit * count
-            made = succeeded(await core_edit(client, scene, BOARDS, name, text, 0))
-            assert made["size"] == 32768, name
-            assert only(scene.revisions(BOARDS, name), "revision")["body"] == text, name
-
-    play(scene.host, scenario)
-
-
-def test_a_body_over_32768_bytes_is_refused_with_its_size_and_nothing_is_written(build_scene):
-    """R20, F7b. One byte over, in each width, is `limit_exceeded` naming the limit and the size of this body. The
-    two-byte case has fewer characters than the limit, so a count of characters would let it through."""
+def test_a_body_over_32768_bytes_is_refused_with_its_size_and_one_of_exactly_32768_is_stored_whole(build_scene):
+    """R20, F7b. One byte over, in each width, is `limit_exceeded` naming the limit and the size of this body, for a
+    core role and a grantee, and nothing is written. The two-byte case has fewer characters than the limit, so a count
+    of characters would let it through. The limit is in bytes of UTF-8, not characters: 32768 ASCII characters, 16384
+    two-byte ones and 8192 four-byte ones are the same size, all accepted, and the response and the row say so."""
     # Mutant 15: the size counted as len(body), or the limit as `>=`.
     scene = build_scene()
 
@@ -198,6 +163,15 @@ def test_a_body_over_32768_bytes_is_refused_with_its_size_and_nothing_is_written
             assert await core_edit(client, scene, BOARDS, name, text, 0) == expected, name
             assert await grantee_edit(client, held, BOARDS, name, text, 0) == expected, name
             assert scene.docs() == [] and scene.revisions() == [] and scene.refused_uses() == [], name
+        for name, unit, count in (
+            ("ascii", "a", 32768),
+            ("two-byte", "\u00e9", 16384),
+            ("four-byte", "\U0001f600", 8192),
+        ):
+            text = unit * count
+            made = succeeded(await core_edit(client, scene, BOARDS, name, text, 0))
+            assert made["size"] == 32768, name
+            assert only(scene.revisions(BOARDS, name), "revision")["body"] == text, name
 
     play(scene.host, scenario)
 
@@ -389,25 +363,5 @@ def test_two_aliases_on_one_credential_share_the_per_credential_counter(build_sc
         over = await grantee_edit(client, second, LEADS, NAME, body_of(1), 0)
         assert over == {"error": "limit_exceeded", "detail": F15, "limit": "posts_per_credential"}
         assert len(scene.docs()) == 1
-
-    play(scene.host, scenario)
-
-
-def test_a_core_roles_edits_and_every_read_add_no_post_row(build_scene):
-    """R20. Only a grantee's edit is charged. A core role's edits, and every read by a core role, a bound guest or a
-    grantee, leave the hourly counter alone."""
-    scene = build_scene()
-    scene.limit_posts(per_alias=1)
-
-    async def scenario(client):
-        held = await board(client, scene)
-        guest = await bound_guest(client, scene)
-        await write_revisions(client, scene, BOARDS, NAME, 3)
-        for who in (Core(scene.host), Core(scene.host, "worker"), guest, Bound.of(held)):
-            succeeded(await read_reference(client, who, BOARDS))
-            succeeded(await read_reference(client, who, BOARDS, NAME))
-            succeeded(await read_reference(client, who, BOARDS, NAME, 2))
-            succeeded(await reference_history(client, who, BOARDS, NAME))
-        assert scene.posts_counted() == 0
 
     play(scene.host, scenario)

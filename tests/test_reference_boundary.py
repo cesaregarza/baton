@@ -92,6 +92,13 @@ def refused_as_mistyped(result, argument, value):
         raise
 
 
+def refused_as_text(result, argument):
+    """`refused_as_mistyped`, and for a string the schema saw as one: its error says `input_type=str`. Read as the JSON
+    it spells, "null" is refused as a null (`NoneType`) or, for `revision`, not refused at all."""
+    refused_as_mistyped(result, argument, "null")
+    assert "input_type=str" in str(result.get("unparsed", result)), result
+
+
 def schema_refusal(tool_name):
     """The guard's answer to a call that carries a binding token and arguments the schema does not take."""
     return {"error": "invalid_request", "detail": f"{tool_name} arguments do not match the tool schema"}
@@ -110,63 +117,56 @@ def what_it_raised(call):
 # 1. Whole numbers ---------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("existing", [False, True], ids=["new", "at-revision-1"])
-def test_mistyped_expected_revisions_are_refused_by_the_schema_and_write_nothing(build_scene, existing):
-    """`expected_revision` is a whole number and nothing else. `false`, `true`, "0", "1", 0.0 and 1.0 are each refused
-    by the schema, whether the reference is new or already at revision 1, and no document, revision or audit line is
-    written. The compare-and-swap must not run on a number the caller did not send."""
+def test_mistyped_and_null_numbers_are_refused_by_the_schema_and_write_or_read_nothing(build_scene):
+    """Each whole number is a whole number and nothing else, and the string "null" is refused as the string it is.
+    `expected_revision`: `false`, `true`, "0", "1", 0.0, 1.0 and "null" are each refused by the schema, whether the
+    reference is new or already at revision 1, and so is leaving it out: it is not defaulted to anything. The
+    compare-and-swap must not run on a number the caller did not send. `revision`: `true`, `false`, "1", 1.0 and "null"
+    are refused and no text comes back; `true` used to read revision 1, and "null" read as no revision read the current
+    text. `limit`: `true`, "5", 5.0 and "null"; `after_revision`: `false`, `true`, "0", 0.0 and "null"; each is refused
+    and lists no revision. No call writes a document, a revision or an audit line."""
     scene = build_scene()
 
     async def scenario(client):
         await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
-        if existing:
-            await write_revisions(client, scene, BOARDS, NAME, 1)
+        who = Core(scene.host, "worker")
+
+        async def refused_each(state, argument, values, call):
+            tables, lines = scene.tables(), audit_lines(scene)
+            for wrong in values:
+                sent = f"{argument}={wrong!r} on {state}"
+                result = await call(wrong)
+                if wrong == "null":
+                    refused_as_text(result, argument)
+                else:
+                    refused_as_mistyped(result, argument, wrong)
+                assert "board list" not in str(result).lower(), f"{sent} returned text: {result!r}"
+                assert scene.tables() == tables, f"{sent} changed tables"
+                assert audit_lines(scene) == lines, f"{sent} wrote an audit line"
+
+        def edit(wrong):
+            return core_edit(client, scene, BOARDS, NAME, "text", wrong)
+
+        def read(wrong):
+            return read_reference(client, who, BOARDS, NAME, wrong)
+
+        await refused_each("a new reference", "expected_revision", [*EXPECTED, "null"], edit)
         tables, lines = scene.tables(), audit_lines(scene)
-        for wrong in EXPECTED:
-            result = await core_edit(client, scene, BOARDS, NAME, "text", wrong)
-            refused_as_mistyped(result, "expected_revision", wrong)
-            assert scene.tables() == tables, f"expected_revision={wrong!r} changed tables"
-            assert audit_lines(scene) == lines, f"expected_revision={wrong!r} wrote an audit line"
-
-    play(scene.host, scenario)
-
-
-def test_mistyped_revisions_are_refused_by_the_schema_and_no_text_comes_back(build_scene):
-    """`revision` is a whole number from 1 and nothing else. `true`, `false`, "1" and 1.0 are each refused by the
-    schema and the answer holds no text. `true` used to read revision 1."""
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
-        await write_revisions(client, scene, BOARDS, NAME, 2)
-        tables, lines = scene.tables(), audit_lines(scene)
-        for wrong in REVISION:
-            result = await read_reference(client, Core(scene.host, "worker"), BOARDS, NAME, wrong)
-            refused_as_mistyped(result, "revision", wrong)
-            assert "board list" not in str(result).lower(), f"revision={wrong!r} returned text: {result!r}"
-            assert scene.tables() == tables, f"revision={wrong!r} changed tables"
-            assert audit_lines(scene) == lines, f"revision={wrong!r} wrote an audit line"
-
-    play(scene.host, scenario)
-
-
-@pytest.mark.parametrize(
-    "argument,values", [("limit", LIMIT), ("after_revision", CURSOR)], ids=["limit", "after_revision"]
-)
-def test_mistyped_limit_or_cursor_values_are_refused_by_the_schema(build_scene, argument, values):
-    """`limit` and `after_revision` are whole numbers and nothing else. `true`, "5" and 5.0 for the first, and `false`,
-    `true`, "0" and 0.0 for the second, are each refused by the schema and list no revision."""
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
-        await write_revisions(client, scene, BOARDS, NAME, 2)
-        tables, lines = scene.tables(), audit_lines(scene)
-        for wrong in values:
-            result = await reference_history(client, Core(scene.host, "worker"), BOARDS, NAME, **{argument: wrong})
-            refused_as_mistyped(result, argument, wrong)
-            assert scene.tables() == tables, f"{argument}={wrong!r} changed tables"
-            assert audit_lines(scene) == lines, f"{argument}={wrong!r} wrote an audit line"
+        missing = await Core(scene.host).call(client, "edit_reference", topic=BOARDS, name=NAME, body="text")
+        refused_by_schema(missing, "expected_revision")
+        assert scene.tables() == tables and audit_lines(scene) == lines, "a missing expected_revision wrote something"
+        await write_revisions(client, scene, BOARDS, NAME, 1)
+        await refused_each("revision 1", "expected_revision", [*EXPECTED, "null"], edit)
+        await refused_each("revision 1", "revision", ["null"], read)
+        succeeded(await core_edit(client, scene, BOARDS, NAME, body_of(2), 1))
+        await refused_each("revision 2", "revision", REVISION, read)
+        for argument, values in (("limit", [*LIMIT, "null"]), ("after_revision", [*CURSOR, "null"])):
+            await refused_each(
+                "revision 2",
+                argument,
+                values,
+                lambda wrong, argument=argument: reference_history(client, who, BOARDS, NAME, **{argument: wrong}),
+            )
 
     play(scene.host, scenario)
 
@@ -175,12 +175,17 @@ def test_a_call_with_a_binding_token_is_refused_a_mistyped_number_as_it_is_an_ou
     """A grantee's edit and a bound guest's reads meet the guard's own check of the schema before the SDK's, and an
     out-of-range number has always been answered with its one refusal of arguments that do not match the tool schema.
     The first value of each list is out of range, and every mistyped value must be answered exactly as it is. Nothing
-    is written and no hourly post is spent. `false` is not tried as a `revision`, which the old schema refused too."""
+    is written and no hourly post is spent. `false` is not tried as a `revision`, which the old schema refused too.
+    The guard must read the arguments as the SDK will, so "null" for each whole number is one more mistyped value:
+    checked with the SDK's reading, `revision` passed the guard, and the SDK's own error came back instead."""
     scene = build_scene()
     guest_calls = {
-        "edit_reference": (edit_arguments(BOARDS, NAME, "text", 2), {"expected_revision": [-1, *EXPECTED]}),
-        "read_reference": ({"topic": BOARDS, "name": NAME}, {"revision": [0, True, "1", 1.0]}),
-        "reference_history": ({"topic": BOARDS, "name": NAME}, {"limit": [0, *LIMIT], "after_revision": [-1, *CURSOR]}),
+        "edit_reference": (edit_arguments(BOARDS, NAME, "text", 2), {"expected_revision": [-1, *EXPECTED, "null"]}),
+        "read_reference": ({"topic": BOARDS, "name": NAME}, {"revision": [0, True, "1", 1.0, "null"]}),
+        "reference_history": (
+            {"topic": BOARDS, "name": NAME},
+            {"limit": [0, *LIMIT, "null"], "after_revision": [-1, *CURSOR, "null"]},
+        ),
     }
 
     async def scenario(client):
@@ -201,31 +206,37 @@ def test_a_call_with_a_binding_token_is_refused_a_mistyped_number_as_it_is_an_ou
 # 2. A request id with no UTF-8 form -------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("caller,spent", [("core role", 0), ("grantee", 1)])
 def test_a_request_id_with_no_utf8_form_is_refused_before_the_transaction_and_the_call_is_audited(
-    build_scene, monkeypatch, caller, spent
+    build_scene, monkeypatch
 ):
     """A request id that is a lone surrogate, sent as a JSON escape, is answered with the refusal any malformed request
-    id gets, not the SDK's execution error. The edit runs no statement and writes nothing. It leaves exactly one audit
-    line, which is valid UTF-8, parses as JSON, names the tool and the outcome, and holds the request id as sent. A
-    grantee's attempt still spends its hourly post, as every refused edit does."""
+    id gets, not the SDK's execution error, for a core role and for a grantee. The edit runs no statement and writes
+    nothing. It leaves exactly one audit line, which is valid UTF-8, parses as JSON, names the tool and the outcome, and
+    holds the request id as sent. A grantee's attempt still spends its hourly post, as every refused edit does."""
     scene = build_scene()
 
     async def scenario(client):
         held = await board(client, scene)
-        tables, lines, posts = scene.tables(), audit_lines(scene), scene.posts_counted()
         staging = Staging(monkeypatch)
-        if caller == "core role":
-            answer = await core_edit(client, scene, BOARDS, NAME, "text", 0, request_id="\ud800")
-        else:
-            answer = await grantee_edit(client, held, BOARDS, NAME, "text", 0, request_id="\ud800")
-        assert answer == MALFORMED_ID
-        assert scene.tables() == tables and staging.texts() == []
-        written = audit_lines(scene)[len(lines) :]
-        assert len(written) == 1, written
-        line = json.loads(written[0])
-        assert (line["tool"], line["outcome"], line["request_id"]) == ("edit_reference", "invalid_request", "\ud800")
-        assert scene.posts_counted() == posts + spent
+        attempts = {
+            "core role": (lambda: core_edit(client, scene, BOARDS, NAME, "text", 0, request_id="\ud800"), 0),
+            "grantee": (lambda: grantee_edit(client, held, BOARDS, NAME, "text", 0, request_id="\ud800"), 1),
+        }
+        for caller, (edit, spent) in attempts.items():
+            tables, lines, posts = scene.tables(), audit_lines(scene), scene.posts_counted()
+            staging.forget()
+            answer = await edit()
+            assert answer == MALFORMED_ID, (caller, answer)
+            assert scene.tables() == tables and staging.texts() == [], (caller, staging.texts())
+            written = audit_lines(scene)[len(lines) :]
+            assert len(written) == 1, (caller, written)
+            line = json.loads(written[0])
+            assert (line["tool"], line["outcome"], line["request_id"]) == (
+                "edit_reference",
+                "invalid_request",
+                "\ud800",
+            ), (caller, line)
+            assert scene.posts_counted() == posts + spent, caller
 
     play(scene.host, scenario)
 
@@ -304,18 +315,18 @@ async def left_behind(client, scene, call):
     }
 
 
-@pytest.mark.parametrize("tool_name", ["edit_reference", "create_topic", "set_topic"])
-@pytest.mark.parametrize("shape", ["bare", "in a key shape"])
-def test_a_grant_key_with_no_utf8_form_gets_what_any_key_that_opens_nothing_gets(build_scene, caplog, tool_name, shape):
-    """A grantee that presents a lone surrogate as its grant key, sent as a JSON escape, is answered, audited and
-    counted exactly as one that presents an ASCII key of the wrong format: the same refusal, the same one audit line,
-    no grant event, the same hourly posts (one for an edit, none for the topic tools) and no table changed. The three
-    tools share the check, so each is tried. A key-shaped string no grant has, and letters outside ASCII that do have
-    a UTF-8 form, get the same. The key, as sent and as JSON writes it, is in no answer, audit line or log."""
+def test_a_grant_key_with_no_utf8_form_gets_what_any_key_that_opens_nothing_gets(build_scene, caplog):
+    """A grantee that presents a lone surrogate as its grant key, sent as a JSON escape, bare or inside a key shape, is
+    answered, audited and counted exactly as one that presents an ASCII key of the wrong format: the same refusal, the
+    same one audit line, no grant event, the same hourly posts (one for an edit, none for the topic tools) and no table
+    changed. The three tools share the check, so each is tried. A key-shaped string no grant has, and letters outside
+    ASCII that do have a UTF-8 form, get the same. The key, as sent and as JSON writes it, is in no answer, audit line
+    or log."""
     caplog.set_level(logging.DEBUG)
     scene = build_scene()
     pieces = [secrets.token_urlsafe(12), secrets.token_urlsafe(12)]
-    lone = "\ud800" if shape == "bare" else f"tgk_{pieces[0]}\udfff{pieces[1]}"
+    lones = {"bare": "\ud800", "in a key shape": f"tgk_{pieces[0]}\udfff{pieces[1]}"}
+    unknown_key = {"error": "forbidden", "detail": "unknown topic grant key"}
 
     async def scenario(client):
         held = await board(client, scene)
@@ -326,32 +337,35 @@ def test_a_grant_key_with_no_utf8_form_gets_what_any_key_that_opens_nothing_gets
             "create_topic": lambda who: who.call(client, "create_topic", path="job-hunt/new"),
             "set_topic": lambda who: who.call(client, "set_topic", conversation_id=moving, topic="job-hunt/boards"),
         }
+        answers = []
+        for tool_name, call in calls.items():
+            for shape, lone in lones.items():
 
-        async def present(key):
-            return await left_behind(client, scene, lambda: calls[tool_name](replace(held, key=key)))
+                async def present(key, call=call):
+                    return await left_behind(client, scene, lambda: call(replace(held, key=key)))
 
-        wrong = await present("not-a-grant-key")
-        assert wrong["answer"] == {"error": "forbidden", "detail": "unknown topic grant key"}, wrong
-        assert [line["outcome"] for line in wrong["audit lines"]] == ["forbidden"], wrong
-        assert (wrong["grant events"], wrong["a table changed"]) == (0, False), wrong
-        assert wrong["hourly posts"] == (1 if tool_name == "edit_reference" else 0), wrong
-        got = {}
-        for what, key in (
-            ("a lone surrogate", lone),
-            ("a key-shaped string no grant has", support.new_key()),
-            ("letters outside ASCII", "caf\xe9-\U0001f600"),
-        ):
-            got[what] = await present(key)
-            for field in wrong:
-                assert got[what][field] == wrong[field], (what, field, got[what][field], wrong[field])
-        answer = got["a lone surrogate"]["answer"]
+                wrong = await present("not-a-grant-key")
+                assert wrong["answer"] == unknown_key, (tool_name, wrong)
+                assert [line["outcome"] for line in wrong["audit lines"]] == ["forbidden"], (tool_name, wrong)
+                assert (wrong["grant events"], wrong["a table changed"]) == (0, False), (tool_name, wrong)
+                assert wrong["hourly posts"] == (1 if tool_name == "edit_reference" else 0), (tool_name, wrong)
+                for what, key in (
+                    ("a lone surrogate", lone),
+                    ("a key-shaped string no grant has", support.new_key()),
+                    ("letters outside ASCII", "caf\xe9-\U0001f600"),
+                ):
+                    got = await present(key)
+                    for field in wrong:
+                        assert got[field] == wrong[field], (tool_name, shape, what, field, got[field], wrong[field])
+                    if what == "a lone surrogate":
+                        answers.append(got["answer"])
         seen = {
-            "the answer": json.dumps(answer) + repr(answer),
+            "the answers": "".join(json.dumps(answer) + repr(answer) for answer in answers),
             "the audit file": "\n".join(audit_lines(scene)),
             "the log": caplog.text,
         }
         for where, text in seen.items():
-            for form in (lone, json.dumps(lone)[1:-1], *(pieces if shape != "bare" else ())):
+            for form in (*lones.values(), *(json.dumps(lone)[1:-1] for lone in lones.values()), *pieces):
                 assert form not in text, (where, form)
 
     play(scene.host, scenario)
@@ -386,13 +400,6 @@ def test_the_grant_check_refuses_a_key_with_no_utf8_form_before_it_hashes_it_or_
 # 4. Arguments taken as sent ---------------------------------------------------------------------------------
 
 
-def refused_as_text(result, argument):
-    """`refused_as_mistyped`, and for a string the schema saw as one: its error says `input_type=str`. Read as the JSON
-    it spells, "null" is refused as a null (`NoneType`) or, for `revision`, not refused at all."""
-    refused_as_mistyped(result, argument, "null")
-    assert "input_type=str" in str(result.get("unparsed", result)), result
-
-
 def test_a_reference_named_null_is_read_by_name_and_not_listed(build_scene):
     """`null` is a name under the rules. A reference called that is read by its name, as its current text and as
     revision 1, and its history is listed, by a core role and by a guest holding only a binding. The SDK took the
@@ -419,94 +426,32 @@ def test_a_reference_named_null_is_read_by_name_and_not_listed(build_scene):
 
 
 @pytest.mark.parametrize("caller", ["core role", "grantee"])
-@pytest.mark.parametrize("rid", ["null", "[1]", '{"a": 1}'], ids=["null", "list", "object"])
-def test_a_request_id_that_reads_as_json_is_kept_as_sent_and_its_retry_replays(build_scene, caller, rid):
-    """A request id is any text of 1 to 200 characters. `null`, `[1]` and `{"a": 1}` are each kept as sent. The
-    identical retry gets the stored revision with `created` false and writes nothing, and both calls' audit lines
-    record the id as sent. The SDK turned "null" into a made-up id, so the retry was stale, and the schema refused the
-    others."""
+def test_a_request_id_that_reads_as_json_is_kept_as_sent_and_its_retry_replays(build_scene, caller):
+    """A request id is any text of 1 to 200 characters. `null`, `[1]` and `{"a": 1}` are each kept as sent, each on a
+    reference of its own. The identical retry gets the stored revision with `created` false and writes nothing, and
+    both calls' audit lines record the id as sent. The SDK turned "null" into a made-up id, so the retry was stale, and
+    the schema refused the others."""
     scene = build_scene()
 
     async def scenario(client):
         held = await board(client, scene)
+        for name, rid in (("rid-null", "null"), ("rid-list", "[1]"), ("rid-object", '{"a": 1}')):
 
-        async def edit():
-            if caller == "core role":
-                return await core_edit(client, scene, BOARDS, NAME, "text", 0, request_id=rid)
-            return await grantee_edit(client, held, BOARDS, NAME, "text", 0, request_id=rid)
+            async def edit(name=name, rid=rid):
+                if caller == "core role":
+                    return await core_edit(client, scene, BOARDS, name, "text", 0, request_id=rid)
+                return await grantee_edit(client, held, BOARDS, name, "text", 0, request_id=rid)
 
-        first = succeeded(await edit())
-        assert (first["request_id"], first["created"]) == (rid, True), first
-        tables = scene.tables()
-        retry = succeeded(await edit())
-        assert retry == {**first, "created": False}, retry
-        assert scene.tables() == tables
-        written = [json.loads(line) for line in audit_lines(scene)]
-        edits = [(line["outcome"], line.get("request_id")) for line in written if line.get("tool") == "edit_reference"]
-        assert edits == [("ok", rid), ("ok", rid)], edits
-
-    play(scene.host, scenario)
-
-
-@pytest.mark.parametrize(
-    "argument,existing",
-    [
-        ("expected_revision", False),
-        ("expected_revision", True),
-        ("revision", True),
-        ("after_revision", True),
-        ("limit", True),
-    ],
-    ids=["expected_revision-new", "expected_revision-at-revision-1", "revision", "after_revision", "limit"],
-)
-def test_the_string_null_is_refused_by_the_schema_as_a_string_for_a_whole_number(build_scene, argument, existing):
-    """The string "null" is a string like any other for `expected_revision` (when creating and on an existing
-    reference), `revision`, `after_revision` and `limit`: the schema refuses it as one, and nothing is written. The SDK
-    read it as a null, which `revision` accepted as no revision, and read the current text."""
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
-        if existing:
-            await write_revisions(client, scene, BOARDS, NAME, 1)
-        tables, lines = scene.tables(), audit_lines(scene)
-        who = Core(scene.host, "worker")
-        if argument == "expected_revision":
-            result = await core_edit(client, scene, BOARDS, NAME, "text", "null")
-        elif argument == "revision":
-            result = await read_reference(client, who, BOARDS, NAME, "null")
-        else:
-            result = await reference_history(client, who, BOARDS, NAME, **{argument: "null"})
-        refused_as_text(result, argument)
-        assert "board list" not in str(result).lower()
-        assert scene.tables() == tables and audit_lines(scene) == lines
-
-    play(scene.host, scenario)
-
-
-def test_a_call_with_a_binding_token_is_refused_the_string_null_for_a_number_like_any_mistyped_one(build_scene):
-    """The guard checks a call that carries a binding token against the schema before the SDK does, and it must read
-    the arguments as the SDK will: "null" for each whole number is answered with the guard's refusal of arguments that
-    do not match the tool schema, as any other mistyped number is. Checked with the SDK's reading, `revision` passed
-    the guard, and the SDK's own error came back instead."""
-    scene = build_scene()
-    guest_calls = {
-        "edit_reference": (edit_arguments(BOARDS, NAME, "text", 2), {"expected_revision": ["null"]}),
-        "read_reference": ({"topic": BOARDS, "name": NAME}, {"revision": ["null"]}),
-        "reference_history": ({"topic": BOARDS, "name": NAME}, {"limit": ["null"], "after_revision": ["null"]}),
-    }
-
-    async def scenario(client):
-        held = await board(client, scene)
-        await write_revisions(client, scene, BOARDS, NAME, 2)
-        tables, posts = scene.tables(), scene.posts_counted()
-        for tool_name, (fixed, varied) in guest_calls.items():
-            who = Keyed(held) if tool_name == "edit_reference" else Bound.of(held)
-            for argument, values in varied.items():
-                for value in values:
-                    answer = await who.call(client, tool_name, **{**fixed, argument: value})
-                    assert answer == schema_refusal(tool_name), (tool_name, argument, value, answer)
-        assert scene.tables() == tables and scene.posts_counted() == posts
+            lines = len(audit_lines(scene))
+            first = succeeded(await edit())
+            assert (first["request_id"], first["created"]) == (rid, True), (rid, first)
+            tables = scene.tables()
+            retry = succeeded(await edit())
+            assert retry == {**first, "created": False}, (rid, retry)
+            assert scene.tables() == tables, rid
+            written = [json.loads(line) for line in audit_lines(scene)[lines:]]
+            edits = [(one["outcome"], one.get("request_id")) for one in written if one.get("tool") == "edit_reference"]
+            assert edits == [("ok", rid), ("ok", rid)], (rid, edits)
 
     play(scene.host, scenario)
 
@@ -529,8 +474,7 @@ def test_a_body_that_reads_as_json_is_stored_and_read_back_as_sent(build_scene):
 
 
 @pytest.mark.parametrize("argument", ["token", "grant_token"])
-@pytest.mark.parametrize("tool_name", ["edit_reference", "read_reference", "reference_history"])
-def test_the_string_null_as_a_token_or_a_grant_key_is_refused_like_any_other(build_scene, tool_name, argument):
+def test_the_string_null_as_a_token_or_a_grant_key_is_refused_like_any_other(build_scene, argument):
     """The string "null" as `token` or as `grant_token` is a token or a key that opens nothing, and is refused as any
     other is, with the same answer, audit lines, grant events, hourly posts and tables: on the shared guest login
     (an unknown binding), on a core credential (which takes no binding token), and for a key, on a guest with a
@@ -547,36 +491,37 @@ def test_the_string_null_as_a_token_or_a_grant_key_is_refused_like_any_other(bui
     async def scenario(client):
         held = await board(client, scene)
         await write_revisions(client, scene, BOARDS, NAME, 1)
-        arguments = (
-            edit_arguments(BOARDS, NAME, "text", 0)
-            if tool_name == "edit_reference"
-            else {"topic": BOARDS, "name": NAME}
-        )  # an edit that is stale when it gets that far writes nothing
-        planner = Core(scene.host, "planner")
-        if argument == "token":
-            callers = {"the shared guest login": (Anonymous(scene.host), {}), "a core credential": (planner, {})}
-            if tool_name == "edit_reference":
-                callers["the shared guest login, with a real grant key"] = (
-                    Anonymous(scene.host),
-                    {"grant_token": held.key},
+        for tool_name in ("edit_reference", "read_reference", "reference_history"):
+            arguments = (
+                edit_arguments(BOARDS, NAME, "text", 0)
+                if tool_name == "edit_reference"
+                else {"topic": BOARDS, "name": NAME}
+            )  # an edit that is stale when it gets that far writes nothing
+            planner = Core(scene.host, "planner")
+            if argument == "token":
+                callers = {"the shared guest login": (Anonymous(scene.host), {}), "a core credential": (planner, {})}
+                if tool_name == "edit_reference":
+                    callers["the shared guest login, with a real grant key"] = (
+                        Anonymous(scene.host),
+                        {"grant_token": held.key},
+                    )
+            else:
+                callers = {"a guest with a binding": (Bound.of(held), {}), "a core credential": (planner, {})}
+
+            async def present(who, extra, value, tool_name=tool_name, arguments=arguments):
+                return await left_behind(
+                    client, scene, lambda: who.call(client, tool_name, **arguments, **extra, **{argument: value})
                 )
-        else:
-            callers = {"a guest with a binding": (Bound.of(held), {}), "a core credential": (planner, {})}
 
-        async def present(who, extra, value):
-            return await left_behind(
-                client, scene, lambda: who.call(client, tool_name, **arguments, **extra, **{argument: value})
-            )
-
-        for name, (who, extra) in callers.items():
-            asked, wrong = await present(who, extra, "null"), await present(who, extra, other)
-            for field in wrong:
-                assert asked[field] == wrong[field], (name, field, asked[field], wrong[field])
-            expected = refusals.get((name.split(",")[0], argument))
-            if expected is not None:
-                assert wrong["answer"] == {"error": "forbidden", "detail": expected}, (name, wrong)
-        if argument == "grant_token" and tool_name == "edit_reference":
-            guest = await present(Bound.of(held), {}, other)
-            assert guest["answer"] == {"error": "forbidden", "detail": "unknown topic grant key"}, guest
+            for name, (who, extra) in callers.items():
+                asked, wrong = await present(who, extra, "null"), await present(who, extra, other)
+                for field in wrong:
+                    assert asked[field] == wrong[field], (tool_name, name, field, asked[field], wrong[field])
+                expected = refusals.get((name.split(",")[0], argument))
+                if expected is not None:
+                    assert wrong["answer"] == {"error": "forbidden", "detail": expected}, (tool_name, name, wrong)
+            if argument == "grant_token" and tool_name == "edit_reference":
+                guest = await present(Bound.of(held), {}, other)
+                assert guest["answer"] == {"error": "forbidden", "detail": "unknown topic grant key"}, guest
 
     play(scene.host, scenario)

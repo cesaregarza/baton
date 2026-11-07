@@ -138,12 +138,12 @@ def test_an_expired_enrol_arm_is_refused(host):
     dispatch(host, scenario)
 
 
-@pytest.mark.parametrize("role", ["person", "guest", "nobody"])
-def test_arm_enrol_refuses_human_guest_and_unknown_roles(host, role):
+def test_arm_enrol_refuses_human_guest_and_unknown_roles(host):
     store.connect(host.config.db_path).close()
-    assert owner(host, "alias", "arm-enrol", role) == 1, "refused by baton itself, not by argparse"
-    with db(host) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM alias_arms").fetchone()[0] == 0
+    for role in ("person", "guest", "nobody"):
+        assert owner(host, "alias", "arm-enrol", role) == 1, f"{role}: refused by baton itself, not by argparse"
+        with db(host) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM alias_arms").fetchone()[0] == 0, role
 
 
 def test_a_guest_renews_an_enrolled_alias_without_an_arm_and_acts_as_its_role(host):
@@ -182,14 +182,14 @@ def test_an_unmapped_proof_still_posts_as_a_guest_and_cannot_use_core_tools(host
     dispatch(host, scenario)
 
 
-@pytest.mark.parametrize("tool,arguments", [("whoami", {}), ("alias_exists", {"name": "x"}), ("read_messages", {})])
-@pytest.mark.parametrize("proof", ["", "not ascii é", "x" * 257, "unknown-proof"])
-def test_a_bad_token_is_refused_on_every_tool(host, tool, arguments, proof):
+def test_a_bad_token_is_refused_on_every_tool(host):
     async def scenario(client):
-        refused = await call(client, host, tool, {**arguments, "token": proof})
-        assert refused.get("error") == "forbidden", refused
-        if proof:
-            assert proof not in host.config.audit_path.read_text()
+        for tool, arguments in (("whoami", {}), ("alias_exists", {"name": "x"}), ("read_messages", {})):
+            for proof in ("", "not ascii é", "x" * 257, "unknown-proof"):
+                refused = await call(client, host, tool, {**arguments, "token": proof})
+                assert refused.get("error") == "forbidden", (tool, proof[:12], refused)
+                if proof:
+                    assert proof not in host.config.audit_path.read_text(), (tool, proof[:12])
 
     dispatch(host, scenario)
 
