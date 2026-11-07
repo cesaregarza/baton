@@ -25,7 +25,7 @@ import pytest
 from secretary_support import conversation, make_world, policy, say
 from test_secretary_recovery import _worker
 
-from baton import conversations
+from baton import conversations, jobs
 from baton.agents.secretary.attention.backlog import Backlog
 from baton.agents.secretary.attention.decide import SecretaryUnavailable
 from baton.agents.secretary.attention.queue import AttentionQueue
@@ -801,6 +801,57 @@ def test_a_trigger_that_is_not_a_visible_event_is_still_refused_by_every_caller(
         assert result["trigger"] is None and result["catch_up"] is True
         assert model.requests[-1]["context"]["trigger"] is None
         assert len(result["sources"]) == CANDIDATE_BOUNDS["max_events"]
+        # The same call again finds the stored assessment, and says so, and still says it is catch-up.
+        calls = len(model.requests)
+        again = asyncio.run(secretary.decide(budget_seconds=BUDGET, trigger=beyond, since=floor, floor=floor))
+        assert again["cached"] is True and again["decision_id"] == result["decision_id"]
+        assert again["trigger"] is None and again["catch_up"] is True and len(model.requests) == calls
+
+        # A page with no events validates its trigger first too, so a missing one is refused there as well; a visible
+        # trigger behind the page, already scanned, is not on it either, so that page is catch-up and names none.
+        head = _position(world, sent[-1]["message_id"])
+        with pytest.raises(InvalidRequest, match="not a visible event"):
+            asyncio.run(secretary.decide(budget_seconds=BUDGET, trigger=missing, since=head, floor=floor))
+        for _ in range(2):  # the second time from the stored result
+            empty = asyncio.run(
+                secretary.decide(budget_seconds=BUDGET, trigger=_trigger(sent[0]), since=head, floor=floor)
+            )
+            assert (empty["event_count"], empty["trigger"], empty["catch_up"]) == (0, None, True)
+        assert len(model.requests) == calls
+
+
+def test_a_job_trigger_beyond_its_page_makes_that_page_catch_up_and_stays_pending(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF)
+        secretary = worker.instance.secretary
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: 1000.0)
+        asyncio.run(secretary.activate())
+        room = conversation(world)
+        sent = [say(world, room, "worker", f"Backlog update {number}") for number in range(12)]
+        made = jobs.create(world.baton, world.config.jobs, request_id="job-beyond", actor="worker", title="A task")
+        created = world.baton.execute(
+            "SELECT pos,seq FROM events WHERE job_id=? AND kind='job.created'", (made["job_id"],)
+        ).fetchone()
+        trigger = f"job:{made['job_id']}:{created['seq']}"
+        log = AttentionLog(world.state_path, world.config.data_dir, "planner")
+
+        # A job trigger follows the message trigger's rule: beyond the bounded page, the page is catch-up. The model is
+        # not told of the trigger, the result names none and is stored as catch-up, and the job event stays beyond the
+        # cursor, unassessed.
+        result, error, _ = asyncio.run(_callback(secretary, trigger))
+        assert error is None and result is not None and result["kind"] == "summary"
+        assert result["trigger"] is None and result["catch_up"] is True
+        assert log.get(result["decision_id"])["catch_up"] is True
+        assert model.requests[-1]["context"]["trigger"] is None
+        assert _event_keys([result]) == Counter(f"message:{item['message_id']}" for item in sent[:10])
+        assert created["pos"] > _scanned(world)
+
+        # The next page holds it, and assesses it as its own.
+        own, error, _ = asyncio.run(_callback(secretary, trigger))
+        assert error is None and own is not None and own["trigger"] == trigger and "catch_up" not in own
+        assert model.requests[-1]["context"]["trigger"] == trigger
+        assert created["pos"] <= _scanned(world)
 
 
 @pytest.mark.parametrize(
@@ -960,6 +1011,57 @@ def test_an_event_larger_than_the_byte_bound_gets_a_cited_failure_notice_never_a
         assert asyncio.run(secretary.acknowledge(newer["decision_id"])) == first["covered_through"]
         assert asyncio.run(secretary.acknowledge(notice["decision_id"])) == newer["covered_through"]
         assert not _retrying(world)
+
+
+def test_a_digest_range_over_narrowed_bounds_splits_into_digest_parts(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path, plan=HOLD)
+        policy(world, **OLD_BOUNDS, **BACKOFF, digest_seconds=60)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        rooms = [conversation(world) for _ in range(3)]
+        held = []
+        for number in range(3):
+            page = [say(world, rooms[number], "worker", f"Routine update {number}.{n}") for n in range(4)]
+            held.extend(page)
+            result, error, _ = asyncio.run(_callback(secretary, _trigger(page[-1])))
+            assert error is None and result is not None and result["decision"] == "hold"
+
+        # The three held pages are combined into one 12-event digest, whose assessment fails: it waits in retry as a
+        # digest range, written under the old bounds. Then the bounds narrow.
+        now[0] += 120
+        model.set_plan({"steps": [{"exit": 1}]})
+        hourly = asyncio.run(_hourly(secretary, model))
+        assert isinstance(hourly.scheduled, SecretaryUnavailable)
+        [digest] = _retrying(world)
+        assert digest["mode"] == "digest"
+        policy(world, **CANDIDATE_BOUNDS)
+        model.set_plan({"decision": "keep"})
+        _at_next_retry(world, now)
+        calls = len(model.requests)
+
+        # Its first refusal splits it at once into digest parts: the held events are never assessed as alerts, which
+        # would ask the decision engine and could wake.
+        hourly = asyncio.run(_hourly(secretary, model))
+        assert isinstance(hourly.scheduled, InboxTooLarge)
+        parts = _retrying(world)
+        assert [row["mode"] for row in parts] == ["digest", "digest"]
+        assert (parts[0]["since"], parts[-1]["through"]) == (digest["since"], digest["through"])
+        assert len(model.requests) == calls
+
+        engine_calls = len(model.engine_requests)
+        pending: dict[str, dict] = {}
+        for _ in _calls(4):
+            if not _retrying(world):
+                break
+            hourly = asyncio.run(_hourly(secretary, model))
+            pending.update({summary["decision_id"]: summary for summary in hourly.pending})
+        assert [request["context"]["mode"] for request in model.requests[calls:]] == ["digest", "digest"]
+        assert len(model.engine_requests) == engine_calls
+        assert {summary["mode"] for summary in pending.values()} == {"digest"}
+        assert _event_keys(list(pending.values())) == Counter(f"message:{sent['message_id']}" for sent in held)
 
 
 def test_a_callback_stalled_inside_its_split_never_puts_back_a_part_another_callback_split(
