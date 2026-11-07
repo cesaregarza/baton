@@ -122,16 +122,22 @@ def reading(*, decided_by: str | None, trigger: str | None, trigger_state: str |
         if decided_by == "secretary" and not historical:
             return Reading(True)
         count = f"{historical} historical catch-up summar{'y' if historical == 1 else 'ies'}"
-        return Reading(False, f"\n[The digest above includes {count}: pages assessed before the secretary reached the "
-                       "current inbox. It is additional historical context and does not replace the instructions "
-                       "below to read the current inbox.]")
+        return Reading(
+            False,
+            f"\n[The digest above includes {count}: pages assessed before the secretary reached the "
+            "current inbox. It is additional historical context and does not replace the instructions "
+            "below to read the current inbox.]",
+        )
     if decided_by == "secretary" and trigger_state == "assessed":
         return Reading(True)
     context = "additional historical context" if historical else "additional context"
-    return Reading(False, f"\n[Not assessed by the secretary: {trigger}, this wake's own event (trigger_state "
-                   f"{trigger_state or 'unknown'}). The brief above is {context} and does not cover it; {trigger} is "
-                   "still handled through the existing fallback, so the instructions below to read the current "
-                   "inbox and any held replay stand.]")
+    return Reading(
+        False,
+        f"\n[Not assessed by the secretary: {trigger}, this wake's own event (trigger_state "
+        f"{trigger_state or 'unknown'}). The brief above is {context} and does not cover it; {trigger} is "
+        "still handled through the existing fallback, so the instructions below to read the current "
+        "inbox and any held replay stand.]",
+    )
 
 
 def lead(brief: str, chosen: Reading | None) -> tuple[str, bool]:
