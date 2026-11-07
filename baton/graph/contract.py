@@ -18,7 +18,14 @@ summary prose, never turn them into action items, approval gates, or reasons to 
 active. Preserve unresolved source-backed contradictions and blockers. Closing a
 strand does not grant permission, authority or completion of a real task. Preserve still-applicable
 constraints as active shared decisions (applies_to ['all'] or selected strand IDs), including when
-its original discussion closes. Deduplicate decisions across strands.
+its original discussion closes. Applicability means where a decision currently matters, not merely
+its originating strand. When closing a discussion or adding strands, carry still-needed definitions,
+format/artifact constraints, rationale and tested artifact scope into active summaries or shared
+decisions applicable to the active strands that need them. Deduplicate decisions across strands.
+Before returning, check the intended compact view: active summaries plus applicable decisions alone
+must explain needed shorthand and preserve exact tested commit/artifact and test names supplied by
+the source, without requiring closed-history drilldown. Do not reduce specific test scope to a generic
+claim that tests passed. This context check must not invent tasks or gates from missing evidence.
 Use directly_relevant, partially_superseded (with readable surviving_text), completely_superseded.
 Status changes require supporting evidence. Keep immutable original extracted text and quotes;
 change existing relevance only via relevance_updates, which may target preexisting statements only.
