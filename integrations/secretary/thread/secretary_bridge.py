@@ -7,15 +7,21 @@ and the response schema. The bridge offers that turn in a private spool, GATE_DI
 thread's answer and prints it for Baton, which checks it again (`Assessment.parse`, the tool-call rules) before it
 counts. The thread, a persistent runtime session, runs:
 
-    receive [--wait S]                      the live turn's header, or {"status": "none"} after S seconds (1-600; 30)
-    read REQUEST_ID [--after POS] [--layers] one page of that turn's events, or its three developer layers
-    reply REQUEST_ID                        its answer on stdin: an assessment or {"tool_calls": [...]}
+    receive [--wait S]          the live turn's header, or {"status": "none"} after S seconds (1-600; 30)
+    read REQUEST_ID [--page N]  page N (1 by default) of that turn's trusted layers and events
+    reply REQUEST_ID            its answer on stdin: an assessment or {"tool_calls": [...]}
 
 Every output that hands the thread a live turn prints that turn's exact `reply` command, a quoted heredoc opener
 included, and the line that closes it (`reply_form`): the thread submits the command, a newline, its serializer's
 JSON, a newline and the closing line, so no answer is ever quoted by hand. The turn's first page also carries the
 three trusted layers, so the contract is in front of the thread when it decides, on every turn. BRIDGE_VERSION names
 this behavior for the thread's guidance.
+
+Every printed line stays within what the thread's tools show whole (PAGE_TOKENS), because a page they cut loses
+events or the contract without a sign. A turn is a fixed sequence of pages, counted in its header: the layers, then
+every event once, in window order, each page with an index line per event. An event or layer too large for one page
+is split across consecutive pages in numbered parts, never dropped or shortened. Every output carries a `status`, and
+each one for a turn that can no longer be answered says to stop and go back to `receive`.
 
 One deadline covers every turn of an assessment: the secretary host sets it in SECRETARY_DEADLINE_AT, which the
 policy's model.env passes through, and Baton kills a turn's process at that deadline. The bridge never gives up
@@ -53,6 +59,7 @@ import unicodedata
 from collections import Counter
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
+from functools import cache
 from pathlib import Path
 
 BRIDGE_PATH = Path(__file__).resolve()
@@ -66,7 +73,8 @@ if _missing := [name for name in GATE_NAMES if not hasattr(secretary_gate, name)
     raise ImportError(f"secretary_gate lacks {', '.join(_missing)}")
 
 PROTOCOL = 4
-BRIDGE_VERSION = "4.1"  # protocol 4 with the printed reply form and the every-turn contract; the guidance names it
+BRIDGE_VERSION = "4.2"  # 4.1's reply form and contract, with pages bounded to what the thread's tools show; the
+# guidance names it
 DEADLINE_ENV = "SECRETARY_DEADLINE_AT"
 TURN_SECONDS = 60  # Baton's longest turn: no deadline lies further out than this
 MAX_REQUEST = 16 * 1024 * 1024
@@ -76,7 +84,14 @@ IDLE_SECONDS = 1.0  # how long a reply waits for its answer's first byte on a pi
 RETURN_SECONDS = 0.5  # kept before the deadline for the bridge to print an answer; a later one is refused as late
 GRACE = 5  # a safety stop past the deadline, for a bridge whose caller is gone without killing it
 WAIT = (1, 600)  # receive's bound, in seconds
-PAGE_BYTES = 48 * 1024  # what one read page holds, at least one event
+# The most one printed line may cost, in tokens as `_tokens` counts them. It protects what the thread sees: its command
+# tool and the cell that prints the command's output each cut a longer output, and the smaller limit, the cell's, is
+# taken as 8,000 tokens until its exact value is known. A cut page silently loses events or the contract. 7,000 keeps
+# 1,000 tokens (12.5%) of margin, and every read page, layers, index, reply form and metadata included, stays within it.
+PAGE_TOKENS = 7000
+BYTES_PER_TOKEN = 2.5  # the fewest ASCII bytes of this JSON one token is taken to hold
+PLACEHOLDER = 10**6  # wider than any page or part number, so a page's size is fixed before the pages are counted
+TURN_OVER = "This turn is over. Stop work on it and go back to receive."
 BUSY = 75  # EX_TEMPFAIL: another turn is live
 LAYERS = ("developer", "developer", "developer", "user")
 EVENT_KEYS = ("source_key", "pos", "kind", "at", "actor", "audience", "job_id", "seq")
@@ -250,13 +265,14 @@ def header(held: dict) -> dict:
         "request_id": held["request_id"],
         "turn": held["turn"],
         "deadline_at": _stamp(held["deadline"]),
-        "seconds_left": round(max(0.0, held["deadline"] - RETURN_SECONDS - time.time()), 1),
+        "seconds_left": _seconds_left(held),
         "mode": event["mode"],
         "trigger": event.get("trigger"),
         "since": event.get("since"),
         "floor": event.get("floor"),
         "through_pos": event.get("through_pos"),
         "events": len(events),
+        "pages": len(pages(held)),
         "first_pos": events[0].get("pos") if events else None,
         "last_pos": events[-1].get("pos") if events else None,
         "required_sources": [entry["source_key"] for entry in events],
@@ -298,44 +314,146 @@ def reply_form(request_id: str) -> dict:
     return {"command": f"{command} <<'{closing}'", "closing_line": closing}
 
 
-def read(spool: Path, request_id: str, after: int | None, layers: bool) -> tuple[dict, int]:
-    """One page of the live turn's events after `after`, in the thread's view, or its developer layers."""
+def read(spool: Path, request_id: str, number: int) -> tuple[dict, int]:
+    """Page `number` of the live turn, as `pages` lays the turn out."""
     with _locked(spool):
         held = _live(spool)
     if held is None or held["request_id"] != request_id:
-        return {"error": "not_outstanding"}, 1
-    if layers:
-        return {"request_id": request_id, "layers": held["layers"], "reply_form": reply_form(request_id)}, 0
-    events = held["event"]["events"]
-    chosen, size = [], 0
-    for entry in events:
-        if after is not None and (entry.get("pos") is None or entry["pos"] <= after):
-            continue
-        shown = view(entry)
-        cost = len(json.dumps(shown, ensure_ascii=False).encode())
-        if chosen and size + cost > PAGE_BYTES:
-            break
-        chosen.append(shown)
-        size += cost
-    last = chosen[-1]["pos"] if chosen else after
-    more = bool(chosen) and any(entry.get("pos") is not None and entry["pos"] > last for entry in events)
-    _record(spool, request_id, "read", events=len(chosen))
-    page = {
+        return {"status": "not_outstanding", "next": TURN_OVER}, 1
+    if _expired(held):
+        return {"status": "late", "next": TURN_OVER}, 1  # an answer can no longer arrive in time: reading is wasted
+    laid_out = pages(held)
+    if not 1 <= number <= len(laid_out):
+        return {"status": "invalid", "detail": "no_such_page", "pages": len(laid_out)}, 1
+    page = laid_out[number - 1]
+    _record(spool, request_id, "read", page=number, events=len(page["index"]))
+    return {**page, "seconds_left": _seconds_left(held)}, 0
+
+
+def pages(held: dict) -> list[dict]:
+    """The turn's pages, in order, each a printed line within PAGE_TOKENS: the three trusted layers, the reply
+    parents' keys, then every event once, in window order. A page closes when the next item doesn't fit; an item too
+    large for a page of its own is split across consecutive pages, in parts. The same turn always pages the same way,
+    so the header's count holds for every read."""
+    form = reply_form(held["request_id"])
+    room = PAGE_TOKENS - _tokens(_line(_page(held["request_id"], form, PLACEHOLDER, PLACEHOLDER)) + "\n")
+    laid_out: list[dict] = []
+    current: dict[str, list] = _contents()
+    used = 0.0
+    for field, value, line in _items(held, room):
+        cost = _item_cost(current, field, value, line)
+        if used and used + cost > room:
+            laid_out.append(current)
+            current, used = _contents(), 0.0
+            cost = _item_cost(current, field, value, line)
+        current[field].append(value)
+        if line is not None:
+            current["index"].append(line)
+        used += cost
+    laid_out.append(current)
+    count = len(laid_out)
+    return [
+        {**_page(held["request_id"], form, number, count), **contents} for number, contents in enumerate(laid_out, 1)
+    ]
+
+
+def _page(request_id: str, form: dict, number: int, count: int) -> dict:
+    """A page's frame. `seconds_left` is measured at its widest, TURN_SECONDS, and replaced when the page is read."""
+    return {
+        "status": "page",
         "request_id": request_id,
-        "after": after,
-        "through_pos": last,
-        "more": more,
-        "events": chosen,
-        "reply_context": [
-            {"source_key": entry["source_key"], "text": "withheld"} for entry in held["event"]["reply_context"]
-        ]
-        if after is None
-        else [],
-        "reply_form": reply_form(request_id),
+        "page": number,
+        "pages": count,
+        "more": number < count,
+        "seconds_left": float(TURN_SECONDS),
+        **_contents(),
+        "reply_form": form,
     }
-    if after is None:
-        page["layers"] = held["layers"]  # the trusted contract, in front of the thread on every turn
-    return page, 0
+
+
+def _contents() -> dict[str, list]:
+    return {"layers": [], "reply_context": [], "events": [], "index": []}
+
+
+def _items(held: dict, room: float):
+    """Everything a turn's pages carry, in order, as (field, value, index line), each small enough for a page of its
+    own: a larger layer or event comes as consecutive parts."""
+    for number, layer in enumerate(held["layers"]):
+        whole = {"index": number, "role": layer["role"], "text": layer["text"]}
+        for part in _parts(whole, {"index": number, "role": layer["role"]}, "text", layer["text"], None, room):
+            yield "layers", *part
+    for entry in held["event"]["reply_context"]:
+        yield "reply_context", {"source_key": entry["source_key"], "text": "withheld"}, None
+    events = held["event"]["events"]
+    for number, entry in enumerate(events, 1):
+        shown = view(entry)
+        head = {"source_key": shown.get("source_key"), "pos": shown.get("pos")}
+        line = _index_line(number, len(events), entry)
+        yield from (("events", *part) for part in _parts(shown, head, "json", _line(shown), line, room))
+
+
+def _parts(whole: dict, head: dict, field: str, text: str, line: str | None, room: float):
+    """`whole` with its index line when it fits a page of its own; else `text` cut at whole characters into the
+    fewest parts that each fit one, each part `head` with its number, the count and its share of `text` under
+    `field`. Joined in order, the shares are `text` exactly: a layer's text, or an event as a whole page prints it."""
+    if _item_cost(_contents(), "index", whole, line) <= room:  # alone on a page: no separators
+        yield whole, line
+        return
+    frame = {**head, "part": PLACEHOLDER, "parts": PLACEHOLDER, field: ""}
+    budget = room - _item_cost(_contents(), "index", frame, _part_line(line, PLACEHOLDER, PLACEHOLDER))
+    shares, start, spent = [], 0, 0.0
+    for at, char in enumerate(text):
+        cost = _char_cost(char)
+        if cost > budget:
+            raise Invalid("a page cannot hold one character")  # only a frame wider than the bound itself does this
+        if spent + cost > budget:
+            shares.append(text[start:at])
+            start, spent = at, 0.0
+        spent += cost
+    shares.append(text[start:])
+    for number, share in enumerate(shares, 1):
+        yield {**head, "part": number, "parts": len(shares), field: share}, _part_line(line, number, len(shares))
+
+
+def _part_line(line: str | None, number: int, count: int) -> str | None:
+    return None if line is None else f"{line} (part {number} of {count})"
+
+
+def _index_line(number: int, total: int, entry: dict) -> str:
+    """One event in a line the thread can enumerate: its place in the turn, position, kind, author, audience and,
+    for a message, whom it asks for attention."""
+    message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
+    attention = message.get("attention") if isinstance(message.get("attention"), list) else []
+    line = f"{number}/{total} pos {entry.get('pos')} {entry.get('kind')} from {entry.get('actor')}"
+    line += f" to {entry.get('audience')}" if entry.get("audience") is not None else ""
+    return line + (f" attention {', '.join(str(name) for name in attention)}" if attention else "")
+
+
+def _item_cost(contents: dict[str, list], field: str, value: dict, line: str | None) -> float:
+    """What adding `value`, and its index line, adds to a page's printed line: each item, plus a separator after
+    the first in its list."""
+    cost = _tokens(_line(value)) + (_tokens(", ") if contents[field] else 0.0)
+    if line is not None:
+        cost += _tokens(_line(line)) + (_tokens(", ") if contents["index"] else 0.0)
+    return cost
+
+
+def _tokens(text: str) -> float:
+    """What printed text may cost the thread's tools, in tokens: ASCII at BYTES_PER_TOKEN bytes a token, and every
+    byte of any other character a token of its own, the most a byte-level tokenizer can spend on it."""
+    ascii_bytes = len(text.encode("ascii", "ignore"))
+    return ascii_bytes / BYTES_PER_TOKEN + (len(text.encode()) - ascii_bytes)
+
+
+@cache
+def _char_cost(char: str) -> float:
+    """One character's cost inside a printed JSON string, escaped as the printed line escapes it."""
+    return _tokens(json.dumps(char, ensure_ascii=False)[1:-1])
+
+
+def _line(value: object) -> str:
+    """A value as the bridge prints it."""
+    return json.dumps(value, sort_keys=True, ensure_ascii=False)
 
 
 def view(entry: dict) -> dict:
@@ -359,14 +477,15 @@ def reply(spool: Path, request_id: str, raw: bytes, refusal: str | None) -> tupl
         held = _live(spool)
         if held is None or held["request_id"] != request_id:
             _record(spool, known, "replied", outcome="not_outstanding")
-            return {"status": "not_outstanding"}, 1
+            return {"status": "not_outstanding", "next": TURN_OVER}, 1
         answer, detail = (None, refusal) if refusal else check(held, raw)
         if answer is None:
             _record(spool, known, "replied", outcome="invalid", detail=detail)
-            return {"status": "invalid", "detail": detail, "reply_form": reply_form(request_id)}, 1
-        if time.time() > held["deadline"] - RETURN_SECONDS:
+            refused = {"status": "invalid", "detail": detail, "reply_form": reply_form(request_id)}
+            return {**refused, **_summary_size(held, raw, detail), "seconds_left": _seconds_left(held)}, 1
+        if _expired(held):
             _record(spool, known, "replied", outcome="late")
-            return {"status": "late"}, 1
+            return {"status": "late", "next": TURN_OVER}, 1
         secretary_gate._write_private(spool / "reply.json", {"request_id": request_id, "answer": answer})
         _record(
             spool,
@@ -428,6 +547,25 @@ def check(held: dict, raw: bytes) -> tuple[dict | None, str | None]:  # noqa: C9
     if not set(CITED.findall(summary)) <= _ids(event):
         return None, "uncited_id"
     return answer, None
+
+
+def _summary_size(held: dict, raw: bytes, detail: str | None) -> dict:
+    """For a summary over its bound, its size and the bound, so the thread shortens it without measuring bytes."""
+    if detail != "summary_bytes":
+        return {}
+    summary = json.loads(raw).get("summary")
+    size = len(summary.encode()) if isinstance(summary, str) else None
+    return {"summary_bytes": held["summary_bytes"], "summary_size": size}
+
+
+def _seconds_left(held: dict) -> float:
+    """The time left to answer, the bridge's return margin kept."""
+    return round(max(0.0, held["deadline"] - RETURN_SECONDS - time.time()), 1)
+
+
+def _expired(held: dict) -> bool:
+    """Whether an answer could still be printed for Baton in time: after this, a reply is late."""
+    return time.time() > held["deadline"] - RETURN_SECONDS
 
 
 def _unpaired_surrogate(value: object) -> bool:
@@ -719,8 +857,7 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("receive", allow_abbrev=False).add_argument("--wait", type=float, default=30)
     reading = commands.add_parser("read", allow_abbrev=False)
     reading.add_argument("request_id")
-    reading.add_argument("--after", type=int)
-    reading.add_argument("--layers", action="store_true")
+    reading.add_argument("--page", type=int, default=1)
     commands.add_parser("reply", allow_abbrev=False).add_argument("request_id")
     commands.add_parser("status", allow_abbrev=False)
     commands.add_parser("timing", allow_abbrev=False)  # the operator's: per-turn times
@@ -756,7 +893,7 @@ def main(argv: list[str]) -> int:
         if args.command == "receive":
             result, code = receive(spool, args.wait), 0
         elif args.command == "read":
-            result, code = read(spool, args.request_id, args.after, args.layers)
+            result, code = read(spool, args.request_id, args.page)
         elif args.command == "reply":
             result, code = reply(spool, args.request_id, *stdin_answer())
         elif args.command == "status":
@@ -764,8 +901,8 @@ def main(argv: list[str]) -> int:
         else:
             result, code = timing(spool), 0
     except Exception as error:  # the kind of fault alone: its message could hold a path
-        result, code = {"error": "fault", "type": type(error).__name__}, 1
-    print(json.dumps(result, sort_keys=True, ensure_ascii=False), flush=True)
+        result, code = {"status": "fault", "type": type(error).__name__}, 1
+    print(_line(result), flush=True)
     return code
 
 

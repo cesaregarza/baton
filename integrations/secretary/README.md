@@ -173,6 +173,10 @@ Host contract:
   terminal, empty, or an open pipe that stays silent is refused and the turn stays open.
 - Each turn's first page carries the three trusted developer layers, so Baton's instructions, including the
   full-page summary rule, are present on every turn.
+- Every printed line fits what the thread's tools display whole (`PAGE_TOKENS`, counted conservatively for non-ASCII
+  text). The header counts the turn's pages; each page indexes its events, and an event or layer larger than a page
+  arrives in numbered parts on consecutive pages. Every output carries a `status`; one for a turn that can no longer
+  be answered (`late`, `not_outstanding`) says to stop and return to `receive`.
 
 To adopt a new version, install the bridge file at the host's existing bridge path while `secretary_bridge.py status`
 reports the spool `idle`, then resume the thread with the guidance, preceded by one line naming the host's command:
