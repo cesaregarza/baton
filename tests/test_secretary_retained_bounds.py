@@ -587,6 +587,31 @@ def test_an_hourly_with_nothing_new_to_scan_reaches_a_due_retry_while_a_digest_t
         assert hourly.asked == (False, False) and len(model.requests) == calls + 2
 
 
+def test_an_idle_scan_lane_leaves_a_lone_due_retry_to_the_scheduled_lane(tmp_path, monkeypatch) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF, digest_seconds=60)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        room = conversation(world)
+        model.set_plan({"steps": [{"exit": 1}]})
+        failed = [say(world, room, "reviewer", f"An update whose assessment failed {number}") for number in range(2)]
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(failed[-1])))
+        assert result is None and isinstance(error, SecretaryUnavailable)
+        model.set_plan({})
+        _at_next_retry(world, now)
+        calls = len(model.requests)
+
+        # No digest is due, so the scheduled lane takes the retry, with a budget never smaller than the scan lane's.
+        # The idle scan lane leaves it there: a page that fits the scheduled lane could time out in the scan lane.
+        hourly = asyncio.run(_hourly(secretary, model))
+        assert hourly.scan is None and hourly.scheduled is None and hourly.asked == (False, True)
+        assert len(model.requests) == calls + 1 and not _retrying(world)
+        assert _event_keys(hourly.pending) == Counter(f"message:{sent['message_id']}" for sent in failed)
+
+
 def test_each_callback_behind_a_scan_backlog_assesses_the_earliest_page_as_catch_up_until_its_trigger_is_reached(
     tmp_path, monkeypatch
 ) -> None:
@@ -696,9 +721,9 @@ def test_an_alert_decide_with_nothing_new_to_scan_never_takes_a_due_digest(tmp_p
         assert len(model.requests) == calls
         assert [row["status"] for row in _rows(world)] == ["held"]
 
-        # The hourly's idle scan lane takes it.
+        # The hourly's scheduled lane takes it; with no retry due, its idle scan lane asks nothing.
         hourly = asyncio.run(_hourly(secretary, model))
-        assert hourly.asked == (True, False)
+        assert hourly.asked == (False, True)
         assert [request["context"]["mode"] for request in model.requests[calls:]] == ["digest"]
 
 

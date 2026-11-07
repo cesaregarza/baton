@@ -41,7 +41,7 @@ class AttentionQueue:
         _, floor = await database.call(log.activate, epoch, head)
         return cls(secretary, database, policy, Backlog(log), floor)
 
-    async def scan(self, budget: float, *, trigger: str | None = None, scheduled: bool = True) -> dict | None:
+    async def scan(self, budget: float, *, trigger: str | None = None) -> dict | None:
         since = await self.database.call(self.backlog.scanned)
         try:
             window = await self.database.call(InboxWindow.read, self.secretary.config, self.policy, since)
@@ -58,28 +58,26 @@ class AttentionQueue:
             page = Page(since, window.through)
             await self.database.call(self.backlog.enqueue, page, time.time())
             await self.database.call(self.backlog.discard_empty, page)
-        if trigger is None and scheduled:
+        if trigger is None:
             result = await self._scheduled(budget)
             if result is not None or self.last_error is not None:
                 return result
         return await run.run()
 
     async def _scheduled(self, budget: float) -> dict | None:
-        """An untriggered scan with nothing new to read spends its budget on scheduled work: a due retry, else a digest.
+        """An untriggered scan with nothing new to read takes the due retry that the scheduled lane will pass over.
 
         The hourly runs its scan, then one scheduled lane, and that lane takes a digest whenever one is due. A held page
-        makes one due a minute later, so with any traffic it never reached a retry, and retained work waited on
-        callbacks, or with none at all on alternate hours; it also digested at most one page of held events an hour.
-        A scan lane with nothing to scan now reaches either, within its own budget and deadline, with no new timer.
-        Only a bare scan, the hourly's own lane, does this: `assess` has already resumed a due retry before it scans,
-        and its alert decide must never return a digest; `poll`'s own scheduled lane alternates between the two.
+        makes one due a minute later, so with any traffic it never reached a retry: retained work waited on callbacks,
+        or with none at all on alternate hours. While a digest is due, a scan lane with nothing to scan now takes the
+        earliest due retry, within its own budget and deadline, with no new timer. Any other scheduled work stays with
+        the scheduled lane, whose budget is never the smaller: a page that fits there could time out here, and a
+        timeout is a counted failure. A triggered scan never does this, and a scan never digests here, so an alert
+        decide never returns a digest.
         """
-        now = time.time()
-        if await self.database.call(self.backlog.due, now):
-            return await self.retry(budget)
-        if await self.database.call(self.backlog.due, now, held=True):
-            return await self.digest(budget)
-        return None
+        if not await self.database.call(self.backlog.due, time.time(), held=True):
+            return None  # a due retry is the scheduled lane's own, with its larger budget
+        return await self.retry(budget)
 
     async def assess(self, budget: float, *, trigger: str | None = None, hourly: bool = False) -> dict | None:
         """The host API resumes retained work before scanning another page."""
@@ -95,8 +93,7 @@ class AttentionQueue:
                 return result
         if await self.database.call(self.backlog.waiting_retry, position, mode="digest" if hourly else None):
             raise SecretaryUnavailable("the retained page is waiting for retry backoff")
-        # This scan never takes scheduled work: the call has already resumed what was due, and must not digest.
-        return await self.digest(budget) if hourly else await self.scan(budget, trigger=trigger, scheduled=False)
+        return await self.digest(budget) if hourly else await self.scan(budget, trigger=trigger)
 
     async def retry(self, budget: float) -> dict | None:
         due = await self.database.call(self.backlog.due, time.time())
@@ -129,7 +126,7 @@ class AttentionQueue:
         New traffic cannot consume the recovery budget. The worker alternates which
         scheduled lane goes first so retries and digests also get time under load.
         """
-        await self.scan(budget, scheduled=False)  # the scheduled lane below alternates, so neither kind waits
+        await self.scan(budget)
         scheduled = (
             ((True, self.digest), (False, self.retry)) if digest_first else ((False, self.retry), (True, self.digest))
         )
