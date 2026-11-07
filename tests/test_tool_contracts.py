@@ -36,6 +36,7 @@ TOOL_NAMES = [
     "create_conversation",
     "list_conversations",
     "read_history",
+    "read_context",
     "add_participant",
     "remove_participant",
     "set_topic",
@@ -86,7 +87,7 @@ def test_the_public_tool_names_are_stable(topic_host):  # GUARD
             catalog = {tool["name"]: tool for tool in tools}
             for name, tool in catalog.items():
                 properties = tool["inputSchema"].get("properties", {})
-                if name not in {"search", "read_artifacts"}:
+                if name not in {"search", "read_artifacts", "read_context"}:
                     assert "producer" not in properties, (role, name)
                 assert "grant_key" not in properties, (role, name)
                 for argument, allowed in GRANT_ARGUMENTS.items():

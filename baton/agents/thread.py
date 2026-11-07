@@ -23,6 +23,28 @@ class Thread:
             self.agent.role, after_seq, limit, before_seq=before_seq, config=self.agent.config
         )
 
+    def read_context(
+        self,
+        *,
+        producer: str | None = None,
+        limit: int = 50,
+        after_seq: int | None = None,
+        through_seq: int | None = None,
+    ) -> dict[str, Any]:
+        """Open with an authorized cumulative summary and raw tail, or continue that fixed tail."""
+        from baton.conversations.context import read_context
+
+        return read_context(
+            self.agent.connection,
+            self.agent.config,
+            self.agent.role,
+            self.id,
+            producer=producer,
+            limit=limit,
+            after_seq=after_seq,
+            through_seq=through_seq,
+        )
+
     def send(
         self,
         text: str,

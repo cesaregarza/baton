@@ -52,16 +52,20 @@ def dispatch(args: argparse.Namespace) -> Any:
         return call(
             args, "set_topic", {"conversation_id": args.conversation_id, "topic": None if args.clear else args.topic}
         )
-    if command == "conversation history":
-        return call(
-            args,
-            "read_history",
-            {"conversation_id": args.conversation_id, "after_seq": args.after_seq, "limit": args.limit},
-        )
+    if command in {"conversation history", "conversation context"}:
+        return read_conversation(args)
     raise ConfigError(
         f"`baton {command}` runs on the host only; with --host use message, read, wait, "
-        "conversation new, conversation list, conversation topic, conversation history or secretary summaries"
+        "conversation new, conversation list, conversation topic, conversation history, "
+        "conversation context or secretary summaries"
     )
+
+
+def read_conversation(args: argparse.Namespace) -> Any:
+    arguments = {"conversation_id": args.conversation_id, "after_seq": args.after_seq, "limit": args.limit}
+    if args.conversation_command == "context":
+        arguments |= {"producer": args.producer, "through_seq": args.through_seq}
+    return call(args, f"read_{args.conversation_command}", arguments)
 
 
 def wait(args: argparse.Namespace) -> Any:

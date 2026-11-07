@@ -212,3 +212,43 @@ def test_the_remote_cli_still_gets_the_hosts_refusals_for_the_three(quiet_host, 
         assert db.execute("SELECT COUNT(*) FROM messages WHERE text = 'x'").fetchone()[0] == 0
     finally:
         db.close()
+
+
+def test_local_and_remote_context_keep_paired_forward_cursors(quiet_host, capsys, monkeypatch) -> None:
+    host = quiet_host
+    code, made = local(host, capsys, "assistant", "conversation", "new", "--title", "Context", "--with", GROUP)
+    assert code == 0, made
+    conversation_id = made["conversation_id"]
+    for number in range(1, 4):
+        assert (
+            local(host, capsys, "reviewer", "message", "--conversation", conversation_id, "--text", f"post {number}")[0]
+            == 0
+        )
+    code, first = local(host, capsys, "assistant", "conversation", "context", conversation_id, "--limit", "1")
+    assert code == 0, first
+    assert (first["head_seq"], first["covered_through_seq"], first["fallback"]) == (3, 0, "search_disabled")
+    assert [item["seq"] for item in first["messages"]] == [1]
+    assert first["continuation"] == {"after_seq": 1, "through_seq": 3}
+    # The remote CLI must forward the producer and both cursor fields all the way through MCP.
+    code, second = remote(
+        host,
+        capsys,
+        monkeypatch,
+        "conversation",
+        "context",
+        conversation_id,
+        "--producer",
+        "alpha",
+        "--limit",
+        "1",
+        "--after-seq",
+        "1",
+        "--through-seq",
+        "3",
+    )
+    assert code == 0, second
+    assert [item["seq"] for item in second["messages"]] == [2]
+    assert second["summary"] is None and second["covered_through_seq"] is None
+    assert second["continuation"] == {"after_seq": 2, "through_seq": 3}
+    code, refused = remote(host, capsys, monkeypatch, "conversation", "context", conversation_id, "--after-seq", "2")
+    assert code == 1 and refused["error"] == "invalid_request"
