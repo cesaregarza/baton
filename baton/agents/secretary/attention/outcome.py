@@ -70,6 +70,9 @@ class Outcome:
                 "window": self.window.digest,
                 "policy": self.policy.digest,
                 "mode": self.mode,
+                # The labels are the call's, so they are keyed: a notice saved for one trigger, or for none, is never
+                # the result that a call for another converges on. An untriggered notice keeps the key it always had.
+                **({"trigger": self.trigger} if self.trigger is not None else {}),
                 **({"catch_up": True} if self.catch_up else {}),
             }
         )

@@ -144,10 +144,13 @@ def test_backlog_preserves_decision_and_scan_state_across_restart(tmp_path) -> N
     assert restarted.scanned() == 8
     assert restarted.ready() == []
     assert restarted.due(99.0) == []
-    assert restarted.due(100.0) == [page]
+    [stored] = restarted.due(100.0)
+    assert stored == page
 
     _decision(log, "summary", 7, 8)
-    retried = restarted.failed(page, now=100.0, error="model unavailable", initial=2.0, maximum=10.0)
+    # A failure is recorded against the page as it was read from the store.
+    assert restarted.failed(page, now=100.0, error="model unavailable", initial=2.0, maximum=10.0) is None
+    retried = restarted.failed(stored, now=100.0, error="model unavailable", initial=2.0, maximum=10.0)
     assert retried == Page(7, 8, mode="digest", attempts=1)
     assert restarted.failures() == 1
     assert restarted.due(101.0) == []

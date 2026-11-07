@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from baton.database import Connection
 from baton.errors import InvalidRequest
@@ -19,6 +19,33 @@ class Page:
     content_failures: int = 0
     model_successes: int = 0
     model_policy: str = ""
+    # The rest of the row as the store held it when this page was read; a page built in memory has none. A
+    # compare-and-set compares these too, not only the counters: a held page and the ready page that a digest of
+    # exactly its range has finished since have the same range, mode and counters, all of them zero.
+    status: str | None = field(default=None, compare=False)
+    next_attempt: float | None = field(default=None, compare=False)
+    decision: str | None = field(default=None, compare=False)
+    error: str | None = field(default=None, compare=False)
+    passed_over: int = field(default=0, compare=False)
+
+
+# Every column of a stored page after its principal and range, in Page's field order.
+_STATE = (
+    "mode",
+    "attempts",
+    "content_failures",
+    "model_successes",
+    "model_policy",
+    "status",
+    "next_attempt",
+    "decision",
+    "error",
+    "passed_over",
+)
+_COLUMNS = "since,through," + ",".join(_STATE)
+# What a failed attempt compares: all of it but the passed-over mark, which a lane may set on a due retry meanwhile and
+# which the attempt clears.
+_ATTEMPTED = tuple(column for column in _STATE if column != "passed_over")
 
 
 class Backlog:
@@ -76,7 +103,8 @@ class Backlog:
                 raise InvalidRequest("activate the secretary before scanning its backlog")
             return row[0]
 
-    def enqueue(self, page: Page, now: float) -> None:
+    def enqueue(self, page: Page, now: float) -> Page:
+        """Store a scanned page, and return it as stored: the page a later compare-and-set compares against."""
         _range(page)
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
@@ -85,6 +113,25 @@ class Backlog:
                 "UPDATE backlog_settings SET scanned=MAX(scanned,?) WHERE principal=?",
                 (page.through, self.log.principal),
             )
+            return self._stored(conn, page)
+
+    def _stored(self, conn: Connection, page: Page) -> Page:
+        row = conn.execute(
+            f"SELECT {_COLUMNS} FROM backlog_windows WHERE principal=? AND since=? AND through=?",
+            (self.log.principal, page.since, page.through),
+        ).one()
+        return Page(*row)
+
+    def _unchanged(self, conn: Connection, page: Page, columns: tuple[str, ...] = _STATE) -> bool:
+        """Whether the page is still stored exactly as it was read, in every one of these columns."""
+        condition = " AND ".join(f"{column} IS ?" for column in columns)
+        return (
+            conn.execute(
+                f"SELECT 1 FROM backlog_windows WHERE principal=? AND since=? AND through=? AND {condition}",
+                (self.log.principal, page.since, page.through, *(getattr(page, column) for column in columns)),
+            ).fetchone()
+            is not None
+        )
 
     def _insert(self, conn: Connection, page: Page, now: float) -> None:
         conn.execute(
@@ -118,8 +165,8 @@ class Backlog:
             conn.execute(
                 "UPDATE backlog_windows SET status=?,mode=?,next_attempt=?,decision=?,"
                 "attempts=0,content_failures=0,model_successes=0,model_policy='',error=NULL "
-                "WHERE principal=? AND since=? AND through=? AND status='retry'",
-                (status, mode, due, decision, self.log.principal, page.since, page.through),
+                "WHERE principal=? AND since=? AND through=? AND mode=? AND status='retry'",
+                (status, mode, due, decision, self.log.principal, page.since, page.through, page.mode),
             )
             self._prune(conn)
 
@@ -144,16 +191,22 @@ class Backlog:
         model_successes: int = 0,
         model_policy: str = "",
     ) -> Page | None:
+        """Record a failed attempt on the page as it was read, with this attempt's own baseline; None if it changed.
+
+        The page must still be stored as read in every column but the passed-over mark. A finish followed by an
+        invalidation puts the counters back to zero, so only the time it is due tells that page from the fresh one a
+        stalled attempt read, and the stale failure would hold the reassessment in backoff.
+        """
         attempts = page.attempts + 1
         content_failures = page.content_failures + int(content)
         delay = min(maximum, initial * 2 ** min(attempts - 1, 20))
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
-            changed = conn.execute(
-                "UPDATE backlog_windows SET status='retry',attempts=?,content_failures=?,next_attempt=?,error=?,"
-                "model_successes=?,model_policy=?,passed_over=0 "
-                "WHERE principal=? AND since=? AND through=? AND mode=? AND status='retry' "
-                "AND attempts=? AND model_successes=? AND model_policy=?",
+            if page.status != "retry" or not self._unchanged(conn, page, _ATTEMPTED):
+                return None
+            conn.execute(
+                "UPDATE backlog_windows SET attempts=?,content_failures=?,next_attempt=?,error=?,"
+                "model_successes=?,model_policy=?,passed_over=0 WHERE principal=? AND since=? AND through=?",
                 (
                     attempts,
                     content_failures,
@@ -164,15 +217,9 @@ class Backlog:
                     self.log.principal,
                     page.since,
                     page.through,
-                    page.mode,
-                    page.attempts,
-                    page.model_successes,
-                    page.model_policy,
                 ),
-            ).rowcount
-        if not changed:
-            return None
-        return Page(page.since, page.through, page.mode, attempts, content_failures, model_successes, model_policy)
+            )
+            return self._stored(conn, page)
 
     def due(
         self, now: float, *, held: bool = False, limit: int = 1, position: int | None = None, mode: str | None = None
@@ -180,7 +227,7 @@ class Backlog:
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
             rows = conn.execute(
-                "SELECT since,through,mode,attempts,content_failures,model_successes,model_policy FROM backlog_windows "
+                f"SELECT {_COLUMNS} FROM backlog_windows "
                 "WHERE principal=? AND status=? "
                 "AND next_attempt<=? AND (? IS NULL OR (since<? AND through>=?)) "
                 "AND (? IS NULL OR mode=?) ORDER BY next_attempt,since LIMIT ?",
@@ -233,34 +280,21 @@ class Backlog:
                 is not None
             )
 
-    def replace(self, originals: list[Page], replacements: list[Page], now: float) -> bool:
-        """Partition failed work or combine held pages without deleting assessments.
+    def replace(self, originals: list[Page], replacements: list[Page], now: float) -> list[Page] | None:
+        """Partition failed work or combine held pages without deleting assessments; the replacements as stored.
 
-        A compare-and-set: every original must still be stored as it was read, or nothing changes and this returns
-        False. A caller that stalled between reading a page and replacing it could otherwise put back a part that
-        another caller had already split further, so that two stored pages held the same events.
+        A compare-and-set: every original must still be stored as it was read, in every column, or nothing changes
+        and this returns None. A caller that stalled between reading a page and replacing it could otherwise put back
+        a part that another caller had already split further, so that two stored pages held the same events, or turn
+        a ready digest that another caller finished back into a retry: a held page and that ready page differ only in
+        status, decision and due time.
         """
         if not originals or not replacements or _spans(originals) != _spans(replacements):
             raise InvalidRequest("replacement pages must cover exactly the same event range")
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
-            for page in originals:
-                stored = conn.execute(
-                    "SELECT 1 FROM backlog_windows WHERE principal=? AND since=? AND through=? AND mode=? "
-                    "AND attempts=? AND content_failures=? AND model_successes=? AND model_policy=?",
-                    (
-                        self.log.principal,
-                        page.since,
-                        page.through,
-                        page.mode,
-                        page.attempts,
-                        page.content_failures,
-                        page.model_successes,
-                        page.model_policy,
-                    ),
-                ).fetchone()
-                if stored is None:
-                    return False
+            if not all(self._unchanged(conn, page) for page in originals):
+                return None
             for page in originals:
                 conn.execute(
                     "DELETE FROM backlog_windows WHERE principal=? AND since=? AND through=?",
@@ -268,7 +302,7 @@ class Backlog:
                 )
             for page in replacements:
                 self._insert(conn, page, now)
-        return True
+            return [self._stored(conn, page) for page in replacements]
 
     def discard_empty(self, page: Page) -> None:
         self.log.acknowledge_empty(page.since, page.through)
