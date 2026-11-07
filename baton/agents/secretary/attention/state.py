@@ -167,21 +167,26 @@ class AttentionLog:
             return _advance_delivered(conn, self.principal)
 
     def acknowledge_empty(self, since: int, through: int) -> int:
+        with self.connection() as conn, conn.transaction():
+            return self.acknowledge_empty_within(conn, since, through)
+
+    def acknowledge_empty_within(self, conn: Connection, since: int, through: int) -> int:
+        """Acknowledge a range with no visible events inside the caller's transaction, so that a caller can make it
+        conditional on the state it read in the same transaction."""
         _position(since, "since")
         _position(through, "through")
         if through < since:
             raise InvalidRequest("through must be greater than or equal to since")
-        with self.connection() as conn, conn.transaction():
-            row = conn.execute("SELECT floor FROM principals WHERE principal=?", (self.principal,)).fetchone()
-            if row is None:
-                raise InvalidRequest("secretary principal is not activated")
-            if since < row[0]:
-                raise InvalidRequest("empty coverage must start at or after the activation floor")
-            conn.execute(
-                "INSERT OR IGNORE INTO acknowledgments(principal,decision_id,since,covered_through) VALUES (?,?,?,?)",
-                (self.principal, f"empty:{since}:{through}", since, through),
-            )
-            return _advance_delivered(conn, self.principal)
+        row = conn.execute("SELECT floor FROM principals WHERE principal=?", (self.principal,)).fetchone()
+        if row is None:
+            raise InvalidRequest("secretary principal is not activated")
+        if since < row[0]:
+            raise InvalidRequest("empty coverage must start at or after the activation floor")
+        conn.execute(
+            "INSERT OR IGNORE INTO acknowledgments(principal,decision_id,since,covered_through) VALUES (?,?,?,?)",
+            (self.principal, f"empty:{since}:{through}", since, through),
+        )
+        return _advance_delivered(conn, self.principal)
 
     def is_acknowledged(self, decision_id: str) -> bool:
         with self.connection() as conn:

@@ -25,6 +25,8 @@ class Outcome:
     floor: int
     mode: str
     trigger: str | None = None
+    # A page assessed for a caller whose trigger it does not hold: historical catch-up, never that trigger's verdict.
+    catch_up: bool = False
 
     def build(self, assessment: Assessment, *, decision_id: str, kind: str = "summary", **details) -> dict:
         refs = _references(self.window)
@@ -52,6 +54,7 @@ class Outcome:
             "cached": False,
             "model": {key: self.policy.model[key] for key in ("provider", "model") if key in self.policy.model},
             "scanned_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            **({"catch_up": True} if self.catch_up else {}),
             **details,
         }
 
@@ -62,7 +65,16 @@ class Outcome:
             decision, reason, reason + " Read the source references before deciding what to do.", sources
         )
         key = fingerprint(
-            {"notice": kind, "window": self.window.digest, "policy": self.policy.digest, "mode": self.mode}
+            {
+                "notice": kind,
+                "window": self.window.digest,
+                "policy": self.policy.digest,
+                "mode": self.mode,
+                # The labels are the call's, so they are keyed: a notice saved for one trigger, or for none, is never
+                # the result that a call for another converges on. An untriggered notice keeps the key it always had.
+                **({"trigger": self.trigger} if self.trigger is not None else {}),
+                **({"catch_up": True} if self.catch_up else {}),
+            }
         )
         return self.build(assessment, decision_id=key, kind=kind, engine_verdict=engine_verdict)
 
