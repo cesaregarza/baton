@@ -224,14 +224,18 @@ delivery uses a separate required `delivery_timeout_seconds`, independent of eng
 mode handles one due retry before scanning new work, even for a newer trigger. Handle that returned page first,
 then call again for the new event. An untriggered call while failed work is in backoff raises retryable
 `secretary_unavailable`; a different new event can still be assessed during that backoff. Passing both `--since`
-and `--floor` requests an exact replay. An explicit trigger must
-belong to the bounded page or the call fails. Page size also reserves a citation budget from model output
+and `--floor` requests an exact replay. A trigger that is not a visible event fails the call, on every path. A
+visible trigger that is not on the bounded page makes that page historical catch-up: the result has `trigger` null
+and `catch_up` true, and the trigger stays pending. Page size also reserves a citation budget from model output
 capacity. Pages are never silently truncated. Transport failures back off in their original mode. Invalid model
-content/output and `InboxTooLarge` count toward `max_attempts` and may split. Timeouts, rejected requests, and
+content/output and `InboxTooLarge` count toward `max_attempts`. A stored range that is `InboxTooLarge` and can split
+splits on its first refusal; a single event over the bounds gets its notice after `max_attempts`. Timeouts, rejected requests, and
 failed commands also count when another page has received a valid answer under the same policy since this page
 last failed; elapsed time alone never causes splitting. Each poll reserves one configured budget
 for a fresh alert and another for scheduled work. It runs one eligible scheduled lane per poll, alternating retry
-and digest priority, so a lane receives the full reserved budget rather than leftover time.
+and digest priority, so a lane receives the full reserved budget rather than leftover time. An hourly host that
+runs the queue's digest lane whenever a held page is due gets the same alternation from stored state: a digest marks
+the earliest due retry it passes over, and the next digest lane takes that retry first.
 
 The worker batches contiguous due held pages into one bounded hourly digest at `digest_seconds` intervals.
 Hold, keep, and model-error pages remain eligible while scanning continues. Pending wake IDs stay queued, with
