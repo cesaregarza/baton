@@ -209,6 +209,13 @@ class DecisionRun:
         return assessment
 
     def _check_trigger(self, window: InboxWindow) -> None:
+        """Keep the trigger only when it is on this bounded page; otherwise assess the page without it.
+
+        Refusing a trigger beyond the page left that page unqueued, so while a backlog existed no callback moved it
+        and only the hourly scan did. Every caller now assesses the earliest bounded page instead. The trigger stays
+        unassessed: the result carries no trigger, and the caller decides that wake as it decides any trigger the
+        secretary has not reached. The model is never told of a trigger that is not on its page.
+        """
         if self.trigger is None or self.trigger == "conversation":
             return
         parts = self.trigger.split(":")
@@ -222,9 +229,7 @@ class DecisionRun:
         else:
             included = any(event["job_id"] == parts[1] and event["seq"] == int(parts[2]) for event in window.events)
         if not included:
-            raise InvalidRequest(
-                "trigger is outside this bounded inbox page; process earlier pages or specify its range"
-            )
+            self.trigger = None
 
     def _remaining(self) -> float:
         remaining = self.deadline - self.clock()

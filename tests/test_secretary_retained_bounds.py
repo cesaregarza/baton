@@ -506,6 +506,45 @@ def test_duplicate_concurrent_callbacks_on_a_retried_range_count_one_failure(tmp
         assert [len(_event_numbers(retained, row)) for row in _range_rows(retained)] == [21, 20]
 
 
+def test_each_callback_behind_a_scan_backlog_assesses_the_earliest_page_until_its_trigger_is_reached(
+    tmp_path, monkeypatch
+) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF)
+        secretary = worker.instance.secretary
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: 1000.0)
+        asyncio.run(secretary.activate())
+        rooms = [conversation(world) for _ in range(2)]
+        # Twenty-four events arrived while no callback ran, so the scan cursor is more than two pages behind.
+        backlog = [say(world, rooms[number % 2], "worker", f"Backlog update {number}") for number in range(24)]
+
+        # Each arriving message's callback assesses the next bounded page from the cursor. Its own trigger is not on
+        # that page, so the page is assessed without it: the model is not told of it and the result names none, and
+        # the trigger stays beyond the cursor for the host's admission to decide.
+        arrivals, results = [], []
+        for number in range(2):
+            arrivals.append(say(world, rooms[number % 2], "reviewer", f"Arriving message {number}"))
+            result, error, _ = asyncio.run(_callback(secretary, _trigger(arrivals[-1])))
+            assert error is None and result is not None and result["kind"] == "summary"
+            assert result["trigger"] is None and model.requests[-1]["context"]["trigger"] is None
+            assert len(model.requests[-1]["context"]["events"]) == CANDIDATE_BOUNDS["max_events"]
+            assert _position(world, arrivals[-1]["message_id"]) > _scanned(world)
+            results.append(result)
+
+        # The third callback's page reaches its trigger, which is then assessed on its page as before.
+        arrivals.append(say(world, rooms[0], "reviewer", "Arriving message 2"))
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(arrivals[-1])))
+        assert error is None and result is not None and result["trigger"] == _trigger(arrivals[-1])
+        assert model.requests[-1]["context"]["trigger"] == _trigger(arrivals[-1])
+        results.append(result)
+
+        # Every event, the earlier arrivals' included, was assessed exactly once, in order and without a gap.
+        assert _event_keys(results) == Counter(f"message:{sent['message_id']}" for sent in [*backlog, *arrivals])
+        assert [result["since"] for result in results[1:]] == [result["through_pos"] for result in results[:-1]]
+        assert len(model.requests) == 3
+
+
 @pytest.mark.parametrize(
     "text",
     [

@@ -50,7 +50,7 @@ class AttentionQueue:
             await self.database.call(self.backlog.enqueue, page, time.time())
             return await self._failed(page, error)
         run = DecisionRun(self.secretary, budget, since, self.floor, trigger, through=window.through)
-        run._check_trigger(window)
+        run._check_trigger(window)  # a trigger beyond this page is dropped, and the page is still assessed
         if window.through == since:
             return await run.run()
         page = Page(since, window.through)
@@ -58,7 +58,7 @@ class AttentionQueue:
         if not window.events:
             await self.database.call(self.backlog.discard_empty, page)
             return await run.run()
-        return await self._attempt(page, budget, trigger=trigger)
+        return await self._attempt(page, budget, trigger=run.trigger)
 
     async def assess(self, budget: float, *, trigger: str | None = None, hourly: bool = False) -> dict | None:
         """The host API resumes retained work before scanning another page."""
