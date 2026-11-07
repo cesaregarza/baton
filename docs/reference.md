@@ -227,7 +227,8 @@ then call again for the new event. An untriggered call while failed work is in b
 and `--floor` requests an exact replay. A trigger that is not a visible event fails the call, on every path. A
 visible trigger that is not on the bounded page makes that page historical catch-up: the result has `trigger` null
 and `catch_up` true, and never covers the trigger. One beyond the page stays pending; one already behind it was
-covered by an earlier page, or waits in a retry page. A due digest retry that a triggered call resumes is catch-up
+covered by an earlier page, or waits in a retry page. A trigger is on a page when its event's position is after the
+page's start and at or before its end. A due digest retry that a triggered call resumes is catch-up
 too. Page size also reserves a citation budget from model output
 capacity. Pages are never silently truncated. Transport failures back off in their original mode. Invalid model
 content/output and `InboxTooLarge` count toward `max_attempts`. A stored range that is `InboxTooLarge` and can split
@@ -256,7 +257,8 @@ without a forced engine wake remains an outage, while an unavailable model after
 Digest failures retain digest mode and eventually produce a keep notice, never an alert or wake. After a crash,
 the queue reuses a saved result for the same policy and current source window before invoking either provider,
 and returns it only to a call with its trigger and catch-up label; for a call of another kind it finishes that page
-and returns nothing from it. A split, combine, failure or finish changes a stored page only as its caller read it.
+and returns nothing from it. A split, combine, failure, finish or empty-page discard changes a stored page only as
+its caller read it.
 Model failures distinguish missing credentials, authentication rejection, invalid requests, timeouts, and outages.
 Connection/pool timeouts remain outages; read/write timeouts and HTTP 408/504 responses can count toward
 splitting only after another page answers. A supplied key clears a current missing-credential failure to

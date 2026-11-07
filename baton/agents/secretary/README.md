@@ -208,7 +208,9 @@ earlier unacknowledged gap.
 not on the bounded page, that page is assessed as historical catch-up: the model is not told of the trigger, the
 result has `trigger` null and `catch_up` true, and it never covers the trigger. A trigger beyond the page stays
 pending, so handle that wake as one the secretary has not assessed. A trigger already behind the page was covered by
-an earlier page, or waits in a retry page, and the catch-up page leaves it as it was.
+an earlier page, or waits in a retry page, and the catch-up page leaves it as it was. A trigger is on a page when its
+event's position is after the page's start and at or before its end, so a trigger that ended one page is never on the
+next. The queue labels a saved result or a failure notice for a page by the same rule, from the same position.
 Use `hourly=True` for a digest of contiguous due held pages. The host chooses a callback budget greater than zero
 and at most 60 seconds; the engine timeout must be shorter than the assessment budget. Installed integrations check
 this at install and startup. Integration delivery has a separate required `delivery_timeout_seconds` setting; it
@@ -266,8 +268,10 @@ gets no result from that page, and goes on as if the page were done, so a callba
 notice carries the call's trigger or catch-up label as a summary does, and a notice's id includes them.
 
 A caller that stalls between reading a stored page and changing it changes nothing if another caller changed the page
-meanwhile: a split or digest combine compares every column of the page as it was read, a failure compares all of
-them but the passed-over mark, and a finish takes only a retry of the same range and mode.
+meanwhile: a split or digest combine compares every column of the page as it was read, a failure, and the discard of
+a page whose events are no longer visible, compare all of them but the passed-over mark, and a finish takes only a
+retry of the same range and mode. The discard and its empty acknowledgement are one transaction, so a caller that read
+the range as empty never deletes a page another caller finished, or acknowledges a range another caller changed.
 
 Pages use the configured `max_events`, `context_bytes`, `summary_bytes`, and citation budget. They are complete
 and never silently truncated. Retried and split pages preserve their original alert or digest mode.

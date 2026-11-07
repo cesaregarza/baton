@@ -167,7 +167,7 @@ retries first and then resume from durable scan progress; explicit `since` and `
 One due retry takes precedence over a newer trigger; the host handles its result then calls again for the new
 event. A visible trigger that is not on the bounded page makes that page historical catch-up (`trigger` null,
 `catch_up` true), never covered by it: one beyond the page stays pending, one behind it was covered earlier or waits
-in a retry page. A trigger that is not a visible event fails. An untriggered call during failed-page backoff reports retryable unavailability. The worker reads complete bounded pages and reserves model output space for citations.
+in a retry page. `inbox/sources.py` `holds_trigger` is that rule, for the assessment and the queue alike. A trigger that is not a visible event fails. An untriggered call during failed-page backoff reports retryable unavailability. The worker reads complete bounded pages and reserves model output space for citations.
 Provider outages back off in their original mode. Invalid model content/output and oversized windows count
 toward `max_attempts`; an oversized range that can split splits on its first refusal before any engine or model call. Timeouts, rejected requests, and failed commands also count after another page succeeds
 under the same policy since that page last failed. Saved results recover before either provider runs again, and are returned only to a call with their trigger and catch-up label. Held contiguous pages combine into
