@@ -41,20 +41,18 @@ def test_a_well_formed_send_is_stored_as_the_person(signed_in) -> None:
     ]
 
 
-def test_wrong_or_missing_origins_are_refused(signed_in) -> None:
+def test_wrong_or_missing_origins_and_cross_site_fetches_are_refused(signed_in) -> None:
     host, conversation, cookies, fields = signed_in
     for origin in (None, "https://elsewhere.example.test", "http://127.0.0.1:8766", SEAT_ORIGIN + ":444", "null"):
         response = post(host.config, f"/seat/c/{conversation}/send", fields, cookies=cookies, origin=origin)
         assert response.status == 403, origin
         assert _stored(host) == 0, origin
-
-
-def test_a_cross_site_fetch_is_refused_even_with_the_right_origin(signed_in) -> None:
-    host, conversation, cookies, fields = signed_in
+    # A cross-site fetch is refused even with the right origin.
     response = post(
         host.config, f"/seat/c/{conversation}/send", fields, cookies=cookies, extra=[("Sec-Fetch-Site", "cross-site")]
     )
-    assert response.status == 403 and _stored(host) == 0
+    assert response.status == 403, "cross-site"
+    assert _stored(host) == 0, "cross-site"
 
 
 def test_missing_or_wrong_csrf_tokens_are_refused(signed_in) -> None:

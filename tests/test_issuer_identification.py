@@ -134,22 +134,19 @@ def test_the_success_redirect_carries_iss(issuer_host: IssuerHost) -> None:
     assert query.get("iss") == [host.issuer] and query["state"] == ["s1"] and query["code"]
 
 
-@pytest.mark.parametrize(
-    "overrides, error",
-    [
+def test_every_error_redirect_to_the_client_carries_iss(issuer_host: IssuerHost) -> None:
+    host = issuer_host
+    client_id = register(host).json()["client_id"]
+    for overrides, error in (
         ({"response_type": "token"}, "unsupported_response_type"),
         ({"code_challenge_method": "plain"}, "invalid_request"),
         ({"resource": "https://elsewhere.example.test/mcp"}, "invalid_target"),
         ({"scope": "not.a.scope"}, "invalid_scope"),
-    ],
-)
-def test_every_error_redirect_to_the_client_carries_iss(issuer_host: IssuerHost, overrides: dict, error: str) -> None:
-    host = issuer_host
-    client_id = register(host).json()["client_id"]
-    refused = httpx.get(host.base + "/authorize", params=authorize_params(host, client_id, **overrides))
-    assert refused.status_code in (302, 303) and refused.headers["location"].startswith(REDIRECT + "?")
-    query = query_of(refused)
-    assert query["error"] == [error] and query.get("iss") == [host.issuer]
+    ):
+        refused = httpx.get(host.base + "/authorize", params=authorize_params(host, client_id, **overrides))
+        assert refused.status_code in (302, 303) and refused.headers["location"].startswith(REDIRECT + "?"), error
+        query = query_of(refused)
+        assert query["error"] == [error] and query.get("iss") == [host.issuer], (error, query)
 
 
 def test_iss_appears_only_on_redirects_back_to_the_client(issuer_host: IssuerHost) -> None:

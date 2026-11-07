@@ -47,30 +47,6 @@ def todays_refusal(name):
 # 1. A guest without a key is refused as it always was -------------------------------------------------------
 
 
-def test_a_bound_guest_without_a_key_gets_todays_refusal_even_when_its_alias_holds_a_grant(build_scene):
-    """GUARD. The grant belongs to a key, not to the alias: holding one changes nothing for a call that does not
-    present it. A null key is the same as none."""
-    # Mutants 3 and 6: no key, or a null key, passing the guard.
-    scene = build_scene()
-
-    async def scenario(client):
-        await stage(client, scene.host)
-        held = await scene.grantee(client, "lane-a", "job-hunt", inherit=True)
-        moving = await thread(client, scene.host, "job-hunt/leads")
-        for name, arguments in (
-            ("create_topic", {"path": "job-hunt/new"}),
-            ("set_topic", {"conversation_id": moving, "topic": "job-hunt/boards"}),
-        ):
-            for extra in ({}, {"grant_token": None}):
-                result = await tool(client, scene.host, name, {**arguments, "token": held.token, **extra})
-                assert result == todays_refusal(name), (name, extra, result)
-        assert "job-hunt/new" not in scene.topic_paths()
-        assert scene.thread_topic(moving) == "job-hunt/leads"
-        assert scene.events("refused_use") == []
-
-    play(scene.host, scenario)
-
-
 def test_a_valid_key_opens_no_other_tool(build_scene):
     """GUARD. Only `create_topic`, `set_topic` and `edit_reference` look at a key. Every other tool a guest may not
     call keeps its refusal, whatever the guest presents, so a grantee cannot update, rename, or change a thread's
@@ -97,8 +73,12 @@ def test_a_valid_key_opens_no_other_tool(build_scene):
 
 
 def test_missing_binding_and_unknown_grant_keys_refuse_without_side_effects(build_scene):
-    """Missing, unknown, or mismatched credentials never identify a grant or change a topic/thread."""
+    """Missing, unknown, or mismatched credentials never identify a grant or change a topic/thread.
+
+    GUARD. A bound guest that presents no key, or a null key, gets today's refusal byte for byte even though its
+    alias holds an active grant: the grant belongs to a key, not to the alias."""
     # Mutant 3: accepting any key or treating a grant key as proof of the alias identity.
+    # Mutants 3 and 6: no key, or a null key, passing the guard.
     scene = build_scene()
 
     async def scenario(client):
@@ -107,7 +87,16 @@ def test_missing_binding_and_unknown_grant_keys_refuse_without_side_effects(buil
         moving = await thread(client, scene.host, "job-hunt/leads")
         before_changes = scene.changes()
         nearly = held.key[:-1] + ("A" if held.key[-1] != "A" else "B")
-        cases = [
+        cases = []
+        for name, arguments in (
+            ("create_topic", {"path": "job-hunt/new"}),
+            ("set_topic", {"conversation_id": moving, "topic": "job-hunt/boards"}),
+        ):
+            for extra, label in (({}, "no key"), ({"grant_token": None}, "a null key")):
+                # No detail: the answer must be today's refusal exactly.
+                sent = {**arguments, "token": held.token, **extra}
+                cases.append((f"bound guest with {label} on {name}", name, sent, None, held.key))
+        cases += [
             (
                 "key without a binding on create_topic",
                 "create_topic",
@@ -147,9 +136,11 @@ def test_missing_binding_and_unknown_grant_keys_refuse_without_side_effects(buil
 
         for label, name, arguments, detail, secret in cases:
             result = await tool(client, scene.host, name, arguments)
-            assert result.get("error") == "forbidden", (label, result)
-            allowed_details = detail if isinstance(detail, tuple) else (detail,)
-            assert result.get("detail") in allowed_details, (label, result)
+            if detail is None:
+                assert result == todays_refusal(name), (label, result)
+            else:
+                assert result.get("error") == "forbidden", (label, result)
+                assert result.get("detail") in (detail if isinstance(detail, tuple) else (detail,)), (label, result)
             assert secret not in json.dumps(result), (label, result)
             assert "job-hunt/new" not in scene.topic_paths(), label
             assert scene.thread_topic(moving) == "job-hunt/leads", label

@@ -287,8 +287,9 @@ def test_a_move_needs_both_the_source_and_the_destination_in_scope(build_scene):
     play(scene.host, scenario)
 
 
-def test_a_move_needs_an_existing_source_topic_row(build_scene):
-    """A null or stale source label cannot be moved into a covered destination."""
+def test_a_move_needs_an_existing_source_and_destination_topic_row(build_scene):
+    """A null or stale source label cannot be moved into a covered destination, and clearing a thread's topic to
+    none or naming a destination with no topic row is refused; none of them changes anything."""
     # Mutant 1: checking only the destination.
     scene = build_scene()
 
@@ -302,30 +303,18 @@ def test_a_move_needs_an_existing_source_topic_row(build_scene):
                 with scene.db() as conn:
                     conn.execute("UPDATE conversations SET topic = ? WHERE id = ?", (source, moving))
             result = await held.call(client, "set_topic", conversation_id=moving, topic="job-hunt/boards")
-            assert result.get("error") == "forbidden", (source, result)
-            assert scene.thread_topic(moving) == source
-            assert scene.changes("set_topic") == before and scene.moved_notices(moving) == []
-
-    play(scene.host, scenario)
-
-
-def test_a_grantee_cannot_clear_a_threads_topic_or_move_it_to_a_topic_that_does_not_exist(build_scene):
-    """Clearing the topic to none, and a destination with no topic row, are refused and change nothing."""
-    scene = build_scene()
-
-    async def scenario(client):
-        held = await board(client, scene, ("thread.organise",))
-        await control_move(client, scene, held)
-        before = scene.changes("set_topic")
+            assert result.get("error") == "forbidden", ("source", source, result)
+            assert scene.thread_topic(moving) == source, ("source", source)
+            assert scene.changes("set_topic") == before and scene.moved_notices(moving) == [], ("source", source)
         moving = await thread(client, scene.host, "job-hunt/leads")
         for topic in (None, "job-hunt/ghost"):
             result = await held.call(client, "set_topic", conversation_id=moving, topic=topic)
             if topic is None:
-                assert result.get("error") == "forbidden", result
+                assert result.get("error") == "forbidden", ("destination", topic, result)
             else:
-                assert "error" in result, result
-            assert scene.thread_topic(moving) == "job-hunt/leads", topic
-            assert scene.changes("set_topic") == before and scene.moved_notices(moving) == [], topic
+                assert "error" in result, ("destination", topic, result)
+            assert scene.thread_topic(moving) == "job-hunt/leads", ("destination", topic)
+            assert scene.changes("set_topic") == before and scene.moved_notices(moving) == [], ("destination", topic)
 
     play(scene.host, scenario)
 

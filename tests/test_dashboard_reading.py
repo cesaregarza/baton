@@ -8,7 +8,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-import pytest
 from test_dashboard import text
 from test_dashboard_pages import MINE, get, made, needs_items, page_config
 
@@ -138,9 +137,9 @@ def test_a_needs_page_keeps_its_topic_filter_on_the_onward_link(tmp_path, monkey
     assert onward and all("topic=alpha" in href for href in onward)
 
 
-@pytest.mark.parametrize(
-    "query",
-    [
+def test_a_bad_page_number_is_a_bad_request_with_the_standard_headers(tmp_path) -> None:
+    config = page_config(tmp_path)
+    for query in (
         "page=0",
         "page=-1",
         "page=abc",
@@ -150,16 +149,13 @@ def test_a_needs_page_keeps_its_topic_filter_on_the_onward_link(tmp_path, monkey
         "jobs_page=0",
         "jobs_page=x",
         "jobs_page=1&jobs_page=2",
-    ],
-)
-def test_a_bad_page_number_is_a_bad_request_with_the_standard_headers(tmp_path, query: str) -> None:
-    config = page_config(tmp_path)
-    for path in ("/", "/needs"):
-        if path == "/" and query.startswith("jobs_page"):
-            continue
-        response = get(config, f"{path}?{query}")
-        assert response.status == 400, (path, query)
-        assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS
+    ):
+        for path in ("/", "/needs"):
+            if path == "/" and query.startswith("jobs_page"):
+                continue
+            response = get(config, f"{path}?{query}")
+            assert response.status == 400, (path, query)
+            assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS, (path, query)
 
 
 def test_a_page_past_the_end_says_so_and_links_back(tmp_path) -> None:

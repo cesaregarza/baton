@@ -720,6 +720,7 @@ def test_delivery_receipts_are_kept_past_their_window_and_cap(offline, monkeypat
     kept = receipts_found(offline.config)
     assert len(kept) == 5, "every receipt is kept"
     assert {receipt["wake_id"] for receipt in kept} == {"wake_old", "wake_0", "wake_1", "wake_2", "wake_3"}
+    assert table_rows(offline.config.db_path, "SELECT COUNT(*) FROM events_receipts") == [(5,)], "kept in the table"
     shown = integration.status(offline.config)["receipts"]
     assert [receipt["wake_id"] for receipt in shown] == ["wake_1", "wake_2", "wake_3"], "the view is still bounded"
 

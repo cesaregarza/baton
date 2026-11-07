@@ -126,9 +126,11 @@ def test_a_topic_page_never_widens_what_the_viewer_sees(tmp_path) -> None:
     assert "Hidden alpha" in text(get(flagged, "/t/alpha"))
 
 
-@pytest.mark.parametrize(
-    "target",
-    [
+def test_an_invalid_topic_is_a_bad_request_with_the_standard_headers(tmp_path) -> None:
+    config = page_config(tmp_path)
+    topics_seeded(config)
+    before = snapshot(config)
+    for target in (
         "/t/Alpha",
         "/t/alpha/x/y",
         "/t/",
@@ -141,14 +143,11 @@ def test_a_topic_page_never_widens_what_the_viewer_sees(tmp_path) -> None:
         "/t/alpha%252Fx",
         "/t/alpha%00",
         "/t/%E2%80%AEalpha",
-    ],
-)
-def test_an_invalid_topic_is_a_bad_request_with_the_standard_headers(tmp_path, target: str) -> None:
-    config = page_config(tmp_path)
-    topics_seeded(config)
-    response = get(config, target)
-    assert response.status == 400, target
-    assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS
+    ):
+        response = get(config, target)
+        assert response.status == 400, target
+        assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS, target
+        assert snapshot(config) == before, target
 
 
 def test_a_topic_route_is_decoded_once_per_segment(tmp_path) -> None:
@@ -493,7 +492,7 @@ def test_config_refuses_a_malformed_or_wildcard_proxy_host(tmp_path, value: Any)
 def test_x_forwarded_host_is_never_trusted(tmp_path) -> None:
     config = page_config(tmp_path, port=free_port(), proxy_host=PROXY)
     server = dashboard.server(config)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
 
     def status(headers: dict[str, str]) -> int:
