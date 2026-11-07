@@ -178,18 +178,41 @@ Host contract:
   arrives in numbered parts on consecutive pages. Every output carries a `status`; one for a turn that can no longer
   be answered (`late`, `not_outstanding`) says to stop and return to `receive`.
 
-To adopt a new version, install the bridge file at the host's existing bridge path while `secretary_bridge.py status`
-reports the spool `idle`, then resume the thread with the guidance, preceded by one line naming the host's command.
-[`thread/resume_message.py`](thread/resume_message.py) renders that message: `BRIDGE: ` and its one argument, a blank
-line, then the guidance's bytes; it refuses an empty or multi-line command.
+To adopt a new version, do these steps in order. "The process list" means every process whose command line holds
+the bridge path. An idle spool alone is not enough: a waiting `receive` holds no lease, so `status` reports `idle`
+while it waits, and it keeps running the bytes it started with, so one started before the swap can take the next
+turn on the old bridge.
+
+1. Hold. Turn the secretary gate and thread mode off, and verify both. Enable neither until step 7 passes.
+2. Retire the thread's receive loop. With no turn in progress, no `receive` should be running. With a turn in
+   progress, interrupt it so that it starts no further `receive`. A `receive` still running exits by itself at its
+   `--wait` bound; wait for it. Do not kill processes broadly.
+3. Require an empty process list and `secretary_bridge.py status` reporting the spool `idle`. If it reports `live`
+   or `abandoned`, stop and report it. Keep a copy of the installed bridge's bytes for rollback.
+4. Immediately before the swap, recheck all of it: gate and mode off, no turn in progress, an empty process list and
+   an idle spool. If any check fails, go back to step 2.
+5. Install. Write the new bytes to a temporary file in the same directory, give it the same owner and mode, and
+   rename it over the bridge.
+6. Run `status` again, and check that the process list is still empty.
+7. Resume the same thread with the rendered resume message below. Check that it acknowledges the new version and
+   runs exactly one `receive`, and that this is the only process in the list. Only then may gate and mode be
+   enabled.
+
+The resume message is the guidance, preceded by one line naming the host's command.
+[`thread/resume_message.py`](thread/resume_message.py) renders it: `BRIDGE: ` and its one argument, a blank line,
+then the guidance's bytes; it refuses an empty or multi-line command.
 
 ```sh
 python3 -I integrations/secretary/thread/resume_message.py "$BRIDGE_COMMAND" > resume-message.txt
 ```
 
 `BRIDGE_COMMAND` is the interpreter, `-I` and the installed bridge's path. The thread acknowledges with the
-version; the next `receive` header shows `bridge_version` and `reply_form`. To roll back, reinstall the previous
-bridge file and its guidance.
+version; the next `receive` header shows `bridge_version` and `reply_form`.
+
+To roll back, hold, retire the loop and require an empty process list and an idle spool as in steps 1 to 4. Then
+reinstall the previous bridge bytes kept in step 3 the same way, run `status`, and check that the process list is
+still empty. Resume the same thread with the previous version's resume message, and make the same checks as in
+step 7 before enabling gate and mode.
 
 ## Where the behavior lives
 
