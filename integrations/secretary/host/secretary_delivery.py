@@ -84,7 +84,7 @@ def frame(summaries: list[dict], start: str, end: str, *, limit: int = DELIVERY_
 
 
 def _framed(item: dict) -> str:
-    summary = json.dumps(item["brief"], ensure_ascii=True).replace("<", r"<").replace(">", r">")
+    summary = json.dumps(item["brief"], ensure_ascii=True).replace("<", r"\u003c").replace(">", r"\u003e")
     references = [
         {key: ref.get(key) for key in REFERENCE} for ref in item["source_refs"][:MAX_SOURCES] if isinstance(ref, dict)
     ]
