@@ -37,6 +37,7 @@ from test_secretary_retained_bounds import (
 from baton import conversations
 from baton.agents.secretary.attention import decide as decide_module
 from baton.agents.secretary.attention.backlog import Backlog
+from baton.agents.secretary.attention.decide import SecretaryUnavailable
 from baton.agents.secretary.attention.queue import AttentionQueue
 from baton.agents.secretary.attention.runtime import DatabaseWorker
 from baton.agents.secretary.attention.state import AttentionLog
@@ -497,10 +498,11 @@ def test_a_stalled_alert_answer_never_finishes_the_digest_its_page_became_since(
         assert (digest["status"], digest["mode"], digest["attempts"]) == ("retry", "digest", 1)
         release.set()
         thread.join(30)
-        assert outcome and isinstance(outcome[0], dict) and outcome[0]["mode"] == "alert"
 
-        # The alert answer finishes only an alert page, so the digest retry stays as it was and is what recovers.
+        # The alert answer finishes only the alert page it read, so the digest retry stays as it was and is what
+        # recovers. A page that does not take an answer gives its call no result.
         assert _rows(world) == [digest]
+        assert outcome and isinstance(outcome[0], SecretaryUnavailable)
         assert asyncio.run(_pending(secretary)) == []
         _at_next_retry(world, now)
         recovered = asyncio.run(_lane(secretary, "retry"))

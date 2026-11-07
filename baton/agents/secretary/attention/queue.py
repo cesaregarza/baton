@@ -47,11 +47,15 @@ class AttentionQueue:
             window = await self.database.call(InboxWindow.read, self.secretary.config, self.policy, since)
         except InboxTooLarge as error:
             page = await self.database.call(self.backlog.enqueue, Page(since, error.extra["through_pos"]), time.time())
+            if page is None:
+                return None  # another scan stored a page from this position since it was read
             return await self._failed(page, error, await self._labels(page, trigger), split_now=True)
         run = DecisionRun(self.secretary, budget, since, self.floor, trigger, through=window.through)
         if window.through == since:
             return await run.run()
         page = await self.database.call(self.backlog.enqueue, Page(since, window.through), time.time())
+        if page is None:
+            return None  # another scan stored a page from this position since it was read
         if not window.events:
             await self.database.call(self.backlog.discard_empty, page)
             return await run.run()
@@ -153,7 +157,7 @@ class AttentionQueue:
         restored, own = await self._restore_result(page, labels)
         if restored is not None:
             if not own:
-                return None
+                return None  # another call's result, or a page that changed since it was read
             acknowledged = await self.database.call(self.backlog.log.is_acknowledged, restored["decision_id"])
             return None if acknowledged else restored
         digest = page.mode == "digest"
@@ -171,17 +175,17 @@ class AttentionQueue:
         try:
             result = await run.run()
         except (SecretaryUnavailable, InboxTooLarge) as error:
-            if run.model_successes is not None:
-                # Accept our own baseline update, while still rejecting a later concurrent callback's write.
-                page = replace(page, model_successes=run.model_successes, model_policy=run.model_policy)
-            return await self._failed(
-                page, error, labels, split_now=isinstance(error, InboxTooLarge) and not run.consulted
-            )
+            early = isinstance(error, InboxTooLarge) and not run.consulted
+            return await self._failed(_own_baseline(page, run), error, labels, split_now=early)
         if result["event_count"] == 0:
             await self.database.call(self.backlog.discard_empty, page)
-        else:
-            await self.database.call(self.backlog.finish, page, result, time.time(), self.policy.digest_seconds)
-        return result
+            return result
+        # A page that changed since it was read does not take this answer, so it is not this call's result: it stays
+        # saved for a later call under the same policy, and an old policy's answer is never restored or delivered.
+        finished = await self.database.call(
+            self.backlog.finish, _own_baseline(page, run), result, time.time(), self.policy.digest_seconds
+        )
+        return result if finished else None
 
     async def _failed(
         self, page: Page, error: Exception, labels: tuple[str | None, bool], *, split_now: bool = False
@@ -224,11 +228,11 @@ class AttentionQueue:
             # can still assess it, and only after max_attempts does it get its cited failure notice.
             return None
         result = await self._failure_notice(page, labels)
+        # The page as this failure stored it, as for a split: a discard or a finish compares it.
         if result is None:
-            # The page as this failure stored it, as for a split.
             await self.database.call(self.backlog.discard_empty, failed)
             return None
-        return await self._finish_result(page, result)
+        return await self._finish_result(failed, result)
 
     def _page_specific(self, page: Page, category: str, successes: int) -> bool:
         """Another successful assessment since this page failed is evidence against a model-wide outage."""
@@ -290,13 +294,25 @@ class AttentionQueue:
             if not current:
                 continue
             if (result["trigger"], result.get("catch_up", False)) == labels:
-                return await self._finish_result(page, result), True
+                # Its own only if the page takes it: one that changed since it was read gets nothing from this call.
+                finished = await self._finish_result(page, result)
+                return finished or result, finished is not None
             foreign = foreign or result
         if foreign is None:
             return None, False
-        return await self._finish_result(page, foreign), False
+        await self._finish_result(page, foreign)
+        return foreign, False
 
-    async def _finish_result(self, page: Page, result: dict) -> dict:
+    async def _finish_result(self, page: Page, result: dict) -> dict | None:
+        """Save the result and finish the page with it; the result, or None if the page changed since it was read."""
         result = await self.database.call(persist, self.secretary, self.policy, result)
-        await self.database.call(self.backlog.finish, page, result, time.time(), self.policy.digest_seconds)
-        return result
+        finished = await self.database.call(self.backlog.finish, page, result, time.time(), self.policy.digest_seconds)
+        return result if finished else None
+
+
+def _own_baseline(page: Page, run: DecisionRun) -> Page:
+    """The page as read, with the baseline this attempt's own model answer wrote to it: its finish or failure accepts
+    that write and still refuses any other since."""
+    if run.model_successes is None:
+        return page
+    return replace(page, model_successes=run.model_successes, model_policy=run.model_policy)

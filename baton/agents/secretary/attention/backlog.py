@@ -103,11 +103,23 @@ class Backlog:
                 raise InvalidRequest("activate the secretary before scanning its backlog")
             return row[0]
 
-    def enqueue(self, page: Page, now: float) -> Page:
-        """Store a scanned page, and return it as stored: the page a later compare-and-set compares against."""
+    def enqueue(self, page: Page, now: float) -> Page | None:
+        """Store a scanned page, and return it as stored: the page a later compare-and-set compares against; None if
+        another scan has stored a page from this position since.
+
+        A compare-and-set on the scanned position, which only grows. A scan that read it and stalled could otherwise
+        store a shorter page beside the one another scan stored from the same position since, or store again a page
+        that another scan stored, finished and pruned since, so that the same events are assessed and delivered twice.
+        The absence of a row does not tell those apart from a page never scanned; the scanned position does.
+        """
         _range(page)
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
+            scanned = conn.execute(
+                "SELECT scanned FROM backlog_settings WHERE principal=?", (self.log.principal,)
+            ).fetchone()
+            if scanned is not None and scanned[0] != page.since:
+                return None
             self._insert(conn, page, now)
             conn.execute(
                 "UPDATE backlog_settings SET scanned=MAX(scanned,?) WHERE principal=?",
@@ -151,9 +163,20 @@ class Backlog:
             ),
         )
 
-    def finish(self, page: Page, result: dict, now: float, digest_seconds: float) -> None:
+    def finish(self, page: Page, result: dict, now: float, digest_seconds: float) -> bool:
+        """Finish a retry with its result, if the page is still stored as it was read; whether it did.
+
+        A compare-and-set on every column but the passed-over mark, as a failure is. A finish and an invalidation put
+        a page back to an immediate retry with every counter at zero, so a range, mode and status compare cannot tell
+        that page from the one a stalled caller read: its stale answer, held or summarized under the old policy, would
+        then hold the reassessment for a digest or finish it. So this refuses an answer for a page that changed in
+        any way since it was read, a failure recorded since included. Its result stays saved, and a later call under
+        the same policy and labels finishes the page with it without asking the model again.
+        """
         with self.log.connection() as conn, conn.transaction():
             self._initialize(conn)
+            if page.status != "retry" or not self._unchanged(conn, page, _ATTEMPTED):
+                return False
             if result["brief"]:
                 status, mode, due, decision = "ready", result["mode"], 0, result["decision_id"]
             else:
@@ -165,13 +188,20 @@ class Backlog:
             conn.execute(
                 "UPDATE backlog_windows SET status=?,mode=?,next_attempt=?,decision=?,"
                 "attempts=0,content_failures=0,model_successes=0,model_policy='',error=NULL "
-                "WHERE principal=? AND since=? AND through=? AND mode=? AND status='retry'",
-                (status, mode, due, decision, self.log.principal, page.since, page.through, page.mode),
+                "WHERE principal=? AND since=? AND through=?",
+                (status, mode, due, decision, self.log.principal, page.since, page.through),
             )
             self._prune(conn)
+            return True
 
     def model_succeeded(self, conn: Connection, page: Page, successes: int, policy: str) -> None:
-        """A page's own answer cannot provide evidence that another page works."""
+        """A page's own answer cannot provide evidence that another page works.
+
+        It needs no snapshot: it records the answer as the baseline of whichever retry of this range and mode is
+        stored, and the answer is that range's own in any lifecycle of it. Its caller folds the baseline into the page
+        it read, so its finish or failure still refuses a page that changed since; a reassessment's own attempt then
+        writes its own baseline over this one.
+        """
         self._initialize(conn)
         conn.execute(
             "UPDATE backlog_windows SET model_successes=?,model_policy=? "

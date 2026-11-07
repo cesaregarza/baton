@@ -282,7 +282,9 @@ Digest failures retain digest mode and eventually produce a keep notice, never a
 the queue reuses a saved result for the same policy and current source window before invoking either provider,
 and returns it only to a call with its trigger and catch-up label; for a call of another kind it finishes that page
 and returns nothing from it. A split, combine, failure, finish or empty-page discard changes a stored page only as
-its caller read it.
+its caller read it, due time included, and a scan stores its page only from a position no other scan has stored from.
+An answer its page refuses stays saved for a later call under the same policy and labels, and is never restored under
+another.
 Model failures distinguish missing credentials, authentication rejection, invalid requests, timeouts, and outages.
 Connection/pool timeouts remain outages; read/write timeouts and HTTP 408/504 responses can count toward
 splitting only after another page answers. A supplied key clears a current missing-credential failure to

@@ -268,10 +268,14 @@ gets no result from that page, and goes on as if the page were done, so a callba
 notice carries the call's trigger or catch-up label as a summary does, and a notice's id includes them.
 
 A caller that stalls between reading a stored page and changing it changes nothing if another caller changed the page
-meanwhile: a split or digest combine compares every column of the page as it was read, a failure, and the discard of
-a page whose events are no longer visible, compare all of them but the passed-over mark, and a finish takes only a
-retry of the same range and mode. The discard and its empty acknowledgement are one transaction, so a caller that read
-the range as empty never deletes a page another caller finished, or acknowledges a range another caller changed.
+meanwhile: a split or digest combine compares every column of the page as it was read, and a failure, a finish, and
+the discard of a page whose events are no longer visible compare all of them but the passed-over mark. That includes
+the due time, since a finish and an invalidation put a page back to an immediate retry with every counter at zero.
+An answer its page does not take is not its call's result. It stays saved: a later call under the same policy and
+labels finishes the page with it without asking the model again, and under another policy it is never restored. A scan
+stores its page only if no other scan has stored one from the same position since, so no event is in two stored pages.
+The discard and its empty acknowledgement are one transaction, so a caller that read the range as empty never deletes
+a page another caller finished, or acknowledges a range another caller changed.
 
 Pages use the configured `max_events`, `context_bytes`, `summary_bytes`, and citation budget. They are complete
 and never silently truncated. Retried and split pages preserve their original alert or digest mode.
