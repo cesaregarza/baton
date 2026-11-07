@@ -165,16 +165,17 @@ Host contract:
 - The bridge runs under the system interpreter with `-I` and never imports `baton`. It sits beside a host-provided
   `secretary_gate` module that supplies the names listed in `GATE_NAMES`, including the spool's root, `GATE_DIR`;
   a gate lacking one stops the bridge at import, naming it.
-- The policy's model command, the spool, the deadlines and every answer check are the host's existing ones.
+- The policy's model command, the spool, the deadlines and every answer check are the host's existing ones. An
+  answer holding half of a surrogate pair, which the checks could not encode, is refused as invalid.
 - Each output that hands the thread a live turn includes `reply_form`: a command ending in a quoted heredoc opener,
   and its closing line, unique to the turn. The thread submits the command, a newline, its serializer's one-line
   JSON, a newline and the closing line, so the shell evaluates nothing in the answer. A reply whose stdin is a
-  terminal or empty is refused and the turn stays open.
+  terminal, empty, or an open pipe that stays silent is refused and the turn stays open.
 - Each turn's first page carries the three trusted developer layers, so Baton's instructions, including the
   full-page summary rule, are present on every turn.
 
-To adopt a new version, install the bridge file at the host's existing bridge path, then resume the thread with the
-guidance, preceded by one line naming the host's command:
+To adopt a new version, install the bridge file at the host's existing bridge path while `secretary_bridge.py status`
+reports the spool `idle`, then resume the thread with the guidance, preceded by one line naming the host's command:
 
 ```sh
 { printf 'BRIDGE: %s\n\n' "$BRIDGE_COMMAND"; cat integrations/secretary/thread/GUIDANCE.md; } > resume-message.txt

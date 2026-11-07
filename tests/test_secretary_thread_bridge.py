@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import ast
 import importlib.util
-import io
 import json
 import os
 import pty
@@ -251,7 +250,20 @@ def test_the_form_is_the_interpreter_isolated_mode_the_resolved_bridge_and_a_quo
     form = form_of(header)
     command, opener = form["command"].split(" <<", 1)
     assert opener == f"'{form['closing_line']}'"
-    assert shlex.split(command) == [sys.executable, "-I", str(host.bridge.resolve()), "reply", header["request_id"]]
+    interpreter = os.path.normpath(os.path.abspath(sys.executable))
+    assert shlex.split(command) == [interpreter, "-I", str(host.bridge.resolve()), "reply", header["request_id"]]
+
+
+def test_the_form_names_the_bridge_file_itself_when_the_bridge_is_run_through_a_link(host):
+    turn, header = host.start()
+    link = host.work / "linked_bridge.py"
+    link.symlink_to(host.bridge)
+    done = subprocess.run(
+        [sys.executable, "-I", str(link), "receive", "--wait", "10"], capture_output=True, timeout=20, env=host.env()
+    )
+    out = json.loads(done.stdout) if done.stdout.strip() else None
+    assert out is not None and out["status"] == "offered", done.stderr
+    assert shlex.split(form_of(out["request"])["command"].split(" <<", 1)[0])[2] == str(host.bridge.resolve())
 
 
 def test_the_closing_line_is_new_every_turn_and_not_the_fixed_word_or_found_in_the_page(host):
@@ -355,6 +367,30 @@ def test_a_terminal_stdin_is_refused_at_once_and_leaves_the_turn_open(host):
     assert_still_open(host, turn, header)
 
 
+def test_a_pipe_held_open_and_silent_is_refused_within_its_bound_and_leaves_the_turn_open(host):
+    turn, header = host.start()
+    process = subprocess.Popen(
+        [sys.executable, "-I", str(host.bridge), "reply", header["request_id"]],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=host.env(),
+    )
+    try:
+        code = process.wait(timeout=8)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        raise AssertionError("reply did not return within its bound while stdin stayed open") from None
+    finally:
+        process.stdin.close()
+        process.stdin = None  # closed: communicate() would flush it
+        stdout, _ = process.communicate()
+    out = json.loads(stdout)
+    assert (code, out["status"], out.get("detail")) == (1, "invalid", "stdin_idle")
+    assert form_of(out) == form_of(header)
+    assert_still_open(host, turn, header)
+
+
 def test_a_wrong_id_is_not_outstanding_before_stdin_is_judged(host):
     _, header = host.start()
     other = "thr_" + "0" * 32
@@ -388,6 +424,17 @@ def test_text_arrives_intact_and_nothing_is_evaluated(host, case):
     answer = assessment(header, **HAZARDS[case])
     assert accepted(host, turn, header, answer) == answer
     assert not (host.work / "SENTINEL").exists()
+
+
+@pytest.mark.parametrize("field", ["reason", "summary"])
+def test_half_of_a_surrogate_pair_is_refused_with_the_form_and_leaves_the_turn_open(host, field):
+    turn, header = host.start()
+    body = serialize(assessment(header, **{field: "trimmed CUT"})).replace("CUT", "\\ud83d")  # a JSON escape
+    code, out = submit(host, form_of(header), body)
+    assert (code, out["status"], out.get("detail")) == (1, "invalid", "unpaired_surrogate")
+    assert form_of(out) == form_of(header)
+    assert [row["detail"] for row in host.timing() if row["step"] == "replied"] == ["unpaired_surrogate"]
+    assert_still_open(host, turn, header)
 
 
 def test_the_unique_closing_line_inside_a_json_string_is_just_text(host):
@@ -472,9 +519,49 @@ def test_guard_the_return_margin_is_half_a_second(
         "time",
         type("Clock", (), {"time": staticmethod(lambda: stamp), "monotonic": time.monotonic, "sleep": time.sleep}),
     )
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(serialize(assessment(header)).encode())))
-    in_process.main(["reply", header["request_id"]])
+    answer = host.work / "answer.json"
+    answer.write_text(serialize(assessment(header)), encoding="utf-8")
+    with answer.open(encoding="utf-8") as stdin:
+        monkeypatch.setattr(sys, "stdin", stdin)
+        in_process.main(["reply", header["request_id"]])
     assert json.loads(capsys.readouterr().out) == {"status": status}
+
+
+def test_the_form_is_built_only_for_a_request_id(in_process):
+    reply_form = getattr(in_process, "reply_form", None)
+    assert callable(reply_form), "the bridge builds no reply form"
+    for bad in ("thr_x' ; touch PLANTED ; '", "thr_" + "a" * 31, "thr_" + "a" * 32 + "\n"):
+        with pytest.raises(in_process.Invalid):
+            reply_form(bad)
+    assert reply_form("thr_" + "a" * 32)["closing_line"] == "END_thr_" + "a" * 32
+
+
+def test_guard_read_of_a_finished_turn_is_not_outstanding(host):
+    turn, header = host.start()
+    answer = serialize(assessment(header)).encode()
+    assert host.run("reply", header["request_id"], stdin=answer) == (0, {"status": "accepted"})
+    turn.finish()
+    assert host.run("read", header["request_id"]) == (1, {"error": "not_outstanding"})
+
+
+def test_guard_the_spool_keeps_the_earlier_bridges_turn_fields_so_either_version_answers_the_others_turn(host):
+    """Regression guard: the bridge reads only the fields the earlier version spooled, so a turn offered by one
+    version is answered by the other during an install."""
+    _, header = host.start()
+    held = json.loads((host.gate / "thread" / "protocol4" / "request.json").read_text())
+    assert set(held) == {
+        "request_id",
+        "turn",
+        "deadline",
+        "offered_at",
+        "received_at",
+        "summary_bytes",
+        "layers",
+        "event",
+        "history",
+        "tools",
+        "calls_left",
+    }
 
 
 # --- the principal's hourly marker, the gate coupling and the files --------------------------------------------
@@ -549,12 +636,10 @@ def test_the_guidance_covers_the_loop_the_replies_and_the_coverage_rule():
         "not coverage",
         "late",
         "not_outstanding",
+        '{"error": "not_outstanding"}',
+        "stdin_idle",
+        "unpaired_surrogate",
         "unresolved",
         "author",
-        "replaces all of your earlier protocol-4 instructions",
-        "same pending `receive`",
-        "never end your turn while",
-        "a cell id is never a session id",
-        "default pipe mode",
     ):
         assert needle in text, needle

@@ -45,6 +45,7 @@ import math
 import os
 import re
 import secrets
+import select
 import shlex
 import sys
 import time
@@ -71,6 +72,7 @@ TURN_SECONDS = 60  # Baton's longest turn: no deadline lies further out than thi
 MAX_REQUEST = 16 * 1024 * 1024
 MAX_ANSWER = 64 * 1024  # Baton's bound on a command's output
 POLL = 0.02  # seconds between looks at the spool
+IDLE_SECONDS = 1.0  # how long a reply waits for its answer's first byte on a pipe left open
 RETURN_SECONDS = 0.5  # kept before the deadline for the bridge to print an answer; a later one is refused as late
 GRACE = 5  # a safety stop past the deadline, for a bridge whose caller is gone without killing it
 WAIT = (1, 600)  # receive's bound, in seconds
@@ -289,6 +291,8 @@ def reply_form(request_id: str) -> dict:
     the page was written, so no event's author can have known it. The opener is quoted, so the shell evaluates
     nothing in the body. A one-line serialized answer holds no physical line break to end it early.
     """
+    if not REQUEST_ID.fullmatch(request_id):
+        raise Invalid("not a request id")  # the id becomes shell text here: only this shape is safe in it
     closing = f"END_{request_id}"
     command = shlex.join([sys.executable, "-I", str(BRIDGE_PATH), "reply", request_id])
     return {"command": f"{command} <<'{closing}'", "closing_line": closing}
@@ -386,6 +390,8 @@ def check(held: dict, raw: bytes) -> tuple[dict | None, str | None]:  # noqa: C9
         return None, "not_json"
     if not isinstance(answer, dict):
         return None, "wrong_shape"
+    if _unpaired_surrogate(answer):
+        return None, "unpaired_surrogate"
     if "tool_calls" in answer:
         return _calls(held, answer)
     if set(answer) != ANSWER_KEYS:
@@ -424,9 +430,20 @@ def check(held: dict, raw: bytes) -> tuple[dict | None, str | None]:  # noqa: C9
     return answer, None
 
 
+def _unpaired_surrogate(value: object) -> bool:
+    """Whether the answer holds half of a UTF-16 pair: JSON's escapes allow one, and no UTF-8 output can carry it."""
+    try:
+        json.dumps(value, ensure_ascii=False).encode()
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
 def _markers(held: dict) -> tuple[str, ...]:
-    """The gate's bracketed markers, and the principal's hourly one, which the turn's own principal layer names."""
-    return (*MARKERS, f"[{held['principal'].casefold()} hourly")
+    """The gate's bracketed markers, and the principal's hourly one, which the turn's own principal layer names. Read
+    from the stored layer, as either bridge version spools it, never from a field only this version writes."""
+    principal = _principal(held["layers"][2]["text"])["principal"]
+    return (*MARKERS, f"[{principal.casefold()} hourly")
 
 
 def _calls(held: dict, answer: dict) -> tuple[dict | None, str | None]:
@@ -544,7 +561,6 @@ def _offer(turn: dict, deadline: float) -> dict:
         "deadline": deadline,
         "offered_at": time.time(),
         "received_at": None,
-        "principal": principal["principal"],
         "summary_bytes": principal["summary_bytes"],
         "layers": turn["layers"][:3],
         "event": turn["event"],
@@ -712,11 +728,14 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def stdin_answer() -> tuple[bytes, str | None]:
-    """The reply's stdin, or why it can't be an answer. A terminal is refused unread: a read would wait on typing
-    that never comes, and the turn's time would run out."""
+    """The reply's stdin, or why it can't be an answer. A terminal, or a pipe that stays open and silent, is refused
+    unread: a read would wait on input that never comes, and the turn's time would run out. A heredoc or a finished
+    writer is ready at once."""
     stream = sys.stdin
     if stream is not None and stream.isatty():
         return b"", "stdin_terminal"
+    if stream is not None and not select.select([stream], [], [], IDLE_SECONDS)[0]:
+        return b"", "stdin_idle"  # a pipe held open with nothing in it: a read would wait out the turn
     raw = b"" if stream is None else stream.buffer.read(MAX_ANSWER + 1)
     return raw, None if raw.strip() else "stdin_empty"
 
