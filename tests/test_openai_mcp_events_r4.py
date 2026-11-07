@@ -180,9 +180,9 @@ def test_every_blocking_step_is_bounded_by_the_one_deadline(bad_server, behaviou
 def test_a_slow_send_is_bounded_by_the_deadline(bad_server) -> None:
     server, events = bad_server(never_read)
     elapsed, outcome = attempt(server, events, body=b"x" * (32 * 1024 * 1024))
-    # The server stalls for 3 s. Under load the 32 MiB send can overrun the budget by half a second, so the
-    # bound only has to show that the deadline, not the stall, ended the send.
-    assert elapsed < 1.5, f"the send took {elapsed:.3f}s on a {BUDGET}s budget against a 3 s stall"
+    # The server stalls for 3 s. The bound leaves a loaded runner room past the budget and still shows that the
+    # deadline, not the stall, ended the send.
+    assert elapsed < 1.0, f"the send took {elapsed:.3f}s on a {BUDGET}s budget against a 3 s stall"
     assert outcome == "timeout"
 
 
@@ -264,11 +264,11 @@ def test_timed_out_lookups_never_exceed_the_pool_and_a_full_pool_fails_fast(tmp_
     def outcome() -> str:
         try:
             events._resolve(NAME, 443)
-            return "resolved"
+            reason = "resolved"
         except integration.CallbackError as error:
-            return error.reason
-        finally:
-            assert resolver_threads() - before <= 4, f"{resolver_threads() - before} resolver threads alive"
+            reason = error.reason
+        assert resolver_threads() - before <= 4, f"{resolver_threads() - before} resolver threads alive"
+        return reason
 
     before = resolver_threads()
     try:
@@ -280,10 +280,12 @@ def test_timed_out_lookups_never_exceed_the_pool_and_a_full_pool_fails_fast(tmp_
             assert time.monotonic() < deadline, (inside[0], reasons)
             reasons.append(outcome())
         assert set(reasons) <= {"timeout", "unreachable"}, reasons
+        # The workers are stuck, so every lookup that took a queue slot is still in it.
+        assert integration.RESOLVER._queue.qsize() <= 4, f"{integration.RESOLVER._queue.qsize()} lookups queued"
         started = time.monotonic()
         assert outcome() == "unreachable"
         elapsed = time.monotonic() - started
-        assert elapsed < timeout, f"a full pool took {elapsed:.3f}s to refuse on a {timeout}s budget"
+        assert elapsed < 0.01, f"a full pool took {elapsed:.4f}s to refuse"
     finally:
         release.set()
 

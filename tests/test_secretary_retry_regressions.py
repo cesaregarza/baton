@@ -288,7 +288,7 @@ def test_poll_uses_one_full_budget_lane_then_switches_to_other_due_lane(tmp_path
         started = time.monotonic()
         asyncio.run(_step(worker))
         elapsed = time.monotonic() - started
-        assert elapsed >= 1.5  # The retry used most of the three-second poll budget.
+        assert elapsed >= 1.5  # The retry ran its two-second step inside the three-second poll budget.
         assert len(model.requests) == 3
         assert model.requests[2]["context"]["mode"] == "alert"
         assert f"message:{retry_message['message_id']}" in {
