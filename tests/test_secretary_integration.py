@@ -47,7 +47,8 @@ def _cli(instance: Path, action: str, *args: str, input_text: str | None = None)
     )
 
 
-def _install(world, tmp_path: Path, product: str, *, project_name: str = "project"):
+def _install_args(world, tmp_path: Path, product: str, *, project_name: str = "project"):
+    """A project with existing hooks, a fake codex and a model policy, and the `install` arguments for them."""
     project = tmp_path / project_name
     project.mkdir()
     codex = tmp_path / "fake-codex"
@@ -63,32 +64,37 @@ def _install(world, tmp_path: Path, product: str, *, project_name: str = "projec
     original = b'{"userMarker":{"preserve":true},"hooks":{"Stop":[{"matcher":"existing"}]}}\n'
     initial_hooks.write_bytes(original)
     _model(world, tmp_path)
+    args = [
+        "install",
+        "--product",
+        product,
+        "--destination",
+        str(destination),
+        "--project",
+        str(project),
+        "--config",
+        str(world.config_path),
+        "--policy",
+        str(world.policy_path),
+        "--poll-seconds",
+        "0.05",
+        "--delivery-timeout-seconds",
+        "7",
+        "--budget-seconds",
+        "5",
+        "--codex",
+        str(codex),
+        "--apply-hooks",
+    ]
+    return project, codex_log, initial_hooks, original, args
+
+
+def _install(world, tmp_path: Path, product: str, *, project_name: str = "project"):
+    project, codex_log, initial_hooks, original, args = _install_args(
+        world, tmp_path, product, project_name=project_name
+    )
     installed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "baton.integrations.secretary",
-            "install",
-            "--product",
-            product,
-            "--destination",
-            str(destination),
-            "--project",
-            str(project),
-            "--config",
-            str(world.config_path),
-            "--policy",
-            str(world.policy_path),
-            "--poll-seconds",
-            "0.05",
-            "--delivery-timeout-seconds",
-            "7",
-            "--budget-seconds",
-            "5",
-            "--codex",
-            str(codex),
-            "--apply-hooks",
-        ],
+        [sys.executable, "-m", "baton.integrations.secretary", *args],
         cwd=ROOT,
         env=_env(),
         text=True,
@@ -258,7 +264,7 @@ def test_install_generated_hook_worker_receive_and_explicit_ack_lifecycle(tmp_pa
             unacknowledged = say(world, room, "reviewer", "Another update before acknowledgment")
             _wait_for_receipt(instance, "pending", lambda pending: len(pending or []) == 2)
             summaries = json.loads(_cli(instance, "receive").stdout)
-            pending = _status(instance)["pending"]
+            pending = Receipts(instance.parent / "delivery.sqlite").get("pending")
             assert set(pending) == {item["decision_id"] for item in summaries}
             assert summary["decision_id"] in pending
             assert any(f"message:{sent['message_id']}" in item["sources"] for item in summaries)
@@ -343,7 +349,7 @@ def test_visibility_revocation_before_receive_discards_brief_and_rejects_ack(tmp
         worker = _start_worker(instance)
         try:
             _wait_for_receipt(instance, "pending")
-            [decision_id] = _status(instance)["pending"]
+            [decision_id] = Receipts(instance.parent / "delivery.sqlite").get("pending")
             from baton import conversations
 
             conversations.remove(world.baton, world.config, room, "planner", actor="planner")

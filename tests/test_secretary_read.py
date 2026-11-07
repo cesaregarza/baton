@@ -2,7 +2,7 @@
 beside it, after a position; or the messages it can see by id. Message text is included.
 
 It reads through the read-only opener with the policy's visibility rule, and writes nothing. Every read here goes
-through `baton secretary read` or `python -m baton.secretary_read`.
+through `baton secretary read` or the standalone entry behind `python -m baton.secretary_read`.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import pytest
 from secretary_support import conversation, make_world, say, table_hashes
 
 import baton
+import baton.agents.secretary.inbox.read as read_module
 from baton import cli, conversations, events, jobs, messages
 from baton.database import store
 from baton.database.store import transaction
@@ -257,45 +258,18 @@ def test_the_read_path_opens_baton_read_only_and_writes_nothing(tmp_path, capsys
         assert not world.state_path.exists()
 
 
-def test_the_module_entry_prints_the_same_page_as_the_subcommand(tmp_path, capsys) -> None:
+def test_the_standalone_entry_prints_the_same_page_and_exit_status_as_the_subcommand(tmp_path, capsys) -> None:
+    """The page through the standalone `main`, in this process; then one real `python -m baton.secretary_read` run,
+    a refusal, because only a nonzero code shows that the module entry hands main's exit status on."""
     with make_world(tmp_path) as world:
         messages.send(world.baton, sender="worker", recipient="planner", text="Same words")
         code, from_cli = _read(world, capsys, "--after", "0", "--limit", "5")
+        options = ["--config", str(world.config_path), "--policy", str(world.policy_path), "--after", "0"]
+        standalone = read_module.main([*options, "--limit", "5"])
+        assert (code, standalone) == (0, 0) and json.loads(capsys.readouterr().out) == from_cli
         root = Path(baton.__file__).resolve().parents[1]
-        run = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "baton.secretary_read",
-                "--config",
-                str(world.config_path),
-                "--policy",
-                str(world.policy_path),
-                "--after",
-                "0",
-                "--limit",
-                "5",
-            ],
-            capture_output=True,
-            text=True,
-            env={**os.environ, "PYTHONPATH": str(root)},
-            check=False,
-        )
-        assert (code, run.returncode) == (0, 0) and json.loads(run.stdout) == from_cli
         refused = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "baton.secretary_read",
-                "--config",
-                str(world.config_path),
-                "--policy",
-                str(world.policy_path),
-                "--after",
-                "0",
-                "--limit",
-                "0",
-            ],
+            [sys.executable, "-m", "baton.secretary_read", *options, "--limit", "0"],
             capture_output=True,
             text=True,
             env={**os.environ, "PYTHONPATH": str(root)},
@@ -304,37 +278,25 @@ def test_the_module_entry_prints_the_same_page_as_the_subcommand(tmp_path, capsy
         assert refused.returncode == 1 and json.loads(refused.stdout)["error"] == "invalid_request"
 
 
-@pytest.mark.parametrize(
-    "args",
-    [
-        [],  # neither a position nor ids
-        ["--after", "0", "--ids", "msg_" + "1" * 16],  # both
-        ["--after", "-1"],
-        ["--after", "0", "--limit", "0"],
-        ["--after", "0", "--limit", "101"],
-        ["--after", "0", "--max-bytes", "1023"],
-        ["--after", "0", "--max-bytes", str(1024 * 1024 + 1)],
-        ["--ids", "not-a-message-id"],
-        ["--ids", "msg_" + "1" * 16 + ",msg_" + "1" * 16],  # the same id twice
-        ["--ids", ",".join(f"msg_{number:016x}" for number in range(101))],
-    ],
-    ids=[
-        "neither",
-        "both",
-        "negative",
-        "limit-0",
-        "limit-101",
-        "bytes-low",
-        "bytes-high",
-        "bad-id",
-        "repeat",
-        "too-many-ids",
-    ],
-)
-def test_a_read_outside_its_bounds_is_refused_before_anything_is_read(tmp_path, capsys, args) -> None:
+def test_a_read_outside_its_bounds_is_refused_before_anything_is_read(tmp_path, capsys) -> None:
+    refused = {
+        "neither": [],  # neither a position nor ids
+        "both": ["--after", "0", "--ids", "msg_" + "1" * 16],
+        "negative": ["--after", "-1"],
+        "limit-0": ["--after", "0", "--limit", "0"],
+        "limit-101": ["--after", "0", "--limit", "101"],
+        "bytes-low": ["--after", "0", "--max-bytes", "1023"],
+        "bytes-high": ["--after", "0", "--max-bytes", str(1024 * 1024 + 1)],
+        "bad-id": ["--ids", "not-a-message-id"],
+        "repeat": ["--ids", "msg_" + "1" * 16 + ",msg_" + "1" * 16],  # the same id twice
+        "too-many-ids": ["--ids", ",".join(f"msg_{number:016x}" for number in range(101))],
+    }
     with make_world(tmp_path) as world:
-        code, out = _read(world, capsys, *args)
-        assert (code, out.get("error")) == (1, "invalid_request")
+        before = table_hashes(world.baton)
+        for name, args in refused.items():
+            code, out = _read(world, capsys, *args)
+            assert (code, out.get("error")) == (1, "invalid_request"), name
+            assert table_hashes(world.baton) == before, name
 
 
 def test_stateful_secretary_actions_require_their_state(tmp_path, capsys) -> None:

@@ -47,42 +47,28 @@ def test_default_reads_largest_ordered_prefix_and_pages_every_delivery_once(tmp_
         assert first.through < second.through < third.through
 
 
-def test_reply_parent_is_included_and_counts_toward_page_limits(tmp_path) -> None:
+def test_a_reply_parent_is_paged_with_its_reply_counted_or_carried_as_context(tmp_path) -> None:
+    """Three reads of one parent and its reply; reads change nothing, so they share the conversation."""
     with make_world(tmp_path) as world:
         room = conversation(world)
         parent = say(world, room, "worker", "Original request")
         reply = say(world, room, "worker", "Following up", reply_to=parent["message_id"])
         policy = _policy(world, max_events=2)
 
+        # From the start the parent is on the page itself and counts toward its limit.
         window = InboxWindow.read(world.config, policy, 0)
-
         assert [event["message"]["id"] for event in window.events] == [parent["message_id"], reply["message_id"]]
         assert window.reply_context == []
 
-
-def test_first_event_with_required_parent_reports_its_position_when_it_cannot_fit(tmp_path) -> None:
-    with make_world(tmp_path) as world:
-        room = conversation(world)
-        parent = say(world, room, "worker", "Original request")
-        reply = say(world, room, "worker", "Following up", reply_to=parent["message_id"])
-
-        with pytest.raises(InboxTooLarge) as raised:
-            InboxWindow.read(world.config, _policy(world, max_events=1), _position(world, parent["message_id"]))
-
-        assert raised.value.extra == {"through_pos": _position(world, reply["message_id"])}
-
-
-def test_reply_parent_fits_as_context_when_page_starts_after_parent_event(tmp_path) -> None:
-    with make_world(tmp_path) as world:
-        room = conversation(world)
-        parent = say(world, room, "worker", "Original request")
-        reply = say(world, room, "worker", "Following up", reply_to=parent["message_id"])
-        policy = _policy(world, max_events=2)
-
+        # A page that starts after the parent carries it as context instead.
         window = InboxWindow.read(world.config, policy, _position(world, parent["message_id"]))
-
         assert [event["message"]["id"] for event in window.events] == [reply["message_id"]]
         assert [event["message"]["id"] for event in window.reply_context] == [parent["message_id"]]
+
+        # A first event whose required parent cannot fit beside it reports its position.
+        with pytest.raises(InboxTooLarge) as raised:
+            InboxWindow.read(world.config, _policy(world, max_events=1), _position(world, parent["message_id"]))
+        assert raised.value.extra == {"through_pos": _position(world, reply["message_id"])}
 
 
 def test_explicit_revalidation_range_refuses_overflow_without_truncating(tmp_path) -> None:
