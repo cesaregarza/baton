@@ -170,7 +170,11 @@ class AttentionQueue:
         if failed is None:
             return None  # A concurrent answer or callback already changed this page.
         self.last_error = error
-        if failed.content_failures < self.policy.max_attempts:
+        exhausted = failed.content_failures >= self.policy.max_attempts
+        # A range over the input bounds stays over them however often it is retried, and halving it needs no model
+        # call, so it splits on its first refusal rather than after max_attempts backoffs. The split still follows
+        # the failure's compare-and-set above, so a duplicate callback that read the same page splits nothing.
+        if not exhausted and not isinstance(error, InboxTooLarge):
             return None
         split = await self.database.call(
             InboxWindow.split_position, self.secretary.config, self.policy, page.since, page.through
@@ -178,6 +182,10 @@ class AttentionQueue:
         if split is not None:
             children = [Page(page.since, split, page.mode), Page(split, page.through, page.mode)]
             await self.database.call(self.backlog.replace, [page], children, time.time())
+            return None
+        if not exhausted:
+            # One event over the bounds cannot split: it keeps its counted refusals and backoff, so a widened bound
+            # can still assess it, and only after max_attempts does it get its cited failure notice.
             return None
         result = await self._failure_notice(page)
         if result is None:

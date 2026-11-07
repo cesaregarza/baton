@@ -1,18 +1,22 @@
 """A retained range written under wider input bounds, recovered after the policy narrows them.
 
 The host runs the secretary through two entry points: a message callback (`Secretary.decide` with the message as
-its trigger, then the ready summaries) and the hourly (the queue's scan, then its digest lane, else its retry lane,
-then the ready summaries). These tests drive only those entry points, on a controllable clock, through the sequence
-a host goes through when a range that fit the old bounds no longer fits the new ones: the oversize refusals before
-any model call, the splits, a digest change under a pending summary, a crash, a duplicate callback, an event larger
-than the byte bound, and newer work going ahead of the old range.
+its trigger, then the ready summaries) and the hourly (the queue's scan lane, then its digest lane, else its retry
+lane, then the ready summaries). These tests drive only those entry points, on a controllable clock, through the
+sequence a host goes through when a range that fit the old bounds no longer fits the new ones: the range refused
+before any model call and split at once, its parts assessed, a digest change under a pending summary, a crash before
+a split, a duplicate callback, a reply whose parent outweighs the byte bound, an event larger than the byte bound,
+newer work going ahead of the old range, and callbacks that move a scan backlog.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 import threading
+import time
 from collections import Counter
 from dataclasses import dataclass
 
@@ -55,6 +59,15 @@ class Retained:
     earlier_id: str
     events: list[dict]
     old_digest: str
+
+
+@dataclass
+class Hourly:
+    """What each of the hourly's two lanes ended with, and the summaries ready after them."""
+
+    scan: Exception | None
+    scheduled: Exception | None
+    pending: list[dict]
 
 
 def _rows(world) -> list[dict]:
@@ -106,12 +119,28 @@ async def _callback(secretary: Secretary, trigger: str) -> tuple[dict | None, Ba
         return result, error, await queue.pending()
 
 
-async def _hourly(secretary: Secretary) -> tuple[Exception | None, list[dict]]:
-    """The hourly as the host runs it: the scan, then the digest lane, else the retry lane, then what is ready."""
+async def _hourly(secretary: Secretary) -> Hourly:
+    """The hourly as the host runs it: the scan lane, then the digest lane if a held page is due, else the retry lane
+    if a retry is due, then what is ready. Each lane starts with no error of its own, and a refusal in the scan lane
+    does not keep the scheduled lane from running, so each lane's error is its own."""
     async with DatabaseWorker() as database:
         queue = await AttentionQueue.open(secretary, database, budget_seconds=BUDGET)
-        pending = await queue.poll(BUDGET, digest_first=True)
-        return queue.last_error, pending
+        scan = await _lane(queue, queue.scan)
+        scheduled = None
+        for held, action in ((True, queue.digest), (False, queue.retry)):
+            if await database.call(queue.backlog.due, time.time(), held=held):
+                scheduled = await _lane(queue, action)
+                break
+        return Hourly(scan, scheduled, await queue.pending())
+
+
+async def _lane(queue: AttentionQueue, action) -> Exception | None:
+    queue.last_error = None
+    try:
+        await action(BUDGET)
+    except BatonError as error:
+        return error
+    return queue.last_error
 
 
 def _at_next_retry(world, now: list[float]) -> None:
@@ -121,7 +150,7 @@ def _at_next_retry(world, now: list[float]) -> None:
         now[0] = max(now[0], min(row["next_attempt"] for row in waiting))
 
 
-def _retained(tmp_path, monkeypatch) -> Retained:
+def _retained(tmp_path, monkeypatch, *, earlier_count: int = 3) -> Retained:
     """The state a host holds before the edit, built through its own entry points under the old bounds.
 
     One page was delivered and acknowledged. A later page has a summary that no confirmed queue carried, so it is
@@ -135,8 +164,8 @@ def _retained(tmp_path, monkeypatch) -> Retained:
     now = [1000.0]
     monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
     asyncio.run(secretary.activate())
-    # Three rooms keep every room under its hourly message limit.
-    rooms = [conversation(world) for _ in range(3)]
+    # Four rooms keep every room under its hourly message limit.
+    rooms = [conversation(world) for _ in range(4)]
 
     delivered_parent = say(world, rooms[0], "worker", "A delivered request that a later reply answers")
     result, error, _ = asyncio.run(_callback(secretary, _trigger(delivered_parent)))
@@ -144,7 +173,7 @@ def _retained(tmp_path, monkeypatch) -> Retained:
     asyncio.run(secretary.acknowledge(result["decision_id"]))
     delivered_id = result["decision_id"]
 
-    earlier = [say(world, rooms[1], "reviewer", f"An earlier update {number}") for number in range(3)]
+    earlier = [say(world, rooms[3], "reviewer", f"An earlier update {number}") for number in range(earlier_count)]
     result, error, pending = asyncio.run(_callback(secretary, _trigger(earlier[-1])))
     assert error is None and result is not None and result["kind"] == "summary"
     assert [summary["decision_id"] for summary in pending] == [result["decision_id"]]
@@ -206,20 +235,20 @@ def _calls(limit: int = 40):
 
 
 def _drain_range(retained: Retained, *, limit: int = 80) -> list[str]:
-    """Hourlies at each next retry until no page waits; what each call did to the retained work."""
+    """Hourlies at each next retry until no page waits; what each call's scheduled lane did to the retained work."""
     steps = []
     for _ in range(limit):
         if not _retrying(retained.world):
             return steps
         _at_next_retry(retained.world, retained.now)
         calls = len(retained.model.requests)
-        error, _ = asyncio.run(_hourly(retained.secretary))
+        hourly = asyncio.run(_hourly(retained.secretary))
         if len(retained.model.requests) > calls:
             steps.append("assessed")
-        elif isinstance(error, InboxTooLarge):
+        elif isinstance(hourly.scheduled, InboxTooLarge):
             steps.append("oversized")
         else:
-            steps.append(type(error).__name__ if error else "nothing")
+            steps.append(type(hourly.scheduled).__name__ if hourly.scheduled else "nothing")
     raise AssertionError(f"the retained range did not recover within {limit} host calls: {steps}")
 
 
@@ -228,44 +257,31 @@ def _event_keys(results: list[dict]) -> Counter:
     return Counter(ref["source_key"] for result in results for ref in result["source_refs"] if ref["pos"] is not None)
 
 
-def test_oversized_retries_count_as_content_failures_and_halve_until_every_part_fits(tmp_path, monkeypatch) -> None:
+def _bytes(entries: list[dict]) -> int:
+    """Entries' serialized size, as the policy's context_bytes counts each event and reply parent."""
+    return sum(len(json.dumps(entry, ensure_ascii=False).encode()) for entry in entries)
+
+
+def test_an_oversized_retained_range_splits_on_its_first_refusal_until_every_part_fits(tmp_path, monkeypatch) -> None:
     retained = _retained(tmp_path, monkeypatch)
     with retained.world:
         world, model = retained.world, retained.model
         _edit_to_candidate(retained)
-        engine_calls = len(model.engine_requests)
+        calls, engine_calls = len(model.requests), len(model.engine_requests)
 
-        # The old range keeps its stored attempts: each refusal backs off from them, not from zero. The pending
-        # summary the edit made stale is reassessed in between; the digest test follows it.
+        # The range's next retry, after the backoff its two transport failures left, is refused before any model or
+        # engine call and counted. A range over the bounds stays over them however often it is retried, so it is
+        # halved by visible events at once instead of after max_attempts backoffs. Each half starts over, due at once.
         [old] = _range_rows(retained)
-        refusals, others = [], 0
-        for _ in _calls():
-            if len(_range_rows(retained)) != 1:
-                break
-            _at_next_retry(world, retained.now)
-            calls = len(model.requests)
-            error, _ = asyncio.run(_hourly(retained.secretary))
-            if len(model.requests) > calls:
-                others += 1
-                continue
-            assert isinstance(error, InboxTooLarge)
-            rows = _range_rows(retained)
-            if len(rows) == 1:
-                [row] = rows
-                assert (row["since"], row["through"]) == (old["since"], old["through"])
-                refusals.append((row["attempts"], row["content_failures"], row["next_attempt"] - retained.now[0]))
-            else:
-                refusals.append("split")
-        # Backoff min(300, 5 * 2 ** (attempts - 1)) continues from the two attempts made under the old bounds.
-        assert refusals == [(3, 1, 20), (4, 2, 40), "split"]
-        assert others == 1
-
-        # After max_attempts content failures the range is halved by visible events; each half starts over.
+        _at_next_retry(world, retained.now)
+        assert retained.now[0] == old["next_attempt"]
+        hourly = asyncio.run(_hourly(retained.secretary))
+        assert hourly.scan is None and isinstance(hourly.scheduled, InboxTooLarge)
         halves = _range_rows(retained)
         assert [len(_event_numbers(retained, row)) for row in halves] == [21, 20]
         assert all((row["attempts"], row["content_failures"], row["status"]) == (0, 0, "retry") for row in halves)
         assert all(row["next_attempt"] == retained.now[0] for row in halves)
-        assert len(model.engine_requests) == engine_calls + 1  # only the reassessed pending page reached the engine
+        assert (len(model.requests), len(model.engine_requests)) == (calls, engine_calls)
 
         steps = _drain_range(retained)
         leaves = _range_rows(retained)
@@ -279,19 +295,23 @@ def test_oversized_retries_count_as_content_failures_and_halve_until_every_part_
             list(range(32, 42)),
         ]
         assert all(row["status"] == "ready" for row in leaves)
-        # Every refusal before the leaves fit was a cheap one: no model or engine call.
-        assert steps.count("oversized") == 15 and steps.count("assessed") == 7
+        # One cheap refusal for each further split, one assessment for each part, and in between one more for the
+        # pending summary the edit made stale (the digest test follows it). No refusal reached the model or the
+        # engine, and none waited: the clock never moved after the range's own retry was due.
+        assert steps.count("oversized") == 5 and steps.count("assessed") == 8
         assert set(steps) == {"oversized", "assessed"}
-        assert len(model.engine_requests) == engine_calls + 1 + 7
-        for request in model.requests[-7:]:
+        assert len(model.engine_requests) == engine_calls + 8
+        assert retained.now[0] == old["next_attempt"]
+        starts = {row["since"]: row for row in leaves}
+        leaf_requests = [request for request in model.requests[calls:] if request["context"]["since"] in starts]
+        assert len(leaf_requests) == 7
+        for request in leaf_requests:
             context = request["context"]
             assert len(context["events"]) + len(context["reply_context"]) <= CANDIDATE_BOUNDS["max_events"]
-            entries = [*context["events"], *context["reply_context"]]
-            size = sum(len(json.dumps(entry, ensure_ascii=False).encode()) for entry in entries)
-            assert size <= CANDIDATE_BOUNDS["context_bytes"]
+            assert _bytes([*context["events"], *context["reply_context"]]) <= CANDIDATE_BOUNDS["context_bytes"]
         parents = {
             request["context"]["since"]: [entry["source_key"] for entry in request["context"]["reply_context"]]
-            for request in model.requests[-7:]
+            for request in leaf_requests
         }
         assert parents == {
             row["since"]: (
@@ -305,11 +325,14 @@ def test_oversized_retries_count_as_content_failures_and_halve_until_every_part_
         }
 
 
-def test_policy_edit_reassesses_a_pending_summary_and_refuses_its_old_acknowledgement(tmp_path, monkeypatch) -> None:
-    retained = _retained(tmp_path, monkeypatch)
+@pytest.mark.parametrize("earlier_count", [3, 12], ids=["pending-page-fits", "pending-page-over-the-bounds"])
+def test_policy_edit_reassesses_a_pending_summary_and_refuses_its_old_acknowledgement(
+    tmp_path, monkeypatch, earlier_count
+) -> None:
+    retained = _retained(tmp_path, monkeypatch, earlier_count=earlier_count)
     with retained.world:
-        secretary = retained.secretary
-        delivered_before = _delivered(retained.world)
+        world, model, secretary = retained.world, retained.model, retained.secretary
+        delivered_before = _delivered(world)
         _edit_to_candidate(retained)
 
         # The saved summary was assessed under the old digest: it is no longer pending, and acknowledging it is stale.
@@ -317,78 +340,82 @@ def test_policy_edit_reassesses_a_pending_summary_and_refuses_its_old_acknowledg
         with pytest.raises(InvalidRequest, match="stale"):
             asyncio.run(secretary.acknowledge(retained.earlier_id))
         # What was acknowledged before the edit stays acknowledged, and the delivered position does not move.
-        log = AttentionLog(retained.world.state_path, retained.world.config.data_dir, "planner")
+        log = AttentionLog(world.state_path, world.config.data_dir, "planner")
         assert log.is_acknowledged(retained.delivered_id)
-        assert _delivered(retained.world) == delivered_before
+        assert _delivered(world) == delivered_before
 
         asyncio.run(_hourly(secretary))  # the ready summaries are read last, and the stale one is invalidated
-        earlier_since = _position(retained.world, retained.earlier[0]["message_id"]) - 1
-        [invalidated] = [row for row in _rows(retained.world) if row["since"] <= earlier_since < row["through"]]
+        earlier_since = _position(world, retained.earlier[0]["message_id"]) - 1
+        [invalidated] = [row for row in _rows(world) if row["since"] <= earlier_since < row["through"]]
         assert invalidated["status"] == "retry" and invalidated["decision"] is None
         assert (invalidated["attempts"], invalidated["content_failures"]) == (0, 0)
 
-        reassessed = None
-        for _ in range(4):
-            _at_next_retry(retained.world, retained.now)
-            _, pending = asyncio.run(_hourly(secretary))
-            reassessed = next((s for s in pending if s["since"] == invalidated["since"]), None)
-            if reassessed is not None:
+        # Its page is assessed again under the new digest. A page the new bounds can hold costs one assessment; one
+        # over them is refused and split at once, at no model cost, and costs one assessment for each part.
+        expected = Counter(f"message:{sent['message_id']}" for sent in retained.earlier)
+        calls, reassessed = len(model.requests), {}
+        for _ in _calls():
+            if _event_keys(list(reassessed.values())) == expected:
                 break
-        assert reassessed is not None and reassessed["kind"] == "summary"
-        assert reassessed["decision_id"] != retained.earlier_id
-        assert reassessed["policy_digest"] != retained.old_digest
-        assert _event_keys([reassessed]) == Counter(f"message:{sent['message_id']}" for sent in retained.earlier)
+            _at_next_retry(world, retained.now)
+            hourly = asyncio.run(_hourly(secretary))
+            for summary in hourly.pending:
+                if invalidated["since"] <= summary["since"] and summary["through_pos"] <= invalidated["through"]:
+                    reassessed[summary["decision_id"]] = summary
+        parts = 1 if earlier_count <= CANDIDATE_BOUNDS["max_events"] else 2
+        assert len(reassessed) == parts and len(model.requests) == calls + parts
+        assert all(summary["kind"] == "summary" for summary in reassessed.values())
+        assert all(summary["policy_digest"] != retained.old_digest for summary in reassessed.values())
+        assert retained.earlier_id not in reassessed
 
-        assert asyncio.run(secretary.acknowledge(reassessed["decision_id"])) == reassessed["covered_through"]
+        for summary in sorted(reassessed.values(), key=lambda summary: summary["since"]):
+            assert asyncio.run(secretary.acknowledge(summary["decision_id"])) == summary["covered_through"]
         with pytest.raises(InvalidRequest, match="stale"):
             asyncio.run(secretary.acknowledge(retained.earlier_id))
         assert not log.is_acknowledged(retained.earlier_id)
         assert log.is_acknowledged(retained.delivered_id)
 
 
-def test_newer_pages_go_ahead_while_the_old_range_backs_off_and_delivery_waits_at_its_gap(
-    tmp_path, monkeypatch
-) -> None:
+def test_newer_pages_go_ahead_of_the_old_range_and_delivery_waits_at_its_gap(tmp_path, monkeypatch) -> None:
     retained = _retained(tmp_path, monkeypatch)
     with retained.world:
-        world, model, secretary = retained.world, retained.model, retained.secretary
+        world, model, secretary, now = retained.world, retained.model, retained.secretary, retained.now
         _edit_to_candidate(retained)
-        acknowledged: list[dict] = []
         newer = say(world, retained.rooms[1], "reviewer", "A newer message after the retained range")
         trigger = _trigger(newer)
 
-        # The range is due, so the callback spends itself on the range: a cheap refusal, and the trigger isn't reached.
-        _at_next_retry(retained.world, retained.now)
+        # The range is due, so the callback spends itself on it: refused and split, and the trigger isn't reached.
+        _at_next_retry(world, now)
         result, error, _ = asyncio.run(_callback(secretary, trigger))
         assert result is None and isinstance(error, InboxTooLarge)
         assert _position(world, newer["message_id"]) > _scanned(world)
 
-        # The same callback again: the page the edit made stale is due now and goes first, without the trigger.
-        calls = len(model.requests)
-        result, error, _ = asyncio.run(_callback(secretary, trigger))
-        assert error is None and result is not None and result["trigger"] is None
-        assert _event_keys([result]) == Counter(f"message:{sent['message_id']}" for sent in retained.earlier)
-        assert len(model.requests) == calls + 1
+        # A model outage: every call fails. Each callback works on the earliest due page, splitting an oversized part
+        # at no model cost or failing a part that fits, which then backs off, as does the page the edit made stale.
+        model.set_plan({"steps": [{"exit": 1}]})
+        for _ in _calls():
+            if all(row["next_attempt"] > now[0] for row in _retrying(world)):
+                break
+            result, error, _ = asyncio.run(_callback(secretary, trigger))
+            assert result is None and error is not None
+        model.set_plan({})
 
-        # Nothing is due while the range backs off, so the next callback scans past the range to its own trigger.
-        assert _retrying(world) and all(row["next_attempt"] > retained.now[0] for row in _retrying(world))
+        # With every part backing off, the next callback scans past the range to its own trigger and assesses it.
         newer_result, error, _ = asyncio.run(_callback(secretary, trigger))
         assert error is None and newer_result is not None
         assert newer_result["trigger"] == trigger and newer_result["kind"] == "summary"
         assert _event_keys([newer_result]) == Counter([f"message:{newer['message_id']}"])
 
-        # Delivery advances only through a contiguous run: past the earlier page, then it stops at the range.
-        range_since = _range_rows(retained)[0]["since"]
-        assert asyncio.run(secretary.acknowledge(result["decision_id"])) == range_since
-        assert asyncio.run(secretary.acknowledge(newer_result["decision_id"])) == range_since
-        acknowledged += [result, newer_result]
-
+        # Delivery advances only through a contiguous run: the newer page waits behind the stale page and the range.
+        before = _delivered(world)
+        assert asyncio.run(secretary.acknowledge(newer_result["decision_id"])) == before
+        acknowledged = [newer_result]
         for _ in _calls():
             if not _retrying(world):
                 break
-            _at_next_retry(retained.world, retained.now)
-            _, pending = asyncio.run(_hourly(secretary))
-            for summary in pending:
+            _at_next_retry(world, now)
+            hourly = asyncio.run(_hourly(secretary))
+            for summary in hourly.pending:
                 assert summary["kind"] == "summary"  # every part was assessed in full; none needed a notice
                 previous = _delivered(world)
                 delivered = asyncio.run(secretary.acknowledge(summary["decision_id"]))
@@ -409,41 +436,54 @@ def test_newer_pages_go_ahead_while_the_old_range_backs_off_and_delivery_waits_a
         assert error is None and result is not None and result["trigger"] == _trigger(later)
 
 
-def test_crash_between_the_last_oversize_failure_and_its_split_resumes_from_stored_state(tmp_path, monkeypatch) -> None:
+def _crash_before_split(world, now: float, trigger: str) -> None:
+    """A callback in its own process, on the test's clock, that dies right after its refusal is recorded."""
+    script = """
+import asyncio, os, sys, time
+from pathlib import Path
+from baton.config import load
+from baton.agents.secretary import Secretary
+from baton.agents.secretary.attention.backlog import Backlog
+config_path, state_path, policy_path, now, trigger = sys.argv[1:]
+time.time = lambda: float(now)
+def crash(*args, **kwargs):
+    os._exit(73)
+Backlog.replace = crash
+secretary = Secretary(load(config_path), Path(state_path), Path(policy_path))
+asyncio.run(secretary.decide(budget_seconds=10, trigger=trigger))
+"""
+    arguments = [str(world.config_path), str(world.state_path), str(world.policy_path), repr(now), trigger]
+    process = subprocess.run(
+        [sys.executable, "-c", script, *arguments], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert process.returncode == 73, process.stderr
+
+
+def test_a_crash_between_the_first_refusal_and_its_split_resumes_from_stored_state(tmp_path, monkeypatch) -> None:
     retained = _retained(tmp_path, monkeypatch)
     with retained.world:
         world, model = retained.world, retained.model
         _edit_to_candidate(retained)
-        for _ in _calls():
-            if _range_rows(retained)[0]["content_failures"] == 2:
-                break
-            _at_next_retry(retained.world, retained.now)
-            asyncio.run(_hourly(retained.secretary))
         [before] = _range_rows(retained)
+        calls = len(model.requests)
 
-        original = Backlog.replace
-
-        def crash(self, originals, replacements, now):
-            raise RuntimeError("synthetic crash before the split is written")
-
-        monkeypatch.setattr(Backlog, "replace", crash)
-        _at_next_retry(retained.world, retained.now)
-        with pytest.raises(RuntimeError, match="before the split"):
-            asyncio.run(_hourly(retained.secretary))
-        # The failure itself was recorded; the split was not.
+        _at_next_retry(world, retained.now)
+        _crash_before_split(world, retained.now[0], _trigger(retained.events[-1]))
+        # The refusal was recorded, with its backoff; the split was not.
         [after] = _range_rows(retained)
         assert (after["since"], after["through"]) == (before["since"], before["through"])
-        assert (after["attempts"], after["content_failures"]) == (before["attempts"] + 1, 3)
+        assert (after["attempts"], after["content_failures"]) == (before["attempts"] + 1, 1)
+        assert after["next_attempt"] > retained.now[0]
 
         # A new process, with nothing but the stored state: its next refusal splits the range.
-        monkeypatch.setattr(Backlog, "replace", original)
         retained.secretary = Secretary(world.config, world.state_path, world.policy_path)
-        _at_next_retry(retained.world, retained.now)
-        error, _ = asyncio.run(_hourly(retained.secretary))
-        assert isinstance(error, InboxTooLarge)
+        _at_next_retry(world, retained.now)
+        hourly = asyncio.run(_hourly(retained.secretary))
+        assert isinstance(hourly.scheduled, InboxTooLarge)
         halves = _range_rows(retained)
         assert [len(_event_numbers(retained, row)) for row in halves] == [21, 20]
         assert all((row["attempts"], row["content_failures"]) == (0, 0) for row in halves)
+        assert len(model.requests) == calls
 
         _drain_range(retained)
         leaves = _range_rows(retained)
@@ -454,12 +494,12 @@ def test_crash_between_the_last_oversize_failure_and_its_split_resumes_from_stor
         assert len(model.requests[-1]["context"]["events"]) <= CANDIDATE_BOUNDS["max_events"]
 
 
-def test_duplicate_concurrent_callbacks_on_a_retried_range_count_one_failure(tmp_path, monkeypatch) -> None:
+def test_duplicate_concurrent_callbacks_on_a_retried_range_split_it_once(tmp_path, monkeypatch) -> None:
     retained = _retained(tmp_path, monkeypatch)
     with retained.world:
-        world = retained.world
+        world, model = retained.world, retained.model
         _edit_to_candidate(retained)
-        _at_next_retry(retained.world, retained.now)
+        _at_next_retry(world, retained.now)
         [before] = _range_rows(retained)
         trigger = _trigger(retained.events[-1])
 
@@ -484,26 +524,21 @@ def test_duplicate_concurrent_callbacks_on_a_retried_range_count_one_failure(tmp
 
         outcomes = asyncio.run(both())
         monkeypatch.setattr(Backlog, "failed", original)
-        # One records the oversize failure; the other finds the page already changed and reports it as waiting.
+        # One records the refusal and splits; the other finds the page already changed and reports it as waiting.
         assert sorted(type(outcome).__name__ for outcome in outcomes) == ["InboxTooLarge", "SecretaryUnavailable"]
-        assert retained.model.requests[-1]["context"]["events"] and len(retained.model.requests) == 4
-        [after] = _range_rows(retained)
-        assert (after["since"], after["through"], after["status"]) == (before["since"], before["through"], "retry")
-        assert (after["attempts"], after["content_failures"]) == (before["attempts"] + 1, 1)
+        assert len(model.requests) == 4
+        halves = _range_rows(retained)
+        assert [len(_event_numbers(retained, row)) for row in halves] == [21, 20]
+        assert (halves[0]["since"], halves[-1]["through"]) == (before["since"], before["through"])
+        assert all((row["attempts"], row["content_failures"], row["status"]) == (0, 0, "retry") for row in halves)
 
-        # The duplicate cost nothing: the range still splits after exactly max_attempts counted refusals.
-        refusals = 1
-        for _ in _calls():
-            if len(_range_rows(retained)) != 1:
-                break
-            _at_next_retry(retained.world, retained.now)
-            calls = len(retained.model.requests)
-            error, _ = asyncio.run(_hourly(retained.secretary))
-            if len(retained.model.requests) == calls:
-                assert isinstance(error, InboxTooLarge)
-                refusals += 1
-        assert refusals == BACKOFF["max_attempts"]
-        assert [len(_event_numbers(retained, row)) for row in _range_rows(retained)] == [21, 20]
+        # The duplicate cost nothing: the halves recover as a single callback's would, each event in one part.
+        _drain_range(retained)
+        leaves = _range_rows(retained)
+        assert sorted(number for row in leaves for number in _event_numbers(retained, row)) == list(
+            range(1, RANGE_EVENTS + 1)
+        )
+        assert len(leaves) == 7 and all(row["status"] == "ready" for row in leaves)
 
 
 def test_each_callback_behind_a_scan_backlog_assesses_the_earliest_page_until_its_trigger_is_reached(
@@ -545,6 +580,64 @@ def test_each_callback_behind_a_scan_backlog_assesses_the_earliest_page_until_it
         assert len(model.requests) == 3
 
 
+def test_a_short_reply_whose_parent_outweighs_the_byte_bound_gets_a_cited_notice_never_a_summary(
+    tmp_path, monkeypatch
+) -> None:
+    with make_world(tmp_path) as world:
+        worker, model = _worker(world, tmp_path)
+        policy(world, **CANDIDATE_BOUNDS, **BACKOFF)
+        secretary = worker.instance.secretary
+        now = [1000.0]
+        monkeypatch.setattr("baton.agents.secretary.attention.queue.time.time", lambda: now[0])
+        asyncio.run(secretary.activate())
+        room = conversation(world)
+        limit = CANDIDATE_BOUNDS["context_bytes"]
+        parent = say(world, room, "worker", "A long review. " + "y" * 16_000)
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(parent)))
+        assert error is None and result is not None and result["kind"] == "summary"
+        asyncio.run(secretary.acknowledge(result["decision_id"]))
+
+        # A reply whose bytes and its parent's fit together is assessed with the parent as its context.
+        fitting = say(world, room, "reviewer", "A reply that fits. " + "z" * 6_000, reply_to=parent["message_id"])
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(fitting)))
+        assert error is None and result is not None and result["kind"] == "summary"
+        context = model.requests[-1]["context"]
+        assert [entry["source_key"] for entry in context["reply_context"]] == [f"message:{parent['message_id']}"]
+        assert _bytes(context["events"]) < _bytes([*context["events"], *context["reply_context"]]) <= limit
+        asyncio.run(secretary.acknowledge(result["decision_id"]))
+        calls, engine_calls = len(model.requests), len(model.engine_requests)
+
+        # A reply 3,004 bytes longer fits alone, but its parent lies outside its page and counts in full, so together
+        # they pass the byte bound. It is one visible event and cannot split: three counted refusals before any model
+        # call, then a notice that cites the reply alone, never a summary of it.
+        reply = say(world, room, "reviewer", "A reply that does not. " + "z" * 9_000, reply_to=parent["message_id"])
+        alone = _bytes(context["events"]) + 3_004
+        together = alone + _bytes(context["reply_context"])
+        assert alone <= limit < together
+        result, error, _ = asyncio.run(_callback(secretary, _trigger(reply)))
+        assert result is None and isinstance(error, InboxTooLarge)
+        [page] = _retrying(world)
+        assert (page["attempts"], page["content_failures"]) == (1, 1)
+        for refusal in (2, 3):
+            _at_next_retry(world, now)
+            hourly = asyncio.run(_hourly(secretary))
+            assert isinstance(hourly.scheduled, InboxTooLarge)
+            if refusal == 2:
+                [page] = _retrying(world)
+                assert (page["attempts"], page["content_failures"]) == (2, 2)
+        assert (len(model.requests), len(model.engine_requests)) == (calls, engine_calls)
+
+        [notice] = hourly.pending
+        assert notice["kind"] == "failure_notice" and notice["kind"] != "summary"
+        assert notice["decision"] == "wake" and notice["reference_only"] is True
+        assert "No relevance judgment was made." in notice["brief"]
+        assert [ref["source_key"] for ref in notice["source_refs"]] == [f"message:{reply['message_id']}"]
+        assert not _retrying(world)
+        # Delivery waited at the reply; its notice's acknowledgement passes it.
+        assert _delivered(world) < _position(world, reply["message_id"]) <= notice["covered_through"]
+        assert asyncio.run(secretary.acknowledge(notice["decision_id"])) >= notice["covered_through"]
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -575,7 +668,8 @@ def test_an_event_larger_than_the_byte_bound_gets_a_cited_failure_notice_never_a
         asyncio.run(secretary.acknowledge(first["decision_id"]))
         calls, engine_calls = len(model.requests), len(model.engine_requests)
 
-        # Three cheap refusals, each before any model or engine call; newer work goes ahead during the backoff.
+        # One event cannot split, so it keeps the counted path: three cheap refusals, each before any model or engine
+        # call, with newer work going ahead during the backoff.
         result, error, _ = asyncio.run(_callback(secretary, _trigger(large)))
         assert result is None and isinstance(error, InboxTooLarge)
         [page] = _retrying(world)
@@ -587,13 +681,13 @@ def test_an_event_larger_than_the_byte_bound_gets_a_cited_failure_notice_never_a
         assert error is None and newer is not None and newer["kind"] == "summary"
         assert _event_keys([newer]) == Counter([f"message:{after['message_id']}"])
         now[0] = _retrying(world)[0]["next_attempt"]
-        error, pending = asyncio.run(_hourly(secretary))
-        assert isinstance(error, InboxTooLarge)
+        hourly = asyncio.run(_hourly(secretary))
+        assert isinstance(hourly.scheduled, InboxTooLarge)
         assert len(model.requests) == calls + 1 and len(model.engine_requests) == engine_calls + 1  # the newer page
 
         # The notice cites the event, says no judgment was made, and is kept apart from the summaries.
-        [notice] = [result for result in pending if result["kind"] == "failure_notice"]
-        assert [result["kind"] for result in pending if result is not notice] == ["summary"]
+        [notice] = [result for result in hourly.pending if result["kind"] == "failure_notice"]
+        assert [result["kind"] for result in hourly.pending if result is not notice] == ["summary"]
         assert notice["decision"] == "wake" and notice["reference_only"] is True
         assert "No relevance judgment was made." in notice["brief"]
         assert [ref["source_key"] for ref in notice["source_refs"]] == [f"message:{large['message_id']}"]
