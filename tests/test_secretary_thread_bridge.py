@@ -59,6 +59,7 @@ def request(
     principal: str = "planner",
     calls: int = 0,
     instructions: str = POLICY_TEXT,
+    knowledge: str = "Synthetic contextual knowledge.",
     reply_context: list[dict] | None = None,
 ) -> bytes:
     """A protocol 4 turn request as Baton's harness builds it, with `calls` earlier tool exchanges."""
@@ -66,7 +67,7 @@ def request(
         "principal": principal,
         "instructions": instructions,
         "summary_bytes": 4096,
-        "knowledge": "Synthetic contextual knowledge.",
+        "knowledge": knowledge,
         "mode": mode,
         "trigger": events[-1]["source_key"],
         "since": 0,
@@ -514,6 +515,17 @@ def test_long_layers_count_inside_the_bound_and_come_before_every_event(host):
             texts[layer["index"]] = texts.get(layer["index"], "") + layer["text"]
     assert [texts[index] for index in sorted(texts)] == wanted
     assert delivered(read) == printed_as_a_page(events)
+
+
+def test_a_layer_of_raw_line_breaks_is_cut_where_its_printed_runs_end_and_arrives_whole(host):
+    """A layer's text is raw: a line break prints as an escape whose last letter joins the word after it."""
+    knowledge = "\nOk" * 15000
+    wanted = json.loads(request([message(1)], knowledge=knowledge))["input"][1]["content"][0]["text"]
+    _, header = host.start([message(1)], knowledge=knowledge)
+    read = read_all(host, header)
+    assert_within_the_tools(read)
+    shares = [layer for _, page in read for layer in page.get("layers", []) if layer["index"] == 1]
+    assert len(shares) > 1 and "".join(layer["text"] for layer in shares) == wanted
 
 
 def test_the_header_counts_the_pages_and_every_read_agrees(host):
