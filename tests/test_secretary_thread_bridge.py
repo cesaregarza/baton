@@ -176,7 +176,7 @@ class Turn:
 
     def header(self) -> dict:
         code, out = self.host.run("receive", "--wait", "10")
-        assert code == 0 and out and out["status"] == "offered", out
+        assert code == 0 and out and out["status"] == "offered", f"{out}; model exit {self.process.poll()}"
         return out["request"]
 
     def finish(self, timeout: float = 10) -> tuple[int, object]:
@@ -322,10 +322,26 @@ def assert_within_the_tools(read: list[tuple[str, dict]]) -> None:
         assert tool_tokens(line) <= bound, f"page {number} costs {tool_tokens(line):.0f} tokens against {bound}"
 
 
+def index_room() -> float:
+    """The most of a page one event's index line may take: a twentieth, which INDEX_TOKENS must stay within."""
+    return page_bound() / 20
+
+
 def index_bound() -> float:
     bound = module_constant("INDEX_TOKENS")
-    assert isinstance(bound, int | float) and 0 < bound <= page_bound() / 20, f"no small index bound: {bound!r}"
+    assert isinstance(bound, int | float) and 0 < bound <= index_room(), f"no small index bound: {bound!r}"
     return bound
+
+
+def first_page_holding(host: Host, header: dict, source_key: str) -> tuple[int, dict]:
+    """The number and value of the first page holding the event `source_key`, reading the pages in order up to it."""
+    for number in range(1, header["pages"] + 1):
+        code, line = host.printed("read", header["request_id"], "--page", str(number))
+        assert code == 0 and line.strip(), (number, code, line[:200])
+        page = json.loads(line)
+        if any(item["source_key"] == source_key for item in page["events"]):
+            return number, page
+    raise AssertionError(f"none of the {header['pages']} pages holds {source_key}")
 
 
 def form_of(output: dict | None) -> dict:
@@ -638,21 +654,29 @@ def test_guard_the_widest_supported_attention_list_is_a_thousand_names_of_32_cha
 def test_a_long_attention_list_keeps_every_index_line_bounded_and_every_name_in_the_event(host, count):
     """One message whose attention names `count` roles at the longest role name. Its index line, repeated on every
     part, shows what fits under INDEX_TOKENS and counts the rest; the event's JSON keeps every name, and the event
-    takes no more pages than its own size needs at what a page leaves it after that bounded overhead, plus one."""
+    takes no more pages than its own size needs at what a page leaves it after the bounded overhead (the page's frame
+    and an index line of at most `index_room`), plus one. The header's count is checked first, from the event's first
+    page, so an inflated turn fails on its count without being read through."""
     names = longest_roles(count)
     event = message(2, attention=names)
     events = [message(1), event, message(3)]
     _, header = host.start(events)
+    first, opening = first_page_holding(host, header, event["source_key"])
+    part = next(item for item in opening["events"] if item["source_key"] == event["source_key"])
+    empty = {**opening, "events": [{**part, "json": ""}], "index": []}  # the page with no share and no index line
+    frame = tool_tokens(json.dumps(empty, sort_keys=True, ensure_ascii=False))
+    need = tool_tokens(json.dumps(printed_as_a_page([event])[0], ensure_ascii=False)[1:-1])  # as a part's share prints
+    most = math.ceil(need / (page_bound() - frame - index_room())) + 1
+    # From its first page on, the turn's pages hold the event's parts and, on at most one page more, the last message.
+    assert header["pages"] - first <= most, (
+        f"the header counts {header['pages']} pages, so pages {first} to {header['pages'] - 1} at least hold an event "
+        f"that needs at most {most}"
+    )
     read = read_all(host, header)
     assert_within_the_tools(read)
     assert delivered(read) == printed_as_a_page(events)
     assert json.loads(delivered(read)[1])["message"]["attention"] == names
     holding = [page for _, page in read if any(item["source_key"] == event["source_key"] for item in page["events"])]
-    part = next(item for item in holding[0]["events"] if item["source_key"] == event["source_key"])
-    empty = {**holding[0], "events": [{**part, "json": ""}], "index": []}  # the page with no share and no index line
-    frame = tool_tokens(json.dumps(empty, sort_keys=True, ensure_ascii=False))
-    need = tool_tokens(json.dumps(printed_as_a_page([event])[0], ensure_ascii=False)[1:-1])  # as a part's share prints
-    most = math.ceil(need / (page_bound() - frame - index_bound())) + 1
     assert len(holding) <= most, f"{len(holding)} pages hold an event that needs at most {most}"
     lines = [line for _, page in read for line in page["index"]]
     assert all(tool_tokens(json.dumps(line, ensure_ascii=False)) <= index_bound() for line in lines)
