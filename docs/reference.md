@@ -254,7 +254,9 @@ nonempty brief, including digest results with decision `keep`. Sanitized engine,
 are reported separately in worker health/status and logged without provider response bodies or credentials. A model outage
 without a forced engine wake remains an outage, while an unavailable model after a forced wake produces a notice.
 Digest failures retain digest mode and eventually produce a keep notice, never an alert or wake. After a crash,
-the queue reuses a saved result for the same policy and current source window before invoking either provider.
+the queue reuses a saved result for the same policy and current source window before invoking either provider,
+and returns it only to a call with its trigger and catch-up label; for a call of another kind it finishes that page
+and returns nothing from it. A split, combine, failure or finish changes a stored page only as its caller read it.
 Model failures distinguish missing credentials, authentication rejection, invalid requests, timeouts, and outages.
 Connection/pool timeouts remain outages; read/write timeouts and HTTP 408/504 responses can count toward
 splitting only after another page answers. A supplied key clears a current missing-credential failure to

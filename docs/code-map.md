@@ -170,7 +170,7 @@ event. A visible trigger that is not on the bounded page makes that page histori
 in a retry page. A trigger that is not a visible event fails. An untriggered call during failed-page backoff reports retryable unavailability. The worker reads complete bounded pages and reserves model output space for citations.
 Provider outages back off in their original mode. Invalid model content/output and oversized windows count
 toward `max_attempts`; an oversized range that can split splits on its first refusal before any engine or model call. Timeouts, rejected requests, and failed commands also count after another page succeeds
-under the same policy since that page last failed. Saved results recover before either provider runs again. Held contiguous pages combine into
+under the same policy since that page last failed. Saved results recover before either provider runs again, and are returned only to a call with their trigger and catch-up label. Held contiguous pages combine into
 bounded digests; digest failures remain digest work and eventually yield a keep notice. Worker health is tracked
 separately from page retry state. Each poll reserves one full budget for a fresh alert and one for scheduled work;
 one eligible scheduled lane receives the full reserved budget per poll, with retry and digest priority alternating.

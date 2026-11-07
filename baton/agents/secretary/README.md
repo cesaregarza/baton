@@ -260,7 +260,14 @@ the page-specific failure rule above.
 
 Before retrying, the queue checks for an already persisted result for the same policy, page, mode, activation floor,
 and current source content. It finishes that result without invoking the engine or model again. This closes the
-restart window between saving a summary or notice and recording queue completion.
+restart window between saving a summary or notice and recording queue completion. The result is returned only to a
+call with its trigger and catch-up label, as a cached result is; a call of another kind finishes the page with it,
+gets no result from that page, and goes on as if the page were done, so a callback scans the next page. A failure
+notice carries the call's trigger or catch-up label as a summary does, and a notice's id includes them.
+
+A caller that stalls between reading a stored page and changing it changes nothing if another caller changed the page
+meanwhile: a split or digest combine compares every column of the page as it was read, a failure compares all of
+them but the passed-over mark, and a finish takes only a retry of the same range and mode.
 
 Pages use the configured `max_events`, `context_bytes`, `summary_bytes`, and citation budget. They are complete
 and never silently truncated. Retried and split pages preserve their original alert or digest mode.
