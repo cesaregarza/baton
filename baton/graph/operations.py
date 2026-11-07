@@ -163,8 +163,7 @@ def read(source_path, state_path, *, strands=(), history=False, expand_statement
         for key, value in state["decisions"].items()
         if (history or value["status"] == "active")
         and (
-            value["applies_to"] == ["all"]
-            or set(value["applies_to"]) & (set(strands) if strands else state["strands"].keys())
+            value["applies_to"] == ["all"] or set(value["applies_to"]) & (set(strands) if strands else selected.keys())
         )
     }
     statement_ids = {key for strand in selected.values() for key in strand["statement_ids"]}

@@ -12,7 +12,10 @@ Represent every new post with statements OR a disposition explaining ceremony/re
 Use stable S1, S2 strand IDs and D1, D2 decision IDs, allocating consecutive unused numbers.
 Strands may overlap. Every statement lists all its strands and each strand lists its full membership.
 Refresh every affected strand's understandable summary and open work through batch.end, citing
-supporting post:N or statement IDs. Preserve unresolved contradictions and blockers. Closing a
+supporting post:N or statement IDs. open_work must contain only source-backed requested or remaining
+work, not new tasks inferred from absent reports or evidence. Label inference-only evidence gaps in
+summary prose, never turn them into action items, approval gates, or reasons to keep a settled strand
+active. Preserve unresolved source-backed contradictions and blockers. Closing a
 strand does not grant permission, authority or completion of a real task. Preserve still-applicable
 constraints as active shared decisions (applies_to ['all'] or selected strand IDs), including when
 its original discussion closes. Deduplicate decisions across strands.

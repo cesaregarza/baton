@@ -115,7 +115,14 @@ def proposal(request):
                 "applies_to": ["all"],
                 "status": "active",
                 "evidence": ["4-1"],
-            }
+            },
+            {
+                "id": "D2",
+                "text": "Use JSON.",
+                "applies_to": ["S1"],
+                "status": "active",
+                "evidence": ["1-1"],
+            },
         ]
         result["edges"] = [
             edge("3-1", "1-1", "supersedes"),
@@ -159,6 +166,10 @@ def test_incremental_native_publication_live_tail_and_history(tmp_path):
     assert history["statements"]["1-1"]["surviving_text"] == "Use JSON."
     assert history["statements"]["1-1"]["quotes"] == ["Use JSON — keep 24-hour receipts."]
     assert history["strands"]["S1"]["summary_through"] == 5
+    assert set(history["decisions"]) == {"D1", "D2"}
+    assert set(read(source, state, strands=["S1"])["decisions"]) == {"D1", "D2"}
+    assert set(read(source, state, strands=["S2"])["decisions"]) == {"D1"}
+    assert set(read(source, state, strands=["S1"], history=True)["decisions"]) == {"D1", "D2"}
     assert read(source, state, strands=["S1"])["decisions"]["D1"]["status"] == "active"
     # Installed and module command surfaces share the same parser without host config.
     result = subprocess.run(
