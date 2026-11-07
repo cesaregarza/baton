@@ -125,7 +125,7 @@ class DecisionRun:
         cached = await database.call(log.get, key)
         if cached is not None:
             await database.call(persist, self.secretary, policy, cached)
-            return {**cached, "cached": True, **({"catch_up": True} if self.catch_up else {})}
+            return {**cached, "cached": True}  # a catch-up result was stored with its catch_up label
         outcome = Outcome(policy, window, self.floor, context["mode"], self.trigger)
         result = await self._infer(database, harness, context, outcome, key, forced)
         if self.catch_up:
