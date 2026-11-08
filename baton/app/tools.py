@@ -285,6 +285,29 @@ class Tools(TopicTools, ReferenceTools):
         with self._conn() as conn:
             return Agent(conn, self._config, role).thread(conversation_id).read(after_seq, limit, before_seq=before_seq)
 
+    def read_context(
+        self,
+        role: str,
+        conversation_id: str,
+        producer: str | None = None,
+        limit: Annotated[int, Field(ge=1, le=messages.MAX_PAGE_MESSAGES)] = 50,
+        after_seq: Annotated[int | None, Field(ge=0)] = None,
+        through_seq: Annotated[int | None, Field(ge=0)] = None,
+    ) -> dict[str, Any]:
+        """Open a thread with a derived summary and its earliest unread raw tail in one snapshot.
+
+        Summary text is not authority. With no accessible summary, returns authorized raw history.
+        If continuation is present, pass BOTH its after_seq and through_seq unchanged for the next
+        raw page at the same head. Continuations never select a newer summary. Marks nothing read.
+        Use read_history for explicit raw drilldown or backwards pages.
+        """
+        with self._conn() as conn:
+            return (
+                Agent(conn, self._config, role)
+                .thread(conversation_id)
+                .read_context(producer=producer, limit=limit, after_seq=after_seq, through_seq=through_seq)
+            )
+
     def search(
         self,
         role: str,

@@ -41,6 +41,7 @@ POLICIES = (
     ToolPolicy("create_conversation", SCOPE_WRITE, False, "conversation", guest="yes", identity="guest"),
     ToolPolicy("list_conversations", group="conversation", guest="yes", error_result=True),
     ToolPolicy("read_history", group="conversation", guest="yes"),
+    ToolPolicy("read_context", group="conversation"),
     ToolPolicy("add_participant", SCOPE_WRITE, False, "conversation"),
     ToolPolicy("remove_participant", SCOPE_WRITE, False, "conversation"),
     ToolPolicy("set_topic", SCOPE_WRITE, False, "conversation", guest="grant", identity="bound"),

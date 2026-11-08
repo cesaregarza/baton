@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from baton import changes, derived
-from baton.config import Config
+from baton.config import Config, config_path
 from baton.database.store import connection
 from baton.errors import InvalidRequest
 
@@ -60,11 +60,18 @@ def add_commands(commands: Any) -> None:
         f"{derived.RECENT} alone, when [search] rolling_window_messages is set",
     )
     begin.add_argument("--generation", help="the generation to fill; default: the active one")
+    begin.add_argument("--through-seq", type=int, help="cumulative summary ceiling; newer posts stay live")
     begin.set_defaults(
         handler=lambda config, args: _index(
             config,
             lambda conn: derived.begin_batch(
-                conn, config, args.producer, args.conversation, args.kinds.split(","), generation=args.generation
+                conn,
+                config,
+                args.producer,
+                args.conversation,
+                args.kinds.split(","),
+                generation=args.generation,
+                through_seq=args.through_seq,
             ),
         )
     )
@@ -86,6 +93,7 @@ def add_commands(commands: Any) -> None:
             config, lambda conn: derived.commit_batch(conn, config, args.producer, args.batch, _json_file(args.file))
         )
     )
+    _add_graph_commands(index)
     generation = index.add_parser(
         "generation", help="make, switch to, or drop a producer's generations"
     ).add_subparsers(dest="generation_command", required=True)
@@ -128,3 +136,62 @@ def _json_file(path: str, flag: str = "--file") -> Any:
         return json.loads(sys.stdin.read() if path == "-" else Path(path).read_text())
     except (OSError, ValueError) as error:
         raise InvalidRequest(f"{flag} must name readable JSON: {type(error).__name__}") from None
+
+
+def _graph_export(config: Config, args: Any) -> Any:
+    from baton.graph.export import export_source, invalid_graph
+
+    return invalid_graph(
+        lambda: _index(
+            config,
+            lambda conn: export_source(
+                conn,
+                config,
+                args.conversation,
+                args.file,
+                through_seq=args.through_seq,
+                max_posts=args.max_posts,
+                max_bytes=args.max_bytes,
+                protected_paths=(config_path(args.config),),
+            ),
+            read_only=True,
+        )
+    )
+
+
+def _graph_publish(config: Config, args: Any) -> Any:
+    from baton.graph.export import invalid_graph
+    from baton.graph.publication import publish_graph
+
+    return invalid_graph(
+        lambda: _index(
+            config,
+            lambda conn: publish_graph(
+                conn,
+                config,
+                args.producer,
+                args.source,
+                args.state,
+                receipt_path=args.receipt,
+                generation=args.generation,
+                protected_paths=(config_path(args.config),),
+            ),
+        )
+    )
+
+
+def _add_graph_commands(index: Any) -> None:
+    export = index.add_parser("graph-export", help="save a complete native prefix for graph generation")
+    export.add_argument("--conversation", required=True)
+    export.add_argument("--file", required=True)
+    export.add_argument("--through-seq", type=int)
+    export.add_argument("--max-posts", type=int, default=10_000)
+    export.add_argument("--max-bytes", type=int, default=20_000_000)
+    export.set_defaults(handler=_graph_export)
+    publish = index.add_parser("graph-publish", help="publish a completed graph as a cumulative summary")
+    publish.add_argument("--producer", required=True)
+    publish.add_argument("--source", required=True)
+    publish.add_argument("--state", required=True)
+    publish.add_argument("--receipt", help="private attempt file; default is a per-publication sibling file")
+    publish.add_argument("--generation")
+    publish.set_defaults(handler=_graph_publish)
