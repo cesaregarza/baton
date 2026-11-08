@@ -228,6 +228,24 @@ class ReconcileRequired(BatonError):
         self.extra = {"pairs": pairs, "bound": bound, "key": "indexer.max_activation_reconcile"}
 
 
+class GraphUnavailable(BatonError):
+    """No served summary with a graph attachment that the caller may read; the same refusal whatever the cause."""
+
+    code = "graph_unavailable"
+
+
+class SnapshotUnavailable(BatonError):
+    """The named graph snapshot is no longer the served one, or never belonged to this conversation: start again."""
+
+    code = "snapshot_unavailable"
+
+
+class ItemTooLarge(BatonError):
+    """One indivisible graph detail exceeds the response cap; it is never returned in part."""
+
+    code = "item_too_large"
+
+
 class CursorExpired(BatonError):
     """The change-log position is from another log, or older than the oldest change kept: start again from state."""
 

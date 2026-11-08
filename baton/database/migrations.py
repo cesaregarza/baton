@@ -8,9 +8,9 @@ from collections.abc import Callable
 
 from .driver import Connection
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22)
 
 
 # The version-2 tables a migration rebuilds, with the columns they keep.
@@ -124,6 +124,8 @@ _ADDED_TABLES = {
     19: ("alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes", "events_receipts"),
     # Deliverable secretary summaries outlive each private secretary's working state.
     21: ("secretary_summaries",),
+    # A summary version's optional canonical graph snapshot (`baton.graph.snapshot`). Existing rows have none.
+    23: ("graph_snapshots",),
 }
 
 

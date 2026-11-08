@@ -51,23 +51,10 @@ def read_context(
             start = after_seq
         else:
             if config.search.enabled:
-                candidates = [
-                    item
-                    for item in search.read_artifacts(conn, config, role, conversation_id, producer)["artifacts"]
-                    if item["kind"] == "summary" and item["body"].strip() and 0 < item["covered_through_seq"] <= head
-                ]
-                if candidates:
-                    summary = min(
-                        candidates,
-                        key=lambda item: (
-                            -item["covered_through_seq"],
-                            item["producer"],
-                            item["scope_id"],
-                            item["generation"],
-                            item["version_id"],
-                        ),
-                    )
-                else:
+                summary = search.summary_winner(
+                    search.read_artifacts(conn, config, role, conversation_id, producer)["artifacts"], head
+                )
+                if summary is None:
                     fallback = "no_accessible_summary"
             else:
                 fallback = "search_disabled"

@@ -258,8 +258,9 @@ can also send replies.
 ## Storage
 
 The host uses one SQLite database in WAL mode. Writes use `BEGIN IMMEDIATE` transactions to serialize
-dependent updates across the server, CLI, and dispatcher. This revision uses schema 20 and upgrades
-schemas 2 through 19 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
+dependent updates across the server, CLI, and dispatcher. This revision uses schema 23 and upgrades
+schemas 2 through 22 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
+Schema 23 adds `graph_snapshots`, a summary version's optional canonical graph; existing rows have none.
 
 The upgrade creates topic records for existing conversation topic paths and any missing parents. It derives
 each topic's members from participants in conversations filed directly there, excluding `guest`. A topic

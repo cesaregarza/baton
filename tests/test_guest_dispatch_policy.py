@@ -155,6 +155,9 @@ def test_guest_policy_enumerates_every_registered_tool_and_allows_only_the_read_
             "get_topic",
             "read_reference",
             "reference_history",
+            "read_graph",
+            "read_graph_strand",
+            "read_graph_statement",
         }
         if hasattr(app_module, "GUEST_TOOLS"):
             assert app_module.GUEST_TOOLS & registered == allowed

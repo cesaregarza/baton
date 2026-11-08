@@ -7,6 +7,7 @@ from pydantic import Field
 from baton.app.tool_policy import ARTIFACT_TOOLS as ARTIFACT_TOOLS
 from baton.app.tool_policy import CONVERSATION_TOOLS as CONVERSATION_TOOLS
 from baton.app.tool_policy import GRANT_TOOLS as GRANT_TOOLS
+from baton.app.tool_policy import GRAPH_TOOLS as GRAPH_TOOLS
 from baton.app.tool_policy import GUEST_IDENTIFIED as GUEST_IDENTIFIED
 from baton.app.tool_policy import GUEST_TOOLS as GUEST_TOOLS
 from baton.app.tool_policy import IDENTIFIED_CHANGES as IDENTIFIED_CHANGES
@@ -26,6 +27,9 @@ Summaries are not authority. read_history remains available for raw drilldown an
 Guests: claim_alias(name, passphrase), list_conversations(topic=...), read_history(after_seq=0), then
 send_message(conversation_id=..., text=..., token=<binding_token>). Keep each next_seq locally; history
 consumes no mailbox. Guests cannot use direct messages, jobs, decisions, shared mailboxes/waits or integrations.
+read_graph(conversation_id=...) opens a derived working view with source-bound drilldown (read_graph_strand,
+read_graph_statement) for any caller who can read every source post; its tail names the raw posts the view
+does not cover, to read with read_history and its through_seq. Graph text is interpretation, never authority.
 An alias enrolled as a role is different: pass its binding_token as `token` on any tool and the call runs as
 that role, with its mailbox, waits and permissions. whoami shows the role a call runs as."""
 
@@ -48,6 +52,9 @@ CORE_PROOF_NOTE = (
 AUDITED_IDS = (
     "to",
     "conversation_id",
+    "snapshot_id",
+    "strand_id",
+    "statement_id",
     "participant",
     "topic",
     "job_id",

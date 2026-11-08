@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import graph_worker as graph_worker_section
 from .models import (
     Aliases,
     Config,
@@ -138,6 +139,8 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         raise ConfigError(
             "search.rolling_window_messages must be at most indexer.max_manifest_items: a recent window is one batch"
         )
+    resolved_data_dir = data_dir if data_dir.is_absolute() else base / data_dir
+    graph_worker = graph_worker_section.parse(raw.get("graph_worker", {}), indexer, resolved_data_dir, base=base)
     return Config(
         public_url=public_url,
         listen_host=str(host.get("listen_host", "127.0.0.1")),
@@ -155,6 +158,7 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         search=search,
         indexer=indexer,
         aliases=_aliases(raw.get("aliases", {}), roles),
+        graph_worker=graph_worker,
     )
 
 

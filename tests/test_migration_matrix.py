@@ -154,6 +154,9 @@ def test_every_older_schema_there_is_a_fixture_for_reaches_the_current_one_whole
     assert len(set(topic_ids)) == len(topic_ids), f"two topics share an id: {topic_ids}"
     summaries = {row["name"] for row in db.execute("PRAGMA table_info(secretary_summaries)")}
     assert summaries == {"cursor", "secretary_id", "principal", "decision_id", "result", "created_at"}
+    # Schema 23's attachment table arrives empty: no existing summary version gains a graph by upgrade.
+    assert db.execute("SELECT COUNT(*) FROM graph_snapshots").fetchone()[0] == 0
+    assert "snapshot" in {row["name"] for row in db.execute("PRAGMA table_info(graph_snapshots)")}
     indexes = {row["name"] for row in db.execute("PRAGMA index_list(secretary_summaries)")}
     assert "secretary_summaries_by_principal" in indexes, f"version {version} did not gain the summaries index"
 
@@ -260,7 +263,7 @@ def test_schema_22_adds_message_identity_index_to_old_and_fresh_databases(tmp_pa
 
     db = connect(config.db_path)
     try:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION == 22
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION >= 22
         assert tuple(db.execute("SELECT id, recipient, seq, text FROM messages").fetchone()) == (
             "msg_v21",
             "assistant",
@@ -310,4 +313,5 @@ WHOLE_TABLES = {
     18: {"reference_docs", "reference_revisions"},  # the documents a topic keeps, and their revisions
     19: {"alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes", "events_receipts"},
     21: {"secretary_summaries"},  # shared secretary summary archive
+    23: {"graph_snapshots"},  # a summary version's optional canonical graph snapshot
 }  # records kept instead of overwritten or expired

@@ -13,6 +13,7 @@ from pydantic import Field
 from baton import aliases, conversations, jobs, messages, topics
 from baton import search as search_module
 from baton.agents import Agent
+from baton.app.graph_tools import GraphTools
 from baton.app.reference_tools import ReferenceTools
 from baton.app.topic_tools import TopicTools
 from baton.config import Config
@@ -36,7 +37,7 @@ def _conversation_cursor(cursor: dict[str, str] | None) -> tuple[str, str] | Non
     return cursor["created_at"], cursor["conversation_id"]
 
 
-class Tools(TopicTools, ReferenceTools):
+class Tools(TopicTools, ReferenceTools, GraphTools):
     """The tool bodies. `role` is the caller's; each call opens its own connection."""
 
     def __init__(self, config: Config) -> None:
@@ -276,14 +277,28 @@ class Tools(TopicTools, ReferenceTools):
                 "from the result's prev_seq.",
             ),
         ] = None,
+        through_seq: Annotated[
+            int | None,
+            Field(
+                ge=0,
+                description="Forward reads only: a fixed inclusive head, such as read_graph's tail.through_seq. Keep "
+                "it while replacing after_seq with next_seq until next_seq reaches it; a last empty page "
+                "reports remaining gaps. Not with before_seq.",
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         """Retained conversation messages readable by your role, numbered in conversation order.
 
-        Keep next_seq locally for catch-up. This marks nothing read and moves no shared delivery cursor.
+        Keep next_seq locally for catch-up. Fewer rows than limit never means the page was the last one.
+        This marks nothing read and moves no shared delivery cursor.
         """
         conversations.require_enabled(self._config)
         with self._conn() as conn:
-            return Agent(conn, self._config, role).thread(conversation_id).read(after_seq, limit, before_seq=before_seq)
+            return (
+                Agent(conn, self._config, role)
+                .thread(conversation_id)
+                .read(after_seq, limit, before_seq=before_seq, through_seq=through_seq)
+            )
 
     def read_context(
         self,

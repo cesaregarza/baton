@@ -308,3 +308,74 @@ newer summary. Their `summary` and `covered_through_seq` are null. Inspect `tail
 `retention_gaps`; never treat a bounded page as acknowledgement of unseen messages. MCP consumers
 can use `read_context` with `conversation_id`, optional `producer` and `limit`, and the same paired
 `after_seq`/`through_seq` continuation fields.
+
+## Background worker and graph readers
+
+Production generation is a background host service, never an interactive command or an MCP generation
+call. The `[graph_worker]` section (see `baton.example.toml`) is off by default; when enabled under
+`baton serve`, the worker polls the allowlisted conversations in read snapshots, exports each canonical
+native prefix into its private `state_dir`, runs the existing prepare/apply contract one batch at a
+time, produces a compact working view, and publishes view and graph together through the derived batch
+protocol. `baton index graph-worker status` shows its ledger; `baton index graph-worker reset
+--conversation ID` is the only way a blocked record resumes, and it needs the service stopped first.
+The manual export/prepare/apply/publish commands above remain diagnostic and test harnesses.
+
+Every model launch is reserved first in one atomically replaced ledger (`ledger.json`) under a
+process-lifetime lock, so a crash consumes it and a second worker exits without inference. Extraction
+gets at most two calls per base W, compaction two per accepted graph digest, and the daily cap (default
+8) and per-cycle cap (default 4) bound launches across every conversation; a correction call carries the
+sanitized validation error and rejected output only when they fit `max_input_bytes`. Exhaustion, an
+input overflow (the retained context plus one post exceeding `max_input_bytes`, as the 512 KB pilot
+baseline hit), a missing required recall, an authentication or isolation failure, or an edited source
+prefix sets the conversation `blocked`; new posts, restarts and new days never clear it. A daily cap
+only defers to the next UTC day. Publication never calls a model: it reuses the saved compact view and
+the derived receipt, waits 60 seconds between attempts, and blocks after three per graph digest. Native
+calls count launches, wall time and bytes; `recent_calls` reports observed turns and usage as the client
+reported them, never a dollar figure. Retained-context compression and localized repair are not part of
+this increment: a large thread that overflows the input ceiling stays blocked, visibly, until an operator
+intervenes.
+
+The compact view is checked structurally before publication: it must name exactly the active strands and
+the active decisions applicable to them (or to all), cite only evidence that resolves within W, cite at
+least one recorded reference for every listed item, bind the exact snapshot digest, and fit
+`min(12000, max_artifact_bytes)` bytes. The deterministic rendering is published without a model call
+when it already fits. The instructions ask the writer to keep requested next work and its owners,
+unresolved contradictions, continuing shared constraints and the exact artifact or test scope the next
+action needs, to state repeated rules once, to put historical proof behind references, to attribute
+claims to source authors and to separate absence of evidence from requested work; they forbid inventing
+any permission, adoption, approval or completion gate. These checks establish coverage, not truth, and a
+view may well be longer than the conversation it summarizes.
+
+Three provider modes share one `produce(request, schema, limits)` interface. `http` is one
+OpenAI-compatible chat-completions request with a strict JSON schema, run under a single deadline of
+`call_timeout_seconds` for connect, headers and body together. A service stop cancels whichever call is in
+flight, in every mode, and waits for its connection or process group to be cleaned up before shutdown
+completes; the spent attempt stays counted and nothing returned during cancellation is applied or
+published. `codex` and `claude` launch the
+installed, already-authenticated clients: fixed argv, explicit model, an isolated temporary working
+directory, no shell, an allowlisted environment with only runtime basics and the configured
+`credential_env` names (never `BATON_*`), bounded stdin/stdout/stderr and wall time, and process-group
+cleanup on cancellation. Codex is pinned to the inspected `codex-cli 0.167.x` profile: `exec
+--ignore-user-config --ephemeral --sandbox read-only --skip-git-repo-check --json --output-schema
+--output-last-message -C TEMP` with `approval_policy="never"`, `web_search="disabled"` and
+`features.NAME=false` for `shell_tool`, `apps`, `plugins`, `hooks`, `multi_agent`, `memories`,
+`view_image`, `image_generation`, `browser_use`, `computer_use` and `request_permissions_tool`; the
+worker verifies the version, the documented flags and the feature list before its first call and accepts
+only thread/turn status, usage and assistant text or reasoning events. Claude Code is pinned to the
+inspected `2.1.296` help: `--print --output-format json --json-schema SCHEMA --model MODEL --tools ""
+--strict-mcp-config --mcp-config EMPTY --safe-mode --disable-slash-commands --no-session-persistence`,
+reading `structured_output` and refusing any recorded permission denial or tool use; the turn count is
+reported, not judged, because structured output may take the SDK more than one turn. `--bare` is never
+used because it disables OAuth. A client outside these profiles is unavailable until reverified. Read-only
+sandboxing and never-approval contain whatever built-in surface documented controls cannot remove; a
+bounded pilot must inspect the real event stream before enrollment widens.
+
+Readers see the result through three read-only MCP tools: `read_graph` opens the working view with strand
+cards, applicable decisions and a `tail` naming the raw posts after W, `read_graph_strand` lists a
+strand's statements or decisions, and `read_graph_statement` returns one immutable statement with quotes,
+evidence and its edges or strands. A graph is served only when the caller may read every source message,
+through the same predicate as `read_artifacts`; a guest with `can_view_all_conversations` therefore
+reads board graphs, and a guest without it gains nothing. Follow `tail.read_history_args` with
+`read_history`, keeping `through_seq` fixed and replacing `after_seq` with `next_seq` until it reaches the
+head; a short page is never completion, and `retention_gaps` name what is gone. A newer publication or a
+lost input during paging answers `snapshot_unavailable` or `graph_unavailable`; open the graph again.
