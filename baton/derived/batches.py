@@ -324,6 +324,25 @@ def _validate_artifact_inputs(
             segments=len(merged),
             items=provenance._count(merged),
         )
+    if "graph_snapshot" in artifact:
+        _validate_graph_snapshot(conn, manifest, artifact["graph_snapshot"])
+
+
+def _validate_graph_snapshot(conn: Connection, manifest: dict, snapshot: dict) -> None:
+    """The attachment is checked against the canonical native posts, never against the producer's own files."""
+    from baton.graph import snapshot as graph_snapshot  # the graph package publishes through this module
+    from baton.graph.contract import GraphError
+    from baton.graph.export import native_prefix
+
+    try:
+        if snapshot.get("conversation_id") != manifest["conversation_id"]:
+            raise GraphError("graph snapshot names another conversation")
+        if snapshot.get("covered_through_seq") != manifest["window"]["to_seq"]:
+            raise GraphError("graph snapshot W differs from the summary's coverage")
+        native = native_prefix(conn, manifest["conversation_id"], manifest["window"]["to_seq"])
+        graph_snapshot.validate(snapshot, native)
+    except GraphError as error:
+        raise InvalidRequest(f"graph_snapshot rejected: {error}") from None
 
 
 def _write_message_vectors(conn: Connection, manifest: dict, embedding: dict | None, owed: dict) -> None:
@@ -415,18 +434,7 @@ def _commit_request(payload: Any) -> tuple[str, list[dict[str, Any]], list[dict[
     artifacts = payload.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise InvalidRequest("artifacts is a non-empty list")
-    canonical = []
-    for artifact in artifacts:
-        if not isinstance(artifact, dict) or artifact.get("kind") not in (*KINDS, RECENT):
-            raise InvalidRequest(f"each artifact has a kind from {', '.join((*KINDS, RECENT))}")
-        body, citations, expected = artifact.get("body"), artifact.get("citations"), artifact.get("expected_version")
-        if not isinstance(body, str):
-            raise InvalidRequest(f"the {artifact['kind']} body is a string")
-        if not isinstance(citations, list) or not all(isinstance(cited, str) for cited in citations):
-            raise InvalidRequest(f"the {artifact['kind']} citations are a list of message ids")
-        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
-            raise InvalidRequest(f"the {artifact['kind']} expected_version is a whole number")
-        canonical.append({"kind": artifact["kind"], "body": body, "citations": citations, "expected_version": expected})
+    canonical = [_commit_artifact(artifact) for artifact in artifacts]
     if len({artifact["kind"] for artifact in canonical}) != len(canonical):
         raise InvalidRequest("each kind appears once in a commit")
     vectors, skips = (
@@ -437,6 +445,24 @@ def _commit_request(payload: Any) -> tuple[str, list[dict[str, Any]], list[dict[
     if len(set(seen)) != len(seen):
         raise InvalidRequest("each item has one vector or one skip, not both and not twice")
     return request_id, sorted(canonical, key=lambda artifact: artifact["kind"]), vectors, skips
+
+
+def _commit_artifact(artifact: Any) -> dict[str, Any]:
+    if not isinstance(artifact, dict) or artifact.get("kind") not in (*KINDS, RECENT):
+        raise InvalidRequest(f"each artifact has a kind from {', '.join((*KINDS, RECENT))}")
+    body, citations, expected = artifact.get("body"), artifact.get("citations"), artifact.get("expected_version")
+    if not isinstance(body, str):
+        raise InvalidRequest(f"the {artifact['kind']} body is a string")
+    if not isinstance(citations, list) or not all(isinstance(cited, str) for cited in citations):
+        raise InvalidRequest(f"the {artifact['kind']} citations are a list of message ids")
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+        raise InvalidRequest(f"the {artifact['kind']} expected_version is a whole number")
+    entry = {"kind": artifact["kind"], "body": body, "citations": citations, "expected_version": expected}
+    if "graph_snapshot" in artifact:  # part of the commit's identity: a different graph is a different commit
+        if artifact["kind"] != "summary" or not isinstance(artifact["graph_snapshot"], dict):
+            raise InvalidRequest("graph_snapshot is an object attached to a summary artifact only")
+        entry["graph_snapshot"] = artifact["graph_snapshot"]
+    return entry
 
 
 def _replay(conn: Connection, receipt: Row) -> dict[str, Any]:

@@ -65,6 +65,8 @@ def read_conversation(args: argparse.Namespace) -> Any:
     arguments = {"conversation_id": args.conversation_id, "after_seq": args.after_seq, "limit": args.limit}
     if args.conversation_command == "context":
         arguments |= {"producer": args.producer, "through_seq": args.through_seq}
+    elif args.through_seq is not None:  # an older host without the argument keeps answering plain history
+        arguments["through_seq"] = args.through_seq
     return call(args, f"read_{args.conversation_command}", arguments)
 
 

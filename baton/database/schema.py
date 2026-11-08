@@ -338,6 +338,17 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS artifact_inputs_by_seq ON artifact_inputs (conversation_id, from_seq, to_seq)",
     "CREATE INDEX IF NOT EXISTS artifact_inputs_by_version ON artifact_inputs (version_id)",
     "CREATE TABLE IF NOT EXISTS artifact_depends_on (version_id TEXT PRIMARY KEY, prior_id TEXT NOT NULL)",
+    # A summary version's optional canonical graph snapshot (baton.graph.snapshot), written in the same commit
+    # transaction as the version itself. Immutable; it lives and dies with its version, and nothing indexes its text.
+    """CREATE TABLE IF NOT EXISTS graph_snapshots (
+        version_id TEXT PRIMARY KEY REFERENCES artifact_versions(id) ON DELETE CASCADE,
+        conversation_id TEXT NOT NULL,
+        covered_through_seq INTEGER NOT NULL,
+        graph_digest TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        snapshot TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
     # One vector per item per generation, as little-endian float32; Baton stores them and never computes one.
     """CREATE TABLE IF NOT EXISTS vectors (
         generation TEXT NOT NULL,

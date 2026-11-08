@@ -1,5 +1,6 @@
 """Offline graph scenarios: incremental publication and one-call provider boundaries."""
 
+import contextlib
 import copy
 import json
 import subprocess
@@ -442,7 +443,7 @@ def test_api_serialization_converges_with_native_and_never_retries(tmp_path, mon
     options = ProviderOptions(
         "https://provider.invalid/v1", "explicit-model", api_key_env="GRAPH_TEST_KEY", max_output_tokens=300
     )
-    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+    with contextlib.nullcontext(httpx.AsyncClient(transport=httpx.MockTransport(provider))) as client:
         result = run(
             source,
             tmp_path / "api-state",

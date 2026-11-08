@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from baton.conversations import Conversation, require_enabled
+from baton.conversations import Conversation, queries, require_enabled
+from baton.errors import InvalidRequest
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -16,12 +17,34 @@ class Thread:
     agent: Agent
     id: str
 
-    def read(self, after_seq: int = 0, limit: int = 50, *, before_seq: int | None = None) -> dict[str, Any]:
-        """Read retained history visible to this agent without advancing its inbox."""
+    def read(
+        self, after_seq: int = 0, limit: int = 50, *, before_seq: int | None = None, through_seq: int | None = None
+    ) -> dict[str, Any]:
+        """Read retained history visible to this agent without advancing its inbox.
+
+        `through_seq` fixes an inclusive forward head, so a client can page the raw tail a graph or summary
+        leaves uncovered without a later post moving the target. History authorizes first; only then is a
+        ceiling above the current head refused, so a forged ceiling reveals nothing about a private thread.
+        """
         require_enabled(self.agent.config)
-        return Conversation(self.agent.connection, self.id).history(
-            self.agent.role, after_seq, limit, before_seq=before_seq, config=self.agent.config
-        )
+        conversation = Conversation(self.agent.connection, self.id)
+        if through_seq is None:
+            return conversation.history(
+                self.agent.role, after_seq, limit, before_seq=before_seq, config=self.agent.config
+            )
+        with self.agent.connection.snapshot():
+            page = conversation.history(
+                self.agent.role,
+                after_seq,
+                limit,
+                before_seq=before_seq,
+                config=self.agent.config,
+                through_seq=through_seq,
+            )
+            head = queries._load(self.agent.connection, self.id)["last_seq"]
+        if through_seq > head:
+            raise InvalidRequest("through_seq cannot exceed the conversation head")
+        return page
 
     def read_context(
         self,

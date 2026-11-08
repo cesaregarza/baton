@@ -35,6 +35,8 @@ SNIPPET_CHARS = 160
 ARTIFACT_KINDS = (*derived.KINDS, derived.RECENT)
 # The first message a version was made from, which a recent window reports as where it starts.
 FIRST_INPUT = "(SELECT MIN(i.from_seq) FROM artifact_inputs i WHERE i.version_id = v.id) AS first_input"
+# Whether a summary version carries a canonical graph snapshot; the blob itself is never inlined in a label.
+HAS_GRAPH = "EXISTS (SELECT 1 FROM graph_snapshots g WHERE g.version_id = v.id) AS has_graph"
 
 
 def keyword_mode(conn: Connection) -> str:
@@ -309,7 +311,7 @@ def _artifact_hits(
     if mode == "fts5":
         values["match"] = _match(terms)
         rows = conn.execute(
-            f"WITH matched AS MATERIALIZED (SELECT v.*, c.last_seq, {FIRST_INPUT},"
+            f"WITH matched AS MATERIALIZED (SELECT v.*, c.last_seq, {FIRST_INPUT}, {HAS_GRAPH},"
             " snippet(artifacts_fts, 0, '[', ']', '…', 12)"
             " AS snippet, bm25(artifacts_fts) AS score FROM artifacts_fts"
             " JOIN artifact_versions v ON v.id = artifacts_fts.version_id"
@@ -321,8 +323,9 @@ def _artifact_hits(
     else:
         likes = _likes(terms, "v.body", values)
         rows = conn.execute(
-            f"SELECT v.*, c.last_seq, {FIRST_INPUT}, 0 AS score FROM artifact_versions v JOIN conversations c ON c.id ="
-            f" v.conversation_id WHERE {likes} AND {condition}{filters} ORDER BY v.created_at DESC LIMIT :limit",
+            f"SELECT v.*, c.last_seq, {FIRST_INPUT}, {HAS_GRAPH}, 0 AS score FROM artifact_versions v"
+            f" JOIN conversations c ON c.id = v.conversation_id WHERE {likes} AND {condition}{filters}"
+            " ORDER BY v.created_at DESC LIMIT :limit",
             {**values, "limit": limit},
         ).fetchall()
     return [
@@ -348,11 +351,45 @@ def read_artifacts(
     condition, values = served(config, role)
     filters, extra = _artifact_filters(list(ARTIFACT_KINDS), str(conversation_id), None, None, producer)
     rows = conn.execute(
-        f"SELECT v.*, c.last_seq, {FIRST_INPUT} FROM artifact_versions v"
+        f"SELECT v.*, c.last_seq, {FIRST_INPUT}, {HAS_GRAPH} FROM artifact_versions v"
         f" JOIN conversations c ON c.id = v.conversation_id WHERE {condition}{filters} ORDER BY v.kind, v.producer",
         {**values, **extra},
     ).fetchall()
     return {"artifacts": [_artifact(row) for row in rows]}
+
+
+def served_summaries(
+    conn: Connection, config: Config, role: str, conversation_id: str, producer: str | None = None
+) -> list[Row]:
+    """The summary versions served to `role` for one conversation, with `has_graph`; the body stays in the row."""
+    condition, values = served(config, role)
+    filters, extra = _artifact_filters(["summary"], str(conversation_id), None, None, producer)
+    return conn.execute(
+        f"SELECT v.*, c.last_seq, {FIRST_INPUT}, {HAS_GRAPH} FROM artifact_versions v"
+        f" JOIN conversations c ON c.id = v.conversation_id WHERE {condition}{filters} ORDER BY v.producer",
+        {**values, **extra},
+    ).fetchall()
+
+
+def summary_winner(summaries: list[dict[str, Any]], head: int) -> dict[str, Any] | None:
+    """The one summary `read_context` opens: greatest coverage within the head, then a stable label tie-break."""
+    candidates = [
+        item
+        for item in summaries
+        if item["kind"] == "summary" and item["body"].strip() and 0 < item["covered_through_seq"] <= head
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda item: (
+            -item["covered_through_seq"],
+            item["producer"],
+            item["scope_id"],
+            item["generation"],
+            item["version_id"],
+        ),
+    )
 
 
 def served(config: Config, role: str) -> tuple[str, dict[str, Any]]:
@@ -399,6 +436,8 @@ def _labels(row: Row) -> dict[str, Any]:
     }
     if row["kind"] == derived.RECENT:  # a window over the latest messages, never coverage of the whole
         labels |= {"window": "recent", "from_seq": row["first_input"], "to_seq": row["covered_through_seq"]}
+    if row["kind"] == "summary":  # the id read_graph opens; None when this summary carries no graph
+        labels["graph_snapshot_id"] = row["id"] if "has_graph" in row.keys() and row["has_graph"] else None
     return labels
 
 

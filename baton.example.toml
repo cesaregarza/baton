@@ -131,6 +131,30 @@ description = "Picks up jobs and reports back"
 # max_activation_reconcile = 10000            # (conversation, kind) pairs one activation may check
 # max_vectors_per_generation = 1000000        # vectors one generation may hold; past it a commit is refused
 
+# Optional: the background graph producer. Off unless enabled; see docs/graph-builder.md before a bounded pilot.
+# It builds validated conversation graphs and compact working views for the listed conversations only, publishes
+# them as cumulative summaries with a graph attachment, and never runs in the foreground of a tool call.
+# [graph_worker]
+# enabled = true
+# producer = "indexer"                        # a name from indexer.producers
+# state_dir = "/var/lib/baton-graphs"         # private worker artifacts; must be outside host.data_dir
+# conversations = ["conv_0123456789abcdef"]   # an explicit allowlist, never a wildcard
+# provider = "http"                           # http (OpenAI-compatible), codex or claude (installed native clients)
+# model = "provider-model-id"                 # always explicit
+# base_url = "https://provider.example/v1"    # http only
+# api_key_env = "GRAPH_API_KEY"               # http only; or allow_no_key = true for an explicit local provider
+# credential_env = ["CODEX_HOME"]             # native only: environment names a client needs; never BATON_* values
+# command = ["codex"]                         # native only: the client executable (argv, no shell)
+# poll_seconds = 30
+# batch_size = 20                             # posts per graph batch
+# max_input_bytes = 512000                    # serialized UTF-8 per model request; overflow blocks the conversation
+# max_response_bytes = 4000000
+# call_timeout_seconds = 300
+# max_output_tokens = 4000                    # http only; native calls are bounded by time and bytes
+# daily_call_cap = 8                          # model launches per UTC day across every conversation
+# calls_per_cycle = 4                         # model launches per scheduling cycle
+# publication_attempts = 3                    # per graph digest; then the conversation blocks until reset
+
 # Bearer tokens: create with `baton token new --name <name> --role <role>` and paste the printed entry.
 # [[auth.tokens]]
 # name = "worker-laptop"

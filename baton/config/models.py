@@ -164,6 +164,37 @@ class Indexer:
 
 
 @dataclass(frozen=True)
+class GraphWorker:
+    """The off-by-default background graph producer (`baton.graph.worker`); `config/graph_worker.py` validates it.
+
+    Disabled unless `enabled = true`; every other value is then required or bounded as that module's `parse` says."""
+
+    enabled: bool = False
+    producer: str = ""
+    state_dir: Path | None = None
+    conversations: tuple[str, ...] = ()
+    provider: str = "http"
+    model: str = ""
+    base_url: str | None = None
+    api_key_env: str | None = None
+    allow_no_key: bool = False
+    # Environment names handed to a native client (its own auth home, for example); never Baton values.
+    credential_env: tuple[str, ...] = ()
+    # The native client executable and fixed leading arguments; the worker appends its isolation flags.
+    command: tuple[str, ...] = ()
+    generation: str | None = None
+    poll_seconds: float = 30
+    batch_size: int = 20
+    max_input_bytes: int = 512_000
+    max_response_bytes: int = 4_000_000
+    call_timeout_seconds: float = 300
+    max_output_tokens: int = 4000
+    daily_call_cap: int = 8
+    calls_per_cycle: int = 4
+    publication_attempts: int = 3
+
+
+@dataclass(frozen=True)
 class Dashboard:
     """The optional read-only view of conversations, off unless enabled. It shows what `viewer_role` may see."""
 
@@ -222,6 +253,7 @@ class Config:
     search: Search = field(default_factory=Search)
     indexer: Indexer = field(default_factory=Indexer)
     aliases: Aliases = field(default_factory=Aliases)
+    graph_worker: GraphWorker = field(default_factory=GraphWorker)
 
     @property
     def resource_url(self) -> str:

@@ -51,6 +51,9 @@ TOOL_NAMES = [
     "search",
     "get_message",
     "read_artifacts",
+    "read_graph",
+    "read_graph_strand",
+    "read_graph_statement",
 ]
 GRANT_ARGUMENTS = {
     "grant_token": {"create_topic", "set_topic", "edit_reference"},
@@ -70,6 +73,9 @@ GUEST_MAY_CALL = {
     "get_topic",
     "read_reference",
     "reference_history",
+    "read_graph",
+    "read_graph_strand",
+    "read_graph_statement",
 }
 
 
@@ -87,7 +93,7 @@ def test_the_public_tool_names_are_stable(topic_host):  # GUARD
             catalog = {tool["name"]: tool for tool in tools}
             for name, tool in catalog.items():
                 properties = tool["inputSchema"].get("properties", {})
-                if name not in {"search", "read_artifacts", "read_context"}:
+                if name not in {"search", "read_artifacts", "read_context", "read_graph"}:
                     assert "producer" not in properties, (role, name)
                 assert "grant_key" not in properties, (role, name)
                 for argument, allowed in GRANT_ARGUMENTS.items():

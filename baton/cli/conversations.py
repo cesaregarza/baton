@@ -54,6 +54,9 @@ def add_commands(commands: Any) -> None:
     history.add_argument("conversation_id")
     history.add_argument("--after-seq", type=int, default=0)
     history.add_argument("--limit", type=int, default=50)
+    history.add_argument(
+        "--through-seq", type=int, help="fixed inclusive head for forward paging, such as a graph tail's through_seq"
+    )
     history.set_defaults(handler=read_history)
 
     context = with_role(
@@ -87,7 +90,11 @@ def read_history(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     conversations.require_enabled(config)
     return db(
         config,
-        lambda conn: Agent(conn, config, args.role).thread(args.conversation_id).read(args.after_seq, args.limit),
+        lambda conn: (
+            Agent(conn, config, args.role)
+            .thread(args.conversation_id)
+            .read(args.after_seq, args.limit, through_seq=args.through_seq)
+        ),
     )
 
 

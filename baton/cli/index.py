@@ -195,3 +195,31 @@ def _add_graph_commands(index: Any) -> None:
     publish.add_argument("--receipt", help="private attempt file; default is a per-publication sibling file")
     publish.add_argument("--generation")
     publish.set_defaults(handler=_graph_publish)
+    worker = index.add_parser(
+        "graph-worker",
+        help="administer the background graph producer ([graph_worker]); generation itself runs under `baton serve`",
+    ).add_subparsers(dest="graph_worker_command", required=True)
+    worker.add_parser(
+        "status", help="the worker ledger: records, daily call budget and recent sanitized outcomes"
+    ).set_defaults(handler=lambda config, args: invalid_worker(lambda: _status(config)))
+    reset = worker.add_parser("reset", help="clear one blocked conversation record; stop the service first")
+    reset.add_argument("--conversation", required=True)
+    reset.set_defaults(handler=lambda config, args: invalid_worker(lambda: _reset(config, args.conversation)))
+
+
+def _status(config: Config) -> Any:
+    from baton.graph.worker import status
+
+    return status(config)
+
+
+def _reset(config: Config, conversation_id: str) -> Any:
+    from baton.graph.worker import reset
+
+    return reset(config, conversation_id)
+
+
+def invalid_worker(operation: Any) -> Any:
+    from baton.graph.export import invalid_graph
+
+    return invalid_graph(operation)

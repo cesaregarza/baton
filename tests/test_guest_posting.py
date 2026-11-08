@@ -291,6 +291,10 @@ def test_valid_proof_does_not_allow_guest_authority_or_forged_identity(posting_h
             "get_topic",
             "read_reference",
             "reference_history",
+            # Derived graph reads serve only what the guest's board visibility already lets it read.
+            "read_graph",
+            "read_graph_strand",
+            "read_graph_statement",
         }
         assert app.GUEST_TOOLS == allowed
         for tool in listed:
