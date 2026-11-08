@@ -24,6 +24,7 @@ def parser():
         if name in {"prepare", "run"}:
             sub.add_argument("--batch-size", type=int, default=20)
             sub.add_argument("--max-input-bytes", type=int, default=100_000)
+            sub.add_argument("--recall-statement", action="append", default=[])
         if name == "read":
             sub.add_argument("--strand", action="append", default=[])
             sub.add_argument("--history", action="store_true")
@@ -62,7 +63,12 @@ def dispatch(args):
             )
         case "prepare":
             request = prepare(
-                args.source, args.state, args.request, batch_size=args.batch_size, max_input_bytes=args.max_input_bytes
+                args.source,
+                args.state,
+                args.request,
+                batch_size=args.batch_size,
+                max_input_bytes=args.max_input_bytes,
+                recall_statements=args.recall_statement,
             )
             return {"request": args.request, "binding": request["binding"], "source_head": request["source_head"]}
         case "apply":
@@ -77,6 +83,7 @@ def dispatch(args):
                 options,
                 batch_size=args.batch_size,
                 max_input_bytes=args.max_input_bytes,
+                recall_statements=args.recall_statement,
             )
 
 

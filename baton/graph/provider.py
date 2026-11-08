@@ -135,13 +135,21 @@ def run(
     *,
     batch_size=20,
     max_input_bytes=100_000,
+    recall_statements=(),
     client=None,
 ):
     distinct_paths(source=source_path, state=state_path, request=request_path, proposal=proposal_path)
     require(not Path(proposal_path).exists(), "proposal artifact already exists; choose a new path")
     # Validate credentials/options before creating any request artifact.
     provider_headers(options)
-    request = prepare(source_path, state_path, request_path, batch_size=batch_size, max_input_bytes=max_input_bytes)
+    request = prepare(
+        source_path,
+        state_path,
+        request_path,
+        batch_size=batch_size,
+        max_input_bytes=max_input_bytes,
+        recall_statements=recall_statements,
+    )
     proposal, usage, input_bytes = call_provider(request, options, max_input_bytes=max_input_bytes, client=client)
     atomic_json(proposal_path, proposal, replace=False)
     receipt = apply(source_path, state_path, request_path, proposal_path)

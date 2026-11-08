@@ -78,6 +78,9 @@ The synthetic thread has six posts. Processing only five leaves the sixth verbat
 It offers multi-target responses, partial and complete supersession, and a resolved discussion
 whose source-backed decision still applies to an active strand. These are interpretation examples,
 not permission to take actions mentioned in the posts.
+Use `--recall-statement ID` once per selected ID when older original wording is needed. First inspect
+`read --history` and `raw --seq` to identify the IDs, then prepare a fresh request; never edit a
+prepared request because its content is bound to its request ID.
 
 ## Produce with an API
 
@@ -108,7 +111,11 @@ for the OpenAI request fields; compatible providers may support a subset. There 
 or retry that makes an additional call. An explicitly configured local provider may use
 `--allow-no-key` instead of `--api-key-env`. Failed, refused, truncated or invalid output does
 not advance the processed frontier. Usage is reported when supplied by the provider; absent
-usage is unknown, not an estimated saving or cost.
+usage is unknown, not an estimated saving or cost. The operator must inspect history and select recall
+IDs before `run`; it sends one request and has no automatic retrieval loop. The separate `prepare`
+plus manual proposal/apply flow can be used when the proposal needs inspection before state advances.
+The API proposal schema has no missing-context outcome, so a single call cannot reliably report that
+an archived meaning was unavailable; the operator must select necessary IDs before calling it.
 
 ## Read, update and retain artifacts
 
@@ -129,8 +136,10 @@ statement text/quotes. A decision can outlive the discussion that established
 it. Semantic edge direction is from a response/supporting/contradicting/superseding/dependent statement
 to its referenced parent. Multiple edges may express multiple targets; raw reply metadata remains
 separate. Relevance is directly relevant, partially superseded with a surviving clause, or completely
-superseded. Extracted text and exact source quotes remain immutable. Strand titles and decision text are stable;
-when a decision changes, supersede its existing D ID and add a new decision.
+superseded. Accepted statement text, exact source quotes, statement-to-strand memberships, and strand
+titles are immutable. Relevance, summaries, open work, and decision status can change only in a normal
+batch that advances over new source posts; there is no correction-only revision. Decision text remains
+immutable; when a decision changes, supersede its existing D ID and add a new decision.
 
 The read captures source head **H**, processed contiguous frontier **W**, and summary coverage for
 each strand. The tail is exactly `W < seq <= H`, with original text and author metadata. A touched
@@ -146,6 +155,23 @@ If source grows after prepare, later posts remain in the tail. Edits to prepared
 Never repair graph state by hand: correct a rejected proposal against the same request, or prepare
 again when stale. The native skills allow one correction before reporting a remaining failure.
 
+If an accepted extraction needs correction, preserve its checkpoint and request/proposal artifacts for
+audit and rebuild from post 1 against the same immutable source, using a fresh checkpoint and fresh
+request/proposal paths. Review the corrected proposal before applying it; do not edit accepted state or
+source. IDs belong to a checkpoint/generation, so an S number in a rebuild is not assumed to mean the
+same strand as that number in the old checkpoint. A corrected same-W checkpoint cannot replace a
+summary already published by this producer/generation: publication requires W to advance beyond the
+prior published W, and same-W publication is treated as already up to date. If the corrected graph was
+already served, rebuild through a later genuine source post before publishing; never fabricate a post
+to force progress. The graph command does not provide same-W replacement. A producer allowlist controls
+who may publish future summaries and does not withdraw a summary already served. Do not treat a
+single-summary new generation as a way to activate a correction; generation activation covers all
+conversations and artifact kinds.
+
+The producer instructions are part of the exact request contract. After this contract changes, discard
+old prepared requests for production and regenerate them from the compatible saved checkpoint with new
+request/proposal paths; checkpoints need no migration.
+
 Source, state, request and proposal must be distinct paths. The source is read-only input; apply
 validates before committing state under a lock with atomic replacement. Inference happens outside
 that lock. Artifacts contain conversation data and should be stored with appropriate local access.
@@ -158,9 +184,17 @@ metadata. The current saved pilot export is also accepted. Use the synthetic fix
 canonical example. Duplicate IDs, missing posts and incompatible conversation IDs fail explicitly;
 permission-filtered or gapped exports are unsupported.
 
-Prepare sends only bounded new raw posts and compact retained graph state, including necessary
-resolved context. The input limit measures serialized UTF-8 bytes, not model tokens. If required
-context or one post cannot fit, prepare fails instead of dropping context or skipping the post.
+Prepare sends only bounded new raw posts and compact retained graph state. Active and partially
+superseded statements include their host-supplied source metadata, while compact text still uses the
+surviving clause. Completely superseded statements appear as IDs only unless explicitly recalled.
+Recall includes the original text, exact quotes, source metadata, relevance, surviving text, memberships,
+and evidence for each requested statement, including archived statements. Recall is empty by default
+and is included in both request and provider UTF-8 bounds. The input limit measures serialized UTF-8
+bytes, not model tokens. If required context or one post cannot fit, prepare fails instead of dropping
+context or skipping the post. Archived IDs alone do not recover meaning: native producers should stop
+and report missing IDs for operator recall; API callers must select IDs before the single call. This is
+producer guidance, not validator-enforced semantic fidelity; the API schema has no missing-context
+response.
 Increase the explicit budget or use a smaller batch. Output tokens are a separate provider limit.
 
 V1 runs one bounded batch at a time. The manual host commands below export source and publish the

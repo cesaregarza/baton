@@ -10,12 +10,13 @@ from baton.graph.storage import atomic_json, distinct_paths, load_state, state_l
 from baton.graph.validation import build_patch
 
 
-def retained_context(state):
+def retained_context(state, recalled_ids=()):
     statements = {
         key: {
             "id": key,
             "seq": value["seq"],
             "text": value["surviving_text"] if value["relevance"] == "partially_superseded" else value["text"],
+            "source": value["source"],
             "strand_ids": value["strand_ids"],
             "relevance": value["relevance"],
             "evidence": value["evidence"],
@@ -24,9 +25,26 @@ def retained_context(state):
         for key, value in state["statements"].items()
         if value["relevance"] != "completely_superseded"
     }
+    recalled = {
+        key: {
+            "id": key,
+            "seq": value["seq"],
+            "text": value["text"],
+            "quotes": value["quotes"],
+            "source": value["source"],
+            "relevance": value["relevance"],
+            "surviving_text": value["surviving_text"],
+            "strand_ids": value["strand_ids"],
+            "evidence": value["evidence"],
+            "relevance_evidence": value["relevance_evidence"],
+        }
+        for key in recalled_ids
+        for value in (state["statements"][key],)
+    }
     return {
         "statements": statements,
         "archived_statement_ids": sorted(state["statements"].keys() - statements.keys()),
+        "recalled_statements": recalled,
         "strands": state["strands"],
         "decisions": {
             key: {field: item[field] for field in ("id", "text", "applies_to", "status", "evidence")}
@@ -43,13 +61,23 @@ def request_identity(request):
     return digest(value)
 
 
-def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_bytes=100_000):
+def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_bytes=100_000, recall_statements=()):
     distinct_paths(source=source_path, state=state_path, request=request_path)
     require(batch_size > 0 and max_input_bytes > 0, "batch and UTF-8 byte limits must be positive")
     require(not Path(request_path).exists(), "request artifact already exists; choose a new path")
     source = load_source(source_path)
     with state_lock(state_path):
         state = load_state(state_path, source)
+    require(isinstance(recall_statements, (list, tuple)), "recall_statements must be a sequence of IDs")
+    require(
+        all(isinstance(key, str) and bool(key) for key in recall_statements),
+        "recall statement IDs must be nonempty strings",
+    )
+    recalled_ids = sorted(set(recall_statements))
+    require(
+        set(recalled_ids) <= state["statements"].keys(),
+        "unknown requested recall statement ID",
+    )
     start = state["watermark"] + 1
     require(start <= len(source["messages"]), "no new posts to prepare")
     request: dict[str, Any] = {
@@ -66,7 +94,7 @@ def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_b
         },
         "source_head": len(source["messages"]),
         "new_posts": [],
-        "retained_state": retained_context(state),
+        "retained_state": retained_context(state, recalled_ids),
     }
     for post in source["messages"][start - 1 : start - 1 + batch_size]:
         candidate = copy.deepcopy(request)
