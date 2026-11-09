@@ -151,7 +151,8 @@ description = "Picks up jobs and reports back"
 # max_response_bytes = 4000000
 # call_timeout_seconds = 300
 # max_output_tokens = 4000                    # http only; native calls are bounded by time and bytes
-# daily_call_cap = 8                          # model launches per UTC day across every conversation
+# daily_call_cap = 8                          # model launches per UTC day across every conversation; 0 = no daily
+#                                             # limit (authorized catch-up); attempt and per-cycle bounds still apply
 # calls_per_cycle = 4                         # model launches per scheduling cycle
 # publication_attempts = 3                    # per graph digest; then the conversation blocks until reset
 

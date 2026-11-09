@@ -28,7 +28,7 @@ LIMITS = {
     "max_response_bytes": (1000, 100_000_000, 4_000_000, True),
     "call_timeout_seconds": (1, 3600, 300, False),
     "max_output_tokens": (1, 1_000_000, 4000, True),
-    "daily_call_cap": (1, 10_000, 8, True),
+    "daily_call_cap": (0, 10_000, 8, True),  # 0 is explicitly unlimited; every other bound still applies
     "calls_per_cycle": (1, 100, 4, True),
     "publication_attempts": (1, 100, 3, True),
 }

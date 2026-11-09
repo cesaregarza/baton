@@ -196,7 +196,7 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
         ({"provider": "magic"}, "provider"),
         ({"model": ""}, "model"),
         ({"allow_no_key": False}, "api_key_env"),
-        ({"daily_call_cap": 0}, "daily_call_cap"),
+        ({"daily_call_cap": -1}, "daily_call_cap"),
         ({"batch_size": 1.5}, "whole number"),
         ({"max_input_bytes": 2000.5}, "whole number"),
         ({"publication_attempts": 2.0}, "whole number"),
@@ -215,6 +215,9 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
         {**base, "poll_seconds": 2.5, "call_timeout_seconds": 0.5 + 1}, config.indexer, config.data_dir
     )
     assert (durations.poll_seconds, durations.call_timeout_seconds) == (2.5, 1.5)  # only durations may be fractional
+    # Zero is the explicit unlimited-day setting; leaving the cap out keeps the ordinary budget.
+    unlimited = config_module.graph_worker.parse({**base, "daily_call_cap": 0}, config.indexer, config.data_dir)
+    assert (durations.daily_call_cap, unlimited.daily_call_cap) == (8, 0)
     # A disabled section ignores everything else it says.
     assert (
         config_module.graph_worker.parse({**base, "enabled": False}, config.indexer, config.data_dir).enabled is False
@@ -345,6 +348,46 @@ def test_daily_cap_defers_without_clearing_attempts_and_cycle_cap_spreads_calls(
     assert all(r["published_W"] == 3 for r in final["records"].values())
 
 
+def test_unlimited_daily_cap_still_counts_calls_and_keeps_cycle_and_attempt_bounds(tmp_path) -> None:
+    settings = {"daily_call_cap": 0, "calls_per_cycle": 1, "batch_size": 1}
+    config = worker_config(tmp_path, conversations=["placeholder"], **settings)
+    with connect(config.db_path) as db:
+        first_cid, _ = converse(db, config, 5)
+        second_cid, _ = converse(db, config, 5)
+    pair = [first_cid, second_cid]
+    config = worker_config(tmp_path, conversations=pair, **settings)
+    clock = Clock()
+    day = ledger.utc_day(clock.now)
+    transport = ScriptedTransport()
+    worker = Worker(config, transport=transport, clock=clock)
+    results = []
+    while len(transport.calls) < 5 and len(results) < 40:
+        results.append(worker.cycle())
+    assert status(config)["calls"] == {day: 5}  # launches are still reserved and counted
+    # A restart keeps the day's counter, and neither it nor the default ceiling of 8 stops the catch-up.
+    restarted = Worker(config, transport=transport, clock=clock)
+    while len(transport.calls) < 10 and len(results) < 80:
+        results.append(restarted.cycle())
+    results += run_until_idle(restarted, clock)
+    assert ledger.utc_day(clock.now) == day and status(config)["calls"] == {day: 10}
+    assert all(r["published_W"] == 5 for r in results[-1]["records"].values())
+    assert max(result["model_calls"] for result in results) == 1  # the per-cycle ceiling still spreads launches
+    assert not any(r["error_category"] == "daily_cap" for result in results for r in result["records"].values())
+    # The attempt bound is untouched: two failed extraction calls still block durably.
+    with connect(config.db_path) as db:
+        say(db, config, first_cid, "note 6")
+    transport.script = ["timeout", "garbage"]
+    blocked = run_until_idle(restarted, clock)[-1]["records"][first_cid]
+    assert (blocked["phase"], blocked["attempts"], blocked["error_category"]) == ("blocked", 2, "extraction_failed")
+    assert len(transport.calls) == 12 and status(config)["calls"] == {day: 12}
+    clock.now = ledger.next_utc_day(clock.now) + 1
+    assert restarted.cycle()["stepped"] == [] and len(transport.calls) == 12  # a new day clears nothing
+    with connect(config.db_path) as db:
+        say(db, config, second_cid, "note 6")
+    run_until_idle(restarted, clock)
+    assert status(config)["calls"] == {ledger.utc_day(clock.now): 1}  # the counter still rolls over by UTC day
+
+
 def test_restart_consumes_the_in_flight_reservation_and_reuses_saved_candidates(tmp_path) -> None:
     config = worker_config(tmp_path, conversations=["placeholder"])
     with connect(config.db_path) as db:
@@ -381,7 +424,8 @@ def test_restart_consumes_the_in_flight_reservation_and_reuses_saved_candidates(
 
 
 def test_compact_retries_alone_and_publication_recovers_with_zero_calls(tmp_path, monkeypatch) -> None:
-    limits = {"max_artifact_bytes": 120}  # the deterministic rendering no longer fits, so compaction needs a call
+    # The deterministic rendering no longer fits, so compaction needs a call; both bounds differ from the defaults.
+    limits = {"max_artifact_bytes": 120, "max_citations": 7}
     config = worker_config(tmp_path, limits, conversations=["placeholder"])
     with connect(config.db_path) as db:
         cid, _ = converse(db, config, 2)
@@ -402,6 +446,9 @@ def test_compact_retries_alone_and_publication_recovers_with_zero_calls(tmp_path
         "correction" in transport.calls[2]["request"]
         and "rejected_output" in transport.calls[2]["request"]["correction"]
     )
+    # The first request and its correction both state the configured bounds the host will enforce.
+    for call in transport.calls[1:]:
+        assert call["request"]["limits"] == {"max_body_bytes": 120, "max_citations": 7}
     snapshot_digest = corrected["records"][cid]["request_id"].removeprefix("publish:")
     view = load_json(worker.paths(cid).compact_view(snapshot_digest))
     assert view["body"].startswith("Release: review the notes")
@@ -788,7 +835,7 @@ def test_compact_contract_rejects_coverage_gaps_and_stale_digests() -> None:
         forged["graph_digest"] = snapshot_module.digest_of(forged)
         with pytest.raises(Exception, match=match):
             snapshot_module.validate(forged, source)
-    request = compact.compact_request(snapshot, source)
+    request = compact.compact_request(snapshot, source, max_body_bytes=12_000, max_citations=64)
     assert [s["id"] for s in request["strands"]] == ["S1"] and [d["id"] for d in request["decisions"]] == ["D1"]
     assert [a["author"] for a in request["authors"]] == ["a", "b"]  # a deduplicated author table for the evidence
     good = compact_candidate(request, {})

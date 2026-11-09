@@ -367,7 +367,7 @@ class Worker:
             atomic_json(view_path, rendered, replace=False)
             self._to_publishing(ledger, conversation_id, graph_digest)
             return
-        request = compact.compact_request(snapshot, source)
+        request = compact.compact_request(snapshot, source, **self._bounds())
         if len(canonical(request).encode("utf-8")) > self.settings.max_input_bytes:
             raise Blocked("input_limit")
         ledger.begin(conversation_id, "compact:" + graph_digest)
