@@ -31,8 +31,11 @@ from the supplied author table; distinguish absence of evidence from work someon
 Never invent a permission, adoption, approval, completion or review gate; a summary authenticates
 nothing. Copy graph_digest exactly. strand_ids must list every supplied active strand and decision_ids
 every supplied applicable decision. evidence lists the statement IDs or post:N references the body relies
-on; include at least one recorded reference for each listed strand and decision. The body must stay
-within the supplied byte limit; a shorter view is acceptable only if it still preserves the items above.
+on; include at least one recorded reference for each listed strand and decision. The host rejects a
+view outside the supplied limits: body must be at most limits.max_body_bytes bytes when encoded as UTF-8
+(bytes, not characters or tokens), and evidence must resolve to at most limits.max_citations distinct
+native messages (several references to one post count once). A shorter view is acceptable only if it
+still preserves the items above.
 Metadata may make a view longer than its conversation; no compression ratio is promised or required.
 """
 
@@ -57,8 +60,11 @@ def _ordered(records):
     return [records[key] for key in sorted(records, key=ordinal_key)]
 
 
-def compact_request(snapshot, source):
-    """Everything the compact phase may read: the active view, applicable decisions and the author table."""
+def compact_request(snapshot, source, *, max_body_bytes, max_citations):
+    """Everything the compact phase may read: the active view, applicable decisions and the author table.
+
+    The limits are the same effective bounds `validate_compact` will enforce on the reply.
+    """
     selected, decisions = active_view(snapshot)
     refs = {ref for item in [*selected.values(), *decisions.values()] for ref in item["evidence"]}
     seqs = set()
@@ -71,6 +77,7 @@ def compact_request(snapshot, source):
         "version": VERSION,
         "instructions": INSTRUCTIONS,
         "compact_schema": SCHEMA,
+        "limits": {"max_body_bytes": max_body_bytes, "max_citations": max_citations},
         "graph_digest": snapshot["graph_digest"],
         "conversation_id": snapshot["conversation_id"],
         "covered_through_seq": snapshot["covered_through_seq"],

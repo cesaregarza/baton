@@ -189,7 +189,7 @@ class GraphWorker:
     max_response_bytes: int = 4_000_000
     call_timeout_seconds: float = 300
     max_output_tokens: int = 4000
-    daily_call_cap: int = 8
+    daily_call_cap: int = 8  # 0 means no daily limit
     calls_per_cycle: int = 4
     publication_attempts: int = 3
 

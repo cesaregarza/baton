@@ -167,7 +167,10 @@ class Ledger:
         cycle_cap: int,
         attempt_cap: int,
     ) -> dict[str, Any]:
-        """Atomically take one attempt and one daily slot before any external call; refused means no call."""
+        """Atomically take one attempt and one daily slot before any external call; refused means no call.
+
+        A `daily_cap` of 0 is the explicit unlimited setting: the launch is still counted, never refused for the day.
+        """
         if self.state["in_flight"] is not None:
             raise Budget("in_flight", "a call is already reserved")
         record = self.record(conversation_id)
@@ -177,7 +180,7 @@ class Ledger:
             raise Budget("cycle_cap", "this scheduling cycle already used its model calls")
         day = utc_day(now)
         used = self.state["calls"].get(day, 0)
-        if used >= daily_cap:
+        if daily_cap and used >= daily_cap:
             raise Budget("daily_cap", "the daily model call cap is spent until the next UTC day")
         self.state["calls"] = {day: used + 1}
         record["attempts"] += 1

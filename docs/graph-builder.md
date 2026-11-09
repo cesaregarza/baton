@@ -328,7 +328,9 @@ sanitized validation error and rejected output only when they fit `max_input_byt
 input overflow (the retained context plus one post exceeding `max_input_bytes`, as the 512 KB pilot
 baseline hit), a missing required recall, an authentication or isolation failure, or an edited source
 prefix sets the conversation `blocked`; new posts, restarts and new days never clear it. A daily cap
-only defers to the next UTC day. Publication never calls a model: it reuses the saved compact view and
+only defers to the next UTC day. `daily_call_cap = 0` removes only the daily limit, for an authorized
+catch-up: launches are still reserved, counted per UTC day and reported, and the per-request attempt
+and per-cycle caps still apply. Publication never calls a model: it reuses the saved compact view and
 the derived receipt, waits 60 seconds between attempts, and blocks after three per graph digest. Native
 calls count launches, wall time and bytes; `recent_calls` reports observed turns and usage as the client
 reported them, never a dollar figure. Retained-context compression and localized repair are not part of
@@ -338,7 +340,8 @@ intervenes.
 The compact view is checked structurally before publication: it must name exactly the active strands and
 the active decisions applicable to them (or to all), cite only evidence that resolves within W, cite at
 least one recorded reference for every listed item, bind the exact snapshot digest, and fit
-`min(12000, max_artifact_bytes)` bytes. The deterministic rendering is published without a model call
+`min(12000, max_artifact_bytes)` UTF-8 bytes and `max_citations` resolved native messages. Every compact
+request, including a correction, states those two effective numbers in `limits`. The deterministic rendering is published without a model call
 when it already fits. The instructions ask the writer to keep requested next work and its owners,
 unresolved contradictions, continuing shared constraints and the exact artifact or test scope the next
 action needs, to state repeated rules once, to put historical proof behind references, to attribute
