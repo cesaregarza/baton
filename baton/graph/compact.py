@@ -1,9 +1,10 @@
 """The compact working view: a bounded prose phase over an accepted graph snapshot, host-validated.
 
-The view is what summary-first readers see. It is produced after each accepted graph batch, bound to the
-exact snapshot digest, and checked structurally: listed strands and decisions must be exactly the active
-applicable set, every evidence reference must resolve within W, and each listed item must be supported by
-at least one of its own recorded references. Those checks establish coverage, not semantic truth.
+The view is what summary-first readers see. It is produced when no further graph batch is due (or the
+published view is far behind), bound to the exact snapshot digest, and checked structurally: listed
+strands and decisions must be exactly the active applicable set, every evidence reference must resolve
+within W, and each listed item must be supported by at least one of its own recorded references. Those
+checks establish coverage, not semantic truth.
 """
 
 from baton.graph.contract import STRING, array, obj, require, validate_shape

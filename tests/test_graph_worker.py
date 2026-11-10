@@ -239,7 +239,7 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
 def test_worker_extracts_compacts_publishes_and_readers_see_the_snapshot(tmp_path) -> None:
     config = worker_config(tmp_path, conversations=["placeholder"])
     with connect(config.db_path) as db:
-        cid, mids = converse(db, config, 3)
+        cid, mids = converse(db, config, 2)
     config = worker_config(tmp_path, conversations=[cid])
     clock = Clock()
     transport = ScriptedTransport()
@@ -250,9 +250,11 @@ def test_worker_extracts_compacts_publishes_and_readers_see_the_snapshot(tmp_pat
         "compacting",
         2,
         0,
-        3,
+        2,
     )
     assert first["model_calls"] == 1 and transport.calls[0]["schema"]["properties"].keys() >= {"binding", "statements"}
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 3")  # after the first batch, so the summary still follows that batch
     second = worker.cycle()  # the deterministic view fits the bounds, so compaction needs no model call
     assert second["records"][cid]["phase"] == "publishing" and second["model_calls"] == 0
     third = worker.cycle()
@@ -332,7 +334,7 @@ def test_calls_are_reserved_before_launch_and_exhaustion_blocks_durably(tmp_path
 def test_provider_refusals_are_refunded_never_block_and_back_off_to_an_hourly_ceiling(tmp_path) -> None:
     config = worker_config(tmp_path, conversations=["placeholder"])
     with connect(config.db_path) as db:
-        cid, _ = converse(db, config, 4)
+        cid, _ = converse(db, config, 2)
     config = worker_config(tmp_path, conversations=[cid], daily_call_cap=2)
     clock = Clock()
     day = ledger.utc_day(clock.now)
@@ -354,6 +356,9 @@ def test_provider_refusals_are_refunded_never_block_and_back_off_to_an_hourly_ce
     # The next answered call proceeds normally: nine refusals did not use up a daily cap of two.
     answered = worker.cycle()["records"][cid]
     assert (answered["phase"], answered["accepted_W"], answered["refusals"]) == ("compacting", 2, 0)
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 3")
+        say(db, config, cid, "note 4")
     while worker.cycle()["records"][cid]["phase"] != "pending":  # compaction and publication make no call
         pass
     assert refused_until_answered(REFUSALS) == [60, 120, 240, 480, 960]
@@ -696,7 +701,7 @@ def test_removed_allowlist_entries_keep_their_records_but_are_never_scheduled(tm
 def test_restart_between_apply_and_bookkeeping_publishes_the_accepted_batch_first(tmp_path, monkeypatch) -> None:
     config = worker_config(tmp_path, conversations=["placeholder"])
     with connect(config.db_path) as db:
-        cid, _ = converse(db, config, 4)
+        cid, _ = converse(db, config, 2)
     config = worker_config(tmp_path, conversations=[cid])
     clock = Clock()
     from baton.graph import worker as worker_module
@@ -720,6 +725,9 @@ def test_restart_between_apply_and_bookkeeping_publishes_the_accepted_batch_firs
     recovered = restarted.cycle()
     record = recovered["records"][cid]
     assert (record["phase"], record["accepted_W"], recovered["model_calls"]) == ("compacting", 2, 0)
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 3")
+        say(db, config, cid, "note 4")
     results = run_until_idle(restarted, clock)
     assert results[-1]["records"][cid]["published_W"] == 4
     with connect(config.db_path) as db:
@@ -994,3 +1002,31 @@ def test_a_thread_waits_for_a_full_batch_or_for_its_oldest_post(tmp_path) -> Non
     with connect(config.db_path) as db:
         say(db, config, cid, "note 5")
     assert eager.cycle()["model_calls"] == 1 and len(transport.calls) == 3
+
+
+def test_a_backlog_runs_its_batches_before_one_summary_unless_the_summary_is_far_behind(tmp_path) -> None:
+    limits = {"max_artifact_bytes": 120}  # the deterministic view does not fit, so every summary is a call
+    config = worker_config(tmp_path, limits, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 6)
+    config = worker_config(tmp_path, limits, conversations=[cid], daily_call_cap=0)
+    clock = Clock()
+    transport = ScriptedTransport()
+    worker = Worker(config, transport=transport, clock=clock)
+    record = run_until_idle(worker, clock)[-1]["records"][cid]
+    assert kinds(transport) == ["extract", "extract", "extract", "summary"]
+    assert (record["phase"], record["accepted_W"], record["published_W"]) == ("idle", 6, 6)
+    with connect(config.db_path) as db:
+        assert published(db, cid) == [(6, 1, 3)]  # one publication jumped three accepted revisions
+    # A summary 100 or more posts behind runs although a further batch is due.
+    root = tmp_path / "far"
+    config = worker_config(root, limits, conversations=["placeholder"])
+    roomy = replace(config, conversations=replace(config.conversations, max_messages_per_hour=1000))
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, roomy, 151)
+    config = worker_config(root, limits, conversations=[cid], batch_size=50, daily_call_cap=0)
+    transport = ScriptedTransport()
+    run_until_idle(Worker(config, transport=transport, clock=clock), clock, cycles=30)
+    assert kinds(transport) == ["extract", "extract", "summary", "extract", "extract", "summary"]
+    with connect(config.db_path) as db:
+        assert published(db, cid) == [(100, 1, 2), (151, 2, 4)]

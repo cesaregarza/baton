@@ -39,6 +39,8 @@ from baton.graph.transport import Limits, Transport, for_config
 log = logging.getLogger("baton.graph.worker")
 EXTRACTION_CALLS = 2
 COMPACT_CALLS = 2
+# A published summary this many posts behind the graph is refreshed before any further batch is taken.
+SUMMARY_BACKLOG = 100
 # One empty file per conversation to reset, named by its id; the running worker applies and removes them.
 RESET_REQUESTS = "reset-requests"
 
@@ -209,10 +211,10 @@ class Worker:
         return self.clock() - datetime.fromisoformat(oldest).timestamp() >= max_wait
 
     def _next_phase(self, conversation_id: str, target_head: int, accepted: int, published: int) -> str:
-        """After a batch or a publication: summarize what is unpublished first, else a due batch or idle."""
+        """After a batch or a publication: another due batch first, unless the summary is far behind."""
         with connection(self.config.db_path) as conn:
             due = self._due(conn, conversation_id, target_head, accepted)
-        if accepted > published:
+        if accepted > published and not (due and accepted - published < SUMMARY_BACKLOG):
             return "compacting"
         return "pending" if due else "idle"
 
