@@ -10,7 +10,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from baton.graph.contract import GraphError, require
+from baton.graph.contract import require
+from baton.graph.failure import Category, TransportError, status_category
 from baton.graph.operations import apply, prepare
 from baton.graph.source import canonical
 from baton.graph.storage import atomic_json, distinct_paths
@@ -59,28 +60,39 @@ def provider_payload(request, options, schema=None, schema_name="baton_graph_pro
 
 
 def provider_headers(options):
-    url = urlsplit(options.base_url)
+    """Request headers, or an `authentication` refusal when the configured credentials cannot form a request."""
+    require(bool(options.model.strip()), "explicit model is required")
     require(
+        math.isfinite(options.timeout) and options.timeout > 0 and options.max_output_tokens > 0,
+        "provider timeout and output token bound must be positive",
+    )
+    url = urlsplit(options.base_url)
+    _expect(
         url.scheme in {"https", "http"}
         and bool(url.netloc)
         and not url.username
         and not url.password
         and not url.query
         and not url.fragment,
+        Category.AUTHENTICATION,
         "base URL must be an explicit HTTP(S) API base without credentials",
     )
-    require(bool(options.model.strip()), "explicit model is required")
-    require(
-        math.isfinite(options.timeout) and options.timeout > 0 and options.max_output_tokens > 0,
-        "provider timeout and output token bound must be positive",
+    _expect(
+        bool(options.api_key_env) != options.allow_no_key,
+        Category.AUTHENTICATION,
+        "choose api-key-env or explicit allow-no-key",
     )
-    require(bool(options.api_key_env) != options.allow_no_key, "choose api-key-env or explicit allow-no-key")
     headers = {"Content-Type": "application/json"}
     if options.api_key_env:
         key = os.environ.get(options.api_key_env)
-        require(bool(key), "configured credential environment variable is missing/empty")
+        _expect(bool(key), Category.AUTHENTICATION, "configured credential environment variable is missing/empty")
         headers["Authorization"] = f"Bearer {key}"
     return headers
+
+
+def _expect(condition, category, message):
+    if not condition:
+        raise TransportError(category, message)
 
 
 def call_provider(
@@ -123,7 +135,7 @@ async def call_provider_async(
     client=None,
     stop=None,
 ):
-    """One request, one response: `{candidate, usage, input_bytes, output_bytes}` or a GraphError.
+    """One request, one response: `{candidate, usage, input_bytes, output_bytes}` or a categorized TransportError.
 
     The whole request (connect, write, headers and body) runs under one `asyncio.timeout(options.timeout)`,
     which is also httpx's inactivity timeout, so a stalled or trickling provider ends at the deadline. A
@@ -134,7 +146,11 @@ async def call_provider_async(
     payload = provider_payload(request, options, schema, schema_name)
     # This is an honest UTF-8 bound on serialized input messages, not a token estimate.
     input_bytes = len(canonical(payload["messages"]).encode("utf-8"))
-    require(input_bytes <= max_input_bytes, "serialized provider input exceeds max-input-bytes (UTF-8)")
+    _expect(
+        input_bytes <= max_input_bytes,
+        Category.INPUT_LIMIT,
+        "serialized provider input exceeds max-input-bytes (UTF-8)",
+    )
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient(timeout=options.timeout, follow_redirects=False)
@@ -142,10 +158,14 @@ async def call_provider_async(
     try:
         body, size = await _bounded_request(client, url, payload, headers, options.timeout, max_response_bytes, stop)
         result = json.loads(body)
-    except GraphError:
-        raise  # the status, size, deadline or cancellation refusal, already safe to report
-    except (httpx.HTTPError, ValueError, UnicodeError) as exc:
-        raise GraphError("provider transport or JSON decoding failed") from exc
+    except TransportError:
+        raise  # the status, size, deadline or cancellation, categorized where it was detected
+    except (httpx.ConnectError, httpx.ConnectTimeout):  # nothing reached the provider
+        raise TransportError(Category.PROVIDER_UNAVAILABLE, "provider connection could not be made") from None
+    except httpx.HTTPError:  # the request may have been received, and nothing says what happened to it
+        raise TransportError(Category.TRANSPORT, "provider transport failed after sending") from None
+    except (ValueError, UnicodeError):
+        raise TransportError(Category.MALFORMED, "provider response is not JSON") from None
     finally:
         if own_client:
             await client.aclose()
@@ -162,11 +182,16 @@ async def _bounded_request(client, url, payload, headers, timeout, max_response_
 
     async def fetch():
         async with client.stream("POST", url, json=payload, headers=headers, timeout=timeout) as response:
-            require(200 <= response.status_code < 300, f"provider HTTP failure ({response.status_code})")
+            status = response.status_code
+            _expect(200 <= status < 300, status_category(status), f"provider HTTP failure ({status})")
             chunks, size = [], 0
             async for chunk in response.aiter_bytes():
                 size += len(chunk)
-                require(size <= max_response_bytes, f"provider response exceeds {max_response_bytes}-byte limit")
+                _expect(
+                    size <= max_response_bytes,
+                    Category.OUTPUT_LIMIT,
+                    f"provider response exceeds {max_response_bytes}-byte limit",
+                )
                 chunks.append(chunk)
             return b"".join(chunks), size
 
@@ -176,40 +201,49 @@ async def _bounded_request(client, url, payload, headers, timeout, max_response_
 
     fetching = asyncio.create_task(fetch())
     watching = asyncio.create_task(watch())
-    reason = None
+    ended = None
     try:
         async with asyncio.timeout(timeout):
             await asyncio.wait({fetching, watching}, return_when=asyncio.FIRST_COMPLETED)
         if not fetching.done():
-            reason = "provider call cancelled by shutdown"
+            ended = TransportError(Category.CANCELLED, "provider call cancelled by shutdown")
     except TimeoutError:
-        reason = "provider call exceeded its total deadline"
+        ended = TransportError(Category.TIMEOUT, "provider call exceeded its total deadline")
     finally:
         for task in (watching, fetching):
             if not task.done():
                 task.cancel()
         await asyncio.gather(watching, return_exceptions=True)
-    if reason is not None:
+    if ended is not None:
         await asyncio.gather(fetching, return_exceptions=True)  # the stream closes with the cancelled task
-        raise GraphError(reason)
+        raise ended
     return fetching.result()
 
 
 def parse_response(result):
-    require(
+    """The proposal object from one completed choice; any other shape is a `malformed` answer."""
+
+    def malformed_unless(condition, message):
+        _expect(condition, Category.MALFORMED, message)
+
+    malformed_unless(
         isinstance(result, dict) and isinstance(result.get("choices"), list) and len(result["choices"]) == 1,
         "provider must return exactly one choice",
     )
     choice = result["choices"][0]
-    require(isinstance(choice, dict) and choice.get("finish_reason") == "stop", "provider did not finish with stop")
+    malformed_unless(
+        isinstance(choice, dict) and choice.get("finish_reason") == "stop", "provider did not finish with stop"
+    )
     message = choice.get("message")
-    require(isinstance(message, dict) and not message.get("refusal"), "provider refused or omitted message")
-    require(isinstance(message.get("content"), str) and bool(message["content"].strip()), "provider content is absent")
+    malformed_unless(isinstance(message, dict) and not message.get("refusal"), "provider refused or omitted message")
+    malformed_unless(
+        isinstance(message.get("content"), str) and bool(message["content"].strip()), "provider content is absent"
+    )
     try:
         proposal = json.loads(message["content"])
-    except ValueError as exc:
-        raise GraphError("provider content is not JSON") from exc
-    require(isinstance(proposal, dict), "provider proposal must be an object")
+    except ValueError:
+        raise TransportError(Category.MALFORMED, "provider content is not JSON") from None
+    malformed_unless(isinstance(proposal, dict), "provider proposal must be an object")
     return proposal
 
 

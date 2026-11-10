@@ -4,7 +4,8 @@ Each scheduling cycle polls the allowlisted conversations in a read snapshot, th
 ones, giving each at most one step: one graph batch (one reserved model call), one compact phase (one
 reserved call unless the deterministic view already fits), or one publication attempt (never a call).
 Every external call is reserved in the ledger first, so a crash consumes it; saved candidates are validated
-and reused before any new call; exhaustion blocks a conversation durably until an operator resets it.
+and reused before any new call; exhaustion blocks a conversation durably until an operator resets it. A call
+the provider refused without doing any work is refunded and retried on a backoff instead, never a block.
 Model processes never see the authoritative database, the source directory or any Baton secret.
 """
 
@@ -24,12 +25,13 @@ from baton.graph import compact
 from baton.graph import snapshot as snapshot_module
 from baton.graph.contract import SCHEMA, GraphError
 from baton.graph.export import export_source
-from baton.graph.ledger import RETRY_DELAY, Budget, Ledger, WorkerBusy, next_utc_day
-from baton.graph.operations import apply, prepare
+from baton.graph.failure import DURABLE, REFUSALS, Category, TransportError
+from baton.graph.ledger import RETRY_DELAY, Budget, Ledger, WorkerBusy, next_utc_day, refusal_delay
+from baton.graph.operations import InputOverflow, MissingRecall, apply, prepare
 from baton.graph.publication import publish_graph
 from baton.graph.source import canonical, digest, load_json, load_source
 from baton.graph.storage import atomic_json, load_state, state_lock
-from baton.graph.transport import Limits, Transport, TransportError, for_config
+from baton.graph.transport import Limits, Transport, for_config
 
 log = logging.getLogger("baton.graph.worker")
 EXTRACTION_CALLS = 2
@@ -224,11 +226,7 @@ class Worker:
             produced = self.transport.produce(request, schema, self.limits, stop=self.stop)
         except TransportError as error:
             ledger.settle({"outcome": error.category, "elapsed": self.clock() - started})
-            if error.category == "cancelled":
-                raise Cancelled() from None
-            if error.category in ("authentication", "isolation", "input_limit"):
-                raise Blocked(error.category) from None
-            raise CallFailed(error.category) from None
+            raise self._settled(ledger, conversation_id, error.category) from None
         except BaseException:
             ledger.settle({"outcome": "crash", "elapsed": self.clock() - started})
             raise
@@ -246,6 +244,18 @@ class Worker:
             }
         )
         return produced["candidate"]
+
+    def _settled(self, ledger: Ledger, conversation_id: str, category: Category) -> Exception:
+        """What a settled failure means for the conversation; a refusal waits on the refusal backoff."""
+        if category == Category.CANCELLED:
+            return Cancelled()
+        if category in REFUSALS:
+            refusals = ledger.record(conversation_id)["refusals"]
+            log.info("graph worker call for %s was refused (%s); refusal %d", conversation_id, category, refusals)
+            return Deferred(self.clock() + refusal_delay(refusals), category)
+        if category in DURABLE:
+            return Blocked(category)
+        return CallFailed(category)
 
     def _retry_or_block(self, ledger: Ledger, conversation_id: str, cap: int, block: str, failure: str) -> Exception:
         if ledger.record(conversation_id)["attempts"] < cap:
@@ -327,11 +337,12 @@ class Worker:
                 batch_size=self.settings.batch_size,
                 max_input_bytes=self.settings.max_input_bytes,
             )
-        except GraphError as error:
-            detail = str(error)
-            if "recall" in detail:
-                raise Blocked("missing_recall") from None
-            raise Blocked("input_limit" if "exceeds" in detail else "unsafe_source") from None
+        except MissingRecall:
+            raise Blocked(Category.MISSING_RECALL) from None
+        except InputOverflow:
+            raise Blocked(Category.INPUT_LIMIT) from None
+        except GraphError:
+            raise Blocked(Category.UNSAFE_SOURCE) from None
         return request, request_path
 
     def _after_apply(self, ledger: Ledger, conversation_id: str, state: dict) -> None:
@@ -453,14 +464,20 @@ def serve(config: Config, stop: threading.Event, *, worker: Worker | None = None
 
     The exclusive ledger lock is taken before verification and held through every idle wait, so a second
     service against the same directory ends at once without inference, and an administrative reset is refused
-    while the service runs. A stop during a call cancels it and returns only after its process is cleaned up.
+    while the service runs. A failed verification is logged and leaves the worker running: the
+    transport verifies again before its next launch, and nothing launches unverified. A stop during a call
+    cancels it and returns only after its process is cleaned up.
     """
     try:
         worker = worker if worker is not None else Worker(config)
         worker.stop = stop
         with Ledger.open(worker.state_dir) as ledger:
-            verified = worker.transport.verify()
-            log.info("graph worker verified %s", verified.get("mode"))
+            try:
+                log.info("graph worker verified %s", worker.transport.verify().get("mode"))
+            except TransportError as error:
+                log.warning(
+                    "graph worker provider is not verified (%s); it verifies again before a launch", error.category
+                )
             while not stop.is_set():
                 try:
                     worker.cycle(ledger)
@@ -479,7 +496,7 @@ def status(config: Config) -> dict[str, Any]:
     if not settings.enabled or settings.state_dir is None:
         return {"enabled": False}
     path = settings.state_dir / "ledger.json"
-    ledger = load_json(path) if path.exists() else {"conversations": {}, "calls": {}, "in_flight": None}
+    ledger = load_json(path) if path.exists() else {"conversations": {}, "calls": {}, "refused": {}, "in_flight": None}
     return {"enabled": True, "producer": settings.producer, "provider": settings.provider, **ledger}
 
 

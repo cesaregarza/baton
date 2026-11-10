@@ -182,6 +182,8 @@ class GraphWorker:
     credential_env: tuple[str, ...] = ()
     # The native client executable and fixed leading arguments; the worker appends its isolation flags.
     command: tuple[str, ...] = ()
+    # The exact native client version the operator inspected; a client reporting any other is never launched.
+    client_version: str | None = None
     generation: str | None = None
     poll_seconds: float = 30
     batch_size: int = 20

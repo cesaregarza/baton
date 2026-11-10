@@ -297,7 +297,9 @@ def test_rejections_leave_state_bytes_unchanged_and_allow_correction(tmp_path, m
         )["binding"]["request_id"]
     )
     committed = state.read_bytes()
-    with pytest.raises(GraphError, match="unknown requested recall"):
+    from baton.graph.operations import MissingRecall
+
+    with pytest.raises(MissingRecall):
         prepare(source, state, tmp_path / "unknown-recall.json", recall_statements=("S999",))
     assert not (tmp_path / "unknown-recall.json").exists()
     assert state.read_bytes() == committed

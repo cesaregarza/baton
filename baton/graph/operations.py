@@ -4,10 +4,18 @@ import copy
 from pathlib import Path
 from typing import Any
 
-from baton.graph.contract import BINDING, INSTRUCTIONS, SCHEMA, VERSION, require, validate_shape
+from baton.graph.contract import BINDING, INSTRUCTIONS, SCHEMA, VERSION, GraphError, require, validate_shape
 from baton.graph.source import canonical, digest, load_json, load_source, prefix_digest
 from baton.graph.storage import atomic_json, distinct_paths, load_state, state_lock
 from baton.graph.validation import build_patch
+
+
+class MissingRecall(GraphError):
+    """A requested recall statement is not in the checkpoint."""
+
+
+class InputOverflow(GraphError):
+    """The retained context plus the next whole post does not fit the input byte limit."""
 
 
 def retained_context(state, recalled_ids=()):
@@ -74,10 +82,8 @@ def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_b
         "recall statement IDs must be nonempty strings",
     )
     recalled_ids = sorted(set(recall_statements))
-    require(
-        set(recalled_ids) <= state["statements"].keys(),
-        "unknown requested recall statement ID",
-    )
+    if not set(recalled_ids) <= state["statements"].keys():
+        raise MissingRecall("unknown requested recall statement ID")
     start = state["watermark"] + 1
     require(start <= len(source["messages"]), "no new posts to prepare")
     request: dict[str, Any] = {
@@ -105,7 +111,8 @@ def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_b
         if len(canonical(candidate).encode("utf-8")) > max_input_bytes:
             break
         request = candidate
-    require(bool(request["new_posts"]), "retained context plus next whole post exceeds max-input-bytes (UTF-8)")
+    if not request["new_posts"]:
+        raise InputOverflow("retained context plus next whole post exceeds max-input-bytes (UTF-8)")
     atomic_json(request_path, request, replace=False)
     return request
 
