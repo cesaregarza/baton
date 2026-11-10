@@ -9,6 +9,7 @@ atomic snapshot publication that the MCP readers later serve.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from dataclasses import replace
@@ -542,7 +543,7 @@ def test_compact_retries_alone_and_publication_recovers_with_zero_calls(tmp_path
     )
     # The first request and its correction both state the configured bounds the host will enforce.
     for call in transport.calls[1:]:
-        assert call["request"]["limits"] == {"max_body_bytes": 120, "max_citations": 7}
+        assert call["request"]["limits"] == {"max_body_bytes": 120, "max_body_words": 15, "max_citations": 7}
     snapshot_digest = corrected["records"][cid]["request_id"].removeprefix("publish:")
     view = load_json(worker.paths(cid).compact_view(snapshot_digest))
     assert view["body"].startswith("Release: review the notes")
@@ -1040,6 +1041,23 @@ def test_a_backlog_runs_its_batches_before_one_summary_unless_the_summary_is_far
     assert kinds(transport) == ["extract", "extract", "summary", "extract", "extract", "summary"]
     with connect(config.db_path) as db:
         assert published(db, cid) == [(100, 1, 2), (151, 2, 4)]
+
+
+def test_a_summary_request_states_a_word_limit_and_a_rejection_states_the_measured_bytes(tmp_path) -> None:
+    limits = {"max_artifact_bytes": 120}
+    config = worker_config(tmp_path, limits, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 2)
+    config = worker_config(tmp_path, limits, conversations=[cid])
+    clock = Clock()
+    transport = ScriptedTransport(["ok", {"body": "\u00e9" * 100}, "ok"])  # 100 characters, 200 UTF-8 bytes
+    worker = Worker(config, transport=transport, clock=clock)
+    run_until_idle(worker, clock)
+    first, second = transport.calls[1]["request"], transport.calls[2]["request"]
+    assert first["limits"]["max_body_words"] == 120 // 8 and "max_body_words" in first["instructions"]
+    numbers = {int(found) for found in re.findall(r"\d+", second["correction"]["validation_error"])}
+    assert {200, 120} <= numbers
+    assert status(config)["conversations"][cid]["published_W"] == 2
 
 
 def test_the_meter_counts_calls_tokens_and_posts_per_utc_day_and_per_conversation(tmp_path) -> None:
