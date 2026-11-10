@@ -313,9 +313,18 @@ def test_calls_are_reserved_before_launch_and_exhaustion_blocks_durably(tmp_path
     assert restarted.transport.calls == []
     with connect(config.db_path) as db:
         assert published(db, cid) == []
-    assert reset(config, cid)["phase"] == "pending"
+    # A reset works while a service owns the directory: it is left as a request the worker applies itself.
+    requests = config.graph_worker.state_dir / "reset-requests"
+    with ledger.Ledger.open(config.graph_worker.state_dir):
+        assert reset(config, cid)["reset"] == "requested"
+        with pytest.raises(GraphError, match="unknown worker conversation"):
+            reset(config, "conv_nowhere")
+    assert status(config)["conversations"][cid]["phase"] == "blocked"  # nothing applied outside the worker
+    (requests / "conv_nowhere").write_text("")  # a request for no record is ignored and removed
     recovered = run_until_idle(restarted, clock)
+    assert recovered[0]["records"][cid]["phase"] != "blocked" and "conv_nowhere" not in recovered[0]["records"]
     assert recovered[-1]["records"][cid]["published_W"] == 3
+    assert not list(requests.iterdir())
 
 
 def test_provider_refusals_are_refunded_never_block_and_back_off_to_an_hourly_ceiling(tmp_path) -> None:
@@ -762,9 +771,8 @@ def test_service_owns_its_directory_for_life_and_stop_cancels_the_native_call(tm
     assert wait_for((dump / "descendant.pid").exists), "the native client never started"
     descendant = int((dump / "descendant.pid").read_text())
     assert alive(descendant)
-    # While the service owns the directory, administration is refused and a second service ends without a call.
-    with pytest.raises(ledger.WorkerBusy):
-        reset(config, cid)
+    # While the service owns the directory, a reset is queued for it and a second service ends without a call.
+    assert reset(config, cid)["reset"] == "requested"
     other = Worker(config, transport=ScriptedTransport())
     serve(config, threading.Event(), worker=other)
     assert other.transport.calls == [] and other.transport.verified == 0  # not even verification ran
@@ -789,11 +797,11 @@ def test_service_owns_its_directory_for_life_and_stop_cancels_the_native_call(tm
     idle_stop = threading.Event()
     idle_service = threading.Thread(target=serve, args=(idle_worker.config, idle_stop), kwargs={"worker": idle_worker})
     idle_service.start()
-    # One cycle moves the record on (the spent attempt left one call); then the service waits its hour, still owning.
+    # Its first cycle applies the queued reset and moves the record on; then it waits its hour, still owning.
     assert wait_for(lambda: status(config)["conversations"][cid]["phase"] == "compacting")
-    assert idle_transport.verified == 1
-    with pytest.raises(ledger.WorkerBusy):
-        reset(config, cid)
+    assert idle_transport.verified == 1 and not list((config.graph_worker.state_dir / "reset-requests").iterdir())
+    with pytest.raises(ledger.WorkerBusy), ledger.Ledger.open(config.graph_worker.state_dir):
+        pass
     idle_stop.set()
     idle_service.join(timeout=15)
     assert not idle_service.is_alive()

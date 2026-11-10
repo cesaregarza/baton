@@ -12,6 +12,7 @@ Model processes never see the authoritative database, the source directory or an
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from baton.config import Config
+from baton.config.graph_worker import CONVERSATION_ID
 from baton.database.store import connection
 from baton.errors import BatonError
 from baton.graph import compact
@@ -36,6 +38,8 @@ from baton.graph.transport import Limits, Transport, for_config
 log = logging.getLogger("baton.graph.worker")
 EXTRACTION_CALLS = 2
 COMPACT_CALLS = 2
+# One empty file per conversation to reset, named by its id; the running worker applies and removes them.
+RESET_REQUESTS = "reset-requests"
 
 
 class Blocked(Exception):
@@ -136,6 +140,7 @@ class Worker:
             with Ledger.open(self.state_dir) as owned:
                 return self.cycle(owned)
         interrupted = ledger.consume_interrupted()
+        self.apply_resets(ledger)
         self.poll(ledger)
         self.cycle_calls = 0
         now = self.clock()
@@ -156,6 +161,20 @@ class Worker:
             "model_calls": self.cycle_calls,
             "records": {cid: dict(record) for cid, record in ledger.records().items()},
         }
+
+    def apply_resets(self, ledger: Ledger) -> None:
+        """Apply each queued reset that names a known record, under this worker's lock; remove every request."""
+        folder = self.state_dir / RESET_REQUESTS
+        if not folder.is_dir():
+            return
+        for request in sorted(folder.iterdir()):
+            if request.is_file() and request.name in ledger.records():
+                log.info("graph worker applied a reset request for %s", request.name)
+                ledger.reset(request.name)
+            try:
+                request.unlink()
+            except OSError:  # a directory or a vanished entry: nothing to apply, and the cycle goes on
+                log.warning("graph worker could not remove a reset request entry")
 
     def poll(self, ledger: Ledger) -> None:
         """Compare canonical heads with graph W in one read snapshot; coalesce to one pending target each."""
@@ -463,8 +482,8 @@ def serve(config: Config, stop: threading.Event, *, worker: Worker | None = None
     """Own the state directory for the whole service lifetime and run cycles until `stop`.
 
     The exclusive ledger lock is taken before verification and held through every idle wait, so a second
-    service against the same directory ends at once without inference, and an administrative reset is refused
-    while the service runs. A failed verification is logged and leaves the worker running: the
+    service against the same directory ends at once without inference; an administrative reset meanwhile is
+    queued for this worker's next cycle. A failed verification is logged and leaves the worker running: the
     transport verifies again before its next launch, and nothing launches unverified. A stop during a call
     cancels it and returns only after its process is cleaned up.
     """
@@ -501,11 +520,39 @@ def status(config: Config) -> dict[str, Any]:
 
 
 def reset(config: Config, conversation_id: str) -> dict[str, Any]:
-    """Explicit host administration: clear one blocked record. Stop the service first; the ledger lock is held."""
+    """Explicit host administration: clear one blocked record, now or, while a service runs, at its next cycle.
+
+    With the ledger lock free the reset is applied at once. A running service holds the lock, so the command
+    leaves a request naming the conversation in the state directory, and that worker applies it under its own
+    lock. Either way only a conversation with a ledger record can be reset.
+    """
     settings = config.graph_worker
     if not settings.enabled or settings.state_dir is None:
         raise GraphError("the graph worker is disabled ([graph_worker] enabled)")
-    with Ledger.open(settings.state_dir) as ledger:
+    if not CONVERSATION_ID.fullmatch(conversation_id):  # the id also names the request file
+        raise GraphError("unknown worker conversation record")
+    try:
+        return _reset_now(settings.state_dir, conversation_id)
+    except WorkerBusy:
+        return _request_reset(config, settings.state_dir, conversation_id)
+
+
+def _reset_now(state_dir: Path, conversation_id: str) -> dict[str, Any]:
+    with Ledger.open(state_dir) as ledger:
         if conversation_id not in ledger.records():
             raise GraphError("unknown worker conversation record")
+        (state_dir / RESET_REQUESTS / conversation_id).unlink(missing_ok=True)  # applied here, not again later
         return dict(ledger.reset(conversation_id))
+
+
+def _request_reset(config: Config, state_dir: Path, conversation_id: str) -> dict[str, Any]:
+    if conversation_id not in status(config)["conversations"]:  # the ledger file is replaced atomically
+        raise GraphError("unknown worker conversation record")
+    folder = state_dir / RESET_REQUESTS
+    folder.mkdir(mode=0o700, exist_ok=True)
+    os.close(os.open(folder / conversation_id, os.O_CREAT | os.O_WRONLY | os.O_CLOEXEC, 0o600))
+    return {
+        "conversation_id": conversation_id,
+        "reset": "requested",
+        "detail": "the running graph worker applies it at the start of its next cycle",
+    }
