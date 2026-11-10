@@ -22,6 +22,7 @@ from baton.config import GraphWorker
 from baton.graph import compact, native
 from baton.graph.contract import SCHEMA
 from baton.graph.failure import TransportError
+from baton.graph.source import canonical
 from baton.graph.transport import HttpTransport, Limits, for_config
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -301,7 +302,12 @@ def test_claude_transport_pins_flags_and_parses_structured_output_only(tmp_path,
     assert json.loads(argv[4]) == compact.SCHEMA
     assert argv[5:9] == ["--model", "claude-synthetic", "--tools", ""]
     assert argv[9] == "--strict-mcp-config" and argv[10] == "--mcp-config"
-    assert argv[12:] == ["--safe-mode", "--disable-slash-commands", "--no-session-persistence"]
+    assert argv[12:15] == ["--safe-mode", "--disable-slash-commands", "--no-session-persistence"]
+    # The contract instructions travel in their own channel; stdin carries only the serialized content.
+    assert argv[15:] == ["--system-prompt", REQUEST["instructions"]]
+    content = {key: value for key, value in compact_request.items() if key != "instructions"}
+    assert call["stdin"] == canonical(content)
+    assert produced["input_bytes"] == len((REQUEST["instructions"] + canonical(content)).encode("utf-8"))
     assert "--bare" not in argv and "--dangerously-skip-permissions" not in argv
     assert not Path(argv[11]).exists() and call["cwd"] == str(
         Path(argv[11]).parent
@@ -334,9 +340,11 @@ def test_claude_transport_pins_flags_and_parses_structured_output_only(tmp_path,
     with pytest.raises(TransportError) as oversized:  # the bound still covers instructions plus content
         transport.produce(REQUEST, SCHEMA, Limits(5, len(REQUEST["instructions"]) + 10, 100_000, 400))
     assert oversized.value.category == "input_limit"
+    # Help that only documents the similar --append-system-prompt flag does not document --system-prompt.
     for mode, version, detail in (
         ("ok", "9.8.6", "version"),
         ("no_tools_flag", FAKE_VERSION, "--tools"),
+        ("no_system_prompt_flag", FAKE_VERSION, "--system-prompt"),
     ):
         (dump / "mode").write_text(mode)
         (dump / "version").write_text(version)

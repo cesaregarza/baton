@@ -70,6 +70,7 @@ CLAUDE_FLAGS = (
     "--safe-mode",
     "--disable-slash-commands",
     "--no-session-persistence",
+    "--system-prompt",
 )
 # Codex JSONL events the host accepts: thread/turn status, usage, failures, and assistant text, reasoning or
 # error items only. Agent text and reasoning items are model output, so they show the provider did work.
@@ -472,7 +473,10 @@ def _codex_allowed(event: Any) -> bool:
 
 @dataclass
 class ClaudeTransport(NativeClient):
-    """`claude --print` with every built-in tool and MCP server removed, structured output, no persistence."""
+    """`claude --print` with every built-in tool and MCP server removed, structured output, no persistence.
+
+    The contract instructions go in `--system-prompt`; stdin carries only the serialized request content.
+    """
 
     mode: str = "claude"
 
@@ -481,7 +485,7 @@ class ClaudeTransport(NativeClient):
         _require_flags(self.introspect(executable, env, "--help"), CLAUDE_FLAGS, "claude")
         return {"mode": self.mode, "version": version, "flags": list(CLAUDE_FLAGS)}
 
-    def argv(self, schema: dict[str, Any], empty_config: str) -> list[str]:
+    def argv(self, schema: dict[str, Any], empty_config: str, instructions: str) -> list[str]:
         return [
             *self.command,
             "--print",
@@ -499,21 +503,22 @@ class ClaudeTransport(NativeClient):
             "--safe-mode",
             "--disable-slash-commands",
             "--no-session-persistence",
+            "--system-prompt",
+            instructions,
         ]
 
     def produce(
         self, request: dict[str, Any], schema: dict[str, Any], limits: Limits, *, stop: threading.Event | None = None
     ) -> dict[str, Any]:
         instructions, content = _channels(request, limits)
-        prompt = instructions.encode("utf-8") + b"\n\n" + content
         executable = self.launch_executable()
         with tempfile.TemporaryDirectory(prefix="baton-graph-claude-") as cwd:
             empty_config = os.path.join(cwd, "mcp-empty.json")
             Path(empty_config).write_text('{"mcpServers": {}}', encoding="utf-8")
             result = run_process(
-                self.argv(schema, empty_config),
+                self.argv(schema, empty_config, instructions),
                 executable=executable,
-                stdin=prompt,
+                stdin=content,
                 env=child_environment(self.credential_env),
                 cwd=cwd,
                 timeout=limits.timeout,
@@ -525,7 +530,7 @@ class ClaudeTransport(NativeClient):
         return {
             "candidate": candidate,
             "usage": usage,
-            "input_bytes": len(prompt),
+            "input_bytes": len(instructions.encode("utf-8")) + len(content),
             "output_bytes": len(result.stdout),
             "elapsed": result.elapsed,
             "turns": turns,

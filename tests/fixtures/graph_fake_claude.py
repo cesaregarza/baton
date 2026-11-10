@@ -28,9 +28,11 @@ FLAGS = [
     "--safe-mode",
     "--disable-slash-commands",
     "--no-session-persistence",
+    "--append-system-prompt",
+    "--system-prompt",
     "--bare",
 ]
-MISSING = {"no_tools_flag": "--tools"}
+MISSING = {"no_tools_flag": "--tools", "no_system_prompt_flag": "--system-prompt"}
 NO_USAGE = {
     "input_tokens": 0,
     "cache_creation_input_tokens": 0,
