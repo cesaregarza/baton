@@ -272,6 +272,7 @@ def test_codex_transport_pins_isolation_and_rejects_every_action_family(tmp_path
         ("ok", "9.8.6", "version"),
         ("no_schema_flag", FAKE_VERSION, "--output-schema"),
         ("missing_feature", FAKE_VERSION, "shell_tool"),
+        ("no_sleep_tool", FAKE_VERSION, "sleep_tool"),
     ):
         (dump / "mode").write_text(mode)
         (dump / "version").write_text(version)

@@ -29,6 +29,7 @@ FEATURES = [
     "browser_use",
     "computer_use",
     "request_permissions_tool",
+    "sleep_tool",
 ]
 EXEC_HELP = """Run Codex non-interactively
   -c, --config <key=value>
@@ -51,6 +52,7 @@ if args == ["exec", "--help"]:
     sys.exit(0)
 if args == ["features", "list"]:
     listed = FEATURES[1:] if mode == "missing_feature" else FEATURES
+    listed = [name for name in listed if name != "sleep_tool"] if mode == "no_sleep_tool" else listed
     print("\n".join(f"{name:40} stable  true" for name in listed))
     sys.exit(0)
 
