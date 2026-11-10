@@ -144,7 +144,10 @@ description = "Picks up jobs and reports back"
 # base_url = "https://provider.example/v1"    # http only
 # api_key_env = "GRAPH_API_KEY"               # http only; or allow_no_key = true for an explicit local provider
 # credential_env = ["CODEX_HOME"]             # native only: environment names a client needs; never BATON_* values
-# command = ["codex"]                         # native only: the client executable (argv, no shell)
+# command = ["codex"]                         # native only: the client executable (argv, no shell); a versioned
+#                                             # executable path keeps an auto-update from changing the client
+# client_version = "1.2.3"                    # native only, required, no default: the exact version you
+#                                             # inspected; any other reported version is never launched
 # poll_seconds = 30
 # batch_size = 20                             # posts per graph batch
 # max_input_bytes = 512000                    # serialized UTF-8 per model request; overflow blocks the conversation
@@ -152,9 +155,11 @@ description = "Picks up jobs and reports back"
 # call_timeout_seconds = 300
 # max_output_tokens = 4000                    # http only; native calls are bounded by time and bytes
 # daily_call_cap = 8                          # model launches per UTC day across every conversation; 0 = no daily
-#                                             # limit (authorized catch-up); attempt and per-cycle bounds still apply
+#                                             # limit (authorized catch-up); attempt and per-cycle bounds still apply;
+#                                             # launches the provider refused without doing work are not counted
 # calls_per_cycle = 4                         # model launches per scheduling cycle
 # publication_attempts = 3                    # per graph digest; then the conversation blocks until reset
+#                                             # (`baton index graph-worker reset`, applied even while serving)
 
 # Bearer tokens: create with `baton token new --name <name> --role <role>` and paste the printed entry.
 # [[auth.tokens]]
