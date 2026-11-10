@@ -4,7 +4,8 @@ Everything lives in one private JSON file replaced atomically under a process-li
 reservation and the counters it changes can never split. A second worker finds the lock held and exits
 without inference. A call settled as a refusal (the provider did no work) is refunded: its attempt returns,
 its launch stays counted in `calls` and is also counted in `refused`, and the daily cap compares the
-difference, so only launches that may have used the provider spend the day. Source, checkpoint, request,
+difference, so only launches that may have used the provider spend the day. A meter counts calls, tokens and
+accepted posts per UTC day (the most recent `METER_DAYS`) and per conversation. Source, checkpoint, request,
 proposal and compact artifacts stay in their own files and are reconciled by identity after an interruption;
 the ledger never contains model output or source prose.
 """
@@ -15,7 +16,7 @@ import fcntl
 import os
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ from baton.graph.failure import REFUSALS, Category
 from baton.graph.source import load_json
 from baton.graph.storage import atomic_json
 
-VERSION = 2
+VERSION = 3
 PHASES = ("pending", "extracting", "compacting", "publishing", "idle", "blocked")
 RECORD_FIELDS = (
     "conversation_id",
@@ -40,6 +41,8 @@ RECORD_FIELDS = (
     "refusals",
 )
 RECENT_CALLS = 50
+METER_DAYS = 30
+COUNTERS = ("calls", "input_tokens", "cached_input_tokens", "output_tokens", "posts")
 RETRY_DELAY = 60.0
 REFUSAL_CEILING = 3600.0
 
@@ -70,6 +73,52 @@ def refusal_delay(refusals: int) -> float:
     return min(RETRY_DELAY * 2 ** min(refusals - 1, 16), REFUSAL_CEILING)
 
 
+def call_tokens(usage: Any) -> dict[str, int]:
+    """Input (cached included), cached input and output tokens from a transport's usage; 0 where none is reported.
+
+    The event-stream client and the chat-completions API count cached input inside their input total; the
+    system-prompt client reports cache reads and writes beside its input count, so they are added to it.
+    """
+    usage = usage if isinstance(usage, dict) else {}
+    if "prompt_tokens" in usage:
+        prompt, cached = _count(usage, "prompt_tokens"), _count(usage.get("prompt_tokens_details"), "cached_tokens")
+        return {
+            "input_tokens": prompt,
+            "cached_input_tokens": cached,
+            "output_tokens": _count(usage, "completion_tokens"),
+        }
+    read, written = _count(usage, "cache_read_input_tokens"), _count(usage, "cache_creation_input_tokens")
+    return {
+        "input_tokens": _count(usage, "input_tokens") + read + written,
+        "cached_input_tokens": _count(usage, "cached_input_tokens") + read,
+        "output_tokens": _count(usage, "output_tokens"),
+    }
+
+
+def _count(fields: Any, key: str) -> int:
+    value = fields.get(key) if isinstance(fields, dict) else None
+    return value if type(value) is int and value >= 0 else 0
+
+
+def meter_report(state: dict[str, Any]) -> dict[str, Any]:
+    """The meter as `status` shows it: day rows oldest first and per-conversation totals, with tokens per post."""
+
+    def row(counts: dict[str, int], **label: str) -> dict[str, Any]:
+        posts = counts["posts"]
+        per_post = {
+            f"{key}_per_post": counts[key] / posts if posts else None for key in ("input_tokens", "output_tokens")
+        }
+        return {**label, **counts, **per_post}
+
+    return {
+        "days": [row(counts, day=day) for day, counts in sorted(state.get("meter", {}).items())],
+        "conversations": {
+            cid: row(record.get("meter") or dict.fromkeys(COUNTERS, 0))
+            for cid, record in state["conversations"].items()
+        },
+    }
+
+
 def new_record(conversation_id: str, checkpoint_path: str) -> dict[str, Any]:
     return {
         "conversation_id": conversation_id,
@@ -83,6 +132,7 @@ def new_record(conversation_id: str, checkpoint_path: str) -> dict[str, Any]:
         "not_before": 0.0,
         "error_category": None,
         "refusals": 0,
+        "meter": dict.fromkeys(COUNTERS, 0),
     }
 
 
@@ -105,8 +155,8 @@ class Ledger:
                 raise WorkerBusy("another graph worker owns this state directory") from None
             path = directory / "ledger.json"
             state = load_json(path) if path.exists() else _initial()
-            if isinstance(state, dict) and state.get("version") == 1:
-                state = _upgrade_from_1(state)
+            while isinstance(state, dict) and state.get("version") in UPGRADES:  # one version forward per step
+                state = UPGRADES[state["version"]](state)
                 atomic_json(path, state)
             if not isinstance(state, dict) or state.get("version") != VERSION:
                 raise GraphError("unsupported graph worker ledger")
@@ -233,10 +283,28 @@ class Ledger:
             self.state["refused"] = {day: self.state["refused"].get(day, 0) + 1}
         elif record is not None and outcome["outcome"] != Category.CANCELLED:
             record["refusals"] = 0
+        if outcome["outcome"] not in REFUSALS:
+            day = utc_day(in_flight["reserved_at"])
+            self._meter(in_flight["conversation_id"], day, calls=1, **call_tokens(outcome.get("usage")))
         entry = {**in_flight, **outcome}
         self.state["recent_calls"] = [*self.state["recent_calls"], entry][-RECENT_CALLS:]
         self.state["in_flight"] = None
         self.save()
+
+    def accept(self, conversation_id: str, posts: int, now: float) -> None:
+        """Count posts an applied batch accepted, on the UTC day of `now`."""
+        self._meter(conversation_id, utc_day(now), posts=posts)
+        self.save()
+
+    def _meter(self, conversation_id: str, day: str, **counts: int) -> None:
+        """Add to one day's counters and the conversation's totals; days before the newest `METER_DAYS` are dropped."""
+        days, record = self.state["meter"], self.records().get(conversation_id)
+        targets = [days.setdefault(day, dict.fromkeys(COUNTERS, 0))] + ([record["meter"]] if record else [])
+        for counters in targets:
+            for key, value in counts.items():
+                counters[key] += value
+        oldest = (date.fromisoformat(max(days)) - timedelta(days=METER_DAYS - 1)).isoformat()
+        self.state["meter"] = {key: days[key] for key in sorted(days) if key >= oldest}
 
     # Scheduling ---------------------------------------------------------------------------------------------
 
@@ -259,6 +327,7 @@ def _initial() -> dict[str, Any]:
         "next_position": 0,
         "recent_calls": [],
         "conversations": {},
+        "meter": {},
     }
 
 
@@ -266,4 +335,14 @@ def _upgrade_from_1(state: dict[str, Any]) -> dict[str, Any]:
     """Version 2 adds the refusal counters, starting at zero; nothing else changes."""
     for record in state.get("conversations", {}).values():
         record["refusals"] = 0
-    return {**state, "version": VERSION, "refused": {}}
+    return {**state, "version": 2, "refused": {}}
+
+
+def _upgrade_from_2(state: dict[str, Any]) -> dict[str, Any]:
+    """Version 3 adds the meter, empty for every day and conversation; nothing else changes."""
+    for record in state.get("conversations", {}).values():
+        record["meter"] = dict.fromkeys(COUNTERS, 0)
+    return {**state, "version": 3, "meter": {}}
+
+
+UPGRADES = {1: _upgrade_from_1, 2: _upgrade_from_2}

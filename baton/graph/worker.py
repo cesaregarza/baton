@@ -29,7 +29,7 @@ from baton.graph import snapshot as snapshot_module
 from baton.graph.contract import SCHEMA, GraphError
 from baton.graph.export import export_source
 from baton.graph.failure import DURABLE, REFUSALS, Category, TransportError
-from baton.graph.ledger import RETRY_DELAY, Budget, Ledger, WorkerBusy, next_utc_day, refusal_delay
+from baton.graph.ledger import RETRY_DELAY, Budget, Ledger, WorkerBusy, meter_report, next_utc_day, refusal_delay
 from baton.graph.operations import InputOverflow, MissingRecall, apply, prepare
 from baton.graph.publication import publish_graph
 from baton.graph.source import canonical, digest, load_json, load_source
@@ -394,6 +394,8 @@ class Worker:
         record = ledger.record(conversation_id)
         accepted = state["watermark"]
         phase = self._next_phase(conversation_id, record["target_head"], accepted, record["published_W"])
+        if accepted > record["accepted_W"]:
+            ledger.accept(conversation_id, accepted - record["accepted_W"], self.clock())
         ledger.update(
             conversation_id, accepted_W=accepted, phase=phase, request_id=None, attempts=0, error_category=None
         )
@@ -533,13 +535,22 @@ def serve(config: Config, stop: threading.Event, *, worker: Worker | None = None
 
 
 def status(config: Config) -> dict[str, Any]:
-    """The ledger as stored: records, budget and recent sanitized call outcomes. Read-only, no lock needed."""
+    """The ledger as stored (records, budget, recent sanitized call outcomes) and its meter with tokens per post.
+
+    Read-only, no lock needed.
+    """
     settings = config.graph_worker
     if not settings.enabled or settings.state_dir is None:
         return {"enabled": False}
     path = settings.state_dir / "ledger.json"
     ledger = load_json(path) if path.exists() else {"conversations": {}, "calls": {}, "refused": {}, "in_flight": None}
-    return {"enabled": True, "producer": settings.producer, "provider": settings.provider, **ledger}
+    return {
+        "enabled": True,
+        "producer": settings.producer,
+        "provider": settings.provider,
+        **ledger,
+        "meter": meter_report(ledger),
+    }
 
 
 def reset(config: Config, conversation_id: str) -> dict[str, Any]:

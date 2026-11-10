@@ -30,6 +30,7 @@ from baton.graph.source import load_json
 from baton.graph.worker import Worker, reset, status
 
 DAY = 86_400.0
+USAGE = {"input_tokens": 11, "cached_input_tokens": 3, "output_tokens": 5}
 REFUSALS = ("authentication", "rate_limited", "provider_unavailable", "provider_refused", "unverified_client")
 
 
@@ -97,7 +98,7 @@ class ScriptedTransport:
             candidate = compact_candidate(request, action if isinstance(action, dict) else {})
         else:
             candidate = extraction_candidate(request)
-        return {"candidate": candidate, "usage": {"total_tokens": 7}, "input_bytes": 1, "output_bytes": 2, "turns": 1}
+        return {"candidate": candidate, "usage": dict(USAGE), "input_bytes": 1, "output_bytes": 2, "turns": 1}
 
 
 def extraction_candidate(request):
@@ -479,7 +480,13 @@ def test_restart_consumes_the_in_flight_reservation_and_reuses_saved_candidates(
     assert ledger_file["in_flight"] is None and ledger_file["recent_calls"][-1]["outcome"] == "crash"
     assert ledger_file["conversations"][cid]["attempts"] == 1
     # Simulate a process that died between reserving and settling: the reservation is consumed on restart.
-    ledger_file["in_flight"] = {"conversation_id": cid, "phase": "extracting", "request_digest": "x", "attempt": 2}
+    ledger_file["in_flight"] = {
+        "conversation_id": cid,
+        "phase": "extracting",
+        "request_digest": "x",
+        "reserved_at": clock.now,
+        "attempt": 2,
+    }
     ledger_file["conversations"][cid]["attempts"] = 2
     ledger_file["calls"] = {ledger.utc_day(clock.now): 2}
     # Written in the version-1 format, without the refusal counters: opening it upgrades it in place.
@@ -490,8 +497,11 @@ def test_restart_consumes_the_in_flight_reservation_and_reuses_saved_candidates(
     restarted = Worker(config, transport=ScriptedTransport(), clock=clock)
     first = restarted.cycle()
     upgraded = load_json(config.graph_worker.state_dir / "ledger.json")
-    assert (upgraded["version"], upgraded.get("refused"), upgraded["calls"]) == (2, {}, {ledger.utc_day(clock.now): 2})
+    assert (upgraded["version"], upgraded.get("refused"), upgraded["calls"]) == (3, {}, {ledger.utc_day(clock.now): 2})
     assert upgraded["conversations"][cid].get("refusals") == 0
+    # The meter starts empty on upgrade; the interrupted reservation settled afterwards is its first call.
+    spent = {"calls": 1, "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "posts": 0}
+    assert upgraded["meter"] == {ledger.utc_day(clock.now): spent} and upgraded["conversations"][cid]["meter"] == spent
     assert first["interrupted"]["attempt"] == 2
     assert first["records"][cid]["phase"] == "blocked"  # both extraction calls were spent without a candidate
     assert restarted.transport.calls == []
@@ -1030,3 +1040,44 @@ def test_a_backlog_runs_its_batches_before_one_summary_unless_the_summary_is_far
     assert kinds(transport) == ["extract", "extract", "summary", "extract", "extract", "summary"]
     with connect(config.db_path) as db:
         assert published(db, cid) == [(100, 1, 2), (151, 2, 4)]
+
+
+def test_the_meter_counts_calls_tokens_and_posts_per_utc_day_and_per_conversation(tmp_path) -> None:
+    limits = {"max_artifact_bytes": 120}
+    config = worker_config(tmp_path, limits, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 2)
+    config = worker_config(tmp_path, limits, conversations=[cid], daily_call_cap=0)
+    clock = Clock()
+    first_day = ledger.utc_day(clock.now)
+    transport = ScriptedTransport(["rate_limited"])  # refunded, so not a call on the meter either
+    worker = Worker(config, transport=transport, clock=clock)
+    run_until_idle(worker, clock)
+    clock.now += DAY
+    second_day = ledger.utc_day(clock.now)
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 3")
+        say(db, config, cid, "note 4")
+    run_until_idle(worker, clock)
+    assert kinds(transport) == ["extract", "extract", "summary", "extract", "summary"]
+
+    def row(calls, posts, **extra):
+        tokens = {key: value * calls for key, value in USAGE.items()}
+        per_post = {
+            f"{key}_per_post": tokens[key] / posts if posts else None for key in ("input_tokens", "output_tokens")
+        }
+        return {"calls": calls, **tokens, "posts": posts, **per_post, **extra}
+
+    meter = status(config)["meter"]
+    assert meter["days"] == [row(2, 2, day=first_day), row(2, 2, day=second_day)]
+    assert meter["conversations"] == {cid: row(4, 4)}
+    # Forty days on: two rejected extraction calls and no accepted post; the old days are dropped.
+    clock.now += 40 * DAY
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 5")
+    transport.script = ["garbage", "garbage"]
+    assert run_until_idle(worker, clock)[-1]["records"][cid]["phase"] == "blocked"
+    meter = status(config)["meter"]
+    assert meter["days"] == [row(2, 0, day=ledger.utc_day(clock.now))]
+    assert meter["conversations"] == {cid: row(6, 4)}
+    assert list(load_json(config.graph_worker.state_dir / "ledger.json")["meter"]) == [ledger.utc_day(clock.now)]

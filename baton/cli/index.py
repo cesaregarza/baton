@@ -200,7 +200,7 @@ def _add_graph_commands(index: Any) -> None:
         help="administer the background graph producer ([graph_worker]); generation itself runs under `baton serve`",
     ).add_subparsers(dest="graph_worker_command", required=True)
     worker.add_parser(
-        "status", help="the worker ledger: records, daily call budget and recent sanitized outcomes"
+        "status", help="the worker ledger: records, daily call budget, recent sanitized outcomes and the meter"
     ).set_defaults(handler=lambda config, args: invalid_worker(lambda: _status(config)))
     reset = worker.add_parser(
         "reset", help="clear one blocked conversation record; a running service applies it at its next cycle"
