@@ -149,7 +149,10 @@ description = "Picks up jobs and reports back"
 # client_version = "1.2.3"                    # native only, required, no default: the exact version you
 #                                             # inspected; any other reported version is never launched
 # poll_seconds = 30
-# batch_size = 20                             # posts per graph batch
+# batch_size = 20                             # posts per graph batch; a thread is graphed once this many wait
+# max_wait_seconds = 21600                    # ... or once its oldest waiting post has waited this long;
+#                                             # 0 = every new post is due at once. A backlog is summarized
+#                                             # once, after its last due batch (or when 100 posts behind)
 # max_input_bytes = 512000                    # serialized UTF-8 per model request; overflow blocks the conversation
 # max_response_bytes = 4000000
 # call_timeout_seconds = 300
