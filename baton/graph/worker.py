@@ -16,6 +16,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -177,7 +178,7 @@ class Worker:
                 log.warning("graph worker could not remove a reset request entry")
 
     def poll(self, ledger: Ledger) -> None:
-        """Compare canonical heads with graph W in one read snapshot; coalesce to one pending target each."""
+        """Compare canonical heads with graph W in one read snapshot; an idle thread is pending once a batch is due."""
         with connection(self.config.db_path) as conn, conn.snapshot():
             for conversation_id in self.settings.conversations:
                 row = conn.execute("SELECT last_seq FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
@@ -187,10 +188,33 @@ class Worker:
                 head = row["last_seq"]
                 if record["phase"] == "blocked":
                     continue
-                if record["phase"] == "idle" and head > record["accepted_W"]:
+                if record["phase"] == "idle" and self._due(conn, conversation_id, head, record["accepted_W"]):
                     ledger.update(conversation_id, phase="pending", target_head=head)
                 elif head != record["target_head"]:
                     ledger.update(conversation_id, target_head=head)
+
+    def _due(self, conn: Any, conversation_id: str, head: int, accepted: int) -> bool:
+        """A batch is due when a full one waits or the first post after `accepted` has waited max_wait_seconds."""
+        waiting, max_wait = head - accepted, self.settings.max_wait_seconds
+        if waiting <= 0:
+            return False
+        if waiting >= self.settings.batch_size or max_wait == 0:
+            return True
+        oldest = conn.execute(
+            "SELECT MIN(at) FROM messages WHERE conversation_id = ? AND conversation_seq = ?",
+            (conversation_id, accepted + 1),
+        ).fetchone()[0]
+        if oldest is None:  # no copy left to date it: due, so the export reports the gap as before
+            return True
+        return self.clock() - datetime.fromisoformat(oldest).timestamp() >= max_wait
+
+    def _next_phase(self, conversation_id: str, target_head: int, accepted: int, published: int) -> str:
+        """After a batch or a publication: summarize what is unpublished first, else a due batch or idle."""
+        with connection(self.config.db_path) as conn:
+            due = self._due(conn, conversation_id, target_head, accepted)
+        if accepted > published:
+            return "compacting"
+        return "pending" if due else "idle"
 
     def step(self, ledger: Ledger, conversation_id: str) -> None:
         phase = ledger.record(conversation_id)["phase"]
@@ -367,10 +391,7 @@ class Worker:
     def _after_apply(self, ledger: Ledger, conversation_id: str, state: dict) -> None:
         record = ledger.record(conversation_id)
         accepted = state["watermark"]
-        if accepted > record["published_W"]:
-            phase = "compacting"
-        else:
-            phase = "pending" if record["target_head"] > accepted else "idle"
+        phase = self._next_phase(conversation_id, record["target_head"], accepted, record["published_W"])
         ledger.update(
             conversation_id, accepted_W=accepted, phase=phase, request_id=None, attempts=0, error_category=None
         )
@@ -466,12 +487,12 @@ class Worker:
             raise self._retry_or_block(
                 ledger, conversation_id, self.settings.publication_attempts, "publication_failed", "publication_failed"
             ) from None
-        record = ledger.record(conversation_id)
+        accepted = state["watermark"]
         ledger.update(
             conversation_id,
-            published_W=state["watermark"],
-            accepted_W=state["watermark"],
-            phase="pending" if record["target_head"] > state["watermark"] else "idle",
+            published_W=accepted,
+            accepted_W=accepted,
+            phase=self._next_phase(conversation_id, ledger.record(conversation_id)["target_head"], accepted, accepted),
             request_id=None,
             attempts=0,
             error_category=None,

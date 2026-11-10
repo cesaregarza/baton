@@ -12,6 +12,7 @@ import json
 import threading
 import time
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,7 @@ def worker_config(tmp_path: Path, indexer: dict | None = None, **worker) -> conf
         "base_url": "https://provider.invalid/v1",
         "allow_no_key": True,
         "batch_size": 2,
+        "max_wait_seconds": 0,
         **worker,
     }
     return replace(
@@ -950,3 +952,45 @@ def test_compact_contract_rejects_coverage_gaps_and_stale_digests() -> None:
     assert "S1: T" in rendered["body"] and "S2" not in rendered["body"] and "D2" not in rendered["body"]
     assert compact.fits(rendered, snapshot, source, max_body_bytes=12_000, max_citations=64)
     assert not compact.fits(rendered, snapshot, source, max_body_bytes=10, max_citations=64)
+
+
+def kinds(transport):
+    return ["summary" if "compact_schema" in call["request"] else "extract" for call in transport.calls]
+
+
+def test_a_thread_waits_for_a_full_batch_or_for_its_oldest_post(tmp_path) -> None:
+    settings = {"batch_size": 3, "max_wait_seconds": 3600}
+    config = worker_config(tmp_path, conversations=["placeholder"], **settings)
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 2)
+    config = worker_config(tmp_path, conversations=[cid], **settings)
+    clock = Clock(time.time())  # posts are stamped with the wall clock, so the worker starts from it
+    transport = ScriptedTransport()
+    worker = Worker(config, transport=transport, clock=clock)
+    young = worker.cycle()
+    assert young["records"][cid]["phase"] == "idle" and transport.calls == []
+    assert young["records"][cid]["target_head"] == 2  # the head is still tracked exactly
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 3")  # a full batch is waiting
+    full = worker.cycle()
+    assert full["model_calls"] == 1 and full["records"][cid]["accepted_W"] == 3
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 4")  # one young post: publication leaves the thread idle, not pending
+    record = run_until_idle(worker, clock)[-1]["records"][cid]
+    assert (record["phase"], record["published_W"], record["target_head"]) == ("idle", 3, 4)
+    assert kinds(transport) == ["extract"]
+    with connect(config.db_path) as db:
+        oldest = db.execute(
+            "SELECT MIN(at) FROM messages WHERE conversation_id = ? AND conversation_seq = 4", (cid,)
+        ).one()[0]
+    clock.now = datetime.fromisoformat(oldest).timestamp() + 3599
+    assert worker.cycle()["records"][cid]["phase"] == "idle" and len(transport.calls) == 1
+    clock.now += 1  # the oldest waiting post has now waited max_wait_seconds
+    aged = worker.cycle()
+    assert aged["model_calls"] == 1 and aged["records"][cid]["accepted_W"] == 4
+    run_until_idle(worker, clock)
+    # With max_wait_seconds = 0 one new post is due at once.
+    eager = Worker(worker_config(tmp_path, conversations=[cid], batch_size=3), transport=transport, clock=clock)
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 5")
+    assert eager.cycle()["model_calls"] == 1 and len(transport.calls) == 3
