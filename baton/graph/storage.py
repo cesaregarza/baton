@@ -6,8 +6,10 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from baton.graph.contract import VERSION, require
+from baton.graph.contract import require
 from baton.graph.source import canonical, load_json, prefix_digest
+
+STATE_VERSION = 1  # the stored graph state's shape, which a new request and proposal contract leaves alone
 
 
 def distinct_paths(**paths):
@@ -57,7 +59,7 @@ def state_lock(path):
 
 def initial_state(source):
     return {
-        "version": VERSION,
+        "version": STATE_VERSION,
         "conversation_id": source["conversation_id"],
         "revision": 0,
         "watermark": 0,
@@ -73,7 +75,7 @@ def initial_state(source):
 
 def load_state(path, source):
     state = load_json(path) if Path(path).exists() else initial_state(source)
-    require(isinstance(state, dict) and state.get("version") == VERSION, "unsupported graph state")
+    require(isinstance(state, dict) and state.get("version") == STATE_VERSION, "unsupported graph state")
     require(state.get("conversation_id") == source["conversation_id"], "state conversation mismatch")
     through = state.get("watermark")
     require(type(through) is int and 0 <= through <= len(source["messages"]), "source is shorter than committed prefix")

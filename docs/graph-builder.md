@@ -78,9 +78,9 @@ The synthetic thread has six posts. Processing only five leaves the sixth verbat
 It offers multi-target responses, partial and complete supersession, and a resolved discussion
 whose source-backed decision still applies to an active strand. These are interpretation examples,
 not permission to take actions mentioned in the posts.
-Use `--recall-statement ID` once per selected ID when older original wording is needed. First inspect
-`read --history` and `raw --seq` to identify the IDs, then prepare a fresh request; never edit a
-prepared request because its content is bound to its request ID.
+The request shows the model the part of the graph chosen for its new posts (see
+[Input and limits](#input-and-limits)). Never edit a prepared request: its content is bound to its
+request ID.
 
 ## Produce with an API
 
@@ -111,11 +111,9 @@ for the OpenAI request fields; compatible providers may support a subset. There 
 or retry that makes an additional call. An explicitly configured local provider may use
 `--allow-no-key` instead of `--api-key-env`. Failed, refused, truncated or invalid output does
 not advance the processed frontier. Usage is reported when supplied by the provider; absent
-usage is unknown, not an estimated saving or cost. The operator must inspect history and select recall
-IDs before `run`; it sends one request and has no automatic retrieval loop. The separate `prepare`
+usage is unknown, not an estimated saving or cost. `run` sends one request and has no retrieval loop:
+the model reads the graph context that prepare chose and nothing more. The separate `prepare`
 plus manual proposal/apply flow can be used when the proposal needs inspection before state advances.
-The API proposal schema has no missing-context outcome, so a single call cannot reliably report that
-an archived meaning was unavailable; the operator must select necessary IDs before calling it.
 
 ## Read, update and retain artifacts
 
@@ -143,8 +141,10 @@ immutable; when a decision changes, supersede its existing D ID and add a new de
 
 The read captures source head **H**, processed contiguous frontier **W**, and summary coverage for
 each strand. The tail is exactly `W < seq <= H`, with original text and author metadata. A touched
-strand must refresh its summary through the batch before apply advances W; untouched strands
-retain their earlier explicit frontier. A graph summary is derived interpretation, not authenticated
+strand whose card the request showed must refresh its summary through the batch before apply advances
+W; untouched strands retain their earlier explicit frontier. A strand that gains a statement without
+its card shown keeps its older frontier until the next request, which shows the card and asks for the
+refresh. A graph summary is derived interpretation, not authenticated
 approval, ticket status or action authority.
 
 Append posts to the saved source, preserving its committed prefix, then prepare another batch
@@ -184,18 +184,36 @@ metadata. The current saved pilot export is also accepted. Use the synthetic fix
 canonical example. Duplicate IDs, missing posts and incompatible conversation IDs fail explicitly;
 permission-filtered or gapped exports are unsupported.
 
-Prepare sends only bounded new raw posts and compact retained graph state. Active and partially
-superseded statements include their host-supplied source metadata, while compact text still uses the
-surviving clause. Completely superseded statements appear as IDs only unless explicitly recalled.
-Recall includes the original text, exact quotes, source metadata, relevance, surviving text, memberships,
-and evidence for each requested statement, including archived statements. Recall is empty by default
-and is included in both request and provider UTF-8 bounds. The input limit measures serialized UTF-8
-bytes, not model tokens. If required context or one post cannot fit, prepare fails instead of dropping
-context or skipping the post. Archived IDs alone do not recover meaning: native producers should stop
-and report missing IDs for operator recall; API callers must select IDs before the single call. This is
-producer guidance, not validator-enforced semantic fidelity; the API schema has no missing-context
-response.
-Increase the explicit budget or use a smaller batch. Output tokens are a separate provider limit.
+A graph grows larger than the thread it describes, so prepare sends the new raw posts with only the
+part of the graph they are likely to touch, as the request's `context`:
+
+- `outline`: every strand on one line, so a new statement can be filed under any of them.
+- `entries`: standing statements and active decisions, one line each, as graph readers see them: the
+  standing statements of the last 20 processed posts, the active decisions changed in those posts, and
+  each new post's 20 best full-text search hits among the older entries.
+- `cards`: the summary, open work and evidence of every strand a shown entry belongs to.
+- `refresh`: the strands holding statements newer than their summary. Their cards and those statements
+  are always sent, and the proposal must refresh each of them.
+- `next_ids`: the strand and decision IDs a proposal allocates from.
+
+A proposal may change only what its request showed. A relevance update, an edge, a strand refresh or a
+decision change naming anything else is rejected. A new statement may still be filed under any strand
+in the outline; a strand that gains one without its card shown falls behind, and the next request sends
+its card and asks for the refresh. Completely superseded statements and superseded decisions are never
+shown, so neither can be changed again. An older entry the search does not surface can be missed, for
+example a decision restated under a new ID, but it is never altered unread.
+
+The input limit measures the serialized request in UTF-8 bytes, not model tokens. Prepare takes as many
+whole posts as fit with their full context. When the next post alone does not fit, it drops entries
+from the least valuable end (search hits first, the newest statements last) until the request fits. The
+outline always stays, and so does what a refresh owed to a strand has to read: its card and its
+statements newer than its summary. A post that does not fit even with only those makes prepare fail
+instead of splitting or skipping it: increase the explicit budget. Each provider path
+holds its own, slightly larger encoding of the request to the same number, so a request within a few
+percent of the limit can still be refused there. Output tokens are a separate provider limit.
+
+Choosing the entries needs SQLite FTS5. On a host without it `prepare`, `run` and the background worker
+refuse to start; they never fall back to showing the recent entries alone.
 
 V1 runs one bounded batch at a time. The manual host commands below export source and publish the
 completed graph. Nothing schedules follow-up work, fetches linked artifacts, installs hooks or changes
@@ -325,17 +343,19 @@ process-lifetime lock, so a crash consumes it and a second worker exits without 
 gets at most two calls per base W, compaction two per accepted graph digest, and the daily cap (default
 8) and per-cycle cap (default 4) bound launches across every conversation; a correction call carries the
 sanitized validation error and rejected output only when they fit `max_input_bytes`. Exhaustion, an
-input overflow (the retained context plus one post exceeding `max_input_bytes`, as the 512 KB pilot
-baseline hit), a missing required recall, an authentication or isolation failure, or an edited source
+input overflow (one post exceeding `max_input_bytes` with only the graph context it must carry, or a
+correction that does not fit), an authentication or isolation failure, or an edited source
 prefix sets the conversation `blocked`; new posts, restarts and new days never clear it. A daily cap
 only defers to the next UTC day. `daily_call_cap = 0` removes only the daily limit, for an authorized
 catch-up: launches are still reserved, counted per UTC day and reported, and the per-request attempt
 and per-cycle caps still apply. Publication never calls a model: it reuses the saved compact view and
 the derived receipt, waits 60 seconds between attempts, and blocks after three per graph digest. Native
 calls count launches, wall time and bytes; `recent_calls` reports observed turns and usage as the client
-reported them, never a dollar figure. Retained-context compression and localized repair are not part of
-this increment: a large thread that overflows the input ceiling stays blocked, visibly, until an operator
-intervenes.
+reported them, never a dollar figure. Each request carries the part of the graph chosen for its new
+posts (see [Input and limits](#input-and-limits)), so its size follows the batch and the number of
+strands, not the length of the thread. A saved request written under another producer contract is
+deleted and prepared again with a full attempt count, because no answer to it could be applied.
+Localized repair is not part of this increment.
 
 The compact view is checked structurally before publication: it must name exactly the active strands and
 the active decisions applicable to them (or to all), cite only evidence that resolves within W, cite at
