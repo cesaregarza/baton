@@ -70,6 +70,8 @@ POLICIES = (
     ToolPolicy("read_graph", group="graph", guest="yes"),
     ToolPolicy("read_graph_strand", group="graph", guest="yes"),
     ToolPolicy("read_graph_statement", group="graph", guest="yes"),
+    ToolPolicy("search_graph", group="graph", guest="yes"),
+    ToolPolicy("read_graph_entries", group="graph", guest="yes"),
     ToolPolicy("read_secretary_summaries"),
 )
 BY_NAME = {policy.name: policy for policy in POLICIES}

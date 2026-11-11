@@ -24,6 +24,7 @@ from test_index_writer import snapshot as table_snapshot
 from baton import auth, conversations, messages, search
 from baton.agents import Agent
 from baton.config import Role, StaticToken
+from baton.database import store
 from baton.database.store import connect
 from baton.errors import BatonError
 from baton.graph import compact, reader
@@ -31,7 +32,7 @@ from baton.graph import snapshot as snapshot_module
 from baton.graph.export import export_source
 from baton.graph.operations import apply, prepare
 from baton.graph.publication import publish_graph
-from baton.graph.source import load_json, load_source
+from baton.graph.source import canonical, load_json, load_source
 
 TEXTS = [post["text"] for post in snapshot()["messages"]]
 GROUP = ["orchestrator", "reviewer", "assistant"]
@@ -271,8 +272,6 @@ def test_pages_stop_between_whole_rows_and_cursors_are_bound(graphed, monkeypatc
     refused("item_too_large", reader.read_graph, db, config, "reviewer", cid)
     refused("item_too_large", reader.read_graph_strand, db, config, "reviewer", cid, snapshot_id, "S2")
     # Every page, cursor included, stays within the cap at every boundary, and nothing is skipped.
-    from baton.graph.source import canonical
-
     for cap in range(1400, 2400, 7):  # from the smallest cap that fits one row beside its cursor
         monkeypatch.setattr(reader, "MAX_RESPONSE_BYTES", cap)
         walked, cursor, pages = [], None, 0
@@ -287,16 +286,169 @@ def test_pages_stop_between_whole_rows_and_cursors_are_bound(graphed, monkeypatc
         assert walked == ["2-1", "3-2", "4-1", "5-1"], cap
 
 
+def test_entry_reads_answer_a_search_with_single_lines_and_ids_with_whole_entries(graphed) -> None:
+    db, config, cid, result = graphed
+    before = table_snapshot(db)
+    label = {
+        "snapshot_id": result["versions"][0]["version_id"],
+        "covered_through_seq": 5,
+        "head_seq": 7,
+        "derived": True,
+        "authoritative": False,
+    }
+    # No query: one line per strand, the resolved one included.
+    assert reader.search_graph(db, config, "reviewer", cid) == label | {
+        "entries": [
+            "S1 | resolved | 3 statements, summarized through post 5 | Format",
+            "S2 | active | 4 statements, summarized through post 5 | Storage and reader",
+        ]
+    }
+    # A search answers with standing statements and active decisions, each whole on one line, best first.
+    found = reader.search_graph(db, config, "reviewer", cid, queries=["quotes source", "reader"])
+    assert found == label | {
+        "entries": [
+            "D1 | all | rests on 4-1 | changed at post 5 | Retain exact source quotes.",
+            "5-1 | S2 | - | Implement the reader.",
+            "4-1 | S1 S2 | responds_to>1-1 responds_to>3-2 | Exact source quotes remain mandatory.",
+        ]
+    }
+    best = reader.search_graph(db, config, "reviewer", cid, queries=["quotes source", "reader"], limit=1)
+    assert best["entries"] == found["entries"][:1]
+    # A reader that names what it holds gets what it has not seen: without D1, 4-1 leads the first query.
+    rest = reader.search_graph(db, config, "reviewer", cid, queries=["quotes source", "reader"], exclude=["D1", "9-9"])
+    assert rest == label | {"entries": [found["entries"][2], found["entries"][1]]}
+    # 1-1 is searched by the text that still stands, so only the statement that replaced the rest mentions receipts.
+    receipts = reader.search_graph(db, config, "reviewer", cid, queries=["receipts"])
+    assert receipts["entries"] == ["3-1 | S1 | supersedes>1-1 | Keep receipts for one hour."]
+
+    # Ids load whole entries in the order asked, each once: post:3 brings both of its statements, so asking
+    # for 3-1 after it adds nothing. An id that names nothing standing is skipped with the reason.
+    opened = reader.read_graph_entries(
+        db, config, "reviewer", cid, ["4-1", "D2", "2-1", "S2", "post:3", "3-1", "post:9"]
+    )
+    assert opened == label | {
+        "entries": [
+            "4-1 | S1 S2 | responds_to>1-1 responds_to>3-2 | Exact source quotes remain mandatory.",
+            "D2 | S1 | rests on 1-1 | changed at post 5 | Use JSON.",
+            "S2 | active | Storage and reader\nJSON remains applicable; receipt retention is one hour.\n"
+            "Open work:\n- Implement the reader using files, preserving quotes.",
+            "3-1 | S1 | supersedes>1-1 | Keep receipts for one hour.",
+            "3-2 | S2 | responds_to<4-1 | Use files instead of SQLite.",
+        ],
+        "skipped": {
+            "2-1": "replaced in full by 3-2",
+            "post:9": "that post is after this graph's coverage; read it with read_history",
+        },
+    }
+    assert table_snapshot(db) == before
+
+    for arguments in (
+        {"queries": "json"},
+        {"queries": ["a", "b", "c", "d"]},
+        {"queries": [""]},
+        {"queries": ["!!!"]},
+        {"queries": ["x" * 201]},
+        {"queries": [5]},
+        {"limit": 0},
+        {"limit": 51},
+        {"limit": True},
+        {"snapshot_id": ""},
+        {"exclude": "D1"},
+        {"exclude": [""]},
+        {"exclude": ["x" * 33]},
+        {"exclude": [1]},
+        {"exclude": ["1-1"] * 201},
+    ):
+        refused("invalid_request", reader.search_graph, db, config, "reviewer", cid, **arguments)
+    for ids in ("1-1", [], ["1-1"] * 13, [""], ["x" * 33], [1]):
+        refused("invalid_request", reader.read_graph_entries, db, config, "reviewer", cid, ids)
+
+
+def test_entry_reads_stop_between_whole_ids_and_say_what_is_left(graphed, monkeypatch) -> None:
+    db, config, cid, _ = graphed
+    ids = ["4-1", "S2", "post:3", "D1"]
+    whole = reader.read_graph_entries(db, config, "reviewer", cid, ids)["entries"]
+    outline = reader.search_graph(db, config, "reviewer", cid)
+    assert len(whole) == 5 and "remaining" not in whole and "omitted" not in outline
+
+    # What did not fit is named in the response, and that note is inside the cap too. Asking again for the
+    # remaining ids loads everything, whatever the cap.
+    monkeypatch.setattr(reader, "MAX_RESPONSE_BYTES", 420)
+    first = reader.read_graph_entries(db, config, "reviewer", cid, ids)
+    assert first["entries"] == whole[:2] and first["remaining"] == ["post:3", "D1"]
+    for cap in range(350, 620, 9):
+        monkeypatch.setattr(reader, "MAX_RESPONSE_BYTES", cap)
+        loaded, wanted = [], ids
+        while wanted:
+            page = reader.read_graph_entries(db, config, "reviewer", cid, wanted)
+            assert len(canonical(page).encode("utf-8")) <= cap, cap
+            loaded += page["entries"]
+            wanted = page.get("remaining", [])
+        assert loaded == whole, cap
+
+    # A search or outline that is cut says how many lines were left out.
+    monkeypatch.setattr(reader, "MAX_RESPONSE_BYTES", len(canonical(outline).encode("utf-8")) - 1)
+    cut = reader.search_graph(db, config, "reviewer", cid)
+    assert cut["entries"] == outline["entries"][:1] and cut["omitted"] == 1
+    # An entry is never returned in part.
+    monkeypatch.setattr(reader, "MAX_RESPONSE_BYTES", 150)
+    refused("item_too_large", reader.search_graph, db, config, "reviewer", cid)
+    refused("item_too_large", reader.read_graph_entries, db, config, "reviewer", cid, ["S2"])
+
+
+def test_reasons_for_skipped_ids_count_toward_the_cap_with_or_without_entries(graphed, monkeypatch) -> None:
+    db, config, cid, _ = graphed
+
+    def read(ids: list[str]) -> dict:
+        return reader.read_graph_entries(db, config, "reviewer", cid, ids)
+
+    def size(response: dict) -> int:
+        return len(canonical(response).encode("utf-8"))
+
+    absent = ["2-1", "post:9", "nine"]  # replaced in full, beyond the graph's coverage, not an id at all
+    alone, mixed = read(absent), read(["4-1", *absent, "D1"])
+    assert alone["entries"] == [] and list(alone["skipped"]) == absent and "remaining" not in alone
+    assert len(mixed["entries"]) == 2 and mixed["skipped"] == alone["skipped"]
+
+    # A read that finds nothing is measured like any other. When its reasons do not fit it is refused, with
+    # or without entries to add, and fewer ids at a time do fit.
+    monkeypatch.setattr(reader, "MAX_RESPONSE_BYTES", size(alone))
+    assert read(absent) == alone
+    monkeypatch.setattr(reader, "MAX_RESPONSE_BYTES", size(alone) - 1)
+    assert "fewer ids" in str(refused("item_too_large", read, absent))
+    assert "fewer ids" in str(refused("item_too_large", read, ["4-1", *absent]))
+    assert read(absent[:2])["skipped"] == {wanted: alone["skipped"][wanted] for wanted in absent[:2]}
+
+    # Beside entries, the reasons are in the same budget as the lines and the note of what is left.
+    monkeypatch.setattr(reader, "MAX_RESPONSE_BYTES", size(mixed) - 1)
+    page = read(["4-1", *absent, "D1"])
+    assert page == mixed | {"entries": mixed["entries"][:1], "remaining": ["D1"]} and size(page) < size(mixed)
+
+
+def test_entry_search_needs_fts5_and_the_other_entry_reads_do_not(graphed, monkeypatch) -> None:
+    db, config, cid, _ = graphed
+    monkeypatch.setattr(store, "fts5_available", lambda conn: False)
+    error = refused("graph_unavailable", reader.search_graph, db, config, "reviewer", cid, queries=["json"])
+    assert "FTS5" in str(error)
+    assert len(reader.search_graph(db, config, "reviewer", cid)["entries"]) == 2
+    assert len(reader.read_graph_entries(db, config, "reviewer", cid, ["post:3"])["entries"]) == 2
+
+
 def test_authorization_precedes_everything_and_revocations_stop_paging(graphed, tmp_path) -> None:
     db, config, cid, result = graphed
     snapshot_id = result["versions"][0]["version_id"]
     first = reader.read_graph(db, config, "assistant", cid, state="all", limit=1)
-    leak_free = {"items", "head_seq", "working_view", "revision", "snapshot_id", "covered_through_seq"}
+    leak_free = {"items", "entries", "head_seq", "working_view", "revision", "snapshot_id", "covered_through_seq"}
     for role in ("outsider", "late"):
         error = refused("graph_unavailable", reader.read_graph, db, config, role, cid)
         assert not (set(error.extra) & leak_free) and cid not in str(error) and "7" not in str(error)
         refused("graph_unavailable", reader.read_graph_strand, db, config, role, cid, snapshot_id, "S1")
         refused("graph_unavailable", reader.read_graph_statement, db, config, role, cid, snapshot_id, "1-1")
+        for error in (
+            refused("graph_unavailable", reader.search_graph, db, config, role, cid, queries=["json"]),
+            refused("graph_unavailable", reader.read_graph_entries, db, config, role, cid, ["1-1"]),
+        ):
+            assert not (set(error.extra) & leak_free) and cid not in str(error)
     refused("graph_unavailable", reader.read_graph, db, config, "assistant", "conv_missing")
     direct = messages.send(db, sender="reviewer", recipient="assistant", text="private")
     refused("graph_unavailable", reader.read_graph, db, config, "assistant", direct["message_id"])
@@ -314,6 +466,17 @@ def test_authorization_precedes_everything_and_revocations_stop_paging(graphed, 
     )
     refused("snapshot_unavailable", reader.read_graph_strand, db, config, "assistant", other, snapshot_id, "S1")
     refused("snapshot_unavailable", reader.read_graph, db, config, "assistant", cid, snapshot_id="art_forged")
+    refused("snapshot_unavailable", reader.search_graph, db, config, "assistant", other, snapshot_id=snapshot_id)
+    refused(
+        "snapshot_unavailable",
+        reader.read_graph_entries,
+        db,
+        config,
+        "assistant",
+        other,
+        ["1-1"],
+        snapshot_id=snapshot_id,
+    )
     # Membership loss between pages: the cursor is still valid, the reader no longer is.
     conversations.remove(db, config, actor="orchestrator", conversation_id=cid, participant="assistant")
     refused(
@@ -327,7 +490,10 @@ def test_authorization_precedes_everything_and_revocations_stop_paging(graphed, 
         limit=1,
         cursor=first["next_cursor"],
     )
+    refused("graph_unavailable", reader.search_graph, db, config, "assistant", cid, queries=["json"])
+    refused("graph_unavailable", reader.read_graph_entries, db, config, "assistant", cid, ["1-1"])
     viewer_first = reader.read_graph(db, config, "viewer", cid, state="all", limit=1)
+    assert reader.read_graph_entries(db, config, "viewer", cid, ["1-1"])["entries"]
     # Retention loss of one source input hides the graph from everyone, including a board-wide viewer.
     sent = db.execute(
         "SELECT DISTINCT id FROM messages WHERE conversation_id = ? AND conversation_seq = 2", (cid,)
@@ -345,6 +511,8 @@ def test_authorization_precedes_everything_and_revocations_stop_paging(graphed, 
         cursor=viewer_first["next_cursor"],
     )
     refused("graph_unavailable", reader.read_graph, db, config, "viewer", cid)
+    refused("graph_unavailable", reader.search_graph, db, config, "viewer", cid)
+    refused("graph_unavailable", reader.read_graph_entries, db, config, "viewer", cid, ["1-1"])
     # Generation invalidation applies to the attachment too.
     reviewer_first = reader.read_graph(db, config, "reviewer", other, state="all", limit=1)
     db.execute("UPDATE generations SET active = 0")
@@ -385,6 +553,17 @@ def test_new_publication_between_pages_and_old_summaries_without_graphs(graphed,
     )
     assert "open it again" in str(error)
     refused("snapshot_unavailable", reader.read_graph_strand, db, config, "reviewer", cid, stale_snapshot, "S2")
+    refused(
+        "snapshot_unavailable",
+        reader.read_graph_entries,
+        db,
+        config,
+        "reviewer",
+        cid,
+        ["S2"],
+        snapshot_id=stale_snapshot,
+    )
+    assert reader.read_graph_entries(db, config, "reviewer", cid, ["post:6"])["covered_through_seq"] == 6
     fresh = reader.read_graph(db, config, "reviewer", cid)
     assert fresh["snapshot_id"] == later["versions"][0]["version_id"] and fresh["covered_through_seq"] == 6
     assert fresh["revision"] == 3 and fresh["tail"]["read_history_args"]["after_seq"] == 6
@@ -395,6 +574,11 @@ def test_new_publication_between_pages_and_old_summaries_without_graphs(graphed,
     assert context["summary"]["producer"] == "beta" and context["summary"]["graph_snapshot_id"] is None
     error = refused("graph_unavailable", reader.read_graph, db, config, "reviewer", cid)
     assert "no graph attachment" in str(error)
+    # The entry reads take the winner or an exact snapshot, so here they need the snapshot id.
+    refused("graph_unavailable", reader.search_graph, db, config, "reviewer", cid)
+    assert (
+        reader.search_graph(db, config, "reviewer", cid, snapshot_id=fresh["snapshot_id"])["covered_through_seq"] == 6
+    )
     assert reader.read_graph(db, config, "reviewer", cid, producer="alpha")["covered_through_seq"] == 6
     refused("graph_unavailable", reader.read_graph, db, config, "reviewer", cid, producer="beta")
     # The complete tail: W equals H, so the arguments are null.
@@ -404,6 +588,7 @@ def test_new_publication_between_pages_and_old_summaries_without_graphs(graphed,
     assert complete["tail"] == {"status": "complete", "from_seq": 3, "through_seq": 2, "read_history_args": None}
     disabled = replace(config, search=replace(config.search, enabled=False))
     refused("graph_unavailable", reader.read_graph, db, disabled, "reviewer", cid)
+    refused("graph_unavailable", reader.search_graph, db, disabled, "reviewer", cid)
 
 
 def test_history_through_seq_keeps_a_fixed_head_and_authorizes_first(graphed, capsys, monkeypatch) -> None:
@@ -517,6 +702,11 @@ def test_guest_reads_the_graph_through_mcp_and_follows_the_raw_tail_to_the_captu
         assert statement["statement"]["quotes"] == ["Use files instead of SQLite"]
         raw = await call(client, host, "get_message", {"message_id": statement["statement"]["source"]["message_id"]})
         assert statement["statement"]["quotes"][0] in raw["text"]
+        found = await call(client, host, "search_graph", {"conversation_id": cid, "queries": ["files sqlite"]})
+        assert found["entries"] == ["3-2 | S2 | responds_to<4-1 | Use files instead of SQLite."]
+        assert found["snapshot_id"] == opened["snapshot_id"] and found["authoritative"] is False
+        loaded = await call(client, host, "read_graph_entries", {"conversation_id": cid, "ids": ["3-2", "2-1"]})
+        assert loaded["entries"] == found["entries"] and loaded["skipped"] == {"2-1": "replaced in full by 3-2"}
         # Losing a source input (not a tail post) hides the graph from everyone; the refusal carries no ids or counts.
         with connect(config.db_path) as db:
             lose(db, statement["statement"]["source"]["message_id"])
@@ -552,6 +742,8 @@ def test_guest_without_board_visibility_gains_nothing_from_the_graph_tools(tmp_p
                 "read_graph_statement",
                 {"conversation_id": cid, "snapshot_id": result["versions"][0]["version_id"], "statement_id": "1-1"},
             ),
+            ("search_graph", {"conversation_id": cid, "queries": ["json"]}),
+            ("read_graph_entries", {"conversation_id": cid, "ids": ["1-1"]}),
         ):
             refusal = await call(client, host, name, arguments)
             assert refusal["error"] == "graph_unavailable" and set(refusal) == {"error", "detail"}, name

@@ -373,7 +373,11 @@ used because it disables OAuth. A client outside these profiles is unavailable u
 sandboxing and never-approval contain whatever built-in surface documented controls cannot remove; a
 bounded pilot must inspect the real event stream before enrollment widens.
 
-Readers see the result through three read-only MCP tools: `read_graph` opens the working view with strand
+Readers see the result through five read-only MCP tools. Scoped work starts with `search_graph`, which
+returns the standing statements and active decisions matching a few words as one line each (id, strands,
+connections, text), and `read_graph_entries`, which loads statements, decisions, strand summaries or a
+post's statements whole by id; a reader loads the part of the thread its work needs and nothing else.
+The other three carry the full records: `read_graph` opens the working view with strand
 cards, applicable decisions and a `tail` naming the raw posts after W, `read_graph_strand` lists a
 strand's statements or decisions, and `read_graph_statement` returns one immutable statement with quotes,
 evidence and its edges or strands. A graph is served only when the caller may read every source message,

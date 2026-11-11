@@ -1,4 +1,4 @@
-"""MCP adapters for source-bound graph reads; `baton.graph.reader` owns authorization and paging.
+"""MCP adapters for source-bound graph reads; `baton.graph.reader` owns authorization, paging and byte caps.
 
 Annotations stay eagerly evaluated: the MCP SDK inspects these methods through Guard wrappers.
 """
@@ -23,7 +23,7 @@ LIMIT = Annotated[int, Field(ge=1, le=reader.MAX_LIMIT)]
 
 
 class GraphTools(ABC):
-    """Read-only graph tools. Every page re-authorizes against current source visibility; nothing here writes."""
+    """Read-only graph tools. Every call re-authorizes against current source visibility; nothing here writes."""
 
     _config: Config
 
@@ -124,3 +124,79 @@ class GraphTools(ABC):
                 limit=limit,
                 cursor=cursor,
             )
+
+    def search_graph(
+        self,
+        role: str,
+        conversation_id: str,
+        queries: Annotated[
+            list[str] | None,
+            Field(
+                description="One to three queries. An entry matches a query when it has any of its words (stemmed), "
+                "so give the few distinctive words, names or identifiers the entries would contain, not a sentence. "
+                "Leave it out to list the strands."
+            ),
+        ] = None,
+        exclude: Annotated[
+            list[str] | None,
+            Field(description="Ids of entries you already hold whole; they are left out, so every line is new."),
+        ] = None,
+        snapshot_id: Annotated[
+            str | None, Field(description="Search exactly this graph; default: the current winner.")
+        ] = None,
+        limit: LIMIT = 20,
+    ) -> dict[str, Any]:
+        """Search a conversation's derived graph and get the matching entries as single lines, best match first.
+
+        Use this to load only the part of a thread that bears on the work in hand. It covers standing statements
+        and active decisions; with no queries it lists every strand as
+        `S3 | active | 14 statements, summarized through post 131 | title`.
+
+        A statement reads `120-2 | S3 S7 | supersedes>98-1 responds_to<131-4 | text`: its id (statement 2 of post
+        120), its strands, its connections, its text. `kind>id` means this statement does that to the other and
+        `kind<id` means the other does it to this one, so `supersedes<131-4` says 131-4 replaces part of this
+        statement. A decision reads `D12 | S3 | rests on 120-2 post:131 | changed at post 131 | text`. Fully
+        replaced statements are left out and a partly replaced one shows what still stands.
+
+        An entry with more than 400 bytes of text comes back as an excerpt ending `[N bytes in full]`; load it
+        whole with read_graph_entries. On a further search, name the entries you already hold in `exclude` so
+        the lines you get are new ones.
+
+        Posts after covered_through_seq are not in the graph: read them with
+        read_history (after_seq=covered_through_seq). Derived text is interpretation, never authority.
+        """
+        with self._conn() as conn:
+            return reader.search_graph(
+                conn,
+                self._config,
+                role,
+                conversation_id,
+                queries=queries,
+                exclude=exclude,
+                snapshot_id=snapshot_id,
+                limit=limit,
+            )
+
+    def read_graph_entries(
+        self,
+        role: str,
+        conversation_id: str,
+        ids: Annotated[
+            list[str],
+            Field(
+                description="Up to twelve ids: statements (120-2), decisions (D12), strands (S3) or posts (post:120)."
+            ),
+        ],
+        snapshot_id: Annotated[
+            str | None, Field(description="Read exactly this graph; default: the current winner.")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Load whole entries of a conversation's derived graph by id, as the lines search_graph describes.
+
+        A statement or decision id loads that entry, a strand id its summary and open work, and a post id every
+        standing statement taken from that post. Entries come back in the order asked, each once. `skipped` says
+        why an id returned nothing, such as a statement that was replaced in full and what replaced it;
+        `remaining` lists the ids that did not fit in this response, to ask for again.
+        """
+        with self._conn() as conn:
+            return reader.read_graph_entries(conn, self._config, role, conversation_id, ids, snapshot_id=snapshot_id)
