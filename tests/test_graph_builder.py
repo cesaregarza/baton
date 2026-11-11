@@ -238,6 +238,9 @@ def test_rejections_leave_state_bytes_unchanged_and_allow_correction(tmp_path):
     bad["strands"] = bad["strands"][:1]
     invalid.append((bad, "refreshed summary"))
     bad = copy.deepcopy(valid)
+    bad["strands"][0]["statement_ids"] = ["1-1"]  # the host keeps the membership; a proposal cannot state it
+    invalid.append((bad, "unknown keys"))
+    bad = copy.deepcopy(valid)
     bad["relevance_updates"][0]["evidence"] = ["post:6"]
     invalid.append((bad, "unavailable source"))
     bad = copy.deepcopy(valid)
