@@ -6,7 +6,8 @@ touch instead of the whole of it:
     outline   every strand on one line, so a new statement can be filed under any of them
     entries   the standing statements and active decisions chosen for these posts, one whole line each
     cards     the summary, open work and evidence of every strand a shown entry belongs to
-    refresh   strands holding a statement newer than their summary: each has a card and is owed a refresh
+    refresh   strands holding statements newer than their summary: each is owed a refresh, so its card and
+              those statements are shown whatever else is left out
     next_ids  the strand and decision ids a proposal allocates from
 
 The lines are the ones `baton.graph.entries` serves to readers. A proposal may change only what its request
@@ -33,7 +34,9 @@ class Context:
         require_search()
         self._state = state
         self._entries = Entries({**state, "covered_through_seq": state["watermark"]})
-        self._behind = sorted(behind(state), key=ordinal_key)
+        owed = behind(state)
+        self._behind = sorted(owed, key=ordinal_key)
+        self._unsummarized = [sid for late in owed.values() for sid in late]
         self._found: dict[int, list[str]] = {}
 
     def ranked(self, posts: list[dict[str, Any]]) -> list[str]:
@@ -55,10 +58,15 @@ class Context:
         return list(dict.fromkeys(recent + changed + hits))
 
     def render(self, ids: list[str]) -> dict[str, Any]:
-        """The request's `context` with these entries shown whole and a card for every strand they belong to."""
+        """The request's `context` with these entries shown whole and a card for every strand they belong to.
+
+        The statements a strand owed a refresh holds past its summary are shown whatever `ids` names. That
+        refresh moves the summary's frontier over them, so it must not be written without them.
+        """
         state = self._state
-        statements = sorted((uid for uid in ids if uid in state["statements"]), key=statement_key)
-        decisions = sorted((uid for uid in ids if uid in state["decisions"]), key=ordinal_key)
+        shown = {*ids, *self._unsummarized}
+        statements = sorted((uid for uid in shown if uid in state["statements"]), key=statement_key)
+        decisions = sorted((uid for uid in shown if uid in state["decisions"]), key=ordinal_key)
         carded = {sid for uid in statements for sid in state["statements"][uid]["strand_ids"]}
         carded |= {sid for uid in decisions for sid in state["decisions"][uid]["applies_to"]}  # "all" is no strand
         carded = (carded & state["strands"].keys()) | set(self._behind)

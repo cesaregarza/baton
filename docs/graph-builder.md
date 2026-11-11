@@ -192,8 +192,8 @@ part of the graph they are likely to touch, as the request's `context`:
   standing statements of the last 20 processed posts, the active decisions changed in those posts, and
   each new post's 20 best full-text search hits among the older entries.
 - `cards`: the summary, open work and evidence of every strand a shown entry belongs to.
-- `refresh`: the strands holding a statement newer than their summary. Their cards are always sent and
-  the proposal must refresh each of them.
+- `refresh`: the strands holding statements newer than their summary. Their cards and those statements
+  are always sent, and the proposal must refresh each of them.
 - `next_ids`: the strand and decision IDs a proposal allocates from.
 
 A proposal may change only what its request showed. A relevance update, an edge, a strand refresh or a
@@ -205,9 +205,10 @@ example a decision restated under a new ID, but it is never altered unread.
 
 The input limit measures the serialized request in UTF-8 bytes, not model tokens. Prepare takes as many
 whole posts as fit with their full context. When the next post alone does not fit, it drops entries
-from the least valuable end (search hits first, the newest statements last) until the request fits; the
-outline and the cards owed a refresh always stay. A post that does not fit even with no entries makes
-prepare fail instead of splitting or skipping it: increase the explicit budget. Each provider path
+from the least valuable end (search hits first, the newest statements last) until the request fits. The
+outline always stays, and so does what a refresh owed to a strand has to read: its card and its
+statements newer than its summary. A post that does not fit even with only those makes prepare fail
+instead of splitting or skipping it: increase the explicit budget. Each provider path
 holds its own, slightly larger encoding of the request to the same number, so a request within a few
 percent of the limit can still be refused there. Output tokens are a separate provider limit.
 
@@ -342,8 +343,8 @@ process-lifetime lock, so a crash consumes it and a second worker exits without 
 gets at most two calls per base W, compaction two per accepted graph digest, and the daily cap (default
 8) and per-cycle cap (default 4) bound launches across every conversation; a correction call carries the
 sanitized validation error and rejected output only when they fit `max_input_bytes`. Exhaustion, an
-input overflow (one post exceeding `max_input_bytes` with no graph entries shown, or a correction that
-does not fit), an authentication or isolation failure, or an edited source
+input overflow (one post exceeding `max_input_bytes` with only the graph context it must carry, or a
+correction that does not fit), an authentication or isolation failure, or an edited source
 prefix sets the conversation `blocked`; new posts, restarts and new days never clear it. A daily cap
 only defers to the next UTC day. `daily_call_cap = 0` removes only the daily limit, for an authorized
 catch-up: launches are still reserved, counted per UTC day and reported, and the per-request attempt

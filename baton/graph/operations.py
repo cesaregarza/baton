@@ -20,7 +20,9 @@ def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_b
     """Write the request for the next posts: as many whole posts as fit, with the graph context chosen for them.
 
     A post is never split. When the next post alone does not fit with its full context, the context is cut
-    from its least valuable end until the request fits; the strand outline and any card owed a refresh stay.
+    from its least valuable end until the request fits. The strand outline stays, and so does what a refresh
+    owed to a strand has to read: its card and its statements newer than its summary. A post that does not
+    fit with that much is refused.
     """
     distinct_paths(source=source_path, state=state_path, request=request_path)
     require(batch_size > 0 and max_input_bytes > 0, "batch and UTF-8 byte limits must be positive")
@@ -49,7 +51,10 @@ def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_b
     if request is None:
         ranked = context.ranked(posts[:1])
         request = fitted(1, [])
-        require(request is not None, "next whole post exceeds max-input-bytes (UTF-8) with no graph entries shown")
+        require(
+            request is not None,
+            "next whole post exceeds max-input-bytes (UTF-8) with only the graph context it must carry",
+        )
         kept, over = 0, len(ranked)  # the longest prefix known to fit, the shortest known not to
         while over - kept > 1:
             middle = (kept + over) // 2

@@ -126,7 +126,7 @@ def test_a_strand_left_without_its_card_falls_behind_and_the_next_request_asks_f
     apply(source, state, tmp_path / "r1.json", tmp_path / "p1.json")
 
     def bare_request(name):
-        """The next post's request at the smallest size that fits: no entries, and only the cards owed a refresh."""
+        """The next post's request at the smallest size that fits: only what a refresh owed to a strand has to read."""
         graph = load_state(state, load_source(source))
         full = prepare(source, state, tmp_path / f"{name}-full.json", batch_size=1)
         limit = size(full, Context(graph).render([]))
@@ -147,12 +147,23 @@ def test_a_strand_left_without_its_card_falls_behind_and_the_next_request_asks_f
     assert (stored["statement_ids"], stored["summary_through"]) == (["1-1", "3-1"], 2)
 
     fourth = bare_request("fourth")
-    assert fourth["context"]["refresh"] == ["S1"] and ids(fourth["context"]["cards"]) == ["S1"]
-    assert fourth["context"]["entries"] == []
+    assert fourth["context"]["refresh"] == ["S1"]
+    # The refresh moves S1's summary past 3-1, so the smallest request still carries it; a byte less is refused.
+    assert ids(fourth["context"]["cards"]) == ["S1"]
+    assert fourth["context"]["entries"] == ["3-1 | S1 | - | Keep receipts for one hour."]
+    [card], [owed] = fourth["context"]["cards"], fourth["context"]["entries"]
+    smallest = len(canonical(fourth).encode("utf-8"))
+    with pytest.raises(GraphError, match="exceeds"):
+        prepare(source, state, tmp_path / "short.json", batch_size=1, max_input_bytes=smallest - 1)
+    assert not (tmp_path / "short.json").exists()
     quotes = statement(4, "Exact source quotes remain mandatory.", ["S2"])
     with pytest.raises(GraphError, match="every affected strand with a card needs a refreshed summary"):
         attempt("fourth", fourth, statements=[quotes])
-    attempt("fourth", fourth, statements=[quotes], strands=[strand("S1", 4)])
+    # The refresh is written from the request alone: the summary on the card and the statement it had yet to cover.
+    old, text = card.split("\n")[1], owed.rsplit(" | ", 1)[1]
+    assert (old, text) == ("Initial proposal.", "Keep receipts for one hour.")
+    refreshed = strand("S1", 4) | {"summary": f"{old} {text}", "evidence": ["3-1"]}
+    attempt("fourth", fourth, statements=[quotes], strands=[refreshed])
     strands = load_json(state)["strands"]
     assert (strands["S1"]["summary_through"], strands["S2"]["summary_through"]) == (4, 2)
     save(source, snapshot(5))

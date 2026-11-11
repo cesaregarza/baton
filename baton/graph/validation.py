@@ -112,12 +112,12 @@ def update_relevance(state, proposal, added, shown):
 
 
 def behind(state):
-    """Strands holding a statement newer than their summary: each is owed a refresh."""
-    return {
-        key
+    """Each strand holding statements newer than its summary, with those statements: it is owed a refresh."""
+    late = {
+        key: [sid for sid in strand["statement_ids"] if state["statements"][sid]["seq"] > strand["summary_through"]]
         for key, strand in state["strands"].items()
-        if any(state["statements"][sid]["seq"] > strand["summary_through"] for sid in strand["statement_ids"])
     }
+    return {key: ids for key, ids in late.items() if ids}
 
 
 def update_strands(state, proposal, updated, shown, end):
@@ -151,7 +151,7 @@ def update_strands(state, proposal, updated, shown, end):
             state["strands"][sid]["statement_ids"].append(key)
             state["strands"][sid]["last_changed"] = end
     require(all(strand["statement_ids"] for strand in strands.values()), "new strand needs a statement")
-    due |= behind(state)
+    due.update(behind(state))
     require(due & shown <= strands.keys(), "every affected strand with a card needs a refreshed summary")
 
 

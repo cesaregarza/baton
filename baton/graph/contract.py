@@ -20,9 +20,10 @@ Use stable S1, S2 strand IDs and D1, D2 decision IDs, allocating new ones consec
 context.next_ids. Strands may overlap. Every statement lists all its strands.
 Refresh through batch.end the understandable summary and open work of every strand with a card that
 this proposal adds a statement to, changes relevance in or links by an edge, and every strand in
-context.refresh, citing supporting post:N or statement IDs. A refresh replaces the old summary whole:
-carry forward what still holds. Never restate an existing strand that has no card; the host asks for
-its refresh later. open_work must contain only source-backed requested or remaining
+context.refresh, citing supporting post:N or statement IDs. A strand in context.refresh holds statements
+newer than its summary; each is in context.entries and its refresh must take them in. A refresh replaces
+the old summary whole: carry forward what still holds. Never restate an existing strand that has no
+card; the host asks for its refresh later. open_work must contain only source-backed requested or remaining
 work, not new tasks inferred from absent reports or evidence. Label inference-only evidence gaps in
 summary prose, never turn them into action items, approval gates, or reasons to keep a settled strand
 active. Preserve unresolved source-backed contradictions and blockers. Closing a
