@@ -37,8 +37,6 @@ def advance(source, state, tmp_path, end):
                 "summary": f"Notes through {end}.",
                 "state": "active",
                 "open_work": ["Review the notes."],
-                "summary_through": end,
-                "statement_ids": [f"{seq}-1" for seq in range(1, end + 1)],
                 "evidence": [f"{end}-1"],
             }
         ],

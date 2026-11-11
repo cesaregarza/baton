@@ -2,57 +2,12 @@
 
 import copy
 from pathlib import Path
-from typing import Any
 
-from baton.graph.contract import BINDING, INSTRUCTIONS, SCHEMA, VERSION, require, validate_shape
+from baton.graph.context import Context, shown_ids
+from baton.graph.contract import BINDING, CONTEXT, INSTRUCTIONS, SCHEMA, VERSION, current, require, validate_shape
 from baton.graph.source import canonical, digest, load_json, load_source, prefix_digest
-from baton.graph.storage import atomic_json, distinct_paths, load_state, state_lock
+from baton.graph.storage import STATE_VERSION, atomic_json, distinct_paths, load_state, state_lock
 from baton.graph.validation import build_patch
-
-
-def retained_context(state, recalled_ids=()):
-    statements = {
-        key: {
-            "id": key,
-            "seq": value["seq"],
-            "text": value["surviving_text"] if value["relevance"] == "partially_superseded" else value["text"],
-            "source": value["source"],
-            "strand_ids": value["strand_ids"],
-            "relevance": value["relevance"],
-            "evidence": value["evidence"],
-            "relevance_evidence": value["relevance_evidence"],
-        }
-        for key, value in state["statements"].items()
-        if value["relevance"] != "completely_superseded"
-    }
-    recalled = {
-        key: {
-            "id": key,
-            "seq": value["seq"],
-            "text": value["text"],
-            "quotes": value["quotes"],
-            "source": value["source"],
-            "relevance": value["relevance"],
-            "surviving_text": value["surviving_text"],
-            "strand_ids": value["strand_ids"],
-            "evidence": value["evidence"],
-            "relevance_evidence": value["relevance_evidence"],
-        }
-        for key in recalled_ids
-        for value in (state["statements"][key],)
-    }
-    return {
-        "statements": statements,
-        "archived_statement_ids": sorted(state["statements"].keys() - statements.keys()),
-        "recalled_statements": recalled,
-        "strands": state["strands"],
-        "decisions": {
-            key: {field: item[field] for field in ("id", "text", "applies_to", "status", "evidence")}
-            for key, item in state["decisions"].items()
-        },
-        "edges": state["edges"],
-        "watermark": state["watermark"],
-    }
 
 
 def request_identity(request):
@@ -61,26 +16,56 @@ def request_identity(request):
     return digest(value)
 
 
-def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_bytes=100_000, recall_statements=()):
+def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_bytes=100_000):
+    """Write the request for the next posts: as many whole posts as fit, with the graph context chosen for them.
+
+    A post is never split. When the next post alone does not fit with its full context, the context is cut
+    from its least valuable end until the request fits; the strand outline and any card owed a refresh stay.
+    """
     distinct_paths(source=source_path, state=state_path, request=request_path)
     require(batch_size > 0 and max_input_bytes > 0, "batch and UTF-8 byte limits must be positive")
     require(not Path(request_path).exists(), "request artifact already exists; choose a new path")
     source = load_source(source_path)
     with state_lock(state_path):
         state = load_state(state_path, source)
-    require(isinstance(recall_statements, (list, tuple)), "recall_statements must be a sequence of IDs")
-    require(
-        all(isinstance(key, str) and bool(key) for key in recall_statements),
-        "recall statement IDs must be nonempty strings",
-    )
-    recalled_ids = sorted(set(recall_statements))
-    require(
-        set(recalled_ids) <= state["statements"].keys(),
-        "unknown requested recall statement ID",
-    )
     start = state["watermark"] + 1
     require(start <= len(source["messages"]), "no new posts to prepare")
-    request: dict[str, Any] = {
+    posts = source["messages"][start - 1 : start - 1 + batch_size]
+    context, base = Context(state), digest(state)
+
+    def fitted(count, entries=None):
+        """The request for the first `count` posts, or None when it is over the limit."""
+        batch = posts[:count]
+        shown = context.ranked(batch) if entries is None else entries
+        candidate = _request(source, state, base, batch, context.render(shown))
+        return candidate if len(canonical(candidate).encode("utf-8")) <= max_input_bytes else None
+
+    request = None
+    for count in range(1, len(posts) + 1):
+        larger = fitted(count)
+        if larger is None:
+            break
+        request = larger
+    if request is None:
+        ranked = context.ranked(posts[:1])
+        request = fitted(1, [])
+        require(request is not None, "next whole post exceeds max-input-bytes (UTF-8) with no graph entries shown")
+        kept, over = 0, len(ranked)  # the longest prefix known to fit, the shortest known not to
+        while over - kept > 1:
+            middle = (kept + over) // 2
+            trimmed = fitted(1, ranked[:middle])
+            if trimmed is None:
+                over = middle
+            else:
+                kept, request = middle, trimmed
+    atomic_json(request_path, request, replace=False)
+    return request
+
+
+def _request(source, state, base, posts, context):
+    """The request artifact for one batch of new posts with this graph context."""
+    end = posts[-1]["seq"]
+    request = {
         "version": VERSION,
         "instructions": INSTRUCTIONS,
         "proposal_schema": SCHEMA,
@@ -88,25 +73,15 @@ def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_b
             "request_id": "",
             "conversation_id": source["conversation_id"],
             "base_revision": state["revision"],
-            "base_state_digest": digest(state),
-            "source_prefix_digest": "",
-            "batch": {"start": start, "end": start},
+            "base_state_digest": base,
+            "source_prefix_digest": prefix_digest(source, end),
+            "batch": {"start": posts[0]["seq"], "end": end},
         },
         "source_head": len(source["messages"]),
-        "new_posts": [],
-        "retained_state": retained_context(state, recalled_ids),
+        "new_posts": posts,
+        "context": context,
     }
-    for post in source["messages"][start - 1 : start - 1 + batch_size]:
-        candidate = copy.deepcopy(request)
-        candidate["new_posts"].append(post)
-        candidate["binding"]["batch"]["end"] = post["seq"]
-        candidate["binding"]["source_prefix_digest"] = prefix_digest(source, post["seq"])
-        candidate["binding"]["request_id"] = request_identity(candidate)
-        if len(canonical(candidate).encode("utf-8")) > max_input_bytes:
-            break
-        request = candidate
-    require(bool(request["new_posts"]), "retained context plus next whole post exceeds max-input-bytes (UTF-8)")
-    atomic_json(request_path, request, replace=False)
+    request["binding"]["request_id"] = request_identity(request)
     return request
 
 
@@ -114,16 +89,12 @@ def verify_request(request, proposal, source):
     require(isinstance(request, dict), "request must be an object")
     require(
         set(request)
-        == {"version", "instructions", "proposal_schema", "binding", "source_head", "new_posts", "retained_state"},
+        == {"version", "instructions", "proposal_schema", "binding", "source_head", "new_posts", "context"},
         "request has missing or unknown keys",
     )
     validate_shape(request["binding"], BINDING, "request.binding")
-    require(
-        request.get("version") == VERSION
-        and request.get("instructions") == INSTRUCTIONS
-        and request.get("proposal_schema") == SCHEMA,
-        "unsupported or modified producer contract",
-    )
+    require(current(request), "unsupported or modified producer contract")
+    validate_shape(request["context"], CONTEXT, "request.context")
     require(request_identity(request) == request["binding"]["request_id"], "request artifact was modified")
     validate_shape(proposal)
     require(proposal["binding"] == request["binding"], "proposal binding does not match request")
@@ -154,7 +125,7 @@ def apply(source_path, state_path, request_path, proposal_path, *, max_proposal_
             "stale proposal base revision/digest",
         )
         require(binding["batch"]["start"] == state["watermark"] + 1, "batch does not extend committed prefix")
-        updated = build_patch(state, proposal, source)
+        updated = build_patch(state, proposal, source, shown_ids(request["context"]))
         updated["watermark"] = binding["batch"]["end"]
         updated["source_prefix_digest"] = binding["source_prefix_digest"]
         updated["revision"] += 1
@@ -218,7 +189,7 @@ def read(source_path, state_path, *, strands=(), history=False, expand_statement
             else {}
         )
     return {
-        "version": VERSION,
+        "version": STATE_VERSION,
         "conversation_id": source["conversation_id"],
         "H": len(source["messages"]),
         "W": state["watermark"],

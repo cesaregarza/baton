@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from baton.config import GraphWorker
-from baton.graph.contract import GraphError
+from baton.graph.contract import SCHEMA_NAME, GraphError
 from baton.graph.provider import ProviderOptions, call_provider
 
 
@@ -90,7 +90,7 @@ class HttpTransport:
                 request,
                 self._options(limits),
                 schema=schema,
-                schema_name="baton_graph_" + ("compact_view_v1" if "compact_schema" in request else "proposal_v1"),
+                schema_name="baton_graph_compact_view_v1" if "compact_schema" in request else SCHEMA_NAME,
                 max_input_bytes=limits.max_input_bytes,
                 max_response_bytes=limits.max_response_bytes,
                 client=self.client,

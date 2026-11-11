@@ -23,6 +23,7 @@ from baton.config import ConfigError
 from baton.database.store import connect
 from baton.graph import compact, ledger
 from baton.graph import snapshot as snapshot_module
+from baton.graph.contract import GraphError, current
 from baton.graph.source import load_json
 from baton.graph.transport import TransportError
 from baton.graph.worker import Worker, reset, status
@@ -95,7 +96,6 @@ class ScriptedTransport:
 def extraction_candidate(request):
     """One statement per new post in strand S1, a decision on the first batch: valid for any synthetic thread."""
     start, end = (request["binding"]["batch"][key] for key in ("start", "end"))
-    members = sorted(request["retained_state"]["strands"].get("S1", {}).get("statement_ids", []))
     candidate = {
         "binding": request["binding"],
         "statements": [],
@@ -118,7 +118,6 @@ def extraction_candidate(request):
                 "evidence": [f"post:{post['seq']}"],
             }
         )
-        members.append(f"{post['seq']}-1")
     candidate["strands"] = [
         {
             "id": "S1",
@@ -126,8 +125,6 @@ def extraction_candidate(request):
             "summary": f"Notes through {end}.",
             "state": "active",
             "open_work": ["Review the notes."],
-            "summary_through": end,
-            "statement_ids": members,
             "evidence": [f"{end}-1"],
         }
     ]
@@ -222,6 +219,14 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
     assert (
         config_module.graph_worker.parse({**base, "enabled": False}, config.indexer, config.data_dir).enabled is False
     )
+
+
+def test_a_host_without_full_text_search_is_refused_when_the_worker_starts(tmp_path, monkeypatch) -> None:
+    config = worker_config(tmp_path, conversations=["conv_a"])
+    monkeypatch.setattr("baton.database.store.fts5_available", lambda conn: False)
+    # Extraction chooses what to show the model by search; a worker that could not would only block later.
+    with pytest.raises(GraphError, match="FTS5"):
+        Worker(config, transport=ScriptedTransport())
 
 
 def test_worker_extracts_compacts_publishes_and_readers_see_the_snapshot(tmp_path) -> None:
@@ -421,6 +426,33 @@ def test_restart_consumes_the_in_flight_reservation_and_reuses_saved_candidates(
     reused = restarted.cycle()
     assert reused["records"][cid]["accepted_W"] == 2 and reused["model_calls"] == 0
     assert restarted.transport.calls == []
+
+
+def test_a_saved_request_from_another_contract_is_prepared_again_with_a_full_attempt_count(tmp_path) -> None:
+    config = worker_config(tmp_path, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 2)
+    config = worker_config(tmp_path, conversations=[cid])
+    clock = Clock()
+    worker = Worker(config, transport=ScriptedTransport(["timeout"]), clock=clock)
+    worker.cycle()
+    # What an upgrade finds on disk: a request an earlier contract wrote, with both of its calls already spent.
+    request_path = next((worker.paths(cid).root / "requests").glob("*.json"))
+    older = {**load_json(request_path), "version": 1, "instructions": "An earlier producer contract."}
+    older["binding"] = {**older["binding"], "request_id": "older"}
+    request_path.write_text(json.dumps(older))
+    ledger_path = config.graph_worker.state_dir / "ledger.json"
+    ledger_file = load_json(ledger_path)
+    ledger_file["conversations"][cid].update(request_id="older", attempts=2)
+    ledger_path.write_text(json.dumps(ledger_file))
+    clock.now += ledger.RETRY_DELAY
+    restarted = Worker(config, transport=ScriptedTransport(), clock=clock)
+    accepted = restarted.cycle()
+    # No answer to the older request could be applied, so the batch is prepared again instead of blocking.
+    assert accepted["records"][cid]["accepted_W"] == 2 and len(restarted.transport.calls) == 1
+    request = restarted.transport.calls[0]["request"]
+    assert current(request) and request["binding"]["request_id"] != "older"
+    assert load_json(request_path) == request
 
 
 def test_compact_retries_alone_and_publication_recovers_with_zero_calls(tmp_path, monkeypatch) -> None:

@@ -91,11 +91,12 @@ def add_statements(state, proposal, source, start, end):
     return set(additions)
 
 
-def update_relevance(state, proposal, added):
+def update_relevance(state, proposal, added, shown):
     updates = indexed(proposal["relevance_updates"], "relevance update")
     require(not updates.keys() & added, "new statements cannot also have relevance updates")
     for key, update in updates.items():
         require(key in state["statements"], "relevance update references unknown statement")
+        require(key in shown, "relevance update targets a statement the request did not show")
         check_relevance(update)
         current = state["statements"][key]
         current["relevance_history"].append(
@@ -110,45 +111,60 @@ def update_relevance(state, proposal, added):
     return set(updates)
 
 
-def update_strands(state, proposal, changed, end):
+def behind(state):
+    """Strands holding a statement newer than their summary: each is owed a refresh."""
+    return {
+        key
+        for key, strand in state["strands"].items()
+        if any(state["statements"][sid]["seq"] > strand["summary_through"] for sid in strand["statement_ids"])
+    }
+
+
+def update_strands(state, proposal, updated, shown, end):
+    """Apply the proposal's strands and file each new statement under the strands it names.
+
+    A proposal restates a strand only to refresh its summary; the host keeps the membership and the frontier.
+    A strand is due a refresh when this batch changed relevance in it, linked it by an edge, or left it
+    holding a statement newer than its summary. Only a strand whose card the request showed is held to that.
+    Any other stays behind, and the next request shows its card and asks for the refresh.
+    """
     strands = indexed(proposal["strands"], "strand")
     allocate(state["strands"], strands, "S")
-    touched = {sid for key in changed for sid in state["statements"][key]["strand_ids"]}
+    added = [item["id"] for item in proposal["statements"]]
+    readable = shown | set(added)
+    due = {sid for key in updated for sid in state["statements"][key]["strand_ids"]}
     for edge in proposal["edges"]:
         for key in (edge["from"], edge["to"]):
             require(key in state["statements"], "edge references unknown statement")
-            touched.update(state["statements"][key]["strand_ids"])
-    require(touched <= strands.keys(), "every affected strand needs a refreshed summary")
+            require(key in readable, "edge names a statement the request did not show")
+            due.update(state["statements"][key]["strand_ids"])
     for key, strand in strands.items():
-        require(strand["summary_through"] == end, "strand summary frontier must cover batch end")
-        if key in state["strands"]:
-            require(strand["title"] == state["strands"][key]["title"], "existing strand title is immutable")
-        strand["last_changed"] = end
+        old = state["strands"].get(key)
+        if old:
+            require(key in shown, "strand refresh needs a card the request did not show")
+            require(strand["title"] == old["title"], "existing strand title is immutable")
+        strand.update(statement_ids=old["statement_ids"] if old else [], summary_through=end, last_changed=end)
     state["strands"].update(strands)
-    for key, strand in state["strands"].items():
-        actual = {sid for sid, statement in state["statements"].items() if key in statement["strand_ids"]}
-        require(set(strand["statement_ids"]) == actual, "strand membership must exactly match statements")
-    require(
-        all(sid in state["strands"] for item in state["statements"].values() for sid in item["strand_ids"]),
-        "statement references unknown strand",
-    )
+    for key in added:
+        for sid in state["statements"][key]["strand_ids"]:
+            require(sid in state["strands"], "statement references unknown strand")
+            state["strands"][sid]["statement_ids"].append(key)
+            state["strands"][sid]["last_changed"] = end
+    require(all(strand["statement_ids"] for strand in strands.values()), "new strand needs a statement")
+    due |= behind(state)
+    require(due & shown <= strands.keys(), "every affected strand with a card needs a refreshed summary")
 
 
-def update_decisions(state, proposal, end):
+def update_decisions(state, proposal, shown, end):
     decisions = indexed(proposal["decisions"], "decision")
     allocate(state["decisions"], decisions, "D")
-    refreshed = {item["id"] for item in proposal["strands"]}
     for key, decision in decisions.items():
         applies = decision["applies_to"]
         require(applies == ["all"] or all(sid in state["strands"] for sid in applies), "unknown decision applicability")
-        affected = set(state["strands"]) if applies == ["all"] else set(applies)
         old = state["decisions"].get(key)
         if old:
-            affected.update(state["strands"] if old["applies_to"] == ["all"] else old["applies_to"])
-        require(affected <= refreshed, "decision changes require affected strand summaries")
-        require(
-            old is None or old["text"] == decision["text"], "decision text is immutable; supersede and create a new ID"
-        )
+            require(key in shown, "decision change targets a decision the request did not show")
+            require(old["text"] == decision["text"], "decision text is immutable; supersede and create a new ID")
         decision["history"] = (
             []
             if old is None
@@ -158,19 +174,24 @@ def update_decisions(state, proposal, end):
     state["decisions"].update(decisions)
 
 
-def build_patch(current, proposal, source):
+def build_patch(current, proposal, source, shown):
+    """The state after this proposal, or a GraphError that leaves the current state as it was.
+
+    `shown` holds every id the request showed whole. A proposal may change only those and what it adds itself:
+    the model reads part of the graph, and a change to something it could not read would be a guess.
+    """
     validate_shape(proposal)
     state, patch = copy.deepcopy(current), copy.deepcopy(proposal)
     start, end = (patch["binding"]["batch"][key] for key in ("start", "end"))
     added = add_statements(state, patch, source, start, end)
-    changed = added | update_relevance(state, patch, added)
+    updated = update_relevance(state, patch, added, shown)
     check_evidence(
         patch["statements"] + patch["relevance_updates"] + patch["strands"] + patch["decisions"] + patch["edges"],
         state["statements"],
         end,
     )
-    update_strands(state, patch, changed, end)
-    update_decisions(state, patch, end)
+    update_strands(state, patch, updated, shown, end)
+    update_decisions(state, patch, shown, end)
     state["edges"].extend(patch["edges"])
     check_dag(state["edges"], state["statements"])
     return state

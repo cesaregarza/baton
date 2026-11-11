@@ -76,7 +76,7 @@ def advance_published(db, config, conversation_id, tmp_path: Path, producer="alp
     request = prepare(source, state, request_path, batch_size=1)
     end = request["binding"]["batch"]["end"]
     post = request["new_posts"][0]
-    retained = request["retained_state"]
+    strand = load_json(state)["strands"]["S2"]
     candidate = {
         "binding": request["binding"],
         "statements": [
@@ -94,10 +94,8 @@ def advance_published(db, config, conversation_id, tmp_path: Path, producer="alp
         "relevance_updates": [],
         "strands": [
             {
-                **{k: retained["strands"]["S2"][k] for k in ("id", "title", "open_work", "state")},
+                **{k: strand[k] for k in ("id", "title", "open_work", "state")},
                 "summary": f"Reader asked about seq {end}.",
-                "statement_ids": [*retained["strands"]["S2"]["statement_ids"], f"{end}-1"],
-                "summary_through": end,
                 "evidence": [f"post:{end}"],
             }
         ],
