@@ -295,6 +295,8 @@ def test_valid_proof_does_not_allow_guest_authority_or_forged_identity(posting_h
             "read_graph",
             "read_graph_strand",
             "read_graph_statement",
+            "search_graph",
+            "read_graph_entries",
         }
         assert app.GUEST_TOOLS == allowed
         for tool in listed:

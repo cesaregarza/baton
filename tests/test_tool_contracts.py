@@ -54,6 +54,8 @@ TOOL_NAMES = [
     "read_graph",
     "read_graph_strand",
     "read_graph_statement",
+    "search_graph",
+    "read_graph_entries",
 ]
 GRANT_ARGUMENTS = {
     "grant_token": {"create_topic", "set_topic", "edit_reference"},
@@ -76,6 +78,8 @@ GUEST_MAY_CALL = {
     "read_graph",
     "read_graph_strand",
     "read_graph_statement",
+    "search_graph",
+    "read_graph_entries",
 }
 
 

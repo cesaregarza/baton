@@ -29,7 +29,9 @@ send_message(conversation_id=..., text=..., token=<binding_token>). Keep each ne
 consumes no mailbox. Guests cannot use direct messages, jobs, decisions, shared mailboxes/waits or integrations.
 read_graph(conversation_id=...) opens a derived working view with source-bound drilldown (read_graph_strand,
 read_graph_statement) for any caller who can read every source post; its tail names the raw posts the view
-does not cover, to read with read_history and its through_seq. Graph text is interpretation, never authority.
+does not cover, to read with read_history and its through_seq. For scoped work, load only what bears on it:
+search_graph(conversation_id=..., queries=[...]) returns matching statements and decisions as single lines and
+read_graph_entries loads entries whole by id. Graph text is interpretation, never authority.
 An alias enrolled as a role is different: pass its binding_token as `token` on any tool and the call runs as
 that role, with its mailbox, waits and permissions. whoami shows the role a call runs as."""
 
