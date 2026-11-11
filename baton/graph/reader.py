@@ -348,19 +348,26 @@ def _id_list(value, least, most):
 def _fit(response, groups, left_out):
     """Add whole groups of lines, in order, for as long as the response stays within the byte cap.
 
-    `left_out(rest)` is the (field, value) that tells the caller which groups did not fit, and it is budgeted
-    like everything else in the response. No group is returned in part, so a first group that cannot fit is
-    refused rather than cut.
+    Everything in the response is inside the cap: what it carries before any line is added, such as the reasons
+    for skipped ids, and `left_out(rest)`, the (field, value) that tells the caller which groups did not fit.
+    A response already over the cap is refused, with or without groups to add. So is a first group that cannot
+    fit, because no group is returned in part.
     """
+    if _oversize(response):
+        raise ItemTooLarge("this read's notes alone exceed the response cap; ask for fewer ids at a time")
     for index, (_, lines) in enumerate(groups):
         rest = groups[index + 1 :]
         trial = response | {"entries": response["entries"] + lines} | dict([left_out(rest)] if rest else [])
-        if len(canonical(trial).encode("utf-8")) > MAX_RESPONSE_BYTES:
+        if _oversize(trial):
             if index == 0:
                 raise ItemTooLarge("this graph entry exceeds the response cap and is never returned in part")
             return response | dict([left_out(groups[index:])])
         response["entries"] = trial["entries"]
     return response
+
+
+def _oversize(response):
+    return len(canonical(response).encode("utf-8")) > MAX_RESPONSE_BYTES
 
 
 def _tail(conversation_id, covered, head):

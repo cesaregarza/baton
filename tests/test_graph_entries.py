@@ -158,6 +158,21 @@ def test_ids_load_strands_and_posts_and_say_why_nothing_came_back() -> None:
         assert entries.find(wanted) == [] and entries.why_missing(wanted) == reason, wanted
 
 
+def test_a_reason_names_the_latest_replacers_and_counts_the_rest() -> None:
+    def reason(later: int) -> str:
+        """Why 2-1 is missing once `later` statements of post 13 have replaced it as well as 3-2."""
+        crowded = graph() | {"covered_through_seq": 13}
+        added = [statement(f"13-{n}", f"Flat files, revision {n}.", ["S2"]) for n in range(1, later + 1)]
+        crowded["statements"] |= {item["id"]: item for item in added}
+        crowded["edges"] += [{"from": item["id"], "to": "2-1", "kind": "supersedes"} for item in added]
+        return Entries(crowded).why_missing("2-1")
+
+    assert reason(4) == "replaced in full by 3-2 13-1 13-2 13-3 13-4"
+    assert reason(5) == "replaced in full by 13-1 13-2 13-3 13-4 13-5 and 1 more before them"
+    # However many there are, the reason stays one short line: a reader pays for every byte of it.
+    assert reason(5000) == "replaced in full by 13-4996 13-4997 13-4998 13-4999 13-5000 and 4996 more before them"
+
+
 def test_search_matches_any_word_stemmed_and_ranks_across_queries() -> None:
     entries = Entries(graph())
     ids = lambda lines: [found.split(" | ")[0] for found in lines]  # noqa: E731

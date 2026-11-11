@@ -30,6 +30,7 @@ QUERY_WORDS = 16
 FUSE_DEPTH = 20  # each query feeds at least this many of its best hits into the fusion
 FUSE_RANK = 60  # reciprocal rank fusion: a hit at rank r scores 1 / (FUSE_RANK + r)
 EXCERPT_TOKENS = 24
+REPLACERS_NAMED = 5  # the reason a replaced statement is missing names this many replacers and counts the rest
 POST_ID = re.compile(r"post:([1-9][0-9]*)")
 MATCH = (
     f"SELECT id, snippet(unit, 1, '', '', ' … ', {EXCERPT_TOKENS}) FROM unit WHERE unit MATCH ? ORDER BY rank LIMIT ?"
@@ -111,10 +112,14 @@ class Entries:
         return [(sid, self._entries[sid].line) for sid in self._of_post.get(int(post.group(1)), [])]
 
     def why_missing(self, wanted: str) -> str:
-        """Why `find` returned nothing for this id, in words a reader can act on."""
+        """Why `find` returned nothing for this id: one short line a reader can act on, whatever the snapshot holds."""
         if wanted in self._snapshot["statements"]:
-            replacers = " ".join(self._replaced_by.get(wanted, []))
-            return f"replaced in full by {replacers}" if replacers else "replaced in full"
+            replacers = self._replaced_by.get(wanted, [])
+            if not replacers:
+                return "replaced in full"
+            earlier = len(replacers) - REPLACERS_NAMED
+            latest = " ".join(replacers[-REPLACERS_NAMED:])
+            return f"replaced in full by {latest}" + (f" and {earlier} more before them" if earlier > 0 else "")
         if wanted in self._snapshot["decisions"]:
             return "superseded decision"
         post = POST_ID.fullmatch(wanted)

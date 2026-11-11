@@ -396,6 +396,35 @@ def test_entry_reads_stop_between_whole_ids_and_say_what_is_left(graphed, monkey
     refused("item_too_large", reader.read_graph_entries, db, config, "reviewer", cid, ["S2"])
 
 
+def test_reasons_for_skipped_ids_count_toward_the_cap_with_or_without_entries(graphed, monkeypatch) -> None:
+    db, config, cid, _ = graphed
+
+    def read(ids: list[str]) -> dict:
+        return reader.read_graph_entries(db, config, "reviewer", cid, ids)
+
+    def size(response: dict) -> int:
+        return len(canonical(response).encode("utf-8"))
+
+    absent = ["2-1", "post:9", "nine"]  # replaced in full, beyond the graph's coverage, not an id at all
+    alone, mixed = read(absent), read(["4-1", *absent, "D1"])
+    assert alone["entries"] == [] and list(alone["skipped"]) == absent and "remaining" not in alone
+    assert len(mixed["entries"]) == 2 and mixed["skipped"] == alone["skipped"]
+
+    # A read that finds nothing is measured like any other. When its reasons do not fit it is refused, with
+    # or without entries to add, and fewer ids at a time do fit.
+    monkeypatch.setattr(reader, "MAX_RESPONSE_BYTES", size(alone))
+    assert read(absent) == alone
+    monkeypatch.setattr(reader, "MAX_RESPONSE_BYTES", size(alone) - 1)
+    assert "fewer ids" in str(refused("item_too_large", read, absent))
+    assert "fewer ids" in str(refused("item_too_large", read, ["4-1", *absent]))
+    assert read(absent[:2])["skipped"] == {wanted: alone["skipped"][wanted] for wanted in absent[:2]}
+
+    # Beside entries, the reasons are in the same budget as the lines and the note of what is left.
+    monkeypatch.setattr(reader, "MAX_RESPONSE_BYTES", size(mixed) - 1)
+    page = read(["4-1", *absent, "D1"])
+    assert page == mixed | {"entries": mixed["entries"][:1], "remaining": ["D1"]} and size(page) < size(mixed)
+
+
 def test_entry_search_needs_fts5_and_the_other_entry_reads_do_not(graphed, monkeypatch) -> None:
     db, config, cid, _ = graphed
     monkeypatch.setattr(store, "fts5_available", lambda conn: False)
