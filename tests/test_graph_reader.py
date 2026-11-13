@@ -17,7 +17,7 @@ from conftest import make_config
 from test_aliases import dispatch, payload, rpc
 from test_artifact_reads import publish as publish_prose
 from test_artifact_reads import reads_config
-from test_graph_builder import edit, proposal, snapshot
+from test_graph_builder import as_version_1, edit, proposal, snapshot
 from test_index_writer import lose, say
 from test_index_writer import snapshot as table_snapshot
 
@@ -424,6 +424,19 @@ def test_entry_search_needs_fts5_and_the_other_entry_reads_do_not(graphed, monke
     assert "FTS5" in str(error)
     assert len(reader.search_graph(db, config, "reviewer", cid)["entries"]) == 2
     assert len(reader.read_graph_entries(db, config, "reviewer", cid, ["post:3"])["entries"]) == 2
+
+
+def test_a_graph_published_before_strands_had_lines_is_read_with_its_lines(graphed) -> None:
+    db, config, cid, result = graphed
+    version = result["versions"][0]["version_id"]
+    current = reader.read_graph_strand(db, config, "reviewer", cid, version, "S2")["strand"]
+    card = reader.read_graph_entries(db, config, "reviewer", cid, ["S2"])["entries"]
+    stored = json.loads(db.execute("SELECT snapshot FROM graph_snapshots WHERE version_id = ?", (version,)).one()[0])
+    older = stored | {"schema_version": 1, "strands": as_version_1(stored["strands"])}
+    db.execute("UPDATE graph_snapshots SET snapshot = ? WHERE version_id = ?", (json.dumps(older), version))
+    # Upgraded on read the way the next apply upgrades the state, so the line ids are the ones it will store.
+    assert reader.read_graph_strand(db, config, "reviewer", cid, version, "S2")["strand"] == current
+    assert reader.read_graph_entries(db, config, "reviewer", cid, ["S2"])["entries"] == card
 
 
 def test_authorization_precedes_everything_and_revocations_stop_paging(graphed, tmp_path) -> None:

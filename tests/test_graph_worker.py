@@ -16,7 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from test_graph_builder import edit
+from test_graph_builder import as_version_1, edit
 from test_index_writer import converse, index_config, say
 
 from baton import config as config_module
@@ -25,7 +25,7 @@ from baton.database.store import connect
 from baton.graph import ledger
 from baton.graph import snapshot as snapshot_module
 from baton.graph.contract import GraphError, current
-from baton.graph.source import load_json
+from baton.graph.source import digest, load_json
 from baton.graph.transport import TransportError
 from baton.graph.worker import Worker, reset, status
 
@@ -319,15 +319,22 @@ def test_restart_consumes_the_in_flight_reservation_and_reuses_saved_candidates(
 def test_a_saved_request_from_another_contract_is_prepared_again_with_a_full_attempt_count(tmp_path) -> None:
     config = worker_config(tmp_path, conversations=["placeholder"])
     with connect(config.db_path) as db:
-        cid, _ = converse(db, config, 2)
+        cid, _ = converse(db, config, 3)
     config = worker_config(tmp_path, conversations=[cid])
     clock = Clock()
-    worker = Worker(config, transport=ScriptedTransport(["timeout"]), clock=clock)
-    worker.cycle()
-    # What an upgrade finds on disk: a request an earlier contract wrote, with both of its calls already spent.
-    request_path = next((worker.paths(cid).root / "requests").glob("*.json"))
-    older = {**load_json(request_path), "version": 1, "instructions": "An earlier producer contract."}
-    older["binding"] = {**older["binding"], "request_id": "older"}
+    worker = Worker(config, transport=ScriptedTransport(["ok", "timeout"]), clock=clock)
+    for _ in range(4):  # the first batch is extracted, compacted and published; the second call times out
+        worker.cycle()
+    assert len(worker.transport.calls) == 2
+    # What an upgrade finds on disk: a version-1 state, and a request an earlier contract wrote against that state
+    # as stored, with both of its calls already spent.
+    paths = worker.paths(cid)
+    older_state = load_json(paths.state) | {"version": 1}
+    older_state["strands"] = as_version_1(older_state["strands"])
+    paths.state.write_text(json.dumps(older_state))
+    request_path = next((paths.root / "requests").glob("*.json"))
+    older = {**load_json(request_path), "version": 2, "instructions": "An earlier producer contract."}
+    older["binding"] = {**older["binding"], "request_id": "older", "base_state_digest": digest(older_state)}
     request_path.write_text(json.dumps(older))
     ledger_path = config.graph_worker.state_dir / "ledger.json"
     ledger_file = load_json(ledger_path)
@@ -337,10 +344,12 @@ def test_a_saved_request_from_another_contract_is_prepared_again_with_a_full_att
     restarted = Worker(config, transport=ScriptedTransport(), clock=clock)
     accepted = restarted.cycle()
     # No answer to the older request could be applied, so the batch is prepared again instead of blocking.
-    assert accepted["records"][cid]["accepted_W"] == 2 and len(restarted.transport.calls) == 1
+    assert accepted["records"][cid]["accepted_W"] == 3 and len(restarted.transport.calls) == 1
     request = restarted.transport.calls[0]["request"]
     assert current(request) and request["binding"]["request_id"] != "older"
     assert load_json(request_path) == request
+    stored = load_json(paths.state)
+    assert stored["version"] == 2 and stored["strands"]["S1"]["summary"] == [{"id": "S1.1", "text": "Notes through 3."}]
 
 
 def test_compact_retries_alone_and_publication_recovers_with_zero_calls(tmp_path, monkeypatch) -> None:
