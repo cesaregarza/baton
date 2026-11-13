@@ -146,10 +146,7 @@ description = "Picks up jobs and reports back"
 # credential_env = []                         # claude only: environment names the client needs; never BATON_* values
 # client_home = "/var/lib/baton-graph-client" # codex only, required: the worker's own client home (mode 0700) holding
 #                                             # only the worker's login, made once with codex login; never your own
-# command = ["codex"]                         # native only: the client executable (argv, no shell); a versioned
-#                                             # executable path keeps an auto-update from changing the client
-# client_version = "1.2.3"                    # native only, required, no default: the exact version you
-#                                             # inspected; any other reported version is never launched
+# command = ["codex"]                         # native only: the client executable (argv, no shell)
 # poll_seconds = 30
 # batch_size = 20                             # posts per graph batch; a thread is graphed once this many wait
 #                                             # (at most indexer.max_manifest_items)

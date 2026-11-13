@@ -96,8 +96,7 @@ def for_config(settings: GraphWorker, *, client: Any = None) -> Transport:
         return HttpTransport(settings.base_url, settings.model, settings.api_key_env, settings.allow_no_key, client)
     from baton.graph import native
 
-    assert settings.client_version is not None  # config parsing requires it for a native provider
-    arguments = (list(settings.command), settings.model, list(settings.credential_env), settings.client_version)
+    arguments = (list(settings.command), settings.model, list(settings.credential_env))
     if settings.provider == "codex":
         assert settings.client_home is not None  # config parsing requires it for this provider
         return native.CodexTransport(*arguments, home=str(settings.client_home))  # refuses a home that isn't private

@@ -182,8 +182,6 @@ class GraphWorker:
     credential_env: tuple[str, ...] = ()
     # The native client executable and fixed leading arguments; the worker appends its isolation flags.
     command: tuple[str, ...] = ()
-    # The exact native client version the operator inspected; a client reporting any other is never launched.
-    client_version: str | None = None
     # The worker's own home for the event-stream client: only the worker's login, mode 0700.
     client_home: Path | None = None
     generation: str | None = None

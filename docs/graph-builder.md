@@ -401,7 +401,7 @@ message text, and the category alone decides what happens next:
 | `rate_limited` | HTTP 429 | refusal |
 | `provider_unavailable` | HTTP 408 or 5xx; the connection could not be made | refusal |
 | `provider_refused` | a native client reports an error and its typed fields show no work was done | refusal |
-| `unverified_client` | native client verification failed (version, flags, introspection, Codex's client home), or Codex's launch check refused what the launch sends | refusal |
+| `unverified_client` | native client verification failed (flags, introspection, Codex's client home), or Codex's launch check refused what the launch sends | refusal |
 
 A charged call counts against the request's two calls and the daily cap, the first failure waits 60
 seconds, and the second blocks. A refusal is a call the provider declined without doing any work, so it
@@ -466,11 +466,12 @@ directory, no shell, an allowlisted environment with only runtime basics (and, f
 configured `credential_env` names, never `BATON_*`), bounded stdin/stdout/stderr and wall time, and
 process-group cleanup on cancellation.
 
-Which client version is trusted is operator configuration: `client_version` is required for `codex` and
-`claude`, refused for `http`, and has no default. Record the exact version you inspected; the worker
-launches only a client that reports exactly that version. Pointing `command` at a versioned executable
-path keeps an automatic update from changing the client under the worker. Claude Code's flag profile stays
-in code and is checked against its own help output; Codex is checked by what its launch sends, below. Every
+No client version is pinned: the worker follows the installed client as it updates, and a config that still
+sets `client_version` is refused as retired. What holds an updated client to the same bounds is the checks,
+never its version. For Codex, every launch is checked by what the client sends and every call by its session
+record, both below; Claude Code's flag profile stays in code and is checked against its own help output. A
+changed client that no longer passes fails closed, as `unverified_client` before the launch or `isolation`
+after the call. The launch check runs without a login, so only the record check covers a logged-in turn. Every
 model launch is preceded by a passing verification of the executable about to run: the worker resolves
 `command` the way the launch does (on the child's `PATH`, symlinks followed), verifies the client through
 that file, and runs that same file directly. It verifies before every launch, not only when a file
