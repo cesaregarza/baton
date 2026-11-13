@@ -24,6 +24,7 @@ from baton.conversations import require_enabled
 from baton.database import Connection
 from baton.errors import GraphUnavailable, InvalidRequest, ItemTooLarge, SnapshotUnavailable
 from baton.graph.entries import Entries, words
+from baton.graph.lines import upgrade
 from baton.graph.snapshot import edge_key, ordinal_key, statement_key
 from baton.graph.source import canonical
 
@@ -285,7 +286,10 @@ def _open(conn, config, role, request, producer):
     elif request.head_seq > current_head:
         raise SnapshotUnavailable("the captured head is ahead of this conversation; open the graph again")
     request.snapshot_id = version["version_id"]
-    return {"version": version, "snapshot": json.loads(stored["snapshot"]), "head_seq": request.head_seq}
+    snapshot = json.loads(stored["snapshot"])
+    if snapshot["schema_version"] == 1:  # published before strands had lines: read them as the next apply stores them
+        snapshot["strands"] = {key: upgrade(strand) for key, strand in snapshot["strands"].items()}
+    return {"version": version, "snapshot": snapshot, "head_seq": request.head_seq}
 
 
 def _envelope(opened, request):

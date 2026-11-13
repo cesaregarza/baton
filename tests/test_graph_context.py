@@ -6,7 +6,9 @@ The synthetic thread of `test_graph_builder` after both of its batches: five pos
 import json
 
 import pytest
-from test_graph_builder import edge, proposal, save, snapshot, statement, strand
+from test_graph_builder import edge, proposal, save, snapshot, statement
+from test_graph_builder import edit as strand_edit
+from test_graph_builder import strand as new_strand
 
 import baton.graph.cli as graph_cli
 import baton.graph.context as context_module
@@ -42,7 +44,8 @@ def empty(binding):
         "binding": binding,
         "statements": [],
         "relevance_updates": [],
-        "strands": [],
+        "new_strands": [],
+        "strand_edits": [],
         "decisions": [],
         "edges": [],
         "dispositions": [],
@@ -62,7 +65,7 @@ def test_recent_statements_lead_then_changed_decisions_then_what_each_new_post_i
     # A card comes with every strand a shown entry belongs to; a decision for all strands brings none.
     context = Context(graph)
     assert ids(context.render(["5-1"])["cards"]) == ["S2"] and ids(context.render(["D2"])["cards"]) == ["S1"]
-    assert context.render(["5-1"])["cards"][0].endswith("\nEvidence: post:5")
+    assert context.render(["5-1"])["cards"][0].endswith("\nEvidence: post:5\nNext line IDs: S2.2 S2.w2")
     assert context.render(["D1"])["cards"] == []
     bare = context.render([])
     assert (bare["cards"], bare["entries"], bare["refresh"]) == ([], [], [])
@@ -77,14 +80,14 @@ def test_a_proposal_may_change_only_what_its_request_showed(tmp_path) -> None:
     assert shown == {"1-1", "3-1", "3-2", "4-1", "5-1", "D1", "D2", "S1", "S2"}
     base = empty(request["binding"]) | {
         "statements": [statement(6, "New unprocessed question?", ["S2"])],
-        "strands": [strand("S2", 6)],
+        "strand_edits": [strand_edit("S2", 6)],
     }
-    both = [strand("S1", 6, resolved=True), strand("S2", 6)]
+    both = [strand_edit("S1", 6), strand_edit("S2", 6)]
     replaced = {"id": "3-1", "relevance": "completely_superseded", "surviving_text": None, "evidence": ["post:6"]}
     retired = {"id": "D2", "text": "Use JSON.", "applies_to": ["S1"], "status": "superseded", "evidence": ["post:6"]}
     for change, hidden, refusal in (
-        ({"relevance_updates": [replaced], "strands": both}, "3-1", "relevance update targets a statement"),
-        ({"edges": [edge("6-1", "1-1", seq=6)], "strands": both}, "1-1", "edge names a statement"),
+        ({"relevance_updates": [replaced], "strand_edits": both}, "3-1", "relevance update targets a statement"),
+        ({"edges": [edge("6-1", "1-1", seq=6)], "strand_edits": both}, "1-1", "edge names a statement"),
         ({}, "S2", "strand refresh needs a card"),
         ({"decisions": [retired]}, "D2", "decision change targets a decision"),
     ):
@@ -92,6 +95,91 @@ def test_a_proposal_may_change_only_what_its_request_showed(tmp_path) -> None:
         with pytest.raises(GraphError, match=f"{refusal} the request did not show"):
             build_patch(graph, candidate, posts, shown - {hidden})
         build_patch(graph, candidate, posts, shown)
+
+
+def line(key, text="The reader waits on the question."):
+    return {"id": key, "text": text}
+
+
+def sixth(tmp_path):
+    """The graph before post 6, what its request showed, and a proposal filing 6-1 under S2 and a new S3."""
+    source, state = extracted(tmp_path)
+    request = prepare(source, state, tmp_path / "request.json")
+    posts, graph = load_source(source), load_state(state, load_source(source))
+    base = empty(request["binding"]) | {"statements": [statement(6, "New unprocessed question?", ["S2", "S3"])]}
+    return graph, posts, shown_ids(request["context"]), base
+
+
+def edited(base, *others, new=None, **changes):
+    """`base` with S2 edited by `changes`, `others` edited too and S3 new, as `new` says or else valid."""
+    created = new_strand("S3", 6) | (new or {})
+    return base | {"new_strands": [created], "strand_edits": [strand_edit("S2", 6, **changes), *others]}
+
+
+OVER = "é" * 120 + "!"  # 241 UTF-8 bytes in 121 characters
+
+
+def test_a_strand_edit_is_refused_for_each_rule_it_breaks(tmp_path) -> None:
+    graph, posts, shown, base = sixth(tmp_path)
+    for candidate, refusal in (
+        (base | {"new_strands": [new_strand("S3", 6)]}, "every affected strand with a card needs a refreshed summary"),
+        (edited(base, replace=[line("S2.9")]), "unknown line"),
+        (edited(base, drop=["S1.1"]), "unknown line"),  # a line of another strand
+        (edited(base, work_done=["S2.1"]), "unknown line"),  # a summary line is not open work
+        (edited(base, replace=[line("S2.1")], drop=["S2.1"]), "names a line twice"),
+        (edited(base, drop=["S2.1"]), "keeps at least one summary line"),
+        (edited(base, drop=["S2.1"], add=[line("S2.1")]), "never reused"),  # S2.1 was retired at post 5
+        (edited(base, add=[line("S2.3")]), "consecutive"),
+        (edited(base, add=[line("S3.2")]), "invalid line ID"),
+        (edited(base, replace=[line("S2.1", OVER)]), "at most 240 UTF-8 bytes"),
+        (edited(base, add=[line("S2.2", OVER)]), "at most 240 UTF-8 bytes"),
+        (edited(base, work_add=[line("S2.w2", OVER)]), "at most 240 UTF-8 bytes"),
+        (edited(base, new={"summary": [line("S3.1", OVER)]}), "at most 240 UTF-8 bytes"),
+        (edited(base, new={"summary": [line("S3.2")]}), "consecutive"),
+        (edited(base, new={"open_work": [line("S3.w2")]}), "consecutive"),
+        (edited(base) | {"new_strands": [new_strand("S2", 6), new_strand("S3", 6)]}, "refreshed by an edit"),
+    ):
+        with pytest.raises(GraphError, match=refusal):
+            build_patch(graph, candidate, posts, shown)
+    # An edit names lines of a strand whose card the request showed, and only those.
+    with pytest.raises(GraphError, match="strand refresh needs a card the request did not show"):
+        build_patch(graph, edited(base, strand_edit("S1", 6, replace=[line("S1.1")])), posts, shown - {"S1"})
+
+
+def test_a_refresh_edits_only_the_lines_its_card_showed_and_retires_what_it_replaces(tmp_path) -> None:
+    graph, posts, shown, base = sixth(tmp_path)
+    old, longest = graph["strands"]["S2"], "é" * 120  # 240 UTF-8 bytes in half as many characters
+    # An edit that changes no line is the refresh: the summary holds through the batch end on the edit's evidence.
+    held = build_patch(graph, edited(base), posts, shown)["strands"]
+    current = ("summary", "open_work", "line_history")
+    assert {key: held["S2"][key] for key in current} == {key: old[key] for key in current}
+    assert (held["S2"]["summary_through"], held["S2"]["evidence"]) == (6, ["post:6"])
+    assert held["S3"]["summary"] == [line("S3.1", "Initial proposal.")]
+
+    # A replaced line keeps its id and place; its old text, like a finished work line, moves to the line history.
+    change = {"replace": [line("S2.1")], "add": [line("S2.2", longest)], "work_done": ["S2.w1"], "evidence": ["6-1"]}
+    after = build_patch(graph, edited(base, **change), posts, shown)
+    edited_strand = after["strands"]["S2"]
+    assert edited_strand["summary"] == [line("S2.1"), line("S2.2", longest)] and edited_strand["open_work"] == []
+    retired = [old["summary"][0], old["open_work"][0]]
+    assert edited_strand["line_history"] == old["line_history"] + [
+        item | {"retired_at": 6, "evidence": ["6-1"]} for item in retired
+    ]
+    # The card counts on from every id the strand has given, so a retired id is never handed out again.
+    card, _ = Context(after).render(["6-1"])["cards"]  # S2's, then the new S3's
+    assert card.endswith("\nOpen work:\n(none)\nEvidence: 6-1\nNext line IDs: S2.3 S2.w2")
+    again = empty(base["binding"]) | {"dispositions": [{"seq": 6, "reason": "Asked again."}]}
+    with pytest.raises(GraphError, match="never reused"):
+        build_patch(after, again | {"strand_edits": [strand_edit("S2", 6, work_add=[line("S2.w1")])]}, posts, shown)
+    later = again | {"strand_edits": [strand_edit("S2", 6, drop=["S2.2"], work_add=[line("S2.w2")])]}
+    history = build_patch(after, later, posts, shown)["strands"]["S2"]["line_history"]
+    # S2.1 was replaced at post 5 and again at post 6: each wording it had is kept.
+    assert [(item["id"], item["retired_at"]) for item in history] == [
+        ("S2.1", 5),
+        ("S2.1", 6),
+        ("S2.w1", 6),
+        ("S2.2", 6),
+    ]
 
 
 def test_a_request_over_the_limit_drops_its_least_valuable_entries_before_it_is_refused(tmp_path) -> None:
@@ -140,7 +228,7 @@ def test_a_strand_left_without_its_card_falls_behind_and_the_next_request_asks_f
     assert (third["context"]["cards"], third["context"]["entries"], third["context"]["refresh"]) == ([], [], [])
     receipts = statement(3, "Keep receipts for one hour.", ["S1"], quote="keep receipts one hour")
     with pytest.raises(GraphError, match="strand refresh needs a card the request did not show"):
-        attempt("third", third, statements=[receipts], strands=[strand("S1", 3)])
+        attempt("third", third, statements=[receipts], strand_edits=[strand_edit("S1", 3)])
     # Filed under a strand the model could not read: accepted, and the strand's summary now trails it.
     attempt("third", third, statements=[receipts])
     stored = load_json(state)["strands"]["S1"]
@@ -159,11 +247,12 @@ def test_a_strand_left_without_its_card_falls_behind_and_the_next_request_asks_f
     quotes = statement(4, "Exact source quotes remain mandatory.", ["S2"])
     with pytest.raises(GraphError, match="every affected strand with a card needs a refreshed summary"):
         attempt("fourth", fourth, statements=[quotes])
-    # The refresh is written from the request alone: the summary on the card and the statement it had yet to cover.
-    old, text = card.split("\n")[1], owed.rsplit(" | ", 1)[1]
-    assert (old, text) == ("Initial proposal.", "Keep receipts for one hour.")
-    refreshed = strand("S1", 4) | {"summary": f"{old} {text}", "evidence": ["3-1"]}
-    attempt("fourth", fourth, statements=[quotes], strands=[refreshed])
+    # The refresh is written from the request alone: the line on the card, its next ids and the statement owed.
+    old, following, text = card.split("\n")[1], card.split("\n")[-1], owed.rsplit(" | ", 1)[1]
+    assert (old, following) == ("S1.1 Initial proposal.", "Next line IDs: S1.2 S1.w2")
+    assert text == "Keep receipts for one hour."
+    refreshed = strand_edit("S1", 4, add=[{"id": "S1.2", "text": text}], evidence=["3-1"])
+    attempt("fourth", fourth, statements=[quotes], strand_edits=[refreshed])
     strands = load_json(state)["strands"]
     assert (strands["S1"]["summary_through"], strands["S2"]["summary_through"]) == (4, 2)
     save(source, snapshot(5))

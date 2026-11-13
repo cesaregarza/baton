@@ -5,7 +5,7 @@ import json
 from dataclasses import replace
 
 import pytest
-from test_graph_builder import proposal, snapshot
+from test_graph_builder import edit, proposal, snapshot
 from test_index_writer import converse, index_config, say
 
 from baton import cli, derived
@@ -30,17 +30,23 @@ def advance(source, state, tmp_path, end):
         "edges": [],
         "dispositions": [],
         "decisions": [],
-        "strands": [
+        "new_strands": [],
+        "strand_edits": [],
+    }
+    notes = [{"id": "S1.1", "text": f"Notes through {end}."}]
+    if start == 1:
+        proposal["new_strands"] = [
             {
                 "id": "S1",
                 "title": "Release",
-                "summary": f"Notes through {end}.",
+                "summary": notes,
                 "state": "active",
-                "open_work": ["Review the notes."],
+                "open_work": [{"id": "S1.w1", "text": "Review the notes."}],
                 "evidence": [f"{end}-1"],
             }
-        ],
-    }
+        ]
+    else:
+        proposal["strand_edits"] = [edit("S1", end, replace=notes, evidence=[f"{end}-1"])]
     for post in request["new_posts"]:
         proposal["statements"].append(
             {

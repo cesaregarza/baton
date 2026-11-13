@@ -7,9 +7,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from baton.graph.contract import require
+from baton.graph.lines import upgrade
 from baton.graph.source import canonical, load_json, prefix_digest
 
-STATE_VERSION = 1  # the stored graph state's shape, which a new request and proposal contract leaves alone
+STATE_VERSION = 2  # the stored graph state's shape, which a new request and proposal contract leaves alone
 
 
 def distinct_paths(**paths):
@@ -74,8 +75,15 @@ def initial_state(source):
 
 
 def load_state(path, source):
+    """The graph state at `path`, or an empty one; a version-1 state is read as version 2.
+
+    The upgrade is written by the next apply and only then: loading never writes, so a state nothing applies to
+    stays as it was on disk, and a request prepared from it binds the upgraded digest that apply recomputes.
+    """
     state = load_json(path) if Path(path).exists() else initial_state(source)
-    require(isinstance(state, dict) and state.get("version") == STATE_VERSION, "unsupported graph state")
+    require(isinstance(state, dict) and state.get("version") in (1, STATE_VERSION), "unsupported graph state")
+    if state["version"] == 1:  # strands before lines: everything else is carried over as stored
+        state = {**state, "version": STATE_VERSION, "strands": {k: upgrade(v) for k, v in state["strands"].items()}}
     require(state.get("conversation_id") == source["conversation_id"], "state conversation mismatch")
     through = state.get("watermark")
     require(type(through) is int and 0 <= through <= len(source["messages"]), "source is shorter than committed prefix")

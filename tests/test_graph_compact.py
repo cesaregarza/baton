@@ -69,7 +69,7 @@ def test_compact_contract_rejects_coverage_gaps_and_stale_digests() -> None:
             "S1": {
                 "id": "S1",
                 "title": "T",
-                "summary": "S",
+                "summary": [{"id": "S1.1", "text": "S"}],
                 "open_work": [],
                 "state": "active",
                 "statement_ids": ["1-1"],
@@ -80,7 +80,7 @@ def test_compact_contract_rejects_coverage_gaps_and_stale_digests() -> None:
             "S2": {
                 "id": "S2",
                 "title": "Closed",
-                "summary": "Done",
+                "summary": [{"id": "S2.1", "text": "Done"}],
                 "open_work": [],
                 "state": "resolved",
                 "statement_ids": ["2-1"],
@@ -118,6 +118,10 @@ def test_compact_contract_rejects_coverage_gaps_and_stale_digests() -> None:
         (lambda s: s.update(schema_version=True), "schema_version"),
         (lambda s: s["statements"]["1-1"].update(seq=True), "statement seq"),
         (lambda s: s["statements"]["1-1"]["source"].update(seq=True), "source differs"),
+        # A strand's lines carry its own ids, and its summary keeps at least one.
+        (lambda s: s["strands"]["S1"]["summary"][0].update(id="S2.1"), "summary line ID"),
+        (lambda s: s["strands"]["S1"].update(open_work=[{"id": "S1.1", "text": "Do it."}]), "open_work line ID"),
+        (lambda s: s["strands"]["S1"].update(summary=[]), "needs a line"),
     ):
         forged = json.loads(json.dumps(snapshot))
         mutate(forged)

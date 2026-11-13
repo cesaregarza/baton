@@ -3,6 +3,7 @@
 import copy
 import re
 
+from baton.graph import lines
 from baton.graph.contract import require, validate_shape
 
 
@@ -123,13 +124,18 @@ def behind(state):
 def update_strands(state, proposal, updated, shown, end):
     """Apply the proposal's strands and file each new statement under the strands it names.
 
-    A proposal restates a strand only to refresh its summary; the host keeps the membership and the frontier.
-    A strand is due a refresh when this batch changed relevance in it, linked it by an edge, or left it
-    holding a statement newer than its summary. Only a strand whose card the request showed is held to that.
-    Any other stays behind, and the next request shows its card and asks for the refresh.
+    A new strand is listed whole and an existing one refreshed by an edit (`baton.graph.lines`); the host keeps
+    the membership and the frontier. A strand is due a refresh when this batch changed relevance in it, linked it
+    by an edge, or left it holding a statement newer than its summary. Only a strand whose card the request showed
+    is held to that, and an edit that changes no line meets it. Any other stays behind, and the next request shows
+    its card and asks for the refresh.
     """
-    strands = indexed(proposal["strands"], "strand")
-    allocate(state["strands"], strands, "S")
+    created = indexed(proposal["new_strands"], "strand")
+    edits = indexed(proposal["strand_edits"], "strand edit")
+    require(
+        not created.keys() & state["strands"].keys(), "an existing strand is refreshed by an edit, never listed new"
+    )
+    allocate(state["strands"], created, "S")
     added = [item["id"] for item in proposal["statements"]]
     readable = shown | set(added)
     due = {sid for key in updated for sid in state["statements"][key]["strand_ids"]}
@@ -138,21 +144,19 @@ def update_strands(state, proposal, updated, shown, end):
             require(key in state["statements"], "edge references unknown statement")
             require(key in readable, "edge names a statement the request did not show")
             due.update(state["statements"][key]["strand_ids"])
-    for key, strand in strands.items():
-        old = state["strands"].get(key)
-        if old:
-            require(key in shown, "strand refresh needs a card the request did not show")
-            require(strand["title"] == old["title"], "existing strand title is immutable")
-        strand.update(statement_ids=old["statement_ids"] if old else [], summary_through=end, last_changed=end)
-    state["strands"].update(strands)
+    for key, change in edits.items():
+        require(key in state["strands"], "strand edit names an unknown strand")
+        require(key in shown, "strand refresh needs a card the request did not show")
+        lines.edit(state["strands"][key], change, end)
+    state["strands"].update({key: lines.create(item, end) for key, item in created.items()})
     for key in added:
         for sid in state["statements"][key]["strand_ids"]:
             require(sid in state["strands"], "statement references unknown strand")
             state["strands"][sid]["statement_ids"].append(key)
             state["strands"][sid]["last_changed"] = end
-    require(all(strand["statement_ids"] for strand in strands.values()), "new strand needs a statement")
+    require(all(state["strands"][key]["statement_ids"] for key in created), "new strand needs a statement")
     due.update(behind(state))
-    require(due & shown <= strands.keys(), "every affected strand with a card needs a refreshed summary")
+    require(due & shown <= edits.keys(), "every affected strand with a card needs a refreshed summary")
 
 
 def update_decisions(state, proposal, shown, end):
@@ -185,11 +189,8 @@ def build_patch(current, proposal, source, shown):
     start, end = (patch["binding"]["batch"][key] for key in ("start", "end"))
     added = add_statements(state, patch, source, start, end)
     updated = update_relevance(state, patch, added, shown)
-    check_evidence(
-        patch["statements"] + patch["relevance_updates"] + patch["strands"] + patch["decisions"] + patch["edges"],
-        state["statements"],
-        end,
-    )
+    cited = ("statements", "relevance_updates", "new_strands", "strand_edits", "decisions", "edges")
+    check_evidence([item for key in cited for item in patch[key]], state["statements"], end)
     update_strands(state, patch, updated, shown, end)
     update_decisions(state, patch, shown, end)
     state["edges"].extend(patch["edges"])

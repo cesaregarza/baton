@@ -11,7 +11,7 @@ from baton.graph.contract import require
 from baton.graph.source import canonical, digest, prefix_digest
 from baton.graph.validation import check_dag, check_evidence, check_relevance
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: strand summaries and open work are lines with ids (`baton.graph.lines`)
 MAX_SNAPSHOT_BYTES = 20_000_000
 DIGEST_FIELDS = (
     "schema_version",
@@ -173,18 +173,25 @@ def _check_strands(snapshot, end):
     for key, strand in snapshot["strands"].items():
         require(STRAND_ID.fullmatch(key) is not None, "invalid strand ID")
         _text(strand["title"], "strand title")
-        _text(strand["summary"], "strand summary")
-        require(
-            isinstance(strand["open_work"], list)
-            and all(isinstance(w, str) and w.strip() for w in strand["open_work"]),
-            "open_work must list nonempty text",
-        )
+        _lines(strand["summary"], rf"{key}\.[1-9][0-9]*", "strand summary")
+        require(bool(strand["summary"]), "strand summary needs a line")
+        _lines(strand["open_work"], rf"{key}\.w[1-9][0-9]*", "open_work")
         require(strand["state"] in ("active", "resolved"), "unsupported strand state")
         _ids(strand["statement_ids"], STATEMENT_ID, "statement_ids")
         actual = {sid for sid, statement in snapshot["statements"].items() if key in statement["strand_ids"]}
         require(set(strand["statement_ids"]) == actual, "strand membership must exactly match statements")
         require(type(strand["summary_through"]) is int and 1 <= strand["summary_through"] <= end, "invalid frontier")
         require(type(strand["last_changed"]) is int and 1 <= strand["last_changed"] <= end, "invalid strand change seq")
+
+
+def _lines(lines, pattern, label):
+    """Lines of one strand and kind: each an id of that strand and nonempty text, every id once."""
+    require(isinstance(lines, list), f"{label} must be a list of lines")
+    for line in lines:
+        require(isinstance(line, dict) and set(line) == {"id", "text"}, f"{label} line has missing or unknown keys")
+        require(isinstance(line["id"], str) and re.fullmatch(pattern, line["id"]) is not None, f"{label} line ID")
+        _text(line["text"], f"{label} line")
+    require(len({line["id"] for line in lines}) == len(lines), f"{label} repeats a line ID")
 
 
 def _check_decisions(snapshot, end):

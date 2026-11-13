@@ -129,23 +129,23 @@ python -m baton.graph raw --source /tmp/baton-graph-demo/thread.json --seq 2 --s
 
 Default reads center active strand summaries, open work and applicable shared decisions, deduplicated
 across selected strands. Add `--statements` for statement detail; partially superseded statements show
-their surviving clause in this working view. `--history` includes resolved strands and original immutable
-statement text/quotes. A decision can outlive the discussion that established
+their surviving clause in this working view. `--history` includes resolved strands, original immutable
+statement text/quotes and each strand's line history. A decision can outlive the discussion that established
 it. Semantic edge direction is from a response/supporting/contradicting/superseding/dependent statement
 to its referenced parent. Multiple edges may express multiple targets; raw reply metadata remains
 separate. Relevance is directly relevant, partially superseded with a surviving clause, or completely
 superseded. Accepted statement text, exact source quotes, statement-to-strand memberships, and strand
-titles are immutable. Relevance, summaries, open work, and decision status can change only in a normal
-batch that advances over new source posts; there is no correction-only revision. Decision text remains
+titles are immutable. Relevance, summary and open-work lines, and decision status can change only in a
+normal batch that advances over new source posts; there is no correction-only revision. Decision text remains
 immutable; when a decision changes, supersede its existing D ID and add a new decision.
 
 The read captures source head **H**, processed contiguous frontier **W**, and summary coverage for
 each strand. The tail is exactly `W < seq <= H`, with original text and author metadata. A touched
 strand whose card the request showed must refresh its summary through the batch before apply advances
-W; untouched strands retain their earlier explicit frontier. A strand that gains a statement without
-its card shown keeps its older frontier until the next request, which shows the card and asks for the
-refresh. A graph summary is derived interpretation, not authenticated
-approval, ticket status or action authority.
+W, with an edit of its lines (see [Strand lines](#strand-lines)); untouched strands retain their earlier
+explicit frontier. A strand that gains a statement without its card shown keeps its older frontier
+until the next request, which shows the card and asks for the refresh. A graph summary is derived
+interpretation, not authenticated approval, ticket status or action authority.
 
 Append posts to the saved source, preserving its committed prefix, then prepare another batch
 against the same state with fresh request/proposal paths. Keep requests, proposals and receipts for
@@ -169,8 +169,9 @@ single-summary new generation as a way to activate a correction; generation acti
 conversations and artifact kinds.
 
 The producer instructions are part of the exact request contract. After this contract changes, discard
-old prepared requests for production and regenerate them from the compatible saved checkpoint with new
-request/proposal paths; checkpoints need no migration.
+old prepared requests for production and regenerate them from the saved checkpoint with new
+request/proposal paths. A checkpoint stored before strands had lines (state version 1) is read with
+lines, as described below, and the next apply writes it as version 2; reading it never writes it.
 
 Source, state, request and proposal must be distinct paths. The source is read-only input; apply
 validates before committing state under a lock with atomic replacement. Inference happens outside
@@ -191,16 +192,18 @@ part of the graph they are likely to touch, as the request's `context`:
 - `entries`: standing statements and active decisions, one line each, as graph readers see them: the
   standing statements of the last 20 processed posts, the active decisions changed in those posts, and
   each new post's 20 best full-text search hits among the older entries.
-- `cards`: the summary, open work and evidence of every strand a shown entry belongs to.
+- `cards`: the summary and open-work lines, evidence and next line IDs of every strand a shown entry
+  belongs to.
 - `refresh`: the strands holding statements newer than their summary. Their cards and those statements
   are always sent, and the proposal must refresh each of them.
 - `next_ids`: the strand and decision IDs a proposal allocates from.
 
 A proposal may change only what its request showed. A relevance update, an edge, a strand refresh or a
-decision change naming anything else is rejected. A new statement may still be filed under any strand
-in the outline; a strand that gains one without its card shown falls behind, and the next request sends
-its card and asks for the refresh. Completely superseded statements and superseded decisions are never
-shown, so neither can be changed again. An older entry the search does not surface can be missed, for
+decision change naming anything else is rejected, and so is an edit naming a line its strand's card did
+not show. A new statement may still be filed under any strand in the outline; a strand that gains one
+without its card shown falls behind, and the next request sends its card and asks for the refresh.
+Completely superseded statements and superseded decisions are never shown, so neither can be changed
+again. An older entry the search does not surface can be missed, for
 example a decision restated under a new ID, but it is never altered unread.
 
 The input limit measures the serialized request in UTF-8 bytes, not model tokens. Prepare takes as many
@@ -221,6 +224,37 @@ global configuration.
 The validator enforces references, coverage, quotes, state binding and structural invariants; it
 cannot prove that every model interpretation or summary is semantically correct. Review the compact
 view and drill down to raw posts for consequential decisions.
+
+### Strand lines
+
+A strand's summary and open work are lines with stable IDs: summary lines `S3.1`, `S3.2` and open-work
+lines `S3.w1`, `S3.w2`. A card shows each line with its ID. A proposal lists a new strand whole in
+`new_strands` and refreshes an existing one with one `strand_edits` item that carries only what changes:
+
+| Field | Does |
+|---|---|
+| `add` | new summary lines, appended |
+| `replace` | a summary line's new text; the line keeps its ID and place |
+| `drop` | summary lines that no longer hold |
+| `work_add` | new open-work lines |
+| `work_done` | open-work lines finished or withdrawn |
+| `state` | `active` or `resolved`, or null to keep it |
+| `evidence` | what the refresh rests on; it becomes the strand's evidence |
+
+An edit with no line changes says the summary still holds through the batch end, and it counts as the
+refresh wherever one is owed. Titles cannot be edited. An edit may name only the lines its strand has
+now; an unknown line, a line named twice, or a strand left with no summary line is refused. New IDs
+continue consecutively from the highest the strand ever gave, which its card shows as its next line
+IDs, so an ID is never reused. Each line a proposal writes is at most 240 UTF-8 bytes; there is no
+limit on the number of lines, and the instructions ask for consolidation with `replace` and `drop` when
+a summary grows long. A replaced, dropped or finished line stays in the strand's `line_history` with the
+batch end it left at and the edit's evidence; `read --history` shows it, and every other reader shows the
+current lines.
+
+A version-1 state is upgraded when it is loaded. Each summary is cut into lines at newlines and sentence
+ends, never before a lowercase word, keeping its text exactly except the whitespace at each cut; each
+open-work item becomes one work line. An upgraded line may be longer than 240 bytes until it is
+replaced. The graph readers read a graph published before strands had lines the same way.
 
 
 ## Export, publish and open a real thread manually
@@ -354,7 +388,8 @@ calls count launches, wall time and bytes; `recent_calls` reports observed turns
 reported them, never a dollar figure. Each request carries the part of the graph chosen for its new
 posts (see [Input and limits](#input-and-limits)), so its size follows the batch and the number of
 strands, not the length of the thread. A saved request written under another producer contract is
-deleted and prepared again with a full attempt count, because no answer to it could be applied.
+deleted and prepared again with a full attempt count, because no answer to it could be applied. This
+holds for a request saved beside a version-1 state, though it binds that state as stored.
 Localized repair is not part of this increment.
 
 The compact view is checked structurally before publication: it must name exactly the active strands and
@@ -395,8 +430,9 @@ bounded pilot must inspect the real event stream before enrollment widens.
 
 Readers see the result through five read-only MCP tools. Scoped work starts with `search_graph`, which
 returns the standing statements and active decisions matching a few words as one line each (id, strands,
-connections, text), and `read_graph_entries`, which loads statements, decisions, strand summaries or a
-post's statements whole by id; a reader loads the part of the thread its work needs and nothing else.
+connections, text), and `read_graph_entries`, which loads statements, decisions, a strand's summary and
+open-work lines or a post's statements whole by id; a reader loads the part of the thread its work needs
+and nothing else.
 The other three carry the full records: `read_graph` opens the working view with strand
 cards, applicable decisions and a `tail` naming the raw posts after W, `read_graph_strand` lists a
 strand's statements or decisions, and `read_graph_statement` returns one immutable statement with quotes,

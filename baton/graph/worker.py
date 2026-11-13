@@ -318,12 +318,15 @@ class Worker:
         if request_path.exists():
             request = load_json(request_path)
             binding = request.get("binding", {}) if isinstance(request, dict) else {}
-            if binding.get("base_revision") != state["revision"] or binding.get("base_state_digest") != digest(state):
-                raise Blocked("unsafe_source")
             if current(request):
+                base = (binding.get("base_revision"), binding.get("base_state_digest"))
+                if base != (state["revision"], digest(state)):
+                    raise Blocked("unsafe_source")
                 return request, request_path
             # Written under another producer contract, so no answer to it could be applied. Its saved proposals
-            # are filed under its own id: the batch is prepared again and starts with a full attempt count.
+            # are filed under its own id: the batch is prepared again and starts with a full attempt count. The
+            # contract is checked before the base: a request saved beside a version-1 state binds the digest of
+            # that state as stored, which the state read as version 2 no longer has.
             request_path.unlink()
         try:
             request = prepare(

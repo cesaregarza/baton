@@ -158,7 +158,7 @@ def read(source_path, state_path, *, strands=(), history=False, expand_statement
         state = load_state(state_path, source)
     require(all(key in state["strands"] for key in strands), "unknown requested strand")
     selected = {
-        key: value
+        key: value if history else {field: value[field] for field in value if field != "line_history"}
         for key, value in state["strands"].items()
         if (not strands or key in strands) and (history or value["state"] == "active")
     }
