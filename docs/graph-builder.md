@@ -143,10 +143,9 @@ The read captures source head **H**, processed contiguous frontier **W**, and su
 each strand. The tail is exactly `W < seq <= H`, with original text and author metadata. A touched
 strand whose card the request showed must refresh its summary through the batch before apply advances
 W, with an edit of its lines (see [Strand lines](#strand-lines)); untouched strands retain their earlier
-explicit frontier. A strand that gains a statement without
-its card shown keeps its older frontier until the next request, which shows the card and asks for the
-refresh. A graph summary is derived interpretation, not authenticated
-approval, ticket status or action authority.
+explicit frontier. A strand that gains a statement without its card shown keeps its older frontier
+until the next request, which shows the card and asks for the refresh. A graph summary is derived
+interpretation, not authenticated approval, ticket status or action authority.
 
 Append posts to the saved source, preserving its committed prefix, then prepare another batch
 against the same state with fresh request/proposal paths. Keep requests, proposals and receipts for
@@ -202,8 +201,9 @@ part of the graph they are likely to touch, as the request's `context`:
 A proposal may change only what its request showed. A relevance update, an edge, a strand refresh or a
 decision change naming anything else is rejected, and so is an edit naming a line its strand's card did
 not show. A new statement may still be filed under any strand in the outline; a strand that gains one
-without its card shown falls behind, and the next request sends its card and asks for the refresh. Completely superseded statements and superseded decisions are never
-shown, so neither can be changed again. An older entry the search does not surface can be missed, for
+without its card shown falls behind, and the next request sends its card and asks for the refresh.
+Completely superseded statements and superseded decisions are never shown, so neither can be changed
+again. An older entry the search does not surface can be missed, for
 example a decision restated under a new ID, but it is never altered unread.
 
 The input limit measures the serialized request in UTF-8 bytes, not model tokens. Prepare takes as many
@@ -431,7 +431,8 @@ bounded pilot must inspect the real event stream before enrollment widens.
 Readers see the result through five read-only MCP tools. Scoped work starts with `search_graph`, which
 returns the standing statements and active decisions matching a few words as one line each (id, strands,
 connections, text), and `read_graph_entries`, which loads statements, decisions, a strand's summary and
-open-work lines or a post's statements whole by id; a reader loads the part of the thread its work needs and nothing else.
+open-work lines or a post's statements whole by id; a reader loads the part of the thread its work needs
+and nothing else.
 The other three carry the full records: `read_graph` opens the working view with strand
 cards, applicable decisions and a `tail` naming the raw posts after W, `read_graph_strand` lists a
 strand's statements or decisions, and `read_graph_statement` returns one immutable statement with quotes,
