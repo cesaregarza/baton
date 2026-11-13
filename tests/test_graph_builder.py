@@ -313,20 +313,27 @@ def test_rejections_leave_state_bytes_unchanged_and_allow_correction(tmp_path):
     assert request3["context"]["next_ids"] == {"strand": "S3", "decision": "D3"}
 
 
-def test_a_version_1_state_is_read_with_lines_and_written_by_the_next_apply_alone(tmp_path):
+# A summary a version-1 state might hold, with spacing, abbreviations and quotes for the cut to respect.
+WRAPPED = 'Use files, not SQLite.  Keep receipts e.g.  one hour!\n\n  The reader (v1.2) is next. "Quoted." Then ship.'
+LONG = "Retention is one hour, " * 12 + "as the second batch decided."  # one sentence over 240 bytes
+
+
+def version_1_state(tmp_path):
+    """Both batches applied, then the state rewritten as version 1 stored it, S2 summarized as WRAPPED."""
     source, state, request_path, proposal_path = paths(tmp_path)
     save(source, snapshot())
     for name, size in (("first", 2), ("second", 3)):
         save(tmp_path / f"{name}-p.json", proposal(prepare(source, state, tmp_path / f"{name}.json", batch_size=size)))
         apply(source, state, tmp_path / f"{name}.json", tmp_path / f"{name}-p.json")
-    wrapped = (
-        'Use files, not SQLite.  Keep receipts e.g.  one hour!\n\n  The reader (v1.2) is next. "Quoted." Then ship.'
-    )
-    long = "Retention is one hour, " * 12 + "as the second batch decided."
     older = load_json(state) | {"version": 1}
-    older["strands"] = as_version_1(older["strands"], {"S1": f"Receipts stay JSON. {long}", "S2": wrapped})
+    older["strands"] = as_version_1(older["strands"], {"S1": f"Receipts stay JSON. {LONG}", "S2": WRAPPED})
     save(state, older)
-    stored = state.read_bytes()
+    return source, state, request_path, proposal_path
+
+
+def test_a_version_1_state_is_read_with_its_summaries_cut_into_lines(tmp_path):
+    source, state, request_path, _ = version_1_state(tmp_path)
+    older, stored = load_json(state), state.read_bytes()
     request = prepare(source, state, request_path)
     assert state.read_bytes() == stored  # reading the upgrade never writes it
     upgraded = load_state(state, load_source(source))
@@ -335,12 +342,12 @@ def test_a_version_1_state_is_read_with_lines_and_written_by_the_next_apply_alon
     # summary as written, and only whitespace lies between them.
     cut = ["Use files, not SQLite.", "Keep receipts e.g.  one hour!", "The reader (v1.2) is next.", '"Quoted."']
     assert lines_of["S2"] == lines("S2", [*cut, "Then ship."])
-    rest = wrapped
+    rest = WRAPPED
     for line in lines_of["S2"]:
         gap, found, rest = rest.partition(line["text"])
         assert found and not gap.strip()
     assert not rest.strip()
-    assert lines_of["S1"] == lines("S1", ["Receipts stay JSON.", long]) and len(long.encode("utf-8")) > 240
+    assert lines_of["S1"] == lines("S1", ["Receipts stay JSON.", LONG]) and len(LONG.encode("utf-8")) > 240
     assert upgraded["strands"]["S2"]["open_work"] == lines(
         "S2", ["Implement the reader using files, preserving quotes."], "w"
     )
@@ -348,13 +355,17 @@ def test_a_version_1_state_is_read_with_lines_and_written_by_the_next_apply_alon
     others = lambda value: {key: value[key] for key in value if key not in ("version", "strands")}  # noqa: E731
     assert others(upgraded) == others(older) and upgraded["version"] == 2
     assert all(strand["line_history"] == [] for strand in upgraded["strands"].values())
-    assert request["context"]["cards"][0].split("\n")[1:3] == ["S1.1 Receipts stay JSON.", f"S1.2 {long}"]
+    assert request["context"]["cards"][0].split("\n")[1:3] == ["S1.1 Receipts stay JSON.", f"S1.2 {LONG}"]
 
+
+def test_an_upgraded_state_is_written_by_the_next_apply_alone(tmp_path):
+    source, state, request_path, proposal_path = version_1_state(tmp_path)
+    request, stored = prepare(source, state, request_path), state.read_bytes()
+    upgraded = load_state(state, load_source(source))
     # The long upgraded line stands until it is replaced, and then only by a line within the limit.
-    question = statement(6, "New unprocessed question?", ["S2"])
     candidate = {
         "binding": request["binding"],
-        "statements": [question],
+        "statements": [statement(6, "New unprocessed question?", ["S2"])],
         "relevance_updates": [],
         "new_strands": [],
         "strand_edits": [edit("S1", 6, replace=[{"id": "S1.1", "text": "Receipts stay JSON files."}]), edit("S2", 6)],
@@ -362,7 +373,7 @@ def test_a_version_1_state_is_read_with_lines_and_written_by_the_next_apply_alon
         "edges": [],
         "dispositions": [],
     }
-    too_long = [edit("S1", 6, replace=[{"id": "S1.2", "text": long}]), edit("S2", 6)]
+    too_long = [edit("S1", 6, replace=[{"id": "S1.2", "text": LONG}]), edit("S2", 6)]
     save(proposal_path, candidate | {"strand_edits": too_long})
     with pytest.raises(GraphError, match="at most 240"):
         apply(source, state, request_path, proposal_path)
@@ -370,8 +381,8 @@ def test_a_version_1_state_is_read_with_lines_and_written_by_the_next_apply_alon
     save(proposal_path, candidate)
     apply(source, state, request_path, proposal_path)
     written = load_json(state)
-    assert written["version"] == 2 and written["strands"]["S2"]["summary"] == lines_of["S2"]
-    assert written["strands"]["S1"]["summary"] == lines("S1", ["Receipts stay JSON files.", long])
+    assert written["version"] == 2 and written["strands"]["S2"]["summary"] == upgraded["strands"]["S2"]["summary"]
+    assert written["strands"]["S1"]["summary"] == lines("S1", ["Receipts stay JSON files.", LONG])
     assert written["strands"]["S1"]["line_history"] == [
         {"id": "S1.1", "text": "Receipts stay JSON.", "retired_at": 6, "evidence": ["post:6"]}
     ]

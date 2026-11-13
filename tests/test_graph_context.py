@@ -97,61 +97,68 @@ def test_a_proposal_may_change_only_what_its_request_showed(tmp_path) -> None:
         build_patch(graph, candidate, posts, shown)
 
 
-def test_a_refresh_edits_only_the_lines_its_card_showed_and_retires_what_it_replaces(tmp_path) -> None:
+def line(key, text="The reader waits on the question."):
+    return {"id": key, "text": text}
+
+
+def sixth(tmp_path):
+    """The graph before post 6, what its request showed, and a proposal filing 6-1 under S2 and a new S3."""
     source, state = extracted(tmp_path)
     request = prepare(source, state, tmp_path / "request.json")
     posts, graph = load_source(source), load_state(state, load_source(source))
-    shown, old = shown_ids(request["context"]), graph["strands"]["S2"]
     base = empty(request["binding"]) | {"statements": [statement(6, "New unprocessed question?", ["S2", "S3"])]}
+    return graph, posts, shown_ids(request["context"]), base
 
-    def line(key, text="The reader waits on the question."):
-        return {"id": key, "text": text}
 
-    def edited(*others, new=None, **changes):
-        """The proposal with S2 edited by `changes`, `others` edited too and S3 new, as `new` says or else valid."""
-        created = new_strand("S3", 6) | (new or {})
-        return base | {"new_strands": [created], "strand_edits": [strand_edit("S2", 6, **changes), *others]}
+def edited(base, *others, new=None, **changes):
+    """`base` with S2 edited by `changes`, `others` edited too and S3 new, as `new` says or else valid."""
+    created = new_strand("S3", 6) | (new or {})
+    return base | {"new_strands": [created], "strand_edits": [strand_edit("S2", 6, **changes), *others]}
 
-    longest, over = "é" * 120, "é" * 120 + "!"  # 240 and 241 UTF-8 bytes, half as many characters
+
+OVER = "é" * 120 + "!"  # 241 UTF-8 bytes in 121 characters
+
+
+def test_a_strand_edit_is_refused_for_each_rule_it_breaks(tmp_path) -> None:
+    graph, posts, shown, base = sixth(tmp_path)
     for candidate, refusal in (
         (base | {"new_strands": [new_strand("S3", 6)]}, "every affected strand with a card needs a refreshed summary"),
-        (edited(replace=[line("S2.9")]), "unknown line"),
-        (edited(drop=["S1.1"]), "unknown line"),  # a line of another strand
-        (edited(work_done=["S2.1"]), "unknown line"),  # a summary line is not open work
-        (edited(replace=[line("S2.1")], drop=["S2.1"]), "names a line twice"),
-        (edited(drop=["S2.1"]), "keeps at least one summary line"),
-        (edited(drop=["S2.1"], add=[line("S2.1")]), "never reused"),
-        (edited(add=[line("S2.3")]), "consecutive"),
-        (edited(add=[line("S3.2")]), "invalid line ID"),
-        (edited(replace=[line("S2.1", over)]), "at most 240 UTF-8 bytes"),
-        (edited(add=[line("S2.2", over)]), "at most 240 UTF-8 bytes"),
-        (edited(work_add=[line("S2.w2", over)]), "at most 240 UTF-8 bytes"),
-        (edited(new={"summary": [line("S3.1", over)]}), "at most 240 UTF-8 bytes"),
-        (edited(new={"summary": [line("S3.2")]}), "consecutive"),
-        (edited(new={"open_work": [line("S3.w2")]}), "consecutive"),
-        (edited() | {"new_strands": [new_strand("S2", 6), new_strand("S3", 6)]}, "refreshed by an edit"),
+        (edited(base, replace=[line("S2.9")]), "unknown line"),
+        (edited(base, drop=["S1.1"]), "unknown line"),  # a line of another strand
+        (edited(base, work_done=["S2.1"]), "unknown line"),  # a summary line is not open work
+        (edited(base, replace=[line("S2.1")], drop=["S2.1"]), "names a line twice"),
+        (edited(base, drop=["S2.1"]), "keeps at least one summary line"),
+        (edited(base, drop=["S2.1"], add=[line("S2.1")]), "never reused"),  # S2.1 was retired at post 5
+        (edited(base, add=[line("S2.3")]), "consecutive"),
+        (edited(base, add=[line("S3.2")]), "invalid line ID"),
+        (edited(base, replace=[line("S2.1", OVER)]), "at most 240 UTF-8 bytes"),
+        (edited(base, add=[line("S2.2", OVER)]), "at most 240 UTF-8 bytes"),
+        (edited(base, work_add=[line("S2.w2", OVER)]), "at most 240 UTF-8 bytes"),
+        (edited(base, new={"summary": [line("S3.1", OVER)]}), "at most 240 UTF-8 bytes"),
+        (edited(base, new={"summary": [line("S3.2")]}), "consecutive"),
+        (edited(base, new={"open_work": [line("S3.w2")]}), "consecutive"),
+        (edited(base) | {"new_strands": [new_strand("S2", 6), new_strand("S3", 6)]}, "refreshed by an edit"),
     ):
         with pytest.raises(GraphError, match=refusal):
             build_patch(graph, candidate, posts, shown)
     # An edit names lines of a strand whose card the request showed, and only those.
     with pytest.raises(GraphError, match="strand refresh needs a card the request did not show"):
-        build_patch(graph, edited(strand_edit("S1", 6, replace=[line("S1.1")])), posts, shown - {"S1"})
+        build_patch(graph, edited(base, strand_edit("S1", 6, replace=[line("S1.1")])), posts, shown - {"S1"})
 
+
+def test_a_refresh_edits_only_the_lines_its_card_showed_and_retires_what_it_replaces(tmp_path) -> None:
+    graph, posts, shown, base = sixth(tmp_path)
+    old, longest = graph["strands"]["S2"], "é" * 120  # 240 UTF-8 bytes in half as many characters
     # An edit that changes no line is the refresh: the summary holds through the batch end on the edit's evidence.
-    held = build_patch(graph, edited(), posts, shown)["strands"]["S2"]
-    assert {key: held[key] for key in ("summary", "open_work", "line_history")} == {
-        key: old[key] for key in ("summary", "open_work", "line_history")
-    }
-    assert (held["summary_through"], held["evidence"]) == (6, ["post:6"])
-    assert build_patch(graph, edited(), posts, shown)["strands"]["S3"]["summary"] == [line("S3.1", "Initial proposal.")]
+    held = build_patch(graph, edited(base), posts, shown)["strands"]
+    current = ("summary", "open_work", "line_history")
+    assert {key: held["S2"][key] for key in current} == {key: old[key] for key in current}
+    assert (held["S2"]["summary_through"], held["S2"]["evidence"]) == (6, ["post:6"])
+    assert held["S3"]["summary"] == [line("S3.1", "Initial proposal.")]
 
     # A replaced line keeps its id and place; its old text, like a finished work line, moves to the line history.
-    after = build_patch(
-        graph,
-        edited(replace=[line("S2.1")], add=[line("S2.2", longest)], work_done=["S2.w1"], evidence=["6-1"]),
-        posts,
-        shown,
-    )
+    change = {"replace": [line("S2.1")], "add": [line("S2.2", longest)], "work_done": ["S2.w1"], "evidence": ["6-1"]}
+    after = build_patch(graph, edited(base, **change), posts, shown)
     edited_strand = after["strands"]["S2"]
     assert edited_strand["summary"] == [line("S2.1"), line("S2.2", longest)] and edited_strand["open_work"] == []
     retired = [old["summary"][0], old["open_work"][0]]
@@ -161,7 +168,7 @@ def test_a_refresh_edits_only_the_lines_its_card_showed_and_retires_what_it_repl
     # The card counts on from every id the strand has given, so a retired id is never handed out again.
     card, _ = Context(after).render(["6-1"])["cards"]  # S2's, then the new S3's
     assert card.endswith("\nOpen work:\n(none)\nEvidence: 6-1\nNext line IDs: S2.3 S2.w2")
-    again = empty(request["binding"]) | {"dispositions": [{"seq": 6, "reason": "Asked again."}]}
+    again = empty(base["binding"]) | {"dispositions": [{"seq": 6, "reason": "Asked again."}]}
     with pytest.raises(GraphError, match="never reused"):
         build_patch(after, again | {"strand_edits": [strand_edit("S2", 6, work_add=[line("S2.w1")])]}, posts, shown)
     later = again | {"strand_edits": [strand_edit("S2", 6, drop=["S2.2"], work_add=[line("S2.w2")])]}
