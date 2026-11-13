@@ -4,7 +4,8 @@ The client's own switches cannot be trusted to remove its tools, so the worker c
 Before each launch, the same launch runs against a `LoopbackStub`, a listener on 127.0.0.1 inside the worker
 that captures requests and never answers with model output, and `request_problems` judges each captured
 request. After each call, `record_problems` judges the client's session record, because the event stream does
-not show every tool call. Neither check runs a model.
+not show every tool call, and `record_gaps` asks whether the record shows this call's finished turn at all.
+Neither check runs a model.
 """
 
 from __future__ import annotations
@@ -88,16 +89,10 @@ def request_problems(request: Any, instructions: str, content: str, *, prewarm: 
 def record_problems(text: str) -> list[str]:
     """Why a session record shows more than messages and reasoning; empty when it shows nothing else."""
     problems = []
-    for number, line in enumerate((line for line in text.split("\n") if line.strip()), 1):
-        try:
-            entry = json.loads(line)
-        except ValueError:
+    for number, kind, payload in _entries(text):
+        if kind is None:
             problems.append(f"an unreadable entry at line {number}")
-            continue
-        kind = entry.get("type") if isinstance(entry, dict) else None
-        payload = entry.get("payload") if isinstance(entry, dict) else None
-        payload = payload if isinstance(payload, dict) else {}
-        if kind not in RECORD_ENTRIES:
+        elif kind not in RECORD_ENTRIES:
             problems.append(f"an entry of type {kind} at line {number}")
         elif kind == "response_item" and payload.get("type") not in RECORD_ITEMS:
             problems.append(f"a {payload.get('type')} item at line {number}")
@@ -107,6 +102,41 @@ def record_problems(text: str) -> list[str]:
             if item_kind not in RECORD_EVENT_ITEMS:
                 problems.append(f"a {item_kind} item event at line {number}")
     return problems
+
+
+def record_gaps(text: str, thread_id: str, content: str) -> list[str]:
+    """What a session record lacks to show a finished turn of this call; empty when it shows one.
+
+    The record must name the thread the event stream started and no other, hold this call's content as its one
+    user message, and show an answer and the turn's completion. An empty or metadata-only record shows none of
+    that, so the absence of a record of the turn is never read as a clean turn.
+    """
+    entries = [(kind, payload) for _, kind, payload in _entries(text)]
+    messages = [payload for kind, payload in entries if kind == "response_item" and payload.get("type") == "message"]
+    gaps = []
+    if {payload.get("id") for kind, payload in entries if kind == "session_meta"} != {thread_id}:
+        gaps.append("a session entry for this thread alone")
+    if [_input_texts(message) for message in messages if message.get("role") == "user"] != [[content]]:
+        gaps.append("this call's content as its one user message")
+    if not any(message.get("role") == "assistant" for message in messages):
+        gaps.append("an answer")
+    if not any(kind == "event_msg" and payload.get("type") == "task_complete" for kind, payload in entries):
+        gaps.append("the turn's completion")
+    return gaps
+
+
+def _entries(text: str) -> list[tuple[int, Any, dict[str, Any]]]:
+    """Each nonblank line of a record: its number, entry type and payload. An unreadable line has no type."""
+    entries = []
+    for number, line in enumerate((line for line in text.split("\n") if line.strip()), 1):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            entry = None
+        payload = entry.get("payload") if isinstance(entry, dict) else None
+        kind = entry.get("type") if isinstance(entry, dict) else None
+        entries.append((number, kind, payload if isinstance(payload, dict) else {}))
+    return entries
 
 
 def _names_key(value: Any, key: str) -> bool:

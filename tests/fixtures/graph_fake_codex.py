@@ -7,8 +7,9 @@ DUMP_DIR/probe.json, sends what a real client would send there (over a WebSocket
 or in `post_probe` mode one HTTP POST) and exits. That request offers a tool while the catalog entry still adds
 them, or in `offers_tool` mode. Any other `exec` is the call: it records argv, environment, cwd, stdin, the
 instructions and the catalog in DUMP_DIR/call.json, writes its session record under CODEX_HOME and prints
-events. The `refused` mode prints the event types a real client emits when the provider refused every request:
-error events and an error item, a failed turn, no agent item and no usage.
+events. The `*_record` modes write a record that is empty, metadata only, another thread's or another call's.
+The `refused` mode prints the event types a real client emits when the provider refused every request: error
+events and an error item, a failed turn, no agent item and no usage.
 """
 
 import base64
@@ -149,20 +150,29 @@ def entry(kind, **payload):
     return json.dumps({"timestamp": "2026-11-13T00:00:00Z", "type": kind, "payload": payload})
 
 
-if mode != "no_record":  # the client's own record of the turn
+if mode != "no_record":  # the client's own record of the turn, shaped like the installed client's
     name = f"rollout-2026-11-13T00-00-00-{thread_id}.jsonl"
     record = Path(os.environ["CODEX_HOME"], "sessions", "2026", "11", "13", name)
     record.parent.mkdir(parents=True, exist_ok=True)
+    session = str(uuid.uuid4()) if mode == "other_thread_record" else thread_id
+    user = "another call's content" if mode == "other_content_record" else stdin
     entries = [
-        entry("session_meta", id=thread_id, cli_version=version),
-        entry("response_item", type="message", role="user", content=[{"type": "input_text", "text": stdin}]),
+        entry("session_meta", id=session, cli_version=version),
+        entry("event_msg", type="task_started", turn_id="turn-1"),
+        entry("turn_context", cwd=os.getcwd()),
+        entry("response_item", type="message", role="user", content=[{"type": "input_text", "text": user}]),
+        entry("event_msg", type="item_completed", item={"type": "UserMessage", "id": "u1"}),
         entry("response_item", type="reasoning", summary=[]),
         entry("event_msg", type="item_completed", item={"type": "Reasoning", "id": "r1"}),
     ]
     if mode == "record_tool":  # a code-mode call: it shows here, never in the event stream
         entries.append(entry("response_item", type="custom_tool_call", name="exec", input="clock()", call_id="c1"))
-    entries.append(entry("response_item", type="message", role="assistant", content=[]))
-    record.write_text("\n".join(entries) + "\n", encoding="utf-8")
+    if mode not in ("refused", "error", "failed_action"):  # a failed turn records no answer and no completion
+        entries.append(entry("response_item", type="message", role="assistant", content=[]))
+        entries.append(entry("event_msg", type="task_complete", turn_id="turn-1"))
+    if mode == "meta_only_record":
+        entries = entries[:3]
+    record.write_text("" if mode == "empty_record" else "\n".join(entries) + "\n", encoding="utf-8")
 
 event("thread.started", thread_id=thread_id)
 event("turn.started")

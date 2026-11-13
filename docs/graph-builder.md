@@ -389,7 +389,7 @@ message text, and the category alone decides what happens next:
 |---|---|---|
 | `cancelled` | the service stops during the call | spent; nothing returned is applied |
 | `input_limit` | serialized input over `max_input_bytes` (any provider), or a prepare overflow | blocked at once |
-| `isolation` | a native client recorded a permission denial, a tool use or a disallowed event; Codex's session record for the call is missing or holds anything but messages and reasoning; a refused environment name | blocked at once, whatever else the call reported |
+| `isolation` | a native client recorded a permission denial, a tool use or a disallowed event; Codex's session record for the call holds anything but messages and reasoning, or, for a turn the worker would accept, is missing or does not show the call's finished turn; a refused environment name | blocked at once, whatever else the call reported |
 | `unsafe_source` | prepare, export or load failures | blocked at once |
 | `timeout` | the host's wall-time limit ended the call | charged |
 | `output_limit` | the response is over the byte limit | charged |
@@ -516,19 +516,24 @@ reaches a model. The launch is refused (`unverified_client`) unless every reques
 `tools` field anywhere, holds only message and reasoning-configuration items, carries developer text equal
 to the instructions and holds the probe exactly once as the user message. After every call, the worker reads
 the call's session record from `client_home` (the file named by the thread the event stream started) and
-refuses the attempt (`isolation`) when it is missing or holds anything but messages and reasoning, because
-the event stream does not show every tool call. A passing record is deleted, since it holds thread text; a
-refused one is kept for the operator. The event stream must still show only thread/turn status, failure and
-usage events and assistant text, reasoning or error items.
+refuses the attempt (`isolation`) when it holds anything but messages and reasoning, because the event stream
+does not show every tool call. A turn the worker would accept is refused the same way unless its record shows
+it was this call's finished turn: a session entry for that thread and no other, the call's content as its one
+user message, an answer and the turn's completion. An empty or metadata-only record shows none of that. A
+failed turn keeps the category its events give, since its record need not show a finished turn. A record
+refused here is kept for the operator; any other is deleted, since it holds thread text. The event stream
+must still show only thread/turn status, failure and usage events and assistant text, reasoning or error
+items.
 
 These checks show two things and no more. The launch check shows that this client, given this argv and
 these files, builds requests that offer no tools and whose only messages are the instructions and the
 probe, when it runs without a login; anything the client does differently once logged in, or anything the
-provider adds on its side, is outside what it sees. The record check shows that the client recorded no item but
-messages and reasoning for the call; it relies on the client's own record. The probe stays on 127.0.0.1
-because every address the client is given points there, which is configuration of the client, not a network
-sandbox. Read-only sandboxing and never-approval contain whatever neither check sees; a bounded pilot must
-inspect the real event stream before enrollment widens.
+provider adds on its side, is outside what it sees. The record check shows that the client recorded no
+item but messages and reasoning for the call and, for an accepted turn, that it recorded this call's
+finished turn; it relies on the client's own record. The probe stays on 127.0.0.1 because every address
+the client is given points there, which is configuration of the client, not a network sandbox.
+Read-only sandboxing and never-approval contain whatever neither check sees; a bounded pilot must inspect
+the real event stream before enrollment widens.
 
 Claude Code runs `--print --output-format json --json-schema SCHEMA --model MODEL --tools ""
 --strict-mcp-config --mcp-config EMPTY --safe-mode --disable-slash-commands --no-session-persistence

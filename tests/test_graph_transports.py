@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -349,6 +350,28 @@ def test_a_session_record_holding_a_tool_call_refuses_the_attempt(tmp_path) -> N
     assert len(list(Path(home, "sessions").rglob("rollout-*.jsonl"))) == 1
     (dump / "mode").write_text("no_record")
     assert refusal(transport, REQUEST, LIMITS) == "isolation"
+
+
+@pytest.mark.parametrize(
+    ("mode", "lacks"),
+    [
+        ("empty_record", "a session entry for this thread alone"),
+        ("meta_only_record", "this call's content as its one user message"),
+        ("other_thread_record", "a session entry for this thread alone"),
+        ("other_content_record", "this call's content as its one user message"),
+    ],
+)
+def test_a_session_record_that_does_not_show_this_calls_finished_turn_refuses_the_attempt(
+    tmp_path, mode, lacks
+) -> None:
+    command, dump = fake(tmp_path, "codex", mode)
+    home = worker_home(tmp_path)
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=home)
+    # The event stream shows a finished turn; a record that does not show it was this call's proves nothing.
+    with pytest.raises(TransportError, match=f"lacks {re.escape(lacks)}") as unproven:
+        transport.produce(REQUEST, SCHEMA, LIMITS)
+    assert unproven.value.category == "isolation"
+    assert len(list(Path(home, "sessions").rglob("rollout-*.jsonl"))) == 1  # kept for the operator
 
 
 def test_the_event_stream_client_runs_only_from_a_private_home_without_instructions(tmp_path) -> None:

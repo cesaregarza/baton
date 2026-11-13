@@ -10,8 +10,9 @@ Codex runs from the worker's own client home, which holds only the worker's logi
 not trusted to remove its tools: before every launch the same launch runs against a loopback capture
 (`baton.graph.isolation`) from an empty home with a fixed probe, and is refused unless the request it sends
 offers no tools and carries only Baton's instructions and content. After every call its session record must
-show only messages and reasoning. Claude Code takes its instructions as a system prompt with every tool
-removed, and its result is refused if it records a tool use.
+show only messages and reasoning, and a turn the worker accepts must be recorded as this call's finished turn.
+Claude Code takes its instructions as a system prompt with every tool removed, and its result is refused if it
+records a tool use.
 
 A finished process is classified from typed fields only, whatever its exit status: an attempted action first,
 then an error the provider refused before doing any work (a refusal), then any other reported error.
@@ -34,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from baton.graph.failure import REFUSALS, Category, TransportError, status_category
-from baton.graph.isolation import LoopbackStub, record_problems
+from baton.graph.isolation import LoopbackStub, record_gaps, record_problems
 from baton.graph.source import canonical
 from baton.graph.transport import Limits
 
@@ -473,12 +474,7 @@ class CodexTransport(NativeClient):
                 stop=stop,
             )
             _check_process(result)
-            thread_id = _thread_id(result.stdout)
-            if thread_id is not None:  # a tool call the stream does not show outranks every other reading
-                self._require_plain_record(thread_id)
-            usage, turns = check_codex_events(result.stdout, result.returncode)
-            if thread_id is None:
-                raise TransportError(Category.ISOLATION, "codex named no thread, so its session record went unchecked")
+            usage, turns = self._judge(result, content.decode("utf-8"))
             candidate = _last_message(output_path, limits.max_response_bytes)
         return {
             "candidate": candidate,
@@ -536,15 +532,45 @@ class CodexTransport(NativeClient):
             more = f" and {len(problems) - 3} more" if len(problems) > 3 else ""
             raise TransportError(Category.UNVERIFIED_CLIENT, f"the launch check found {'; '.join(problems[:3])}{more}")
 
-    def _require_plain_record(self, thread_id: str) -> None:
-        """The call's own session record must show only messages and reasoning; a passing one is removed."""
-        found = sorted(Path(str(self.home), "sessions").glob(f"*/*/*/rollout-*-{thread_id}.jsonl"))
-        if len(found) != 1 or found[0].stat().st_size > CODEX_RECORD_BYTES:
-            raise TransportError(Category.ISOLATION, f"codex left {len(found)} readable session records for the call")
-        problems = record_problems(found[0].read_text(encoding="utf-8", errors="replace"))
+    def _judge(self, result: ProcessResult, content: str) -> tuple[Any, int]:
+        """Classify a finished call from its session record and event stream; returns usage and turn count.
+
+        A tool call the record shows outranks every other reading. A failed turn keeps the category its events
+        give, since its record need not show a finished turn. A turn the worker would accept must be recorded as
+        this call's: the thread the stream started, this content as the one user message, an answer and the
+        turn's completion. A record refused here is kept for the operator; any other is removed, since it holds
+        thread text.
+        """
+        thread_id = _thread_id(result.stdout)
+        record = self._session_record(thread_id)
+        text = record.read_text(encoding="utf-8", errors="replace") if record else ""
+        problems = record_problems(text)
         if problems:
             raise TransportError(Category.ISOLATION, f"the call's session record holds {problems[0]}")
-        found[0].unlink()  # it holds thread text; the home keeps the login and the client's own state
+        try:
+            usage, turns = check_codex_events(result.stdout, result.returncode)
+        except TransportError:
+            if record:
+                record.unlink()
+            raise
+        if record is None or thread_id is None:
+            raise TransportError(Category.ISOLATION, "codex left no session record for the call")
+        gaps = record_gaps(text, thread_id, content)
+        if gaps:
+            raise TransportError(Category.ISOLATION, f"the call's session record lacks {gaps[0]}")
+        record.unlink()
+        return usage, turns
+
+    def _session_record(self, thread_id: str | None) -> Path | None:
+        """The one session record named by the call's thread, or None when there is none; more is refused."""
+        if thread_id is None:
+            return None
+        found = sorted(Path(str(self.home), "sessions").glob(f"*/*/*/rollout-*-{thread_id}.jsonl"))
+        if len(found) > 1 or any(path.stat().st_size > CODEX_RECORD_BYTES for path in found):
+            raise TransportError(
+                Category.ISOLATION, f"codex left {len(found)} session records for the call, or one too large"
+            )
+        return found[0] if found else None
 
 
 def _proxied_to(url: str) -> dict[str, str]:
