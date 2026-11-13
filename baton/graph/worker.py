@@ -534,7 +534,10 @@ def serve(config: Config, stop: threading.Event, *, worker: Worker | None = None
         worker.stop = stop
         with Ledger.open(worker.state_dir) as ledger:
             try:
-                log.info("graph worker verified %s", worker.transport.verify().get("mode"))
+                verified = worker.transport.verify()
+                log.info(
+                    "graph worker verified %s, version %s", verified.get("mode"), verified.get("version", "unknown")
+                )
             except TransportError as error:
                 log.warning(
                     "graph worker provider is not verified (%s); it verifies again before a launch", error.category
