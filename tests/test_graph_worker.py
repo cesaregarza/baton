@@ -225,7 +225,6 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
         ({"client_version": "1.2.3"}, "client_version"),
         # The event-stream client runs from a home of the worker's own, whose login is its only credential.
         ({**native_base, "client_home": None}, "client_home"),
-        ({**native_base, "client_home": str(Path.home() / ".codex")}, "not the operator's"),
         ({**native_base, "credential_env": ["CODEX_HOME"]}, "its credential is in client_home"),
         ({**native_base, "provider": "claude"}, "codex only"),
         ({"client_home": home}, "native providers only"),
@@ -260,6 +259,38 @@ def native_settings(tmp_path: Path, client_home: str, **fields) -> dict:
         "client_home": client_home,
         **fields,
     }
+
+
+@pytest.mark.parametrize(
+    ("operator_client", "client_home", "refused"),
+    [
+        ("clients/operator", "clients/operator", True),  # the operator's client home, named in the environment
+        ("clients/operator", "clients/operator/worker", True),  # inside it
+        ("clients/operator", "clients", True),  # around it
+        (None, "operator/.codex", True),  # the default under the operator's home
+        (None, "operator/.codex/worker", True),
+        ("clients/operator", "operator/.codex", True),  # the default stays the operator's
+        ("clients/operator", "operator", True),  # the operator's home itself
+        ("clients/operator", "clients/worker", False),  # a home of the worker's own beside them
+    ],
+)
+def test_the_worker_never_runs_from_the_operators_client_home(
+    tmp_path, monkeypatch, operator_client, client_home, refused
+) -> None:
+    config = index_config(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "operator"))
+    if operator_client is None:
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+    else:
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / operator_client))
+    raw = native_settings(tmp_path, str(tmp_path / client_home))
+    if refused:
+        with pytest.raises(ConfigError, match="not the operator's"):
+            config_module.graph_worker.parse(raw, config.indexer, config.data_dir)
+    else:
+        assert config_module.graph_worker.parse(raw, config.indexer, config.data_dir).client_home == Path(
+            raw["client_home"]
+        )
 
 
 def test_a_relative_client_home_is_the_absolute_home_the_launch_runs_from(tmp_path, monkeypatch) -> None:

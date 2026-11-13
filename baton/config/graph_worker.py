@@ -8,6 +8,7 @@ private state directory outside `data_dir`, an explicit conversation allowlist a
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -106,14 +107,23 @@ def _client_home(raw: Mapping[str, Any], data_dir: Path, base: Path) -> Path:
     """The worker's own client home as an absolute path, a relative one taken from `base` like `state_dir`.
 
     The client runs in a temporary working directory, so only an absolute home names this directory there. It is
-    never the operator's home or client home, whose login the worker never reads.
+    never the operator's home, and never the operator's client home (CODEX_HOME in the environment the worker
+    starts with, and the default ~/.codex), a directory inside one or a directory around one: the worker never
+    reads the operator's login.
     """
     path = _private_dir(
         raw.get("client_home"), "client_home", "the worker's own client home (it has no default)", data_dir, base
     ).absolute()
-    own = Path.home().resolve(strict=False)
-    if path.resolve(strict=False) in (own, own / ".codex"):
-        raise ConfigError("graph_worker.client_home must be a home of the worker's own, not the operator's")
+    resolved, home = path.resolve(strict=False), Path.home()
+    operator = (Path(os.environ.get("CODEX_HOME") or home / ".codex"), home / ".codex")
+    clients = [client.expanduser().resolve(strict=False) for client in operator]
+    if resolved == home.resolve(strict=False) or any(
+        resolved.is_relative_to(client) or client.is_relative_to(resolved) for client in clients
+    ):
+        raise ConfigError(
+            "graph_worker.client_home must be a home of the worker's own, not the operator's home or client home, "
+            "nor inside or around the operator's client home"
+        )
     return path
 
 
