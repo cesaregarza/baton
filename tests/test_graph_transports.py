@@ -354,9 +354,12 @@ def test_a_session_record_holding_a_tool_call_refuses_the_attempt(tmp_path) -> N
 def test_the_event_stream_client_runs_only_from_a_private_home_without_instructions(tmp_path) -> None:
     command, dump = fake(tmp_path, "codex")
     home = tmp_path / "worker-home"
-    with pytest.raises(TransportError, match="not an existing directory"):
+    with pytest.raises(TransportError, match="not an absolute directory path"):
         native.CodexTransport(command, "m", [], FAKE_VERSION, home=str(home))
     home.mkdir(mode=0o700)
+    # The client runs in a temporary working directory, where a relative home names another place.
+    with pytest.raises(TransportError, match="not an absolute directory path"):
+        native.CodexTransport(command, "m", [], FAKE_VERSION, home=os.path.relpath(home))
     (tmp_path / "linked-home").symlink_to(home)
     for path, mode in ((home, 0o755), (tmp_path / "linked-home", 0o700)):
         home.chmod(mode)

@@ -482,10 +482,11 @@ restart once the client or the configuration is right.
 
 Codex runs from `client_home`, a directory of the worker's own that holds only the worker's login. It is
 both `HOME` and `CODEX_HOME` for the client, so the operator's own login, settings, instructions and skills
-are never read, and the worker never copies or touches the operator's login. The worker refuses to start
-the client when `client_home` is unset, is the operator's own home, is not a directory of this user's with
-mode 0700, or holds an `AGENTS.md` or `AGENTS.override.md`; `credential_env` does not apply to `codex`.
-Log the worker in there once yourself:
+are never read, and the worker never copies or touches the operator's login. A relative `client_home` is
+taken from the config file's directory, like `state_dir`, and the client always gets the absolute path. The
+worker refuses to start the client when `client_home` is unset, is the operator's own home, is not a
+directory of this user's with mode 0700, or holds an `AGENTS.md` or `AGENTS.override.md`; `credential_env`
+does not apply to `codex`. Log the worker in there once yourself:
 
 ```sh
 mkdir -m 700 /path/to/worker-home

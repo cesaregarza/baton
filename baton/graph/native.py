@@ -362,13 +362,17 @@ class NativeClient:
 
 
 def private_home(path: str | None) -> str:
-    """The worker's own client home: an existing directory, not a symlink, that only this user may enter."""
+    """The worker's own client home: an absolute path to a directory, not a symlink, that only this user may enter.
+
+    It must be absolute because the client runs in a temporary working directory, where a relative home would
+    name somewhere else.
+    """
     try:
-        info = os.lstat(path) if path else None
+        info = os.lstat(path) if path and os.path.isabs(path) else None
     except OSError:
         info = None
     if info is None or not stat.S_ISDIR(info.st_mode):
-        raise TransportError(Category.UNVERIFIED_CLIENT, "graph_worker.client_home is not an existing directory")
+        raise TransportError(Category.UNVERIFIED_CLIENT, "graph_worker.client_home is not an absolute directory path")
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise TransportError(Category.UNVERIFIED_CLIENT, "graph_worker.client_home must be this user's, mode 0700")
     return str(path)

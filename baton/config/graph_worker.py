@@ -103,10 +103,14 @@ def _private_dir(value: Any, key: str, purpose: str, data_dir: Path, base: Path)
 
 
 def _client_home(raw: Mapping[str, Any], data_dir: Path, base: Path) -> Path:
-    """The worker's own client home. Never the operator's home or client home, whose login the worker never reads."""
+    """The worker's own client home as an absolute path, a relative one taken from `base` like `state_dir`.
+
+    The client runs in a temporary working directory, so only an absolute home names this directory there. It is
+    never the operator's home or client home, whose login the worker never reads.
+    """
     path = _private_dir(
         raw.get("client_home"), "client_home", "the worker's own client home (it has no default)", data_dir, base
-    )
+    ).absolute()
     own = Path.home().resolve(strict=False)
     if path.resolve(strict=False) in (own, own / ".codex"):
         raise ConfigError("graph_worker.client_home must be a home of the worker's own, not the operator's")

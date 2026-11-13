@@ -248,6 +248,43 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
     )
 
 
+def native_settings(tmp_path: Path, client_home: str, **fields) -> dict:
+    return {
+        "enabled": True,
+        "producer": "alpha",
+        "state_dir": str(tmp_path / "graph-state"),
+        "conversations": ["conv_a"],
+        "provider": "codex",
+        "model": "m",
+        "client_version": "1.2.3",
+        "client_home": client_home,
+        **fields,
+    }
+
+
+def test_a_relative_client_home_is_the_absolute_home_the_launch_runs_from(tmp_path, monkeypatch) -> None:
+    from test_graph_transports import FAKE_VERSION, LIMITS, REQUEST, fake, recorded
+
+    from baton.graph.contract import SCHEMA
+    from baton.graph.transport import for_config
+
+    config = index_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    home = tmp_path / "conf" / "worker-home"
+    home.mkdir(parents=True)
+    home.chmod(0o700)
+    command, dump = fake(tmp_path, "codex")
+    raw = native_settings(tmp_path, "worker-home", command=command, client_version=FAKE_VERSION)
+    # A config file named by a relative path has a relative directory; its relative paths are taken from there.
+    settings = config_module.graph_worker.parse(raw, config.indexer, config.data_dir, base=Path("conf"))
+    assert settings.client_home == home
+    produced = for_config(settings).produce(REQUEST, SCHEMA, LIMITS)
+    call = recorded(dump)
+    assert call["env"]["HOME"] == call["env"]["CODEX_HOME"] == str(home)
+    # The call's session record was written there, found there and removed once it passed.
+    assert produced["candidate"] == {"echo": "req-1"} and not list(home.rglob("rollout-*.jsonl"))
+
+
 def test_a_host_without_full_text_search_is_refused_when_the_worker_starts(tmp_path, monkeypatch) -> None:
     config = worker_config(tmp_path, conversations=["conv_a"])
     monkeypatch.setattr("baton.database.store.fts5_available", lambda conn: False)
