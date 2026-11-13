@@ -4,10 +4,24 @@ import copy
 from pathlib import Path
 
 from baton.graph.context import Context, shown_ids
-from baton.graph.contract import BINDING, CONTEXT, INSTRUCTIONS, SCHEMA, VERSION, current, require, validate_shape
+from baton.graph.contract import (
+    BINDING,
+    CONTEXT,
+    INSTRUCTIONS,
+    SCHEMA,
+    VERSION,
+    GraphError,
+    current,
+    require,
+    validate_shape,
+)
 from baton.graph.source import canonical, digest, load_json, load_source, prefix_digest
 from baton.graph.storage import STATE_VERSION, atomic_json, distinct_paths, load_state, state_lock
 from baton.graph.validation import build_patch
+
+
+class InputOverflow(GraphError):
+    """The next whole post does not fit the input byte limit even with only the graph context it must carry."""
 
 
 def request_identity(request):
@@ -51,10 +65,10 @@ def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_b
     if request is None:
         ranked = context.ranked(posts[:1])
         request = fitted(1, [])
-        require(
-            request is not None,
-            "next whole post exceeds max-input-bytes (UTF-8) with only the graph context it must carry",
-        )
+        if request is None:
+            raise InputOverflow(
+                "next whole post exceeds max-input-bytes (UTF-8) with only the graph context it must carry"
+            )
         kept, over = 0, len(ranked)  # the longest prefix known to fit, the shortest known not to
         while over - kept > 1:
             middle = (kept + over) // 2

@@ -1,7 +1,9 @@
 """A synthetic `codex` executable for transport tests: no model, scripted behavior from a mode file.
 
 Usage: python graph_fake_codex.py DUMP_DIR [codex arguments...]. Every launch records argv, environment,
-cwd and stdin under DUMP_DIR; the file DUMP_DIR/mode selects what `exec` does.
+cwd and stdin under DUMP_DIR; the file DUMP_DIR/mode selects what `exec` does and DUMP_DIR/version the
+reported client version. The `refused` mode prints the event types a real client emits when the provider
+refused every request: error events and an error item, a failed turn, no agent item and no usage.
 """
 
 import json
@@ -14,6 +16,7 @@ from pathlib import Path
 dump = Path(sys.argv[1])
 args = sys.argv[2:]
 mode = (dump / "mode").read_text().strip() if (dump / "mode").exists() else "ok"
+version = (dump / "version").read_text().strip() if (dump / "version").exists() else "9.8.7"
 FEATURES = [
     "shell_tool",
     "apps",
@@ -41,7 +44,7 @@ EXEC_HELP = """Run Codex non-interactively
 """
 
 if args == ["--version"]:
-    print("codex-cli 0.166.9" if mode == "old_version" else "codex-cli 0.167.0")
+    print(f"codex-cli {version}")
     sys.exit(0)
 if args == ["exec", "--help"]:
     print(EXEC_HELP.replace("--output-schema <FILE>", "") if mode == "no_schema_flag" else EXEC_HELP)
@@ -63,6 +66,15 @@ def event(kind, **fields):
 
 event("thread.started", thread_id="t1")
 event("turn.started")
+if mode == "refused":
+    for attempt in (1, 2):
+        event("error", message=f"Reconnecting... {attempt}/2 (synthetic refusal)")
+    event("item.completed", item={"id": "item_0", "type": "error", "message": "synthetic transport fallback"})
+    event("turn.failed", error={"message": "synthetic refusal"})
+    sys.exit(1)
+if mode == "garbage_exit":
+    sys.stdout.write("not an event\n")
+    sys.exit(1)
 if mode == "hang":
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
     (dump / "descendant.pid").write_text(str(child.pid))
@@ -72,13 +84,13 @@ if mode == "flood":
         sys.stdout.write(
             json.dumps({"type": "item.completed", "item": {"type": "reasoning", "text": "x" * 1000}}) + "\n"
         )
-if mode == "action":
+if mode in ("action", "failed_action"):
     event("item.completed", item={"type": "command_execution", "command": "cat /etc/passwd"})
 if mode == "mcp":
     event("item.started", item={"type": "mcp_tool_call", "server": "baton", "tool": "read_history"})
 if mode == "unknown":
     event("item.completed", item={"type": "web_search", "query": "x"})
-if mode == "error":
+if mode in ("error", "failed_action"):
     event("error", message="provider rejected the request")
 event("item.completed", item={"type": "reasoning", "text": "thinking"})
 candidate = json.loads(stdin.split("\n\n", 1)[1])

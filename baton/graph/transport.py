@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from baton.config import GraphWorker
-from baton.graph.contract import SCHEMA_NAME, GraphError
-from baton.graph.provider import ProviderOptions, call_provider
+from baton.graph.contract import SCHEMA_NAME
+from baton.graph.provider import ProviderOptions, call_provider, provider_headers
 
 
 @dataclass(frozen=True)
@@ -28,26 +28,22 @@ class Limits:
     max_output_tokens: int
 
 
-class TransportError(GraphError):
-    """A call that produced no acceptable candidate; `category` is a sanitized class, never provider text."""
-
-    def __init__(self, category: str, detail: str) -> None:
-        super().__init__(f"{category}: {detail}")
-        self.category = category
-
-
 class Transport(Protocol):
     mode: str
 
     def verify(self) -> dict[str, Any]:
-        """Check installation and isolation prerequisites without running a model."""
+        """Check installation and isolation prerequisites without running a model.
+
+        A failure raises a `TransportError` in a refusal category, so the worker waits and verifies again.
+        """
 
     def produce(
         self, request: dict[str, Any], schema: dict[str, Any], limits: Limits, *, stop: threading.Event | None = None
     ) -> dict[str, Any]:
         """One bounded call: `{candidate, usage, input_bytes, output_bytes, elapsed, turns}`.
 
-        A set `stop` cancels the call and releases its connection or process group before this returns.
+        A set `stop` cancels the call and releases its connection or process group before this returns. A
+        failure raises a `TransportError` whose category was fixed where the failure was detected.
         """
 
 
@@ -63,12 +59,7 @@ class HttpTransport:
     mode: str = "http"
 
     def verify(self) -> dict[str, Any]:
-        from baton.graph.provider import provider_headers
-
-        try:
-            provider_headers(self._options(Limits(1, 1, 1, 1)))
-        except GraphError as error:
-            raise TransportError("authentication", str(error)) from None
+        provider_headers(self._options(Limits(1, 1, 1, 1)))
         return {"mode": self.mode, "model": self.model}
 
     def _options(self, limits: Limits) -> ProviderOptions:
@@ -85,36 +76,17 @@ class HttpTransport:
         self, request: dict[str, Any], schema: dict[str, Any], limits: Limits, *, stop: threading.Event | None = None
     ) -> dict[str, Any]:
         started = time.monotonic()
-        try:
-            produced = call_provider(
-                request,
-                self._options(limits),
-                schema=schema,
-                schema_name="baton_graph_compact_view_v1" if "compact_schema" in request else SCHEMA_NAME,
-                max_input_bytes=limits.max_input_bytes,
-                max_response_bytes=limits.max_response_bytes,
-                client=self.client,
-                stop=stop,
-            )
-        except GraphError as error:
-            raise TransportError(_category(str(error)), str(error)) from None
+        produced = call_provider(
+            request,
+            self._options(limits),
+            schema=schema,
+            schema_name="baton_graph_compact_view_v1" if "compact_schema" in request else SCHEMA_NAME,
+            max_input_bytes=limits.max_input_bytes,
+            max_response_bytes=limits.max_response_bytes,
+            client=self.client,
+            stop=stop,
+        )
         return {**produced, "elapsed": time.monotonic() - started, "turns": 1}
-
-
-def _category(detail: str) -> str:
-    if "cancelled" in detail:
-        return "cancelled"
-    if "deadline" in detail:
-        return "timeout"
-    if "credential" in detail:
-        return "authentication"
-    if "exceeds" in detail:
-        return "input_limit" if "input" in detail else "output_limit"
-    if "HTTP failure (401)" in detail or "HTTP failure (403)" in detail:
-        return "authentication"
-    if "HTTP failure" in detail or "transport" in detail:
-        return "transport"
-    return "malformed"
 
 
 def for_config(settings: GraphWorker, *, client: Any = None) -> Transport:
@@ -124,6 +96,6 @@ def for_config(settings: GraphWorker, *, client: Any = None) -> Transport:
         return HttpTransport(settings.base_url, settings.model, settings.api_key_env, settings.allow_no_key, client)
     from baton.graph import native
 
-    if settings.provider == "codex":
-        return native.CodexTransport(list(settings.command), settings.model, list(settings.credential_env))
-    return native.ClaudeTransport(list(settings.command), settings.model, list(settings.credential_env))
+    assert settings.client_version is not None  # config parsing requires it for a native provider
+    kind = native.CodexTransport if settings.provider == "codex" else native.ClaudeTransport
+    return kind(list(settings.command), settings.model, list(settings.credential_env), settings.client_version)

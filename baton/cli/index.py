@@ -202,7 +202,9 @@ def _add_graph_commands(index: Any) -> None:
     worker.add_parser(
         "status", help="the worker ledger: records, daily call budget and recent sanitized outcomes"
     ).set_defaults(handler=lambda config, args: invalid_worker(lambda: _status(config)))
-    reset = worker.add_parser("reset", help="clear one blocked conversation record; stop the service first")
+    reset = worker.add_parser(
+        "reset", help="clear one blocked conversation record; a running service applies it at its next cycle"
+    )
     reset.add_argument("--conversation", required=True)
     reset.set_defaults(handler=lambda config, args: invalid_worker(lambda: _reset(config, args.conversation)))
 

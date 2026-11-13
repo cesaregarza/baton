@@ -335,7 +335,11 @@ call. The `[graph_worker]` section (see `baton.example.toml`) is off by default;
 native prefix into its private `state_dir`, runs the existing prepare/apply contract one batch at a
 time, produces a compact working view, and publishes view and graph together through the derived batch
 protocol. `baton index graph-worker status` shows its ledger; `baton index graph-worker reset
---conversation ID` is the only way a blocked record resumes, and it needs the service stopped first.
+--conversation ID` is the only way a blocked record resumes. It works whether or not the service runs:
+with the service stopped it applies at once; while the service runs (and holds the ledger lock) the command
+leaves a reset request in `state_dir`, says so, and the worker applies it under its own lock at the start of
+its next cycle and removes it. A request names one conversation that has a ledger record and carries
+nothing else; the command refuses any other, and the worker ignores and removes any other it finds.
 The manual export/prepare/apply/publish commands above remain diagnostic and test harnesses.
 
 Every model launch is reserved first in one atomically replaced ledger (`ledger.json`) under a
@@ -344,11 +348,52 @@ gets at most two calls per base W, compaction two per accepted graph digest, and
 8) and per-cycle cap (default 4) bound launches across every conversation; a correction call carries the
 sanitized validation error and rejected output only when they fit `max_input_bytes`. Exhaustion, an
 input overflow (one post exceeding `max_input_bytes` with only the graph context it must carry, or a
-correction that does not fit), an authentication or isolation failure, or an edited source
-prefix sets the conversation `blocked`; new posts, restarts and new days never clear it. A daily cap
-only defers to the next UTC day. `daily_call_cap = 0` removes only the daily limit, for an authorized
-catch-up: launches are still reserved, counted per UTC day and reported, and the per-request attempt
-and per-cycle caps still apply. Publication never calls a model: it reuses the saved compact view and
+correction that does not fit), an isolation failure, or an edited source prefix sets the conversation
+`blocked`; new posts, restarts and new days never clear it. A daily cap only defers to the next UTC day.
+`daily_call_cap = 0` removes only the daily limit, for an authorized catch-up: launches are still
+reserved, counted per UTC day and reported, and the per-request attempt and per-cycle caps still apply.
+
+A conversation blocks durably only for a cause that belongs to it, or after calls that may have used the
+provider. Every failed call carries one category, fixed where the failure is raised and never read from
+message text, and the category alone decides what happens next:
+
+| Category | Raised when | Handling |
+|---|---|---|
+| `cancelled` | the service stops during the call | spent; nothing returned is applied |
+| `input_limit` | serialized input over `max_input_bytes` (any provider), or a prepare overflow | blocked at once |
+| `isolation` | a native client recorded a permission denial, a tool use or a disallowed event; a refused environment name | blocked at once, whatever else the call reported |
+| `unsafe_source` | prepare, export or load failures | blocked at once |
+| `timeout` | the host's wall-time limit ended the call | charged |
+| `output_limit` | the response is over the byte limit | charged |
+| `malformed` | an answer that is not the expected shape | charged |
+| `transport` | the call failed after the request was sent and nothing typed says what happened (an HTTP read failure, a native non-zero exit with no structured result) | charged |
+| `request_rejected` | HTTP 4xx other than 401, 403, 408 and 429 | charged |
+| `provider_error` | a native client reports an error and its typed fields show work may have been done | charged |
+| `authentication` | HTTP 401 or 403; the configured credential variable is missing or empty | refusal |
+| `rate_limited` | HTTP 429 | refusal |
+| `provider_unavailable` | HTTP 408 or 5xx; the connection could not be made | refusal |
+| `provider_refused` | a native client reports an error and its typed fields show no work was done | refusal |
+| `unverified_client` | native client verification failed (version, flags, features, introspection) | refusal |
+
+A charged call counts against the request's two calls and the daily cap, the first failure waits 60
+seconds, and the second blocks. A refusal is a call the provider declined without doing any work, so it
+is never charged and never blocks: its attempt is refunded, the launch is still counted in the ledger's
+`calls` for the day and also in `refused`, and the daily cap compares `calls - refused`. The conversation's
+consecutive-refusal count `refusals` goes up and it waits 1, 2, 4, 8, 16 and 32 minutes, then hourly, so
+refused launches stay bounded (at most about 30 per conversation per UTC day) even with `daily_call_cap =
+0`. `graph-worker status` shows the refusal in `error_category` and the next attempt in `not_before`.
+The count returns to zero when a call settles any other way except a cancellation, and on `reset`; a new
+request does not clear it. A crash between reserving and settling a call stays charged. The per-cycle cap
+counts refused launches too.
+
+Native clients are classified from typed fields only, whatever their exit status: an attempted action
+first; then an error result, which is a refusal only when the client's own record shows no work. For
+Claude Code that is an error result whose every usage counter and cost is zero and whose
+`api_error_status` is a refusal status (401, 403, 408, 429 or 5xx) or absent (nothing was sent, as with
+no login); any other status or any nonzero counter is `provider_error`. For Codex it is a stream with an
+`error` event, a failed turn or an error item, no agent message or reasoning item, and no reported usage.
+A subscription usage limit is expected to take the refusal shape (an error status of 429 with zero usage)
+but has not been observed directly. Publication never calls a model: it reuses the saved compact view and
 the derived receipt, waits 60 seconds between attempts, and blocks after three per graph digest. Native
 calls count launches, wall time and bytes; `recent_calls` reports observed turns and usage as the client
 reported them, never a dollar figure. Each request carries the part of the graph chosen for its new
@@ -378,20 +423,39 @@ published. `codex` and `claude` launch the
 installed, already-authenticated clients: fixed argv, explicit model, an isolated temporary working
 directory, no shell, an allowlisted environment with only runtime basics and the configured
 `credential_env` names (never `BATON_*`), bounded stdin/stdout/stderr and wall time, and process-group
-cleanup on cancellation. Codex is pinned to the inspected `codex-cli 0.167.x` profile: `exec
---ignore-user-config --ephemeral --sandbox read-only --skip-git-repo-check --json --output-schema
---output-last-message -C TEMP` with `approval_policy="never"`, `web_search="disabled"` and
+cleanup on cancellation.
+
+Which client version is trusted is operator configuration: `client_version` is required for `codex` and
+`claude`, refused for `http`, and has no default. Record the exact version you inspected; the worker
+launches only a client that reports exactly that version. Pointing `command` at a versioned executable
+path keeps an automatic update from changing the client under the worker. The flag and feature profiles
+stay in code and are checked against the client's own help output. Every model launch is preceded by a
+passing verification of the executable about to run: the worker resolves `command` the way the launch
+does (on the child's `PATH`, symlinks followed), verifies the client through that file, and runs that
+same file directly. It verifies before every launch, not only when a file changes, because `command`
+cannot name every file the client runs: an interpreter runs a script, and the script loads more. That
+costs a few short introspection processes per call and never a model run. A failed verification at
+service start is logged and leaves the worker running; it is the `unverified_client` refusal, shown in
+`status`, and clears without a restart once the client or the configuration is right.
+
+Codex runs `exec --ignore-user-config --ephemeral --sandbox read-only --skip-git-repo-check --json
+--output-schema --output-last-message -C TEMP` with `approval_policy="never"`, `web_search="disabled"` and
 `features.NAME=false` for `shell_tool`, `apps`, `plugins`, `hooks`, `multi_agent`, `memories`,
 `view_image`, `image_generation`, `browser_use`, `computer_use` and `request_permissions_tool`; the
-worker verifies the version, the documented flags and the feature list before its first call and accepts
-only thread/turn status, usage and assistant text or reasoning events. Claude Code is pinned to the
-inspected `2.1.296` help: `--print --output-format json --json-schema SCHEMA --model MODEL --tools ""
---strict-mcp-config --mcp-config EMPTY --safe-mode --disable-slash-commands --no-session-persistence`,
-reading `structured_output` and refusing any recorded permission denial or tool use; the turn count is
-reported, not judged, because structured output may take the SDK more than one turn. `--bare` is never
-used because it disables OAuth. A client outside these profiles is unavailable until reverified. Read-only
-sandboxing and never-approval contain whatever built-in surface documented controls cannot remove; a
-bounded pilot must inspect the real event stream before enrollment widens.
+worker verifies the version, the documented flags and the feature list and accepts only thread/turn
+status, failure and usage events and assistant text, reasoning or error items. `exec` has no
+system-prompt option, so Codex still receives the instructions and the request content in one prompt.
+Claude Code runs `--print --output-format json --json-schema SCHEMA --model MODEL --tools ""
+--strict-mcp-config --mcp-config EMPTY --safe-mode --disable-slash-commands --no-session-persistence
+--system-prompt INSTRUCTIONS` with only the serialized request content on stdin, reading
+`structured_output` and refusing any recorded permission denial or tool use; the turn count is reported,
+not judged, because structured output may take the SDK more than one turn. `--bare` is never used because
+it disables OAuth. `max_input_bytes` bounds the input as the client receives it: instructions plus content,
+with the blank line between them for the one-prompt client. Keeping the instructions
+in their own channel lowers the chance that thread text steers a summary; it does not remove it, and the
+checks establish structure, exact quotes and coverage, not truth. Read-only sandboxing and never-approval
+contain whatever built-in surface documented controls cannot remove; a bounded pilot must inspect the
+real event stream before enrollment widens.
 
 Readers see the result through five read-only MCP tools. Scoped work starts with `search_graph`, which
 returns the standing statements and active decisions matching a few words as one line each (id, strands,

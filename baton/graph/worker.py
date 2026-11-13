@@ -4,13 +4,15 @@ Each scheduling cycle polls the allowlisted conversations in a read snapshot, th
 ones, giving each at most one step: one graph batch (one reserved model call), one compact phase (one
 reserved call unless the deterministic view already fits), or one publication attempt (never a call).
 Every external call is reserved in the ledger first, so a crash consumes it; saved candidates are validated
-and reused before any new call; exhaustion blocks a conversation durably until an operator resets it.
+and reused before any new call; exhaustion blocks a conversation durably until an operator resets it. A call
+the provider refused without doing any work is refunded and retried on a backoff instead, never a block.
 Model processes never see the authoritative database, the source directory or any Baton secret.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from baton.config import Config
+from baton.config.graph_worker import CONVERSATION_ID
 from baton.database.store import connection
 from baton.errors import BatonError
 from baton.graph import compact
@@ -25,16 +28,19 @@ from baton.graph import snapshot as snapshot_module
 from baton.graph.context import require_search
 from baton.graph.contract import SCHEMA, GraphError, current
 from baton.graph.export import export_source
-from baton.graph.ledger import RETRY_DELAY, Budget, Ledger, WorkerBusy, next_utc_day
-from baton.graph.operations import apply, prepare
+from baton.graph.failure import DURABLE, REFUSALS, Category, TransportError
+from baton.graph.ledger import RETRY_DELAY, Budget, Ledger, WorkerBusy, next_utc_day, refusal_delay
+from baton.graph.operations import InputOverflow, apply, prepare
 from baton.graph.publication import publish_graph
 from baton.graph.source import canonical, digest, load_json, load_source
 from baton.graph.storage import atomic_json, load_state, state_lock
-from baton.graph.transport import Limits, Transport, TransportError, for_config
+from baton.graph.transport import Limits, Transport, for_config
 
 log = logging.getLogger("baton.graph.worker")
 EXTRACTION_CALLS = 2
 COMPACT_CALLS = 2
+# One empty file per conversation to reset, named by its id; the running worker applies and removes them.
+RESET_REQUESTS = "reset-requests"
 
 
 class Blocked(Exception):
@@ -136,6 +142,7 @@ class Worker:
             with Ledger.open(self.state_dir) as owned:
                 return self.cycle(owned)
         interrupted = ledger.consume_interrupted()
+        self.apply_resets(ledger)
         self.poll(ledger)
         self.cycle_calls = 0
         now = self.clock()
@@ -156,6 +163,20 @@ class Worker:
             "model_calls": self.cycle_calls,
             "records": {cid: dict(record) for cid, record in ledger.records().items()},
         }
+
+    def apply_resets(self, ledger: Ledger) -> None:
+        """Apply each queued reset that names a known record, under this worker's lock; remove every request."""
+        folder = self.state_dir / RESET_REQUESTS
+        if not folder.is_dir():
+            return
+        for request in sorted(folder.iterdir()):
+            if request.is_file() and request.name in ledger.records():
+                log.info("graph worker applied a reset request for %s", request.name)
+                ledger.reset(request.name)
+            try:
+                request.unlink()
+            except OSError:  # a directory or a vanished entry: nothing to apply, and the cycle goes on
+                log.warning("graph worker could not remove a reset request entry")
 
     def poll(self, ledger: Ledger) -> None:
         """Compare canonical heads with graph W in one read snapshot; coalesce to one pending target each."""
@@ -226,11 +247,7 @@ class Worker:
             produced = self.transport.produce(request, schema, self.limits, stop=self.stop)
         except TransportError as error:
             ledger.settle({"outcome": error.category, "elapsed": self.clock() - started})
-            if error.category == "cancelled":
-                raise Cancelled() from None
-            if error.category in ("authentication", "isolation", "input_limit"):
-                raise Blocked(error.category) from None
-            raise CallFailed(error.category) from None
+            raise self._settled(ledger, conversation_id, error.category) from None
         except BaseException:
             ledger.settle({"outcome": "crash", "elapsed": self.clock() - started})
             raise
@@ -248,6 +265,18 @@ class Worker:
             }
         )
         return produced["candidate"]
+
+    def _settled(self, ledger: Ledger, conversation_id: str, category: Category) -> Exception:
+        """What a settled failure means for the conversation; a refusal waits on the refusal backoff."""
+        if category == Category.CANCELLED:
+            return Cancelled()
+        if category in REFUSALS:
+            refusals = ledger.record(conversation_id)["refusals"]
+            log.info("graph worker call for %s was refused (%s); refusal %d", conversation_id, category, refusals)
+            return Deferred(self.clock() + refusal_delay(refusals), category)
+        if category in DURABLE:
+            return Blocked(category)
+        return CallFailed(category)
 
     def _retry_or_block(self, ledger: Ledger, conversation_id: str, cap: int, block: str, failure: str) -> Exception:
         if ledger.record(conversation_id)["attempts"] < cap:
@@ -333,8 +362,10 @@ class Worker:
                 batch_size=self.settings.batch_size,
                 max_input_bytes=self.settings.max_input_bytes,
             )
-        except GraphError as error:
-            raise Blocked("input_limit" if "exceeds" in str(error) else "unsafe_source") from None
+        except InputOverflow:
+            raise Blocked(Category.INPUT_LIMIT) from None
+        except GraphError:
+            raise Blocked(Category.UNSAFE_SOURCE) from None
         return request, request_path
 
     def _after_apply(self, ledger: Ledger, conversation_id: str, state: dict) -> None:
@@ -455,15 +486,21 @@ def serve(config: Config, stop: threading.Event, *, worker: Worker | None = None
     """Own the state directory for the whole service lifetime and run cycles until `stop`.
 
     The exclusive ledger lock is taken before verification and held through every idle wait, so a second
-    service against the same directory ends at once without inference, and an administrative reset is refused
-    while the service runs. A stop during a call cancels it and returns only after its process is cleaned up.
+    service against the same directory ends at once without inference; an administrative reset meanwhile is
+    queued for this worker's next cycle. A failed verification is logged and leaves the worker running: the
+    transport verifies again before its next launch, and nothing launches unverified. A stop during a call
+    cancels it and returns only after its process is cleaned up.
     """
     try:
         worker = worker if worker is not None else Worker(config)
         worker.stop = stop
         with Ledger.open(worker.state_dir) as ledger:
-            verified = worker.transport.verify()
-            log.info("graph worker verified %s", verified.get("mode"))
+            try:
+                log.info("graph worker verified %s", worker.transport.verify().get("mode"))
+            except TransportError as error:
+                log.warning(
+                    "graph worker provider is not verified (%s); it verifies again before a launch", error.category
+                )
             while not stop.is_set():
                 try:
                     worker.cycle(ledger)
@@ -482,16 +519,44 @@ def status(config: Config) -> dict[str, Any]:
     if not settings.enabled or settings.state_dir is None:
         return {"enabled": False}
     path = settings.state_dir / "ledger.json"
-    ledger = load_json(path) if path.exists() else {"conversations": {}, "calls": {}, "in_flight": None}
+    ledger = load_json(path) if path.exists() else {"conversations": {}, "calls": {}, "refused": {}, "in_flight": None}
     return {"enabled": True, "producer": settings.producer, "provider": settings.provider, **ledger}
 
 
 def reset(config: Config, conversation_id: str) -> dict[str, Any]:
-    """Explicit host administration: clear one blocked record. Stop the service first; the ledger lock is held."""
+    """Explicit host administration: clear one blocked record, now or, while a service runs, at its next cycle.
+
+    With the ledger lock free the reset is applied at once. A running service holds the lock, so the command
+    leaves a request naming the conversation in the state directory, and that worker applies it under its own
+    lock. Either way only a conversation with a ledger record can be reset.
+    """
     settings = config.graph_worker
     if not settings.enabled or settings.state_dir is None:
         raise GraphError("the graph worker is disabled ([graph_worker] enabled)")
-    with Ledger.open(settings.state_dir) as ledger:
+    if not CONVERSATION_ID.fullmatch(conversation_id):  # the id also names the request file
+        raise GraphError("unknown worker conversation record")
+    try:
+        return _reset_now(settings.state_dir, conversation_id)
+    except WorkerBusy:
+        return _request_reset(config, settings.state_dir, conversation_id)
+
+
+def _reset_now(state_dir: Path, conversation_id: str) -> dict[str, Any]:
+    with Ledger.open(state_dir) as ledger:
         if conversation_id not in ledger.records():
             raise GraphError("unknown worker conversation record")
+        (state_dir / RESET_REQUESTS / conversation_id).unlink(missing_ok=True)  # applied here, not again later
         return dict(ledger.reset(conversation_id))
+
+
+def _request_reset(config: Config, state_dir: Path, conversation_id: str) -> dict[str, Any]:
+    if conversation_id not in status(config)["conversations"]:  # the ledger file is replaced atomically
+        raise GraphError("unknown worker conversation record")
+    folder = state_dir / RESET_REQUESTS
+    folder.mkdir(mode=0o700, exist_ok=True)
+    os.close(os.open(folder / conversation_id, os.O_CREAT | os.O_WRONLY | os.O_CLOEXEC, 0o600))
+    return {
+        "conversation_id": conversation_id,
+        "reset": "requested",
+        "detail": "the running graph worker applies it at the start of its next cycle",
+    }

@@ -205,7 +205,7 @@ configuration problem exits with status 2.
 | `baton read --as R [--after-seq N]` | Read a role's mailbox. |
 | `baton wait --as R [--timeout S]` | Wait for work addressed to a role. |
 | `baton conversation new\|list\|history\|add\|remove` | Create, list, read, and manage conversations. `new` and `list` take `--topic`; `history` takes `--through-seq` for a fixed head; `conversation topic C --set T\|--clear` files or unfiles one. Create topic containers with MCP first. |
-| `baton index graph-worker status\|reset --conversation C` | Inspect the background graph worker's ledger, or clear one blocked conversation record (stop the service first). Generation itself runs under `baton serve`; see [the graph builder guide](graph-builder.md). |
+| `baton index graph-worker status\|reset --conversation C` | Inspect the background graph worker's ledger, or clear one blocked conversation record (a running service applies the reset at its next cycle). Generation itself runs under `baton serve`; see [the graph builder guide](graph-builder.md). |
 | `baton job create\|show\|list\|move\|events` | Create and inspect jobs or move them through their configured states. |
 | `baton token new --name N --role R` | Generate a bearer token and its config entry. |
 | `baton token revoke N` | Revoke a named bearer token without restarting the server. |

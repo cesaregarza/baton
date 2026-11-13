@@ -17,6 +17,8 @@ from .models import ConfigError, GraphWorker, Indexer
 PROVIDERS = ("http", "codex", "claude")
 CONVERSATION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+# The exact version a native client reports, as the operator inspected it; the worker trusts no other.
+CLIENT_VERSION = re.compile(r"\d+\.\d+\.\d+")
 # Names a model process must never receive: Baton's own credentials, secrets and configuration locations.
 FORBIDDEN_ENV_PREFIXES = ("BATON_",)
 NATIVE_COMMANDS = {"codex": ("codex",), "claude": ("claude",)}
@@ -92,23 +94,29 @@ def _state_dir(value: Any, data_dir: Path, base: Path) -> Path:
 
 
 def _transport_fields(raw: Mapping[str, Any], provider: str) -> dict[str, Any]:
-    if provider == "http":
-        base_url, api_key_env, allow_no_key = (
-            raw.get("base_url"),
-            raw.get("api_key_env"),
-            raw.get("allow_no_key", False),
-        )
-        if not isinstance(base_url, str) or not re.fullmatch(r"https?://[^\s?#]+", base_url):
-            raise ConfigError("graph_worker.base_url must be an explicit http(s) API base")
-        if not isinstance(allow_no_key, bool):
-            raise ConfigError("graph_worker.allow_no_key must be a boolean")
-        if api_key_env is not None and (not isinstance(api_key_env, str) or not ENV_NAME.fullmatch(api_key_env)):
-            raise ConfigError("graph_worker.api_key_env must be an environment variable name")
-        if (api_key_env is None) == (not allow_no_key):
-            raise ConfigError("graph_worker needs exactly one of api_key_env or allow_no_key = true")
-        if raw.get("credential_env") or raw.get("command"):
-            raise ConfigError("graph_worker.credential_env and command apply to native providers only")
-        return {"base_url": base_url, "api_key_env": api_key_env, "allow_no_key": allow_no_key}
+    return _http_fields(raw) if provider == "http" else _native_fields(raw, provider)
+
+
+def _http_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
+    base_url, api_key_env, allow_no_key = (
+        raw.get("base_url"),
+        raw.get("api_key_env"),
+        raw.get("allow_no_key", False),
+    )
+    if not isinstance(base_url, str) or not re.fullmatch(r"https?://[^\s?#]+", base_url):
+        raise ConfigError("graph_worker.base_url must be an explicit http(s) API base")
+    if not isinstance(allow_no_key, bool):
+        raise ConfigError("graph_worker.allow_no_key must be a boolean")
+    if api_key_env is not None and (not isinstance(api_key_env, str) or not ENV_NAME.fullmatch(api_key_env)):
+        raise ConfigError("graph_worker.api_key_env must be an environment variable name")
+    if (api_key_env is None) == (not allow_no_key):
+        raise ConfigError("graph_worker needs exactly one of api_key_env or allow_no_key = true")
+    if raw.get("credential_env") or raw.get("command") or raw.get("client_version") is not None:
+        raise ConfigError("graph_worker.credential_env, command and client_version apply to native providers only")
+    return {"base_url": base_url, "api_key_env": api_key_env, "allow_no_key": allow_no_key}
+
+
+def _native_fields(raw: Mapping[str, Any], provider: str) -> dict[str, Any]:
     for key in ("base_url", "api_key_env", "allow_no_key"):
         if raw.get(key) is not None and raw.get(key) is not False:
             raise ConfigError(f"graph_worker.{key} applies to the http provider only")
@@ -120,7 +128,13 @@ def _transport_fields(raw: Mapping[str, Any], provider: str) -> dict[str, Any]:
     command = raw.get("command", list(NATIVE_COMMANDS[provider]))
     if not isinstance(command, list) or not command or not all(isinstance(part, str) and part for part in command):
         raise ConfigError("graph_worker.command must be a non-empty argv list for the native client (no shell)")
-    return {"credential_env": tuple(names), "command": tuple(command)}
+    client_version = raw.get("client_version")
+    if not isinstance(client_version, str) or not CLIENT_VERSION.fullmatch(client_version):
+        raise ConfigError(
+            "graph_worker.client_version must be the exact version the native client reports (like 1.2.3); "
+            "it has no default"
+        )
+    return {"credential_env": tuple(names), "command": tuple(command), "client_version": client_version}
 
 
 def _number(table: Mapping[str, Any], key: str, low: float, high: float, default: float, whole: bool) -> Any:

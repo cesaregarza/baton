@@ -24,8 +24,8 @@ from baton.database.store import connect
 from baton.graph import ledger
 from baton.graph import snapshot as snapshot_module
 from baton.graph.contract import GraphError, current
+from baton.graph.failure import TransportError
 from baton.graph.source import load_json
-from baton.graph.transport import TransportError
 from baton.graph.worker import Worker, reset, status
 
 DAY = 86_400.0
@@ -63,25 +63,29 @@ class Clock:
 class ScriptedTransport:
     """Answers extraction requests with the synthetic graph fixture and compact requests with a scripted view.
 
-    `script` is consumed one entry per call: "ok", "timeout", "garbage", "crash", or a dict of compact overrides.
+    `script` is consumed one entry per call: "ok", "garbage", "crash", a dict of compact overrides, or a failure
+    category, raised as that category. `verify_failures` verifications fail before verification passes.
     """
 
     mode = "scripted"
 
-    def __init__(self, script=()) -> None:
+    def __init__(self, script=(), verify_failures=0) -> None:
         self.script = list(script)
         self.calls: list[dict] = []
         self.verified = 0
+        self.verify_failures = verify_failures
 
     def verify(self):
         self.verified += 1
+        if self.verified <= self.verify_failures:
+            raise TransportError("unverified_client", "scripted verification failure")
         return {"mode": self.mode}
 
     def produce(self, request, schema, limits, *, stop=None):
         self.calls.append({"request": request, "schema": schema, "limits": limits})
         action = self.script.pop(0) if self.script else "ok"
-        if action == "timeout":
-            raise TransportError("timeout", "scripted timeout")
+        if isinstance(action, str) and action not in ("ok", "garbage", "crash"):
+            raise TransportError(action, f"scripted {action}")
         if action == "crash":
             raise RuntimeError("scripted crash inside the transport")
         if action == "garbage":
@@ -185,6 +189,7 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
         "base_url": "https://provider.invalid/v1",
         "allow_no_key": True,
     }
+    native_base = {"provider": "codex", "base_url": None, "allow_no_key": False, "client_version": "1.2.3"}
     for bad, match in (
         ({"producer": "nobody"}, "indexer.producers"),
         ({"state_dir": str(config.data_dir / "graphs")}, "outside host.data_dir"),
@@ -197,17 +202,20 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
         ({"batch_size": 1.5}, "whole number"),
         ({"max_input_bytes": 2000.5}, "whole number"),
         ({"publication_attempts": 2.0}, "whole number"),
-        ({"provider": "codex", "base_url": None, "allow_no_key": False, "credential_env": ["BATON_TOKEN"]}, "Baton"),
-        ({"provider": "claude", "base_url": None, "allow_no_key": False, "command": []}, "command"),
+        ({**native_base, "credential_env": ["BATON_TOKEN"]}, "Baton"),
+        ({**native_base, "provider": "claude", "command": []}, "command"),
+        # The trusted client version is operator config: required for a native client, refused for http.
+        ({**native_base, "client_version": None}, "client_version"),
+        ({**native_base, "provider": "claude", "client_version": "latest"}, "client_version"),
+        ({"client_version": "1.2.3"}, "client_version"),
     ):
         with pytest.raises(ConfigError, match=match):
             config_module.graph_worker.parse({**base, **bad}, config.indexer, config.data_dir)
     native = config_module.graph_worker.parse(
-        {**base, "provider": "codex", "base_url": None, "allow_no_key": False, "credential_env": ["CODEX_HOME"]},
-        config.indexer,
-        config.data_dir,
+        {**base, **native_base, "credential_env": ["CODEX_HOME"]}, config.indexer, config.data_dir
     )
     assert native.command == ("codex",) and native.credential_env == ("CODEX_HOME",)
+    assert native.client_version == "1.2.3"
     durations = config_module.graph_worker.parse(
         {**base, "poll_seconds": 2.5, "call_timeout_seconds": 0.5 + 1}, config.indexer, config.data_dir
     )
@@ -293,9 +301,16 @@ def test_restart_consumes_the_in_flight_reservation_and_reuses_saved_candidates(
     ledger_file["in_flight"] = {"conversation_id": cid, "phase": "extracting", "request_digest": "x", "attempt": 2}
     ledger_file["conversations"][cid]["attempts"] = 2
     ledger_file["calls"] = {ledger.utc_day(clock.now): 2}
+    # Written in the version-1 format, without the refusal counters: opening it upgrades it in place.
+    ledger_file["version"] = 1
+    ledger_file.pop("refused", None)
+    ledger_file["conversations"][cid].pop("refusals", None)
     (config.graph_worker.state_dir / "ledger.json").write_text(json.dumps(ledger_file))
     restarted = Worker(config, transport=ScriptedTransport(), clock=clock)
     first = restarted.cycle()
+    upgraded = load_json(config.graph_worker.state_dir / "ledger.json")
+    assert (upgraded["version"], upgraded.get("refused"), upgraded["calls"]) == (2, {}, {ledger.utc_day(clock.now): 2})
+    assert upgraded["conversations"][cid].get("refusals") == 0
     assert first["interrupted"]["attempt"] == 2
     assert first["records"][cid]["phase"] == "blocked"  # both extraction calls were spent without a candidate
     assert restarted.transport.calls == []
@@ -422,6 +437,18 @@ def test_publication_exhaustion_blocks_and_input_overflow_blocks_before_any_call
     overflow = Worker(small, transport=transport, clock=clock).cycle()
     assert overflow["records"][other]["phase"] == "blocked"
     assert overflow["records"][other]["error_category"] == "input_limit" and transport.calls == []
+    # The prepare failure's type decides the block, never its wording.
+    from baton.graph.operations import InputOverflow
+
+    for raised, category in ((InputOverflow("recall"), "input_limit"), (GraphError("exceeds"), "unsafe_source")):
+        root = tmp_path / category
+        prepared = worker_config(root, conversations=["placeholder"])
+        with connect(prepared.db_path) as db:
+            third, _ = converse(db, prepared, 1)
+        monkeypatch.setattr(worker_module, "prepare", lambda *a, raised=raised, **k: (_ for _ in ()).throw(raised))
+        prepared = worker_config(root, conversations=[third])
+        record = Worker(prepared, transport=transport, clock=clock).cycle()["records"][third]
+        assert (record["phase"], record["error_category"], transport.calls) == ("blocked", category, [])
 
 
 def test_second_worker_exits_without_inference_and_tampered_snapshot_is_rejected(tmp_path) -> None:
@@ -580,7 +607,7 @@ def wait_for(predicate, seconds=10.0):
 
 
 def test_service_owns_its_directory_for_life_and_stop_cancels_the_native_call(tmp_path) -> None:
-    from test_graph_transports import alive, fake, wait_gone
+    from test_graph_transports import FAKE_VERSION, alive, fake, wait_gone
 
     from baton.graph import native
     from baton.graph.worker import serve
@@ -590,16 +617,15 @@ def test_service_owns_its_directory_for_life_and_stop_cancels_the_native_call(tm
         cid, _ = converse(db, config, 2)
     config = worker_config(tmp_path, conversations=[cid], poll_seconds=3600, call_timeout_seconds=600)
     command, dump = fake(tmp_path, "codex", "hang")
-    worker = Worker(config, transport=native.CodexTransport(command, "m", []))
+    worker = Worker(config, transport=native.CodexTransport(command, "m", [], FAKE_VERSION))
     stop = threading.Event()
     service = threading.Thread(target=serve, args=(config, stop), kwargs={"worker": worker}, daemon=True)
     service.start()
     assert wait_for((dump / "descendant.pid").exists), "the native client never started"
     descendant = int((dump / "descendant.pid").read_text())
     assert alive(descendant)
-    # While the service owns the directory, administration is refused and a second service ends without a call.
-    with pytest.raises(ledger.WorkerBusy):
-        reset(config, cid)
+    # While the service owns the directory, a reset is queued for it and a second service ends without a call.
+    assert reset(config, cid)["reset"] == "requested"
     other = Worker(config, transport=ScriptedTransport())
     serve(config, threading.Event(), worker=other)
     assert other.transport.calls == [] and other.transport.verified == 0  # not even verification ran
@@ -618,15 +644,17 @@ def test_service_owns_its_directory_for_life_and_stop_cancels_the_native_call(tm
     )
     with connect(config.db_path) as db:
         assert published(db, cid) == []
-    # The lock also covers idle waits: a service with nothing to do still owns the directory until it stops.
-    idle_worker = Worker(worker_config(tmp_path, conversations=[cid], poll_seconds=3600), transport=ScriptedTransport())
+    # A failed verification at start does not turn the worker off, and the lock also covers idle waits.
+    idle_transport = ScriptedTransport(verify_failures=1)
+    idle_worker = Worker(worker_config(tmp_path, conversations=[cid], poll_seconds=3600), transport=idle_transport)
     idle_stop = threading.Event()
     idle_service = threading.Thread(target=serve, args=(idle_worker.config, idle_stop), kwargs={"worker": idle_worker})
     idle_service.start()
-    # One cycle moves the record on (the spent attempt left one call); then the service waits its hour, still owning.
+    # Its first cycle applies the queued reset and moves the record on; then it waits its hour, still owning.
     assert wait_for(lambda: status(config)["conversations"][cid]["phase"] == "compacting")
-    with pytest.raises(ledger.WorkerBusy):
-        reset(config, cid)
+    assert idle_transport.verified == 1 and not list((config.graph_worker.state_dir / "reset-requests").iterdir())
+    with pytest.raises(ledger.WorkerBusy), ledger.Ledger.open(config.graph_worker.state_dir):
+        pass
     idle_stop.set()
     idle_service.join(timeout=15)
     assert not idle_service.is_alive()

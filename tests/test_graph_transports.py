@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -20,9 +21,12 @@ import pytest
 from baton.config import GraphWorker
 from baton.graph import compact, native
 from baton.graph.contract import SCHEMA
-from baton.graph.transport import HttpTransport, Limits, TransportError, for_config
+from baton.graph.failure import TransportError
+from baton.graph.source import canonical
+from baton.graph.transport import HttpTransport, Limits, for_config
 
 FIXTURES = Path(__file__).parent / "fixtures"
+FAKE_VERSION = "9.8.7"  # what the fake clients report unless their dump names another version
 LIMITS = Limits(timeout=5, max_input_bytes=200_000, max_response_bytes=100_000, max_output_tokens=400)
 REQUEST = {
     "version": 1,
@@ -38,6 +42,17 @@ def fake(tmp_path: Path, name: str, mode: str = "ok") -> tuple[list[str], Path]:
     dump.mkdir()
     (dump / "mode").write_text(mode)
     return [sys.executable, str(FIXTURES / f"graph_fake_{name}.py"), str(dump)], dump
+
+
+def install(tmp_path: Path, name: str, dump: Path, version: str) -> list[str]:
+    """Put a client executable at one fixed path, replacing any earlier one, that reports `version`."""
+    (dump / "version").write_text(version)
+    target, staged = tmp_path / f"{name}-client", tmp_path / f"{name}-client.new"
+    fake_args = " ".join(shlex.quote(part) for part in (sys.executable, str(FIXTURES / f"graph_fake_{name}.py")))
+    staged.write_text(f'#!/bin/sh\nexec {fake_args} {shlex.quote(str(dump))} "$@"\n')
+    staged.chmod(0o700)
+    os.replace(staged, target)
+    return [str(target)]
 
 
 def recorded(dump: Path) -> dict:
@@ -103,6 +118,42 @@ def test_http_transport_is_one_schema_bound_request_with_sanitized_failures(monk
     with pytest.raises(TransportError) as absent:
         missing.verify()
     assert absent.value.category == "authentication"
+    with pytest.raises(TransportError) as unsent:
+        missing.produce(REQUEST, SCHEMA, LIMITS)
+    assert unsent.value.category == "authentication" and len(seen) == 3
+
+
+def test_http_failures_are_categorized_where_they_are_raised() -> None:
+    """Statuses and connection failures map to fixed categories; the response text never decides one."""
+
+    def provider(http_request):
+        marker = json.loads(json.loads(http_request.content)["messages"][1]["content"])["marker"]
+        if marker == "connect":
+            raise httpx.ConnectError("synthetic: authentication rate limit deadline exceeds")
+        if marker == "read":
+            raise httpx.ReadError("synthetic: credential HTTP failure (401)")
+        if marker == "notjson":
+            return httpx.Response(200, text="not json")
+        return httpx.Response(int(marker), text="credential exceeds deadline recall cancelled")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+    transport = HttpTransport("https://provider.invalid/v1", "m", allow_no_key=True, client=client)
+    for marker, category in (
+        ("401", "authentication"),
+        ("403", "authentication"),
+        ("429", "rate_limited"),
+        ("408", "provider_unavailable"),
+        ("500", "provider_unavailable"),
+        ("503", "provider_unavailable"),
+        ("connect", "provider_unavailable"),
+        ("400", "request_rejected"),
+        ("404", "request_rejected"),
+        ("read", "transport"),
+        ("notjson", "malformed"),
+    ):
+        with pytest.raises(TransportError) as failed:
+            transport.produce({**REQUEST, "marker": marker}, SCHEMA, LIMITS)
+        assert failed.value.category == category, marker
 
 
 def test_http_calls_end_at_the_total_deadline_or_on_stop_with_nothing_left_running() -> None:
@@ -162,9 +213,9 @@ def test_codex_transport_pins_isolation_and_rejects_every_action_family(tmp_path
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     monkeypatch.setenv("UNRELATED_SECRET", "nope")
     command, dump = fake(tmp_path, "codex")
-    transport = native.CodexTransport(command, "gpt-synthetic", ["CODEX_HOME"])
+    transport = native.CodexTransport(command, "gpt-synthetic", ["CODEX_HOME"], FAKE_VERSION)
     verified = transport.verify()
-    assert verified["version"] == "0.167.0" and set(verified["features_disabled"]) == set(native.CODEX_FEATURES)
+    assert verified["version"] == FAKE_VERSION and set(verified["features_disabled"]) == set(native.CODEX_FEATURES)
     produced = transport.produce(REQUEST, SCHEMA, LIMITS)
     assert produced["candidate"] == {"echo": "req-1"} and produced["turns"] == 1
     assert produced["usage"] == {"input_tokens": 11, "cached_input_tokens": 0, "output_tokens": 5}
@@ -191,20 +242,24 @@ def test_codex_transport_pins_isolation_and_rejects_every_action_family(tmp_path
     assert "BATON_TOKEN" not in call["env"] and "UNRELATED_SECRET" not in call["env"]
     assert set(call["env"]) <= set(native.ENV_ALLOWLIST) | {"CODEX_HOME"}
     assert call["stdin"].startswith(REQUEST["instructions"]) and '"new_posts"' in call["stdin"]
+    # The event stream is read whatever the exit status; an action outranks every other reading of it.
     for mode, category in (
         ("action", "isolation"),
         ("mcp", "isolation"),
         ("unknown", "isolation"),
-        ("error", "rejected"),
+        ("failed_action", "isolation"),
+        ("refused", "provider_refused"),
+        ("error", "provider_error"),
         ("malformed", "malformed"),
         ("exit", "transport"),
+        ("garbage_exit", "transport"),
     ):
         (dump / "mode").write_text(mode)
         with pytest.raises(TransportError) as refused:
             transport.produce(REQUEST, SCHEMA, LIMITS)
         assert refused.value.category == category, mode
     with pytest.raises(TransportError) as crossing:
-        native.CodexTransport(command, "m", ["BATON_TOKEN"]).produce(REQUEST, SCHEMA, LIMITS)
+        native.CodexTransport(command, "m", ["BATON_TOKEN"], FAKE_VERSION).produce(REQUEST, SCHEMA, LIMITS)
     assert crossing.value.category == "isolation"
     (dump / "mode").write_text("bigfile")  # the last-message file is bounded like stdout
     with pytest.raises(TransportError) as big:
@@ -213,15 +268,18 @@ def test_codex_transport_pins_isolation_and_rejects_every_action_family(tmp_path
     with pytest.raises(TransportError) as oversized:
         transport.produce(REQUEST, SCHEMA, Limits(5, 10, 100_000, 400))
     assert oversized.value.category == "input_limit"
-    for mode, detail in (
-        ("old_version", "version"),
-        ("no_schema_flag", "--output-schema"),
-        ("missing_feature", "shell_tool"),
+    for mode, version, detail in (
+        ("ok", "9.8.6", "version"),
+        ("no_schema_flag", FAKE_VERSION, "--output-schema"),
+        ("missing_feature", FAKE_VERSION, "shell_tool"),
     ):
         (dump / "mode").write_text(mode)
-        with pytest.raises(TransportError, match=detail):
-            native.CodexTransport(command, "m", []).verify()
-    assert for_config(GraphWorker(enabled=True, provider="codex", model="m", command=tuple(command))).mode == "codex"
+        (dump / "version").write_text(version)
+        with pytest.raises(TransportError, match=detail) as unverified:
+            native.CodexTransport(command, "m", [], FAKE_VERSION).verify()
+        assert unverified.value.category == "unverified_client", mode
+    settings = GraphWorker(enabled=True, provider="codex", model="m", command=tuple(command), client_version="1.0.0")
+    assert for_config(settings).mode == "codex"
 
 
 def tempfile_root() -> str:
@@ -233,13 +291,10 @@ def tempfile_root() -> str:
 def test_claude_transport_pins_flags_and_parses_structured_output_only(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("BATON_CONFIG", "/etc/baton.toml")
     command, dump = fake(tmp_path, "claude")
-    transport = native.ClaudeTransport(command, "claude-synthetic", [])
-    assert transport.verify()["version"] == "2.1.296"
-    produced = transport.produce(
-        {**REQUEST, "compact_schema": compact.SCHEMA, "graph_digest": "d", "strands": [], "decisions": []},
-        compact.SCHEMA,
-        LIMITS,
-    )
+    transport = native.ClaudeTransport(command, "claude-synthetic", [], FAKE_VERSION)
+    assert transport.verify()["version"] == FAKE_VERSION
+    compact_request = {**REQUEST, "compact_schema": compact.SCHEMA, "graph_digest": "d", "strands": [], "decisions": []}
+    produced = transport.produce(compact_request, compact.SCHEMA, LIMITS)
     assert produced["candidate"]["graph_digest"] == "d" and produced["usage"] == {"input_tokens": 9, "output_tokens": 4}
     call = recorded(dump)
     argv = call["argv"]
@@ -247,7 +302,12 @@ def test_claude_transport_pins_flags_and_parses_structured_output_only(tmp_path,
     assert json.loads(argv[4]) == compact.SCHEMA
     assert argv[5:9] == ["--model", "claude-synthetic", "--tools", ""]
     assert argv[9] == "--strict-mcp-config" and argv[10] == "--mcp-config"
-    assert argv[12:] == ["--safe-mode", "--disable-slash-commands", "--no-session-persistence"]
+    assert argv[12:15] == ["--safe-mode", "--disable-slash-commands", "--no-session-persistence"]
+    # The contract instructions travel in their own channel; stdin carries only the serialized content.
+    assert argv[15:] == ["--system-prompt", REQUEST["instructions"]]
+    content = {key: value for key, value in compact_request.items() if key != "instructions"}
+    assert call["stdin"] == canonical(content)
+    assert produced["input_bytes"] == len((REQUEST["instructions"] + canonical(content)).encode("utf-8"))
     assert "--bare" not in argv and "--dangerously-skip-permissions" not in argv
     assert not Path(argv[11]).exists() and call["cwd"] == str(
         Path(argv[11]).parent
@@ -258,30 +318,105 @@ def test_claude_transport_pins_flags_and_parses_structured_output_only(tmp_path,
     (dump / "mode").write_text("turns")
     reprompted = transport.produce(REQUEST, SCHEMA, LIMITS)
     assert reprompted["turns"] == 3 and reprompted["candidate"] == {"echo": "req-1"}
+    # The result is read whatever the exit status. Only typed fields decide: an error with zero usage and a
+    # refusal status (or none, when nothing was sent) is a refusal; an action record outranks everything.
     for mode, category in (
         ("denied", "isolation"),
         ("tooluse", "isolation"),
-        ("error", "rejected"),
+        ("denied_error", "isolation"),
+        ("refused", "provider_refused"),
+        ("refused_unsent", "provider_refused"),
+        ("bad_request", "provider_error"),
+        ("error", "provider_error"),
         ("prose", "malformed"),
         ("malformed", "malformed"),
         ("exit", "transport"),
+        ("silent_exit", "transport"),
     ):
         (dump / "mode").write_text(mode)
         with pytest.raises(TransportError) as refused:
             transport.produce(REQUEST, SCHEMA, LIMITS)
         assert refused.value.category == category, mode
-    for mode, detail in (("old_version", "version"), ("no_tools_flag", "--tools")):
+    with pytest.raises(TransportError) as oversized:  # the bound still covers instructions plus content
+        transport.produce(REQUEST, SCHEMA, Limits(5, len(REQUEST["instructions"]) + 10, 100_000, 400))
+    assert oversized.value.category == "input_limit"
+    # Help that only documents the similar --append-system-prompt flag does not document --system-prompt.
+    for mode, version, detail in (
+        ("ok", "9.8.6", "version"),
+        ("no_tools_flag", FAKE_VERSION, "--tools"),
+        ("no_system_prompt_flag", FAKE_VERSION, "--system-prompt"),
+    ):
         (dump / "mode").write_text(mode)
-        with pytest.raises(TransportError, match=detail):
-            native.ClaudeTransport(command, "m", []).verify()
-    assert for_config(GraphWorker(enabled=True, provider="claude", model="m", command=tuple(command))).mode == "claude"
+        (dump / "version").write_text(version)
+        with pytest.raises(TransportError, match=detail) as unverified:
+            native.ClaudeTransport(command, "m", [], FAKE_VERSION).verify()
+        assert unverified.value.category == "unverified_client", mode
+    settings = GraphWorker(enabled=True, provider="claude", model="m", command=tuple(command), client_version="1.0.0")
+    assert for_config(settings).mode == "claude"
+
+
+@pytest.mark.parametrize("name", ["codex", "claude"])
+def test_native_clients_launch_only_after_verifying_the_executable_about_to_run(tmp_path, name) -> None:
+    command, dump = fake(tmp_path, name)
+    transport = (native.CodexTransport if name == "codex" else native.ClaudeTransport)(
+        install(tmp_path, name, dump, "9.8.6"), "m", [], FAKE_VERSION
+    )
+    with pytest.raises(TransportError) as mismatched:
+        transport.produce(REQUEST, SCHEMA, LIMITS)
+    assert mismatched.value.category == "unverified_client" and not (dump / "call.json").exists()
+    # Replacing the executable with the configured version is picked up by the same transport, no restart.
+    install(tmp_path, name, dump, FAKE_VERSION)
+    assert transport.produce(REQUEST, SCHEMA, LIMITS)["candidate"] == {"echo": "req-1"}
+    assert (dump / "call.json").exists()
+    # Every launch verifies again, so a replacement that reports another version is refused before it runs.
+    (dump / "call.json").unlink()
+    install(tmp_path, name, dump, "9.8.6")
+    with pytest.raises(TransportError) as replaced:
+        transport.produce(REQUEST, SCHEMA, LIMITS)
+    assert replaced.value.category == "unverified_client" and not (dump / "call.json").exists()
+
+
+def refusal(transport, request: dict, limits: Limits) -> str | None:
+    """The category a call was refused with, or None when the client launched and answered."""
+    try:
+        transport.produce(request, SCHEMA, limits)
+    except TransportError as error:
+        return error.category
+    return None
+
+
+@pytest.mark.parametrize("name", ["codex", "claude"])
+def test_a_client_script_rewritten_under_its_interpreter_is_verified_again_before_launch(tmp_path, name) -> None:
+    # The command runs an interpreter on a script, so rewriting the script leaves the interpreter's file as it was.
+    _, dump = fake(tmp_path, name)
+    original = (FIXTURES / f"graph_fake_{name}.py").read_text()
+    assert f'"{FAKE_VERSION}"' in original  # the version a fake client reports by default
+    script = tmp_path / f"{name}_client.py"
+    script.write_text(original)
+    transport = (native.CodexTransport if name == "codex" else native.ClaudeTransport)(
+        [sys.executable, str(script), str(dump)], "m", [], FAKE_VERSION
+    )
+    assert transport.verify()["version"] == FAKE_VERSION
+    script.write_text(original.replace(f'"{FAKE_VERSION}"', '"9.8.6"'))
+    assert refusal(transport, REQUEST, LIMITS) == "unverified_client" and not (dump / "call.json").exists()
+
+
+def test_the_input_bound_covers_the_whole_prompt_the_event_stream_client_receives(tmp_path) -> None:
+    command, dump = fake(tmp_path, "codex")
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION)
+    request = {"instructions": "synthetic", "binding": {"request_id": "req-1"}}
+    channels = len(b"synthetic") + len(canonical({"binding": {"request_id": "req-1"}}).encode("utf-8"))
+    # The prompt joins instructions and content with two newlines, so the channels alone are two bytes short.
+    assert refusal(transport, request, Limits(5, channels, 100_000, 400)) == "input_limit"
+    assert not (dump / "call.json").exists()
+    produced = transport.produce(request, SCHEMA, Limits(5, channels + 2, 100_000, 400))
+    assert produced["input_bytes"] == channels + 2 == len(recorded(dump)["stdin"].encode("utf-8"))
 
 
 @pytest.mark.parametrize("name", ["codex", "claude"])
 def test_native_timeouts_and_output_bounds_kill_the_client_and_its_descendants(tmp_path, name) -> None:
     command, dump = fake(tmp_path, name, "hang")
-    transport = (native.CodexTransport if name == "codex" else native.ClaudeTransport)(command, "m", [])
-    transport.verified = {"mode": name}  # the profile check is covered above; this is about process control
+    transport = (native.CodexTransport if name == "codex" else native.ClaudeTransport)(command, "m", [], FAKE_VERSION)
     started = time.monotonic()
     with pytest.raises(TransportError) as timed_out:
         transport.produce(
@@ -292,12 +427,20 @@ def test_native_timeouts_and_output_bounds_kill_the_client_and_its_descendants(t
     assert timed_out.value.category == "timeout" and time.monotonic() - started < 10
     descendant = int((dump / "descendant.pid").read_text())
     assert wait_gone(descendant), "the client's descendant survived process-group cleanup"
-    # A stop request cancels a running client the same way, well before its deadline.
+    # A stop request cancels a running client the same way, well before its deadline. It is sent once the client
+    # runs, because every launch first verifies the client again.
     import threading
 
     (dump / "descendant.pid").unlink()
     stop = threading.Event()
-    threading.Timer(0.5, stop.set).start()
+
+    def stop_once_running() -> None:
+        deadline = time.monotonic() + 10
+        while not (dump / "descendant.pid").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        stop.set()
+
+    threading.Thread(target=stop_once_running, daemon=True).start()
     started = time.monotonic()
     with pytest.raises(TransportError) as cancelled:
         transport.produce(

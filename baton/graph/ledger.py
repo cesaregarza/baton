@@ -2,8 +2,11 @@
 
 Everything lives in one private JSON file replaced atomically under a process-lifetime exclusive lock, so a
 reservation and the counters it changes can never split. A second worker finds the lock held and exits
-without inference. Source, checkpoint, request, proposal and compact artifacts stay in their own files and
-are reconciled by identity after an interruption; the ledger never contains model output or source prose.
+without inference. A call settled as a refusal (the provider did no work) is refunded: its attempt returns,
+its launch stays counted in `calls` and is also counted in `refused`, and the daily cap compares the
+difference, so only launches that may have used the provider spend the day. Source, checkpoint, request,
+proposal and compact artifacts stay in their own files and are reconciled by identity after an interruption;
+the ledger never contains model output or source prose.
 """
 
 from __future__ import annotations
@@ -17,10 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from baton.graph.contract import GraphError
+from baton.graph.failure import REFUSALS, Category
 from baton.graph.source import load_json
 from baton.graph.storage import atomic_json
 
-VERSION = 1
+VERSION = 2
 PHASES = ("pending", "extracting", "compacting", "publishing", "idle", "blocked")
 RECORD_FIELDS = (
     "conversation_id",
@@ -33,9 +37,11 @@ RECORD_FIELDS = (
     "attempts",
     "not_before",
     "error_category",
+    "refusals",
 )
 RECENT_CALLS = 50
 RETRY_DELAY = 60.0
+REFUSAL_CEILING = 3600.0
 
 
 class WorkerBusy(GraphError):
@@ -59,6 +65,11 @@ def next_utc_day(now: float) -> float:
     return (today + timedelta(days=1)).timestamp()
 
 
+def refusal_delay(refusals: int) -> float:
+    """The wait after `refusals` consecutive refused calls: one minute, doubling, then hourly at most."""
+    return min(RETRY_DELAY * 2 ** min(refusals - 1, 16), REFUSAL_CEILING)
+
+
 def new_record(conversation_id: str, checkpoint_path: str) -> dict[str, Any]:
     return {
         "conversation_id": conversation_id,
@@ -71,6 +82,7 @@ def new_record(conversation_id: str, checkpoint_path: str) -> dict[str, Any]:
         "attempts": 0,
         "not_before": 0.0,
         "error_category": None,
+        "refusals": 0,
     }
 
 
@@ -93,6 +105,9 @@ class Ledger:
                 raise WorkerBusy("another graph worker owns this state directory") from None
             path = directory / "ledger.json"
             state = load_json(path) if path.exists() else _initial()
+            if isinstance(state, dict) and state.get("version") == 1:
+                state = _upgrade_from_1(state)
+                atomic_json(path, state)
             if not isinstance(state, dict) or state.get("version") != VERSION:
                 raise GraphError("unsupported graph worker ledger")
             yield cls(path, state)
@@ -142,7 +157,13 @@ class Ledger:
     def reset(self, conversation_id: str) -> dict[str, Any]:
         """Explicit host administration: clear a blocked record so the scheduler may try again."""
         return self.update(
-            conversation_id, phase="pending", request_id=None, attempts=0, not_before=0.0, error_category=None
+            conversation_id,
+            phase="pending",
+            request_id=None,
+            attempts=0,
+            not_before=0.0,
+            error_category=None,
+            refusals=0,
         )
 
     # Call reservations --------------------------------------------------------------------------------------
@@ -179,10 +200,11 @@ class Ledger:
         if cycle_calls >= cycle_cap:
             raise Budget("cycle_cap", "this scheduling cycle already used its model calls")
         day = utc_day(now)
-        used = self.state["calls"].get(day, 0)
-        if daily_cap and used >= daily_cap:
+        launched, refused = self.state["calls"].get(day, 0), self.state["refused"].get(day, 0)
+        if daily_cap and launched - refused >= daily_cap:
             raise Budget("daily_cap", "the daily model call cap is spent until the next UTC day")
-        self.state["calls"] = {day: used + 1}
+        self.state["calls"] = {day: launched + 1}
+        self.state["refused"] = {day: refused} if refused else {}
         record["attempts"] += 1
         self.state["in_flight"] = {
             "conversation_id": conversation_id,
@@ -195,10 +217,22 @@ class Ledger:
         return self.state["in_flight"]
 
     def settle(self, outcome: dict[str, Any]) -> None:
-        """Record what the reserved call cost and how it ended; model output never enters the ledger."""
+        """Record what the reserved call cost and how it ended; model output never enters the ledger.
+
+        A refusal refunds the attempt and counts the launch as refused; any other ending except a cancellation
+        clears the conversation's consecutive-refusal count.
+        """
         in_flight = self.state["in_flight"]
         if in_flight is None:
             raise GraphError("no call is reserved")
+        record = self.records().get(in_flight["conversation_id"])
+        if record is not None and outcome["outcome"] in REFUSALS:
+            record["attempts"] = in_flight["attempt"] - 1
+            record["refusals"] += 1
+            day = utc_day(in_flight["reserved_at"])
+            self.state["refused"] = {day: self.state["refused"].get(day, 0) + 1}
+        elif record is not None and outcome["outcome"] != Category.CANCELLED:
+            record["refusals"] = 0
         entry = {**in_flight, **outcome}
         self.state["recent_calls"] = [*self.state["recent_calls"], entry][-RECENT_CALLS:]
         self.state["in_flight"] = None
@@ -220,8 +254,16 @@ def _initial() -> dict[str, Any]:
     return {
         "version": VERSION,
         "calls": {},
+        "refused": {},
         "in_flight": None,
         "next_position": 0,
         "recent_calls": [],
         "conversations": {},
     }
+
+
+def _upgrade_from_1(state: dict[str, Any]) -> dict[str, Any]:
+    """Version 2 adds the refusal counters, starting at zero; nothing else changes."""
+    for record in state.get("conversations", {}).values():
+        record["refusals"] = 0
+    return {**state, "version": VERSION, "refused": {}}
