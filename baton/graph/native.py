@@ -4,10 +4,10 @@ Native means the operator's own client and subscription authentication, not an A
 side. Isolation is preventative first: a fixed argv, an explicit model, an isolated temporary working
 directory, no shell, read-only sandboxing and never-approval, every documented retrieval or side-effect
 capability family disabled, an allowlisted environment and bounded stdin/stdout/stderr/wall time. Event
-checking then supplements that: any action-bearing or unknown event invalidates the attempt. Nothing launches
-before a passing verification of the exact executable about to run: it must report the operator's configured
-`client_version` and document the flags and features of the inspected profile below. A replaced executable
-is verified again, and nothing here runs a model during verification.
+checking then supplements that: any action-bearing or unknown event invalidates the attempt. Every launch
+first verifies the client again, through the exact executable it is about to run: the client must report the
+operator's configured `client_version` and document the flags and features of the inspected profile below.
+Nothing here runs a model during verification.
 
 A finished process is classified from typed fields only, whatever its exit status: an attempted action first,
 then an error the provider refused before doing any work (a refusal), then any other reported error.
@@ -214,22 +214,14 @@ def _wait(process: subprocess.Popen, deadline: float, stop: threading.Event | No
 def resolve_executable(command: list[str], env: dict[str, str]) -> str:
     """The file `command` names: argv[0] looked up on the child's own PATH as exec does, symlinks resolved.
 
-    Launches run this resolved file directly, so a symlink re-pointed after verification is never followed.
+    Verification and the launch after it run this resolved file directly, so a symlink re-pointed between them
+    is never followed.
     """
     name = command[0]
     found = name if os.sep in name else shutil.which(name, path=env.get("PATH", os.defpath))
     if found is None:
         raise TransportError(Category.UNVERIFIED_CLIENT, "native client executable was not found")
     return os.path.realpath(found)
-
-
-def file_identity(path: str) -> tuple[int, int, int, int]:
-    """What changes when the file at `path` is replaced or rewritten."""
-    try:
-        stat = os.stat(path)
-    except OSError:
-        raise TransportError(Category.UNVERIFIED_CLIENT, "native client executable cannot be inspected") from None
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
 def _introspect(argv: list[str], executable: str, env: dict[str, str]) -> str:
@@ -259,13 +251,17 @@ def _require_flags(help_text: str, flags: tuple[str, ...], client: str) -> None:
             raise TransportError(Category.UNVERIFIED_CLIENT, f"{client} does not document {flag}")
 
 
-def _channels(request: dict[str, Any], limits: Limits) -> tuple[str, bytes]:
-    """The contract instructions and the serialized content; the input bound covers both together."""
+def _channels(request: dict[str, Any]) -> tuple[str, bytes]:
+    """The contract instructions and the serialized rest of the request."""
     instructions = request["instructions"]
     content = canonical({key: value for key, value in request.items() if key != "instructions"}).encode("utf-8")
-    if len(instructions.encode("utf-8")) + len(content) > limits.max_input_bytes:
-        raise TransportError(Category.INPUT_LIMIT, "serialized native prompt exceeds max_input_bytes (UTF-8)")
     return instructions, content
+
+
+def _require_input_within(size: int, limits: Limits) -> None:
+    """Refuse a launch whose input, counted as the client receives it, is over `max_input_bytes` (UTF-8)."""
+    if size > limits.max_input_bytes:
+        raise TransportError(Category.INPUT_LIMIT, "serialized native prompt exceeds max_input_bytes (UTF-8)")
 
 
 def _candidate(value: Any) -> dict[str, Any]:
@@ -292,27 +288,31 @@ def _unparsed(returncode: int | None, client: str) -> TransportError:
 
 @dataclass
 class NativeClient:
-    """An installed client that launches only after its executable passed verification against the profile."""
+    """An installed client that launches only right after it passed verification against the profile."""
 
     command: list[str]
     model: str
     credential_env: list[str]
     client_version: str
-    verified: dict[str, Any] | None = None
-    verified_file: tuple[str, tuple[int, int, int, int]] | None = None
     mode: str = "native"
 
     def verify(self) -> dict[str, Any]:
-        """Check the executable a launch would run now; a failure leaves the client unverified."""
-        self.verified = self.verified_file = None
+        """Check the client a launch would run now, without running a model."""
+        return self._checked()[1]
+
+    def launch_executable(self) -> str:
+        """The resolved file to launch, verified again just now.
+
+        The command cannot name every file the client runs (an interpreter runs a script, and the script loads
+        more), so a record of file identities would miss a change to some of them. What the configuration pins is
+        the version the client reports, so the client is asked again before every launch.
+        """
+        return self._checked()[0]
+
+    def _checked(self) -> tuple[str, dict[str, Any]]:
         env = child_environment(self.credential_env)
         executable = resolve_executable(self.command, env)
-        identity = file_identity(executable)
-        profile = self.profile(executable, env)
-        if file_identity(executable) != identity:
-            raise TransportError(Category.UNVERIFIED_CLIENT, f"{self.mode} executable changed during verification")
-        self.verified, self.verified_file = profile, (executable, identity)
-        return profile
+        return executable, self.profile(executable, env)
 
     def profile(self, executable: str, env: dict[str, str]) -> dict[str, Any]:
         """Client-specific introspection; raises `unverified_client` when the client is outside the profile."""
@@ -320,14 +320,6 @@ class NativeClient:
 
     def introspect(self, executable: str, env: dict[str, str], *args: str) -> str:
         return _introspect([*self.command, *args], executable, env)
-
-    def launch_executable(self) -> str:
-        """The verified file to run, verifying first when the command no longer names the file last verified."""
-        executable = resolve_executable(self.command, child_environment(self.credential_env))
-        if self.verified_file != (executable, file_identity(executable)):
-            self.verify()
-        assert self.verified_file is not None  # set by the passing verification above
-        return self.verified_file[0]
 
     def require_version(self, text: str, pattern: str) -> str:
         match = re.search(pattern, text)
@@ -384,8 +376,9 @@ class CodexTransport(NativeClient):
     def produce(
         self, request: dict[str, Any], schema: dict[str, Any], limits: Limits, *, stop: threading.Event | None = None
     ) -> dict[str, Any]:
-        instructions, content = _channels(request, limits)
+        instructions, content = _channels(request)
         prompt = instructions.encode("utf-8") + b"\n\n" + content  # `exec` has no separate instruction channel
+        _require_input_within(len(prompt), limits)
         executable = self.launch_executable()
         with tempfile.TemporaryDirectory(prefix="baton-graph-codex-") as cwd:
             schema_path, output_path = os.path.join(cwd, "schema.json"), os.path.join(cwd, "last-message.json")
@@ -511,7 +504,9 @@ class ClaudeTransport(NativeClient):
     def produce(
         self, request: dict[str, Any], schema: dict[str, Any], limits: Limits, *, stop: threading.Event | None = None
     ) -> dict[str, Any]:
-        instructions, content = _channels(request, limits)
+        instructions, content = _channels(request)
+        input_bytes = len(instructions.encode("utf-8")) + len(content)
+        _require_input_within(input_bytes, limits)
         executable = self.launch_executable()
         with tempfile.TemporaryDirectory(prefix="baton-graph-claude-") as cwd:
             empty_config = os.path.join(cwd, "mcp-empty.json")
@@ -531,7 +526,7 @@ class ClaudeTransport(NativeClient):
         return {
             "candidate": candidate,
             "usage": usage,
-            "input_bytes": len(instructions.encode("utf-8")) + len(content),
+            "input_bytes": input_bytes,
             "output_bytes": len(result.stdout),
             "elapsed": result.elapsed,
             "turns": turns,

@@ -369,12 +369,49 @@ def test_native_clients_launch_only_after_verifying_the_executable_about_to_run(
     install(tmp_path, name, dump, FAKE_VERSION)
     assert transport.produce(REQUEST, SCHEMA, LIMITS)["candidate"] == {"echo": "req-1"}
     assert (dump / "call.json").exists()
-    # A passing verification covers only that executable: a replacement is verified again before any launch.
+    # Every launch verifies again, so a replacement that reports another version is refused before it runs.
     (dump / "call.json").unlink()
     install(tmp_path, name, dump, "9.8.6")
     with pytest.raises(TransportError) as replaced:
         transport.produce(REQUEST, SCHEMA, LIMITS)
     assert replaced.value.category == "unverified_client" and not (dump / "call.json").exists()
+
+
+def refusal(transport, request: dict, limits: Limits) -> str | None:
+    """The category a call was refused with, or None when the client launched and answered."""
+    try:
+        transport.produce(request, SCHEMA, limits)
+    except TransportError as error:
+        return error.category
+    return None
+
+
+@pytest.mark.parametrize("name", ["codex", "claude"])
+def test_a_client_script_rewritten_under_its_interpreter_is_verified_again_before_launch(tmp_path, name) -> None:
+    # The command runs an interpreter on a script, so rewriting the script leaves the interpreter's file as it was.
+    _, dump = fake(tmp_path, name)
+    original = (FIXTURES / f"graph_fake_{name}.py").read_text()
+    assert f'"{FAKE_VERSION}"' in original  # the version a fake client reports by default
+    script = tmp_path / f"{name}_client.py"
+    script.write_text(original)
+    transport = (native.CodexTransport if name == "codex" else native.ClaudeTransport)(
+        [sys.executable, str(script), str(dump)], "m", [], FAKE_VERSION
+    )
+    assert transport.verify()["version"] == FAKE_VERSION
+    script.write_text(original.replace(f'"{FAKE_VERSION}"', '"9.8.6"'))
+    assert refusal(transport, REQUEST, LIMITS) == "unverified_client" and not (dump / "call.json").exists()
+
+
+def test_the_input_bound_covers_the_whole_prompt_the_event_stream_client_receives(tmp_path) -> None:
+    command, dump = fake(tmp_path, "codex")
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION)
+    request = {"instructions": "synthetic", "binding": {"request_id": "req-1"}}
+    channels = len(b"synthetic") + len(canonical({"binding": {"request_id": "req-1"}}).encode("utf-8"))
+    # The prompt joins instructions and content with two newlines, so the channels alone are two bytes short.
+    assert refusal(transport, request, Limits(5, channels, 100_000, 400)) == "input_limit"
+    assert not (dump / "call.json").exists()
+    produced = transport.produce(request, SCHEMA, Limits(5, channels + 2, 100_000, 400))
+    assert produced["input_bytes"] == channels + 2 == len(recorded(dump)["stdin"].encode("utf-8"))
 
 
 @pytest.mark.parametrize("name", ["codex", "claude"])
@@ -391,12 +428,20 @@ def test_native_timeouts_and_output_bounds_kill_the_client_and_its_descendants(t
     assert timed_out.value.category == "timeout" and time.monotonic() - started < 10
     descendant = int((dump / "descendant.pid").read_text())
     assert wait_gone(descendant), "the client's descendant survived process-group cleanup"
-    # A stop request cancels a running client the same way, well before its deadline.
+    # A stop request cancels a running client the same way, well before its deadline. It is sent once the client
+    # runs, because every launch first verifies the client again.
     import threading
 
     (dump / "descendant.pid").unlink()
     stop = threading.Event()
-    threading.Timer(0.5, stop.set).start()
+
+    def stop_once_running() -> None:
+        deadline = time.monotonic() + 10
+        while not (dump / "descendant.pid").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        stop.set()
+
+    threading.Thread(target=stop_once_running, daemon=True).start()
     started = time.monotonic()
     with pytest.raises(TransportError) as cancelled:
         transport.produce(

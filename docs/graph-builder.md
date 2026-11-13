@@ -454,11 +454,13 @@ Which client version is trusted is operator configuration: `client_version` is r
 `claude`, refused for `http`, and has no default. Record the exact version you inspected; the worker
 launches only a client that reports exactly that version. Pointing `command` at a versioned executable
 path keeps an automatic update from changing the client under the worker. The flag and feature profiles
-stay in code and are checked against the client's own help output. No model launch happens without a
+stay in code and are checked against the client's own help output. Every model launch is preceded by a
 passing verification of the executable about to run: the worker resolves `command` the way the launch
-does (on the child's `PATH`, symlinks followed), runs that resolved file directly, and verifies again
-whenever the file differs from the one it verified or the last verification failed. A failed verification
-at service start is logged and leaves the worker running; it is the `unverified_client` refusal, shown in
+does (on the child's `PATH`, symlinks followed), verifies the client through that file, and runs that
+same file directly. It verifies before every launch, not only when a file changes, because `command`
+cannot name every file the client runs: an interpreter runs a script, and the script loads more. That
+costs a few short introspection processes per call and never a model run. A failed verification at
+service start is logged and leaves the worker running; it is the `unverified_client` refusal, shown in
 `status`, and clears without a restart once the client or the configuration is right.
 
 Codex runs `exec --ignore-user-config --ephemeral --sandbox read-only --skip-git-repo-check --json
@@ -473,7 +475,8 @@ Claude Code runs `--print --output-format json --json-schema SCHEMA --model MODE
 --system-prompt INSTRUCTIONS` with only the serialized request content on stdin, reading
 `structured_output` and refusing any recorded permission denial or tool use; the turn count is reported,
 not judged, because structured output may take the SDK more than one turn. `--bare` is never used because
-it disables OAuth. `max_input_bytes` still measures instructions plus content. Keeping the instructions
+it disables OAuth. `max_input_bytes` bounds the input as the client receives it: instructions plus content,
+with the blank line between them for the one-prompt client. Keeping the instructions
 in their own channel lowers the chance that thread text steers a summary; it does not remove it, and the
 checks establish structure, exact quotes and coverage, not truth. Read-only sandboxing and never-approval
 contain whatever built-in surface documented controls cannot remove; a bounded pilot must inspect the
