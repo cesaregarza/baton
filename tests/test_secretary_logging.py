@@ -66,7 +66,7 @@ def test_http_client_request_url_does_not_reach_process_stderr(tmp_path) -> None
             policy["summary_bytes"] = 4000
             policy["model"] = {
                 "provider": "openai",
-                "model": "gpt-6-luna",
+                "model": "configured-triage-model",
                 "base_url": f"http://127.0.0.1:{server.server_port}/{marker}/v1",
                 "api_key_env": "SECRETARY_LOG_TEST_KEY",
                 "timeout_seconds": 5,
