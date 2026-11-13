@@ -367,6 +367,17 @@ correction that does not fit), an isolation failure, or an edited source prefix 
 `daily_call_cap = 0` removes only the daily limit, for an authorized catch-up: launches are still
 reserved, counted per UTC day and reported, and the per-request attempt and per-cycle caps still apply.
 
+Before it saves an extraction answer, the worker corrects two copying slips, so that neither refuses a
+whole proposal. It sets the proposal's `binding` from the request it sent: the binding is the host's own
+data, and the schema still asks the model for a copy only so that every path writes the same proposal
+shape. A quote that is not in its post is compared with the post with the markdown marks `*`, `#`,
+backtick and `_` ignored on both sides; when it then matches exactly one place, it is replaced with that
+exact source span, from its first matched character to its last, formatting inside included. Any other
+quote is saved as written and refused as before. Apply checks the saved proposal, so every stored quote
+is exact source text. The worker logs, per call, how many inexact quotes it repaired and whether the
+binding was restored. The manual `apply` and `run` commands correct nothing and still refuse a proposal
+whose binding differs from its request.
+
 A conversation blocks durably only for a cause that belongs to it, or after calls that may have used the
 provider. Every failed call carries one category, fixed where the failure is raised and never read from
 message text, and the category alone decides what happens next:
