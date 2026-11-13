@@ -1,7 +1,10 @@
-"""The graph worker's call budget: a call is reserved before it is launched, within attempt, cycle and daily caps."""
+"""The graph worker's call budget: a call is reserved before it is launched, within attempt, cycle and daily caps.
+
+A call the provider refused without doing any work is refunded and retried on a backoff instead.
+"""
 
 import pytest
-from test_graph_worker import DAY, REFUSALS, Clock, ScriptedTransport, published, run_until_idle, worker_config
+from test_graph_worker import DAY, Clock, ScriptedTransport, published, run_until_idle, worker_config
 from test_index_writer import converse, say
 
 from baton.database.store import connect
@@ -9,6 +12,8 @@ from baton.graph import ledger
 from baton.graph.contract import GraphError
 from baton.graph.source import load_json
 from baton.graph.worker import Worker, reset, status
+
+REFUSALS = ("authentication", "rate_limited", "provider_unavailable", "provider_refused", "unverified_client")
 
 
 def test_calls_are_reserved_before_launch_and_exhaustion_blocks_durably(tmp_path) -> None:

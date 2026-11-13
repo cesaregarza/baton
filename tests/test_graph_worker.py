@@ -29,7 +29,6 @@ from baton.graph.source import load_json
 from baton.graph.worker import Worker, reset, status
 
 DAY = 86_400.0
-REFUSALS = ("authentication", "rate_limited", "provider_unavailable", "provider_refused", "unverified_client")
 
 
 def worker_config(tmp_path: Path, indexer: dict | None = None, **worker) -> config_module.Config:
