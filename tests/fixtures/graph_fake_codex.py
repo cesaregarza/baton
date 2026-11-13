@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 
+sys.stdout.reconfigure(encoding="utf-8")  # raw line separators below are written as UTF-8 under any locale
 dump = Path(sys.argv[1])
 args = sys.argv[2:]
 mode = (dump / "mode").read_text().strip() if (dump / "mode").exists() else "ok"
@@ -52,8 +53,12 @@ if args == ["exec", "--help"]:
     sys.exit(0)
 if args == ["features", "list"]:
     listed = FEATURES[1:] if mode == "missing_feature" else FEATURES
-    listed = [name for name in listed if name != "sleep_tool"] if mode == "no_sleep_tool" else listed
-    print("\n".join(f"{name:40} stable  true" for name in listed))
+    if mode in ("no_sleep_tool", "separated_listing"):
+        listed = [name for name in listed if name != "sleep_tool"]
+    rows = [f"{name:40} stable  true" for name in listed]
+    if mode == "separated_listing":  # the name appears only inside another row, after a line separator
+        rows[-1] += "\u2028sleep_tool"
+    print("\n".join(rows))
     sys.exit(0)
 
 stdin = sys.stdin.buffer.read().decode("utf-8")
@@ -62,7 +67,7 @@ output = args[args.index("--output-last-message") + 1]
 
 
 def event(kind, **fields):
-    sys.stdout.write(json.dumps({"type": kind, **fields}) + "\n")
+    sys.stdout.write(json.dumps({"type": kind, **fields}, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
 
@@ -115,6 +120,8 @@ elif mode == "bigfile":  # a quiet stdout with an oversized last-message file
     Path(output).write_text(json.dumps({**message, "padding": "x" * 150_000}))
 else:
     Path(output).write_text(json.dumps(message))
+if mode == "line_separators":  # JSON allows both raw inside a string
+    event("item.completed", item={"type": "agent_message", "text": "one\u2028two\u0085three"})
 event("item.completed", item={"type": "agent_message", "text": json.dumps(message)})
 event("turn.completed", usage={"input_tokens": 11, "cached_input_tokens": 0, "output_tokens": 5})
 sys.exit(3 if mode == "exit" else 0)

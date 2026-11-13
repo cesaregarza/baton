@@ -414,6 +414,16 @@ def test_the_input_bound_covers_the_whole_prompt_the_event_stream_client_receive
     assert produced["input_bytes"] == channels + 2 == len(recorded(dump)["stdin"].encode("utf-8"))
 
 
+def test_line_separators_inside_client_output_split_nothing(tmp_path) -> None:
+    command, dump = fake(tmp_path, "codex", "line_separators")
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION)
+    # An agent message holding U+2028 and U+0085 raw is one event, not two halves that fail to parse.
+    assert transport.produce(REQUEST, SCHEMA, LIMITS)["candidate"] == {"echo": "req-1"}
+    # A listing without sleep_tool shows the name only after a U+2028 inside another row: it is not listed.
+    (dump / "mode").write_text("separated_listing")
+    assert refusal(transport, REQUEST, LIMITS) == "unverified_client"
+
+
 @pytest.mark.parametrize("name", ["codex", "claude"])
 def test_native_timeouts_and_output_bounds_kill_the_client_and_its_descendants(tmp_path, name) -> None:
     command, dump = fake(tmp_path, name, "hang")
