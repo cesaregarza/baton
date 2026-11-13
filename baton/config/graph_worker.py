@@ -2,7 +2,8 @@
 
 The worker is a host service, separate from secretary inboxes and from the indexer's manual commands. It
 is configured here and nowhere else; an enabled section names a producer from `[indexer] producers`, a
-private state directory outside `data_dir`, an explicit conversation allowlist and one provider mode.
+private state directory outside `data_dir`, an explicit conversation allowlist and one provider mode. The
+`codex` mode also names the worker's own client home, which holds only the worker's login.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ CLIENT_VERSION = re.compile(r"\d+\.\d+\.\d+")
 # Names a model process must never receive: Baton's own credentials, secrets and configuration locations.
 FORBIDDEN_ENV_PREFIXES = ("BATON_",)
 NATIVE_COMMANDS = {"codex": ("codex",), "claude": ("claude",)}
+NATIVE_ONLY = ("client_version", "client_home")
 # (low, high, default, whole): durations may be fractional; counts, byte and token limits are whole numbers.
 LIMITS = {
     "poll_seconds": (1, 86400, 30, False),
@@ -49,7 +51,9 @@ def parse(raw: Any, indexer: Indexer, data_dir: Path, *, base: Path = Path("."))
     producer = raw.get("producer")
     if not isinstance(producer, str) or producer not in indexer.producers:
         raise ConfigError("graph_worker.producer must name a producer listed in indexer.producers")
-    state_dir = _state_dir(raw.get("state_dir"), data_dir, base)
+    state_dir = _private_dir(
+        raw.get("state_dir"), "state_dir", "a private directory path for worker artifacts", data_dir, base
+    )
     conversations = raw.get("conversations")
     if (
         not isinstance(conversations, list)
@@ -80,26 +84,33 @@ def parse(raw: Any, indexer: Indexer, data_dir: Path, *, base: Path = Path("."))
         provider=provider,
         model=model,
         generation=generation,
-        **_transport_fields(raw, provider),
+        **(_http_fields(raw) if provider == "http" else _native_fields(raw, provider, data_dir, base)),
         **limits,
     )
 
 
-def _state_dir(value: Any, data_dir: Path, base: Path) -> Path:
+def _private_dir(value: Any, key: str, purpose: str, data_dir: Path, base: Path) -> Path:
     if not isinstance(value, str) or not value:
-        raise ConfigError("graph_worker.state_dir must be a private directory path for worker artifacts")
+        raise ConfigError(f"graph_worker.{key} must be {purpose}")
     path = Path(value).expanduser()
     path = path if path.is_absolute() else base / path
     if ".." in path.parts:
-        raise ConfigError("graph_worker.state_dir must not contain '..'")
+        raise ConfigError(f"graph_worker.{key} must not contain '..'")
     resolved = Path(str(path)).resolve(strict=False)
     if resolved == data_dir.resolve(strict=False) or resolved.is_relative_to(data_dir.resolve(strict=False)):
-        raise ConfigError("graph_worker.state_dir must be outside host.data_dir")
+        raise ConfigError(f"graph_worker.{key} must be outside host.data_dir")
     return path
 
 
-def _transport_fields(raw: Mapping[str, Any], provider: str) -> dict[str, Any]:
-    return _http_fields(raw) if provider == "http" else _native_fields(raw, provider)
+def _client_home(raw: Mapping[str, Any], data_dir: Path, base: Path) -> Path:
+    """The worker's own client home. Never the operator's home or client home, whose login the worker never reads."""
+    path = _private_dir(
+        raw.get("client_home"), "client_home", "the worker's own client home (it has no default)", data_dir, base
+    )
+    own = Path.home().resolve(strict=False)
+    if path.resolve(strict=False) in (own, own / ".codex"):
+        raise ConfigError("graph_worker.client_home must be a home of the worker's own, not the operator's")
+    return path
 
 
 def _http_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -116,12 +127,14 @@ def _http_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise ConfigError("graph_worker.api_key_env must be an environment variable name")
     if (api_key_env is None) == (not allow_no_key):
         raise ConfigError("graph_worker needs exactly one of api_key_env or allow_no_key = true")
-    if raw.get("credential_env") or raw.get("command") or raw.get("client_version") is not None:
-        raise ConfigError("graph_worker.credential_env, command and client_version apply to native providers only")
+    if raw.get("credential_env") or raw.get("command") or any(raw.get(k) is not None for k in NATIVE_ONLY):
+        raise ConfigError(
+            "graph_worker.credential_env, command, client_version and client_home apply to native providers only"
+        )
     return {"base_url": base_url, "api_key_env": api_key_env, "allow_no_key": allow_no_key}
 
 
-def _native_fields(raw: Mapping[str, Any], provider: str) -> dict[str, Any]:
+def _native_fields(raw: Mapping[str, Any], provider: str, data_dir: Path, base: Path) -> dict[str, Any]:
     for key in ("base_url", "api_key_env", "allow_no_key"):
         if raw.get(key) is not None and raw.get(key) is not False:
             raise ConfigError(f"graph_worker.{key} applies to the http provider only")
@@ -139,7 +152,14 @@ def _native_fields(raw: Mapping[str, Any], provider: str) -> dict[str, Any]:
             "graph_worker.client_version must be the exact version the native client reports (like 1.2.3); "
             "it has no default"
         )
-    return {"credential_env": tuple(names), "command": tuple(command), "client_version": client_version}
+    fields = {"credential_env": tuple(names), "command": tuple(command), "client_version": client_version}
+    if provider != "codex":
+        if raw.get("client_home") is not None:
+            raise ConfigError("graph_worker.client_home applies to codex only")
+        return fields
+    if names:
+        raise ConfigError("graph_worker.credential_env does not apply to codex: its credential is in client_home")
+    return {**fields, "client_home": _client_home(raw, data_dir, base)}
 
 
 def _number(table: Mapping[str, Any], key: str, low: float, high: float, default: float, whole: bool) -> Any:

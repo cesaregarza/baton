@@ -90,12 +90,15 @@ class HttpTransport:
 
 
 def for_config(settings: GraphWorker, *, client: Any = None) -> Transport:
-    """The configured transport; native clients are constructed, not verified, here."""
+    """The configured transport; native clients are constructed, not verified, here (a client home is checked)."""
     if settings.provider == "http":
         assert settings.base_url is not None  # config parsing requires it for the http provider
         return HttpTransport(settings.base_url, settings.model, settings.api_key_env, settings.allow_no_key, client)
     from baton.graph import native
 
     assert settings.client_version is not None  # config parsing requires it for a native provider
-    kind = native.CodexTransport if settings.provider == "codex" else native.ClaudeTransport
-    return kind(list(settings.command), settings.model, list(settings.credential_env), settings.client_version)
+    arguments = (list(settings.command), settings.model, list(settings.credential_env), settings.client_version)
+    if settings.provider == "codex":
+        assert settings.client_home is not None  # config parsing requires it for this provider
+        return native.CodexTransport(*arguments, home=str(settings.client_home))  # refuses a home that isn't private
+    return native.ClaudeTransport(*arguments)

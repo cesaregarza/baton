@@ -389,7 +389,7 @@ message text, and the category alone decides what happens next:
 |---|---|---|
 | `cancelled` | the service stops during the call | spent; nothing returned is applied |
 | `input_limit` | serialized input over `max_input_bytes` (any provider), or a prepare overflow | blocked at once |
-| `isolation` | a native client recorded a permission denial, a tool use or a disallowed event; a refused environment name | blocked at once, whatever else the call reported |
+| `isolation` | a native client recorded a permission denial, a tool use or a disallowed event; Codex's session record for the call is missing or holds anything but messages and reasoning; a refused environment name | blocked at once, whatever else the call reported |
 | `unsafe_source` | prepare, export or load failures | blocked at once |
 | `timeout` | the host's wall-time limit ended the call | charged |
 | `output_limit` | the response is over the byte limit | charged |
@@ -401,7 +401,7 @@ message text, and the category alone decides what happens next:
 | `rate_limited` | HTTP 429 | refusal |
 | `provider_unavailable` | HTTP 408 or 5xx; the connection could not be made | refusal |
 | `provider_refused` | a native client reports an error and its typed fields show no work was done | refusal |
-| `unverified_client` | native client verification failed (version, flags, features, introspection) | refusal |
+| `unverified_client` | native client verification failed (version, flags, introspection, Codex's client home), or Codex's launch check refused what the launch sends | refusal |
 
 A charged call counts against the request's two calls and the daily cap, the first failure waits 60
 seconds, and the second blocks. A refusal is a call the provider declined without doing any work, so it
@@ -462,41 +462,80 @@ flight, in every mode, and waits for its connection or process group to be clean
 completes; the spent attempt stays counted and nothing returned during cancellation is applied or
 published. `codex` and `claude` launch the
 installed, already-authenticated clients: fixed argv, explicit model, an isolated temporary working
-directory, no shell, an allowlisted environment with only runtime basics and the configured
-`credential_env` names (never `BATON_*`), bounded stdin/stdout/stderr and wall time, and process-group
-cleanup on cancellation.
+directory, no shell, an allowlisted environment with only runtime basics (and, for `claude`, the
+configured `credential_env` names, never `BATON_*`), bounded stdin/stdout/stderr and wall time, and
+process-group cleanup on cancellation.
 
 Which client version is trusted is operator configuration: `client_version` is required for `codex` and
 `claude`, refused for `http`, and has no default. Record the exact version you inspected; the worker
 launches only a client that reports exactly that version. Pointing `command` at a versioned executable
-path keeps an automatic update from changing the client under the worker. The flag and feature profiles
-stay in code and are checked against the client's own help output. Every model launch is preceded by a
-passing verification of the executable about to run: the worker resolves `command` the way the launch
-does (on the child's `PATH`, symlinks followed), verifies the client through that file, and runs that
-same file directly. It verifies before every launch, not only when a file changes, because `command`
-cannot name every file the client runs: an interpreter runs a script, and the script loads more. That
-costs a few short introspection processes per call and never a model run. A failed verification at
-service start is logged and leaves the worker running; it is the `unverified_client` refusal, shown in
-`status`, and clears without a restart once the client or the configuration is right.
+path keeps an automatic update from changing the client under the worker. Claude Code's flag profile stays
+in code and is checked against its own help output; Codex is checked by what its launch sends, below. Every
+model launch is preceded by a passing verification of the executable about to run: the worker resolves
+`command` the way the launch does (on the child's `PATH`, symlinks followed), verifies the client through
+that file, and runs that same file directly. It verifies before every launch, not only when a file
+changes, because `command` cannot name every file the client runs: an interpreter runs a script, and the
+script loads more. That costs a few short introspection processes per call and never a model run; for
+Codex it adds the launch check, about two seconds. A failed verification at service start is logged and
+leaves the worker running; it is the `unverified_client` refusal, shown in `status`, and clears without a
+restart once the client or the configuration is right.
 
-Codex runs `exec --ignore-user-config --ephemeral --sandbox read-only --skip-git-repo-check --json
---output-schema --output-last-message -C TEMP` with `approval_policy="never"`, `web_search="disabled"` and
-`features.NAME=false` for `shell_tool`, `apps`, `plugins`, `hooks`, `multi_agent`, `memories`,
-`view_image`, `image_generation`, `browser_use`, `computer_use`, `request_permissions_tool` and
-`sleep_tool`; the worker verifies the version, the documented flags and the feature list and accepts only
-thread/turn status, failure and usage events and assistant text, reasoning or error items. `exec` has no
-system-prompt option, so Codex still receives the instructions and the request content in one prompt.
+Codex runs from `client_home`, a directory of the worker's own that holds only the worker's login. It is
+both `HOME` and `CODEX_HOME` for the client, so the operator's own login, settings, instructions and skills
+are never read, and the worker never copies or touches the operator's login. The worker refuses to start
+the client when `client_home` is unset, is the operator's own home, is not a directory of this user's with
+mode 0700, or holds an `AGENTS.md` or `AGENTS.override.md`; `credential_env` does not apply to `codex`.
+Log the worker in there once yourself:
+
+```sh
+mkdir -m 700 /path/to/worker-home
+HOME=/path/to/worker-home CODEX_HOME=/path/to/worker-home codex login --device-auth
+```
+
+Each call writes its output schema, the contract instructions and a one-model catalog to a private
+temporary directory that is removed afterwards. The catalog is the client's own entry for the model, read
+with `codex debug models`, with the four fields through which an entry adds tools cleared:
+`tool_mode = "direct"` and no `multi_agent_version`, `experimental_supported_tools` or
+`apply_patch_tool_type`. The
+launch is `exec --ignore-user-config --sandbox read-only --skip-git-repo-check --model MODEL --json
+--output-schema SCHEMA --output-last-message FILE -C TEMP` with `approval_policy="never"`,
+`web_search="disabled"`, `features.NAME=false` for `shell_tool`, `apps`, `plugins`, `hooks`, `multi_agent`,
+`memories`, `view_image`, `image_generation`, `browser_use`, `computer_use`, `request_permissions_tool`,
+`sleep_tool`, `goals` and `incremental_tools`, the permission, collaboration-mode, environment and skill
+instructions switched off, the request-user-input tool disabled, `model_catalog_json` naming the catalog
+and `model_instructions_file` naming the instructions. Only the serialized request content goes to stdin.
+
+None of these switches is trusted to remove the client's tools; two checks look at what the client does
+instead. Before every launch, the worker runs the same launch against a capture listener on 127.0.0.1
+inside the worker, from a new empty home with no login and no credential variable, with a fixed made-up
+probe in place of the content. The client's base URL and every proxy variable point at the capture, which
+refuses proxy tunnels and any request carrying an Authorization header, answers only with errors and never
+reaches a model. The launch is refused (`unverified_client`) unless every request captured there has no
+`tools` field anywhere, holds only message and reasoning-configuration items, carries developer text equal
+to the instructions and holds the probe exactly once as the user message. After every call, the worker reads
+the call's session record from `client_home` (the file named by the thread the event stream started) and
+refuses the attempt (`isolation`) when it is missing or holds anything but messages and reasoning, because
+the event stream does not show every tool call. A passing record is deleted, since it holds thread text; a
+refused one is kept for the operator. The event stream must still show only thread/turn status, failure and
+usage events and assistant text, reasoning or error items.
+
+These checks show two things and no more. The launch check shows that this client, given this argv and
+these files, builds requests that offer no tools and whose only messages are the instructions and the
+probe, when it runs without a login; anything the client does differently once logged in, or anything the
+provider adds on its side, is outside what it sees. The record check shows that the client recorded no item but
+messages and reasoning for the call; it relies on the client's own record. The probe stays on 127.0.0.1
+because every address the client is given points there, which is configuration of the client, not a network
+sandbox. Read-only sandboxing and never-approval contain whatever neither check sees; a bounded pilot must
+inspect the real event stream before enrollment widens.
+
 Claude Code runs `--print --output-format json --json-schema SCHEMA --model MODEL --tools ""
 --strict-mcp-config --mcp-config EMPTY --safe-mode --disable-slash-commands --no-session-persistence
 --system-prompt INSTRUCTIONS` with only the serialized request content on stdin, reading
 `structured_output` and refusing any recorded permission denial or tool use; the turn count is reported,
 not judged, because structured output may take the SDK more than one turn. `--bare` is never used because
-it disables OAuth. `max_input_bytes` bounds the input as the client receives it: instructions plus content,
-with the blank line between them for the one-prompt client. Keeping the instructions
-in their own channel lowers the chance that thread text steers a summary; it does not remove it, and the
-checks establish structure, exact quotes and coverage, not truth. Read-only sandboxing and never-approval
-contain whatever built-in surface documented controls cannot remove; a bounded pilot must inspect the
-real event stream before enrollment widens.
+it disables OAuth. `max_input_bytes` bounds the input as the client receives it: instructions plus content.
+Keeping the instructions in their own channel lowers the chance that thread text steers a summary; it does
+not remove it, and the checks establish structure, exact quotes and coverage, not truth.
 
 Readers see the result through five read-only MCP tools. Scoped work starts with `search_graph`, which
 returns the standing statements and active decisions matching a few words as one line each (id, strands,
