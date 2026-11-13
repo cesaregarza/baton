@@ -1,10 +1,11 @@
 """The graph worker's call budget: a call is reserved before it is launched, within attempt, cycle and daily caps.
 
-A call the provider refused without doing any work is refunded and retried on a backoff instead.
+A call the provider refused without doing any work is refunded and retried on a backoff instead. The meter counts
+what settled calls used and how many posts were accepted.
 """
 
 import pytest
-from test_graph_worker import DAY, Clock, ScriptedTransport, published, run_until_idle, worker_config
+from test_graph_worker import DAY, USAGE, Clock, ScriptedTransport, kinds, published, run_until_idle, worker_config
 from test_index_writer import converse, say
 
 from baton.database.store import connect
@@ -65,7 +66,7 @@ def test_calls_are_reserved_before_launch_and_exhaustion_blocks_durably(tmp_path
 def test_provider_refusals_are_refunded_never_block_and_back_off_to_an_hourly_ceiling(tmp_path) -> None:
     config = worker_config(tmp_path, conversations=["placeholder"])
     with connect(config.db_path) as db:
-        cid, _ = converse(db, config, 4)
+        cid, _ = converse(db, config, 2)
     config = worker_config(tmp_path, conversations=[cid], daily_call_cap=2)
     clock = Clock()
     day = ledger.utc_day(clock.now)
@@ -87,6 +88,9 @@ def test_provider_refusals_are_refunded_never_block_and_back_off_to_an_hourly_ce
     # The next answered call proceeds normally: nine refusals did not use up a daily cap of two.
     answered = worker.cycle()["records"][cid]
     assert (answered["phase"], answered["accepted_W"], answered["refusals"]) == ("compacting", 2, 0)
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 3")
+        say(db, config, cid, "note 4")
     while worker.cycle()["records"][cid]["phase"] != "pending":  # compaction and publication make no call
         pass
     assert refused_until_answered(REFUSALS) == [60, 120, 240, 480, 960]
@@ -191,3 +195,69 @@ def test_unlimited_daily_cap_still_counts_calls_and_keeps_cycle_and_attempt_boun
         say(db, config, second_cid, "note 6")
     run_until_idle(restarted, clock)
     assert status(config)["calls"] == {ledger.utc_day(clock.now): 1}  # the counter still rolls over by UTC day
+
+
+def test_the_meter_counts_calls_tokens_and_posts_per_utc_day_and_per_conversation(tmp_path) -> None:
+    limits = {"max_artifact_bytes": 120}
+    config = worker_config(tmp_path, limits, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 2)
+    config = worker_config(tmp_path, limits, conversations=[cid], daily_call_cap=0)
+    clock = Clock()
+    first_day = ledger.utc_day(clock.now)
+    transport = ScriptedTransport(["rate_limited"])  # refunded, so not a call on the meter either
+    worker = Worker(config, transport=transport, clock=clock)
+    run_until_idle(worker, clock)
+    clock.now += DAY
+    second_day = ledger.utc_day(clock.now)
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 3")
+        say(db, config, cid, "note 4")
+    run_until_idle(worker, clock)
+    assert kinds(transport) == ["extract", "extract", "summary", "extract", "summary"]
+
+    def row(calls, posts, **extra):
+        tokens = {key: value * calls for key, value in USAGE.items()}
+        per_post = {
+            f"{key}_per_post": tokens[key] / posts if posts else None for key in ("input_tokens", "output_tokens")
+        }
+        return {"calls": calls, **tokens, "posts": posts, **per_post, **extra}
+
+    meter = status(config)["meter"]
+    assert meter["days"] == [row(2, 2, day=first_day), row(2, 2, day=second_day)]
+    assert meter["conversations"] == {cid: row(4, 4)}
+    # Forty days on: two rejected extraction calls and no accepted post; the old days are dropped.
+    clock.now += 40 * DAY
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 5")
+    transport.script = ["garbage", "garbage"]
+    assert run_until_idle(worker, clock)[-1]["records"][cid]["phase"] == "blocked"
+    meter = status(config)["meter"]
+    assert meter["days"] == [row(2, 0, day=ledger.utc_day(clock.now))]
+    assert meter["conversations"] == {cid: row(6, 4)}
+    assert list(load_json(config.graph_worker.state_dir / "ledger.json")["meter"]) == [ledger.utc_day(clock.now)]
+
+
+def test_an_interrupted_acceptance_meters_its_posts_once(tmp_path, monkeypatch) -> None:
+    config = worker_config(tmp_path, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 2)
+    config = worker_config(tmp_path, conversations=[cid])
+    clock = Clock()
+    save, crashes = ledger.Ledger.save, {"left": 1}
+
+    def crash_before_the_watermark_is_saved(self) -> None:
+        if crashes["left"] and self.state["conversations"][cid]["accepted_W"] == 2:
+            crashes["left"] -= 1
+            raise RuntimeError("synthetic crash before the accepted watermark is saved")
+        save(self)
+
+    monkeypatch.setattr(ledger.Ledger, "save", crash_before_the_watermark_is_saved)
+    with pytest.raises(RuntimeError, match="accepted watermark"):
+        Worker(config, transport=ScriptedTransport(), clock=clock).cycle()
+    # The restart finds the graph already at W2, records it without a call and counts its two posts once.
+    transport = ScriptedTransport()
+    record = run_until_idle(Worker(config, transport=transport, clock=clock), clock)[-1]["records"][cid]
+    assert (record["accepted_W"], record["published_W"], transport.calls) == (2, 2, [])
+    assert status(config)["meter"]["conversations"][cid]["posts"] == 2
+    assert [day["posts"] for day in status(config)["meter"]["days"]] == [2]

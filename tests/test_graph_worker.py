@@ -10,9 +10,11 @@ contract in `test_graph_compact`; both use the scripted producers defined here.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,7 @@ from baton.graph.source import load_json
 from baton.graph.worker import Worker, reset, status
 
 DAY = 86_400.0
+USAGE = {"input_tokens": 11, "cached_input_tokens": 3, "output_tokens": 5}
 
 
 def worker_config(tmp_path: Path, indexer: dict | None = None, **worker) -> config_module.Config:
@@ -43,6 +46,7 @@ def worker_config(tmp_path: Path, indexer: dict | None = None, **worker) -> conf
         "base_url": "https://provider.invalid/v1",
         "allow_no_key": True,
         "batch_size": 2,
+        "max_wait_seconds": 0,
         **worker,
     }
     return replace(
@@ -94,7 +98,7 @@ class ScriptedTransport:
             candidate = compact_candidate(request, action if isinstance(action, dict) else {})
         else:
             candidate = extraction_candidate(request)
-        return {"candidate": candidate, "usage": {"total_tokens": 7}, "input_bytes": 1, "output_bytes": 2, "turns": 1}
+        return {"candidate": candidate, "usage": dict(USAGE), "input_bytes": 1, "output_bytes": 2, "turns": 1}
 
 
 def extraction_candidate(request):
@@ -240,7 +244,7 @@ def test_a_host_without_full_text_search_is_refused_when_the_worker_starts(tmp_p
 def test_worker_extracts_compacts_publishes_and_readers_see_the_snapshot(tmp_path) -> None:
     config = worker_config(tmp_path, conversations=["placeholder"])
     with connect(config.db_path) as db:
-        cid, mids = converse(db, config, 3)
+        cid, mids = converse(db, config, 2)
     config = worker_config(tmp_path, conversations=[cid])
     clock = Clock()
     transport = ScriptedTransport()
@@ -251,9 +255,11 @@ def test_worker_extracts_compacts_publishes_and_readers_see_the_snapshot(tmp_pat
         "compacting",
         2,
         0,
-        3,
+        2,
     )
     assert first["model_calls"] == 1 and transport.calls[0]["schema"]["properties"].keys() >= {"binding", "statements"}
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 3")  # after the first batch, so the summary still follows that batch
     second = worker.cycle()  # the deterministic view fits the bounds, so compaction needs no model call
     assert second["records"][cid]["phase"] == "publishing" and second["model_calls"] == 0
     third = worker.cycle()
@@ -298,7 +304,13 @@ def test_restart_consumes_the_in_flight_reservation_and_reuses_saved_candidates(
     assert ledger_file["in_flight"] is None and ledger_file["recent_calls"][-1]["outcome"] == "crash"
     assert ledger_file["conversations"][cid]["attempts"] == 1
     # Simulate a process that died between reserving and settling: the reservation is consumed on restart.
-    ledger_file["in_flight"] = {"conversation_id": cid, "phase": "extracting", "request_digest": "x", "attempt": 2}
+    ledger_file["in_flight"] = {
+        "conversation_id": cid,
+        "phase": "extracting",
+        "request_digest": "x",
+        "reserved_at": clock.now,
+        "attempt": 2,
+    }
     ledger_file["conversations"][cid]["attempts"] = 2
     ledger_file["calls"] = {ledger.utc_day(clock.now): 2}
     # Written in the version-1 format, without the refusal counters: opening it upgrades it in place.
@@ -309,8 +321,11 @@ def test_restart_consumes_the_in_flight_reservation_and_reuses_saved_candidates(
     restarted = Worker(config, transport=ScriptedTransport(), clock=clock)
     first = restarted.cycle()
     upgraded = load_json(config.graph_worker.state_dir / "ledger.json")
-    assert (upgraded["version"], upgraded.get("refused"), upgraded["calls"]) == (2, {}, {ledger.utc_day(clock.now): 2})
+    assert (upgraded["version"], upgraded.get("refused"), upgraded["calls"]) == (3, {}, {ledger.utc_day(clock.now): 2})
     assert upgraded["conversations"][cid].get("refusals") == 0
+    # The meter starts empty on upgrade; the interrupted reservation settled afterwards is its first call.
+    spent = {"calls": 1, "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "posts": 0}
+    assert upgraded["meter"] == {ledger.utc_day(clock.now): spent} and upgraded["conversations"][cid]["meter"] == spent
     assert first["interrupted"]["attempt"] == 2
     assert first["records"][cid]["phase"] == "blocked"  # both extraction calls were spent without a candidate
     assert restarted.transport.calls == []
@@ -378,7 +393,7 @@ def test_compact_retries_alone_and_publication_recovers_with_zero_calls(tmp_path
     )
     # The first request and its correction both state the configured bounds the host will enforce.
     for call in transport.calls[1:]:
-        assert call["request"]["limits"] == {"max_body_bytes": 120, "max_citations": 7}
+        assert call["request"]["limits"] == {"max_body_bytes": 120, "max_body_words": 15, "max_citations": 7}
     snapshot_digest = corrected["records"][cid]["request_id"].removeprefix("publish:")
     view = load_json(worker.paths(cid).compact_view(snapshot_digest))
     assert view["body"].startswith("Release: review the notes")
@@ -547,7 +562,7 @@ def test_removed_allowlist_entries_keep_their_records_but_are_never_scheduled(tm
 def test_restart_between_apply_and_bookkeeping_publishes_the_accepted_batch_first(tmp_path, monkeypatch) -> None:
     config = worker_config(tmp_path, conversations=["placeholder"])
     with connect(config.db_path) as db:
-        cid, _ = converse(db, config, 4)
+        cid, _ = converse(db, config, 2)
     config = worker_config(tmp_path, conversations=[cid])
     clock = Clock()
     from baton.graph import worker as worker_module
@@ -571,6 +586,9 @@ def test_restart_between_apply_and_bookkeeping_publishes_the_accepted_batch_firs
     recovered = restarted.cycle()
     record = recovered["records"][cid]
     assert (record["phase"], record["accepted_W"], recovered["model_calls"]) == ("compacting", 2, 0)
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 3")
+        say(db, config, cid, "note 4")
     results = run_until_idle(restarted, clock)
     assert results[-1]["records"][cid]["published_W"] == 4
     with connect(config.db_path) as db:
@@ -659,3 +677,106 @@ def test_service_owns_its_directory_for_life_and_stop_cancels_the_native_call(tm
     idle_service.join(timeout=15)
     assert not idle_service.is_alive()
     assert reset(config, cid)["phase"] == "pending"  # released with the service
+
+
+def kinds(transport):
+    return ["summary" if "compact_schema" in call["request"] else "extract" for call in transport.calls]
+
+
+def test_a_thread_waits_for_a_full_batch_or_for_its_oldest_post(tmp_path) -> None:
+    settings = {"batch_size": 3, "max_wait_seconds": 3600}
+    config = worker_config(tmp_path, conversations=["placeholder"], **settings)
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 2)
+    config = worker_config(tmp_path, conversations=[cid], **settings)
+    clock = Clock(time.time())  # posts are stamped with the wall clock, so the worker starts from it
+    transport = ScriptedTransport()
+    worker = Worker(config, transport=transport, clock=clock)
+    young = worker.cycle()
+    assert young["records"][cid]["phase"] == "idle" and transport.calls == []
+    assert young["records"][cid]["target_head"] == 2  # the head is still tracked exactly
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 3")  # a full batch is waiting
+    full = worker.cycle()
+    assert full["model_calls"] == 1 and full["records"][cid]["accepted_W"] == 3
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 4")  # one young post: publication leaves the thread idle, not pending
+    record = run_until_idle(worker, clock)[-1]["records"][cid]
+    assert (record["phase"], record["published_W"], record["target_head"]) == ("idle", 3, 4)
+    assert kinds(transport) == ["extract"]
+    with connect(config.db_path) as db:
+        oldest = db.execute(
+            "SELECT MIN(at) FROM messages WHERE conversation_id = ? AND conversation_seq = 4", (cid,)
+        ).one()[0]
+    clock.now = datetime.fromisoformat(oldest).timestamp() + 3599
+    assert worker.cycle()["records"][cid]["phase"] == "idle" and len(transport.calls) == 1
+    clock.now += 1  # the oldest waiting post has now waited max_wait_seconds
+    aged = worker.cycle()
+    assert aged["model_calls"] == 1 and aged["records"][cid]["accepted_W"] == 4
+    run_until_idle(worker, clock)
+    # With max_wait_seconds = 0 one new post is due at once.
+    eager = Worker(worker_config(tmp_path, conversations=[cid], batch_size=3), transport=transport, clock=clock)
+    with connect(config.db_path) as db:
+        say(db, config, cid, "note 5")
+    assert eager.cycle()["model_calls"] == 1 and len(transport.calls) == 3
+
+
+def test_a_backlog_runs_its_batches_before_one_summary_unless_the_summary_is_far_behind(tmp_path) -> None:
+    limits = {"max_artifact_bytes": 120}  # the deterministic view does not fit, so every summary is a call
+    config = worker_config(tmp_path, limits, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 6)
+    config = worker_config(tmp_path, limits, conversations=[cid], daily_call_cap=0)
+    clock = Clock()
+    transport = ScriptedTransport()
+    worker = Worker(config, transport=transport, clock=clock)
+    record = run_until_idle(worker, clock)[-1]["records"][cid]
+    assert kinds(transport) == ["extract", "extract", "extract", "summary"]
+    assert (record["phase"], record["accepted_W"], record["published_W"]) == ("idle", 6, 6)
+    with connect(config.db_path) as db:
+        assert published(db, cid) == [(6, 1, 3)]  # one publication jumped three accepted revisions
+    # A summary 100 or more posts behind runs although a further batch is due.
+    root = tmp_path / "far"
+    config = worker_config(root, limits, conversations=["placeholder"])
+    roomy = replace(config, conversations=replace(config.conversations, max_messages_per_hour=1000))
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, roomy, 151)
+    config = worker_config(root, limits, conversations=[cid], batch_size=50, daily_call_cap=0)
+    transport = ScriptedTransport()
+    run_until_idle(Worker(config, transport=transport, clock=clock), clock, cycles=30)
+    assert kinds(transport) == ["extract", "extract", "summary", "extract", "extract", "summary"]
+    with connect(config.db_path) as db:
+        assert published(db, cid) == [(100, 1, 2), (151, 2, 4)]
+
+
+def test_a_backlog_is_published_before_it_would_outgrow_one_publication(tmp_path) -> None:
+    indexer = {"max_manifest_items": 2}  # one publication covers at most two posts
+    config = worker_config(tmp_path, indexer, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 4)
+    config = worker_config(tmp_path, indexer, conversations=[cid])
+    clock = Clock()
+    record = run_until_idle(Worker(config, transport=ScriptedTransport(), clock=clock), clock)[-1]["records"][cid]
+    assert (record["phase"], record["accepted_W"], record["published_W"]) == ("idle", 4, 4)
+    with connect(config.db_path) as db:
+        assert published(db, cid) == [(2, 1, 1), (4, 2, 2)]
+    # A batch that no publication could cover is refused when the configuration is read.
+    with pytest.raises(ConfigError, match="max_manifest_items"):
+        worker_config(tmp_path, indexer, conversations=[cid], batch_size=3)
+
+
+def test_a_summary_request_states_a_word_limit_and_a_rejection_states_the_measured_bytes(tmp_path) -> None:
+    limits = {"max_artifact_bytes": 120}
+    config = worker_config(tmp_path, limits, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 2)
+    config = worker_config(tmp_path, limits, conversations=[cid])
+    clock = Clock()
+    transport = ScriptedTransport(["ok", {"body": "\u00e9" * 100}, "ok"])  # 100 characters, 200 UTF-8 bytes
+    worker = Worker(config, transport=transport, clock=clock)
+    run_until_idle(worker, clock)
+    first, second = transport.calls[1]["request"], transport.calls[2]["request"]
+    assert first["limits"]["max_body_words"] == 120 // 8 and "max_body_words" in first["instructions"]
+    numbers = {int(found) for found in re.findall(r"\d+", second["correction"]["validation_error"])}
+    assert {200, 120} <= numbers
+    assert status(config)["conversations"][cid]["published_W"] == 2

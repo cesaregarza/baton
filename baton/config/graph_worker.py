@@ -26,6 +26,7 @@ NATIVE_COMMANDS = {"codex": ("codex",), "claude": ("claude",)}
 LIMITS = {
     "poll_seconds": (1, 86400, 30, False),
     "batch_size": (1, 500, 20, True),
+    "max_wait_seconds": (0, 604_800, 21_600, True),  # 0: every waiting post is due at once
     "max_input_bytes": (1000, 50_000_000, 512_000, True),
     "max_response_bytes": (1000, 100_000_000, 4_000_000, True),
     "call_timeout_seconds": (1, 3600, 300, False),
@@ -67,6 +68,10 @@ def parse(raw: Any, indexer: Indexer, data_dir: Path, *, base: Path = Path("."))
     if generation is not None and (not isinstance(generation, str) or not generation):
         raise ConfigError("graph_worker.generation must be a generation id when given")
     limits = {key: _number(raw, key, *bounds) for key, bounds in LIMITS.items()}
+    if limits["batch_size"] > indexer.max_manifest_items:
+        raise ConfigError(
+            "graph_worker.batch_size must be at most indexer.max_manifest_items: one publication covers a whole batch"
+        )
     return GraphWorker(
         enabled=True,
         producer=producer,

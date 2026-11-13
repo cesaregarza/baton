@@ -187,6 +187,8 @@ class GraphWorker:
     generation: str | None = None
     poll_seconds: float = 30
     batch_size: int = 20
+    # How long the oldest waiting post may wait for a full batch before a smaller one is due.
+    max_wait_seconds: int = 21_600
     max_input_bytes: int = 512_000
     max_response_bytes: int = 4_000_000
     call_timeout_seconds: float = 300

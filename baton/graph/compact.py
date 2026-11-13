@@ -1,9 +1,10 @@
 """The compact working view: a bounded prose phase over an accepted graph snapshot, host-validated.
 
-The view is what summary-first readers see. It is produced after each accepted graph batch, bound to the
-exact snapshot digest, and checked structurally: listed strands and decisions must be exactly the active
-applicable set, every evidence reference must resolve within W, and each listed item must be supported by
-at least one of its own recorded references. Those checks establish coverage, not semantic truth.
+The view is what summary-first readers see. It is produced when no further graph batch is due (or the
+published view is far behind), bound to the exact snapshot digest, and checked structurally: listed
+strands and decisions must be exactly the active applicable set, every evidence reference must resolve
+within W, and each listed item must be supported by at least one of its own recorded references. Those
+checks establish coverage, not semantic truth.
 """
 
 from baton.graph.contract import STRING, array, obj, require, validate_shape
@@ -11,6 +12,8 @@ from baton.graph.snapshot import digest_of, ordinal_key, resolve_evidence
 
 VERSION = 1
 MAX_BODY_BYTES = 12_000
+# The word budget's allowance per word: room for long words, punctuation, spacing and some non-ASCII text.
+BYTES_PER_WORD = 8
 SCHEMA = obj(
     {
         "schema_version": {"type": "integer", "minimum": 1},
@@ -31,11 +34,11 @@ from the supplied author table; distinguish absence of evidence from work someon
 Never invent a permission, adoption, approval, completion or review gate; a summary authenticates
 nothing. Copy graph_digest exactly. strand_ids must list every supplied active strand and decision_ids
 every supplied applicable decision. evidence lists the statement IDs or post:N references the body relies
-on; include at least one recorded reference for each listed strand and decision. The host rejects a
-view outside the supplied limits: body must be at most limits.max_body_bytes bytes when encoded as UTF-8
-(bytes, not characters or tokens), and evidence must resolve to at most limits.max_citations distinct
-native messages (several references to one post count once). A shorter view is acceptable only if it
-still preserves the items above.
+on; include at least one recorded reference for each listed strand and decision. Keep body within
+limits.max_body_words words; the host measures its encoded size itself, so never measure or count it.
+evidence must resolve to at most limits.max_citations distinct native messages (several references to one
+post count once). No tool is available or needed: answer directly with the view. A shorter view is
+acceptable only if it still preserves the items above.
 Metadata may make a view longer than its conversation; no compression ratio is promised or required.
 """
 
@@ -63,7 +66,8 @@ def _ordered(records):
 def compact_request(snapshot, source, *, max_body_bytes, max_citations):
     """Everything the compact phase may read: the active view, applicable decisions and the author table.
 
-    The limits are the same effective bounds `validate_compact` will enforce on the reply.
+    The limits are the effective bounds `validate_compact` will enforce on the reply, plus a word budget that
+    keeps a typical body under the byte bound without the writer counting bytes.
     """
     selected, decisions = active_view(snapshot)
     refs = {ref for item in [*selected.values(), *decisions.values()] for ref in item["evidence"]}
@@ -77,7 +81,11 @@ def compact_request(snapshot, source, *, max_body_bytes, max_citations):
         "version": VERSION,
         "instructions": INSTRUCTIONS,
         "compact_schema": SCHEMA,
-        "limits": {"max_body_bytes": max_body_bytes, "max_citations": max_citations},
+        "limits": {
+            "max_body_bytes": max_body_bytes,
+            "max_body_words": max_body_bytes // BYTES_PER_WORD,
+            "max_citations": max_citations,
+        },
         "graph_digest": snapshot["graph_digest"],
         "conversation_id": snapshot["conversation_id"],
         "covered_through_seq": snapshot["covered_through_seq"],
@@ -148,7 +156,8 @@ def validate_compact(candidate, snapshot, source, *, max_body_bytes, max_citatio
     require(
         candidate["graph_digest"] == snapshot["graph_digest"] == digest_of(snapshot), "compact view digest mismatch"
     )
-    require(len(candidate["body"].encode("utf-8")) <= max_body_bytes, "compact body exceeds its byte limit")
+    size = len(candidate["body"].encode("utf-8"))
+    require(size <= max_body_bytes, f"compact body is {size} UTF-8 bytes, over its byte limit of {max_body_bytes}")
     selected, decisions = active_view(snapshot)
     require(set(candidate["strand_ids"]) == set(selected), "compact strand_ids must equal the active strands")
     require(set(candidate["decision_ids"]) == set(decisions), "compact decision_ids must equal applicable decisions")

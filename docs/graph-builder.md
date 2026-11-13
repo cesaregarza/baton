@@ -334,13 +334,27 @@ call. The `[graph_worker]` section (see `baton.example.toml`) is off by default;
 `baton serve`, the worker polls the allowlisted conversations in read snapshots, exports each canonical
 native prefix into its private `state_dir`, runs the existing prepare/apply contract one batch at a
 time, produces a compact working view, and publishes view and graph together through the derived batch
-protocol. `baton index graph-worker status` shows its ledger; `baton index graph-worker reset
+protocol. `baton index graph-worker status` shows its ledger and meter; `baton index graph-worker reset
 --conversation ID` is the only way a blocked record resumes. It works whether or not the service runs:
 with the service stopped it applies at once; while the service runs (and holds the ledger lock) the command
 leaves a reset request in `state_dir`, says so, and the worker applies it under its own lock at the start of
 its next cycle and removes it. A request names one conversation that has a ledger record and carries
 nothing else; the command refuses any other, and the worker ignores and removes any other it finds.
 The manual export/prepare/apply/publish commands above remain diagnostic and test harnesses.
+
+A thread is graphed when a batch is due: `batch_size` posts (default 20) are waiting past the accepted
+watermark, or the oldest of them (the first post after the watermark, dated from the canonical message
+table) has waited `max_wait_seconds` (default 21600, six hours; at most 604800). With
+`max_wait_seconds = 0` every waiting post is due at once. Deciding needs no export and no model call, and
+a new post alone no longer makes a thread pending; `target_head` still tracks the canonical head. After a
+batch is applied the thread takes the next due batch at once, and is summarized (the compact phase, then
+publication) when no further batch is due, when the published summary is 100 or more posts behind the
+graph, or when one more batch would leave more unpublished posts than one publication covers
+(`indexer.max_manifest_items`; a `batch_size` above it is refused when the configuration is read). A
+backlog therefore costs one summary call, not one per batch, and one publication covers every batch
+accepted since the last. Known limit: a thread that blocks in the middle of a backlog can leave up to 99
+graphed posts without a published summary until it is reset; readers get those posts raw, and the
+ledger's `accepted_W` and `published_W` show the gap.
 
 Every model launch is reserved first in one atomically replaced ledger (`ledger.json`) under a
 process-lifetime lock, so a crash consumes it and a second worker exits without inference. Extraction
@@ -402,12 +416,25 @@ strands, not the length of the thread. A saved request written under another pro
 deleted and prepared again with a full attempt count, because no answer to it could be applied.
 Localized repair is not part of this increment.
 
+The ledger also keeps a meter: calls, input tokens (cached included), cached input tokens, output
+tokens and posts accepted, per UTC day for the 30 most recent days and as running totals in each
+conversation's record. Calls and tokens are added when a call settles, from the usage its transport
+reported (zero where it reported none, as after a timeout or a failed call); a refunded refusal is not a
+call here either. Posts are added when a batch is applied. `graph-worker status` prints `meter.days` and
+`meter.conversations`, each row with `input_tokens_per_post` and `output_tokens_per_post` (null while no
+post was accepted). The meter holds counters only, and the daily cap is still enforced from `calls`, not
+from the meter. A ledger written before the meter opens with it empty.
+
 The compact view is checked structurally before publication: it must name exactly the active strands and
 the active decisions applicable to them (or to all), cite only evidence that resolves within W, cite at
 least one recorded reference for every listed item, bind the exact snapshot digest, and fit
 `min(12000, max_artifact_bytes)` UTF-8 bytes and `max_citations` resolved native messages. Every compact
-request, including a correction, states those two effective numbers in `limits`. The deterministic rendering is published without a model call
-when it already fits. The instructions ask the writer to keep requested next work and its owners,
+request, including a correction, states those two effective numbers in `limits`, with `max_body_words`
+(the byte bound divided by 8, 1500 at the default). The instructions ask for a body within that many
+words, say the host measures the encoded size itself and that no tool is available or needed, and never
+ask the writer to count bytes. The host still checks bytes exactly, and a rejected body's correction
+states its measured size and the limit in bytes. The deterministic rendering is published without a model
+call when it already fits. The instructions ask the writer to keep requested next work and its owners,
 unresolved contradictions, continuing shared constraints and the exact artifact or test scope the next
 action needs, to state repeated rules once, to put historical proof behind references, to attribute
 claims to source authors and to separate absence of evidence from requested work; they forbid inventing
@@ -441,9 +468,9 @@ service start is logged and leaves the worker running; it is the `unverified_cli
 Codex runs `exec --ignore-user-config --ephemeral --sandbox read-only --skip-git-repo-check --json
 --output-schema --output-last-message -C TEMP` with `approval_policy="never"`, `web_search="disabled"` and
 `features.NAME=false` for `shell_tool`, `apps`, `plugins`, `hooks`, `multi_agent`, `memories`,
-`view_image`, `image_generation`, `browser_use`, `computer_use` and `request_permissions_tool`; the
-worker verifies the version, the documented flags and the feature list and accepts only thread/turn
-status, failure and usage events and assistant text, reasoning or error items. `exec` has no
+`view_image`, `image_generation`, `browser_use`, `computer_use`, `request_permissions_tool` and
+`sleep_tool`; the worker verifies the version, the documented flags and the feature list and accepts only
+thread/turn status, failure and usage events and assistant text, reasoning or error items. `exec` has no
 system-prompt option, so Codex still receives the instructions and the request content in one prompt.
 Claude Code runs `--print --output-format json --json-schema SCHEMA --model MODEL --tools ""
 --strict-mcp-config --mcp-config EMPTY --safe-mode --disable-slash-commands --no-session-persistence

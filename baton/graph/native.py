@@ -45,6 +45,7 @@ CODEX_FEATURES = (
     "browser_use",
     "computer_use",
     "request_permissions_tool",
+    "sleep_tool",
 )
 CODEX_OVERRIDES = ('approval_policy="never"', 'web_search="disabled"')
 CODEX_EXEC_FLAGS = (

@@ -16,6 +16,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,7 @@ from baton.graph.context import require_search
 from baton.graph.contract import SCHEMA, GraphError, current
 from baton.graph.export import export_source
 from baton.graph.failure import DURABLE, REFUSALS, Category, TransportError
-from baton.graph.ledger import RETRY_DELAY, Budget, Ledger, WorkerBusy, next_utc_day, refusal_delay
+from baton.graph.ledger import RETRY_DELAY, Budget, Ledger, WorkerBusy, meter_report, next_utc_day, refusal_delay
 from baton.graph.operations import InputOverflow, apply, prepare
 from baton.graph.publication import publish_graph
 from baton.graph.source import canonical, digest, load_json, load_source
@@ -39,6 +40,8 @@ from baton.graph.transport import Limits, Transport, for_config
 log = logging.getLogger("baton.graph.worker")
 EXTRACTION_CALLS = 2
 COMPACT_CALLS = 2
+# A published summary this many posts behind the graph is refreshed before any further batch is taken.
+SUMMARY_BACKLOG = 100
 # One empty file per conversation to reset, named by its id; the running worker applies and removes them.
 RESET_REQUESTS = "reset-requests"
 
@@ -179,7 +182,7 @@ class Worker:
                 log.warning("graph worker could not remove a reset request entry")
 
     def poll(self, ledger: Ledger) -> None:
-        """Compare canonical heads with graph W in one read snapshot; coalesce to one pending target each."""
+        """Compare canonical heads with graph W in one read snapshot; an idle thread is pending once a batch is due."""
         with connection(self.config.db_path) as conn, conn.snapshot():
             for conversation_id in self.settings.conversations:
                 row = conn.execute("SELECT last_seq FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
@@ -189,10 +192,39 @@ class Worker:
                 head = row["last_seq"]
                 if record["phase"] == "blocked":
                     continue
-                if record["phase"] == "idle" and head > record["accepted_W"]:
+                if record["phase"] == "idle" and self._due(conn, conversation_id, head, record["accepted_W"]):
                     ledger.update(conversation_id, phase="pending", target_head=head)
                 elif head != record["target_head"]:
                     ledger.update(conversation_id, target_head=head)
+
+    def _due(self, conn: Any, conversation_id: str, head: int, accepted: int) -> bool:
+        """A batch is due when a full one waits or the first post after `accepted` has waited max_wait_seconds."""
+        waiting, max_wait = head - accepted, self.settings.max_wait_seconds
+        if waiting <= 0:
+            return False
+        if waiting >= self.settings.batch_size or max_wait == 0:
+            return True
+        oldest = conn.execute(
+            "SELECT MIN(at) FROM messages WHERE conversation_id = ? AND conversation_seq = ?",
+            (conversation_id, accepted + 1),
+        ).fetchone()[0]
+        if oldest is None:  # no copy left to date it: due, so the export reports the gap as before
+            return True
+        return self.clock() - datetime.fromisoformat(oldest).timestamp() >= max_wait
+
+    def _next_phase(self, conversation_id: str, target_head: int, accepted: int, published: int) -> str:
+        """After a batch or a publication: another due batch first, unless the summary is far behind.
+
+        One publication covers at most `indexer.max_manifest_items` posts, so the summary is also published before a
+        further batch would leave more unpublished posts than that.
+        """
+        with connection(self.config.db_path) as conn:
+            due = self._due(conn, conversation_id, target_head, accepted)
+        unpublished = accepted - published
+        room = self.config.indexer.max_manifest_items - self.settings.batch_size
+        if unpublished > 0 and not (due and unpublished < SUMMARY_BACKLOG and unpublished <= room):
+            return "compacting"
+        return "pending" if due else "idle"
 
     def step(self, ledger: Ledger, conversation_id: str) -> None:
         phase = ledger.record(conversation_id)["phase"]
@@ -371,12 +403,9 @@ class Worker:
     def _after_apply(self, ledger: Ledger, conversation_id: str, state: dict) -> None:
         record = ledger.record(conversation_id)
         accepted = state["watermark"]
-        if accepted > record["published_W"]:
-            phase = "compacting"
-        else:
-            phase = "pending" if record["target_head"] > accepted else "idle"
-        ledger.update(
-            conversation_id, accepted_W=accepted, phase=phase, request_id=None, attempts=0, error_category=None
+        phase = self._next_phase(conversation_id, record["target_head"], accepted, record["published_W"])
+        ledger.accept(
+            conversation_id, accepted, self.clock(), phase=phase, request_id=None, attempts=0, error_category=None
         )
 
     # Compaction ---------------------------------------------------------------------------------------------
@@ -470,12 +499,13 @@ class Worker:
             raise self._retry_or_block(
                 ledger, conversation_id, self.settings.publication_attempts, "publication_failed", "publication_failed"
             ) from None
-        record = ledger.record(conversation_id)
-        ledger.update(
+        accepted = state["watermark"]
+        ledger.accept(
             conversation_id,
-            published_W=state["watermark"],
-            accepted_W=state["watermark"],
-            phase="pending" if record["target_head"] > state["watermark"] else "idle",
+            accepted,
+            self.clock(),
+            published_W=accepted,
+            phase=self._next_phase(conversation_id, ledger.record(conversation_id)["target_head"], accepted, accepted),
             request_id=None,
             attempts=0,
             error_category=None,
@@ -514,13 +544,22 @@ def serve(config: Config, stop: threading.Event, *, worker: Worker | None = None
 
 
 def status(config: Config) -> dict[str, Any]:
-    """The ledger as stored: records, budget and recent sanitized call outcomes. Read-only, no lock needed."""
+    """The ledger as stored (records, budget, recent sanitized call outcomes) and its meter with tokens per post.
+
+    Read-only, no lock needed.
+    """
     settings = config.graph_worker
     if not settings.enabled or settings.state_dir is None:
         return {"enabled": False}
     path = settings.state_dir / "ledger.json"
     ledger = load_json(path) if path.exists() else {"conversations": {}, "calls": {}, "refused": {}, "in_flight": None}
-    return {"enabled": True, "producer": settings.producer, "provider": settings.provider, **ledger}
+    return {
+        "enabled": True,
+        "producer": settings.producer,
+        "provider": settings.provider,
+        **ledger,
+        "meter": meter_report(ledger),
+    }
 
 
 def reset(config: Config, conversation_id: str) -> dict[str, Any]:
