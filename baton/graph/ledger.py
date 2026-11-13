@@ -1,7 +1,8 @@
 """The worker's one durable ledger: call reservations, UTC-day budget and every conversation's scheduling record.
 
 Everything lives in one private JSON file replaced atomically under a process-lifetime exclusive lock, so a
-reservation and the counters it changes can never split. A second worker finds the lock held and exits
+reservation and the counters it changes, or an accepted watermark and the posts it meters, can never split. A
+second worker finds the lock held and exits
 without inference. A call settled as a refusal (the provider did no work) is refunded: its attempt returns,
 its launch stays counted in `calls` and is also counted in `refused`, and the daily cap compares the
 difference, so only launches that may have used the provider spend the day. A meter counts calls, tokens and
@@ -183,9 +184,7 @@ class Ledger:
 
     def update(self, conversation_id: str, **fields: Any) -> dict[str, Any]:
         record = self.record(conversation_id)
-        unknown = set(fields) - set(RECORD_FIELDS)
-        if unknown or ("phase" in fields and fields["phase"] not in PHASES):
-            raise GraphError("invalid worker record update")
+        _require_record_fields(fields)
         record.update(fields)
         self.save()
         return record
@@ -291,10 +290,16 @@ class Ledger:
         self.state["in_flight"] = None
         self.save()
 
-    def accept(self, conversation_id: str, posts: int, now: float) -> None:
-        """Count posts an applied batch accepted, on the UTC day of `now`."""
-        self._meter(conversation_id, utc_day(now), posts=posts)
-        self.save()
+    def accept(self, conversation_id: str, watermark: int, now: float, **fields: Any) -> dict[str, Any]:
+        """Move `accepted_W` to `watermark` and count the posts that adds on the UTC day of `now`, in one save.
+
+        The count is the step from the saved watermark, so an acceptance repeated after an interruption adds none.
+        """
+        _require_record_fields(fields)
+        added = watermark - self.record(conversation_id)["accepted_W"]
+        if added > 0:
+            self._meter(conversation_id, utc_day(now), posts=added)
+        return self.update(conversation_id, accepted_W=watermark, **fields)
 
     def _meter(self, conversation_id: str, day: str, **counts: int) -> None:
         """Add to one day's counters and the conversation's totals; days before the newest `METER_DAYS` are dropped."""
@@ -316,6 +321,12 @@ class Ledger:
         self.state["next_position"] = (start + 1) % len(order)
         self.save()
         return order[start:] + order[:start]
+
+
+def _require_record_fields(fields: dict[str, Any]) -> None:
+    """Refuse an update naming a field a record doesn't have or a phase the scheduler doesn't know."""
+    if set(fields) - set(RECORD_FIELDS) or ("phase" in fields and fields["phase"] not in PHASES):
+        raise GraphError("invalid worker record update")
 
 
 def _initial() -> dict[str, Any]:

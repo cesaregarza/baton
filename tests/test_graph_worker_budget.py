@@ -236,3 +236,28 @@ def test_the_meter_counts_calls_tokens_and_posts_per_utc_day_and_per_conversatio
     assert meter["days"] == [row(2, 0, day=ledger.utc_day(clock.now))]
     assert meter["conversations"] == {cid: row(6, 4)}
     assert list(load_json(config.graph_worker.state_dir / "ledger.json")["meter"]) == [ledger.utc_day(clock.now)]
+
+
+def test_an_interrupted_acceptance_meters_its_posts_once(tmp_path, monkeypatch) -> None:
+    config = worker_config(tmp_path, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 2)
+    config = worker_config(tmp_path, conversations=[cid])
+    clock = Clock()
+    save, crashes = ledger.Ledger.save, {"left": 1}
+
+    def crash_before_the_watermark_is_saved(self) -> None:
+        if crashes["left"] and self.state["conversations"][cid]["accepted_W"] == 2:
+            crashes["left"] -= 1
+            raise RuntimeError("synthetic crash before the accepted watermark is saved")
+        save(self)
+
+    monkeypatch.setattr(ledger.Ledger, "save", crash_before_the_watermark_is_saved)
+    with pytest.raises(RuntimeError, match="accepted watermark"):
+        Worker(config, transport=ScriptedTransport(), clock=clock).cycle()
+    # The restart finds the graph already at W2, records it without a call and counts its two posts once.
+    transport = ScriptedTransport()
+    record = run_until_idle(Worker(config, transport=transport, clock=clock), clock)[-1]["records"][cid]
+    assert (record["accepted_W"], record["published_W"], transport.calls) == (2, 2, [])
+    assert status(config)["meter"]["conversations"][cid]["posts"] == 2
+    assert [day["posts"] for day in status(config)["meter"]["days"]] == [2]

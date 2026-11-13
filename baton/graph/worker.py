@@ -404,10 +404,8 @@ class Worker:
         record = ledger.record(conversation_id)
         accepted = state["watermark"]
         phase = self._next_phase(conversation_id, record["target_head"], accepted, record["published_W"])
-        if accepted > record["accepted_W"]:
-            ledger.accept(conversation_id, accepted - record["accepted_W"], self.clock())
-        ledger.update(
-            conversation_id, accepted_W=accepted, phase=phase, request_id=None, attempts=0, error_category=None
+        ledger.accept(
+            conversation_id, accepted, self.clock(), phase=phase, request_id=None, attempts=0, error_category=None
         )
 
     # Compaction ---------------------------------------------------------------------------------------------
@@ -502,10 +500,11 @@ class Worker:
                 ledger, conversation_id, self.settings.publication_attempts, "publication_failed", "publication_failed"
             ) from None
         accepted = state["watermark"]
-        ledger.update(
+        ledger.accept(
             conversation_id,
+            accepted,
+            self.clock(),
             published_W=accepted,
-            accepted_W=accepted,
             phase=self._next_phase(conversation_id, ledger.record(conversation_id)["target_head"], accepted, accepted),
             request_id=None,
             attempts=0,
