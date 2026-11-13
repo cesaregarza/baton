@@ -389,10 +389,12 @@ class LaunchFiles:
 class CodexTransport(NativeClient):
     """`codex exec` from the worker's own client home, checked against a loopback capture before every launch.
 
-    `home` is both HOME and CODEX_HOME for the client, so nothing of the operator's own login, instructions or
-    skills is read. Constructing the transport refuses a home that is missing or open to other users, and any
-    credential variable: the login in the home is the only credential, so the launch check's environment holds
-    none.
+    Every run of the client has both HOME and CODEX_HOME set: to `home` for the call, and to a new empty directory,
+    removed afterwards, for reading its version and for the launch check. The client writes under its home on every
+    run, so it never runs under the service's own home, and nothing of the operator's own login, settings,
+    instructions or skills is read. Constructing the transport refuses a home that is missing or open to other
+    users, and any credential variable: the login in the home is the only credential, so the launch check's
+    environment holds none.
     """
 
     mode: str = "codex"
@@ -408,7 +410,8 @@ class CodexTransport(NativeClient):
         for name in ("AGENTS.md", "AGENTS.override.md"):  # read from the home into every request
             if os.path.lexists(os.path.join(str(self.home), name)):
                 raise TransportError(Category.UNVERIFIED_CLIENT, f"graph_worker.client_home holds {name}")
-        version = self.reported_version(executable, env, r"codex-cli (\d+\.\d+\.\d+)")
+        with tempfile.TemporaryDirectory(prefix="baton-graph-version-") as home:  # 0700, removed afterwards
+            version = self.reported_version(executable, self.environment(home), r"codex-cli (\d+\.\d+\.\d+)")
         return {"mode": self.mode, "version": version}
 
     def argv(self, files: LaunchFiles, output_path: str, cwd: str, *extra: str) -> list[str]:

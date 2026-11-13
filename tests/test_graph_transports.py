@@ -503,6 +503,25 @@ def test_a_client_script_rewritten_under_its_interpreter_is_verified_again_befor
     assert refusal(transport, REQUEST, LIMITS) == "unverified_client" and not (dump / "call.json").exists()
 
 
+def test_the_version_is_read_under_a_new_empty_home_that_is_removed_afterwards(tmp_path, monkeypatch) -> None:
+    # The client writes under its home on every run, so reading its version never uses the service's home or the
+    # worker's: not when verifying, and not before a launch.
+    service_home = str(tmp_path / "service-home")
+    monkeypatch.setenv("HOME", service_home)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    command, dump = fake(tmp_path, "codex")
+    home = worker_home(tmp_path)
+    transport = native.CodexTransport(command, "m", [], home=home)
+    seen = []
+    for check in (transport.verify, lambda: transport.produce(REQUEST, SCHEMA, LIMITS)):
+        check()
+        seen.append(json.loads((dump / "version-env.json").read_text()))
+    for run in seen:
+        assert run["HOME"] == run["CODEX_HOME"] and run["HOME"] not in (service_home, home)
+        assert run["entries"] == [] and run["mode"] == "0o700" and not os.path.exists(run["HOME"])
+    assert seen[0]["HOME"] != seen[1]["HOME"]
+
+
 @pytest.mark.parametrize("name", ["codex", "claude"])
 def test_the_configured_client_launches_whatever_version_it_reports(tmp_path, name) -> None:
     # No version is configured: an updated client runs once it passes the same checks, and its version is reported.

@@ -481,14 +481,17 @@ Codex it adds the launch check, about two seconds. A failed verification at serv
 leaves the worker running; it is the `unverified_client` refusal, shown in `status`, and clears without a
 restart once the client or the configuration is right.
 
-Codex runs from `client_home`, a directory of the worker's own that holds only the worker's login. It is
-both `HOME` and `CODEX_HOME` for the client, so the operator's own login, settings, instructions and skills
-are never read, and the worker never copies or touches the operator's login. A relative `client_home` is
-taken from the config file's directory, like `state_dir`, and the client always gets the absolute path. The
-worker refuses to start the client when `client_home` is unset; is the operator's own home; is the
-operator's client home (`CODEX_HOME` in the environment the worker starts with, and `~/.codex`), inside it
-or around it; is not a directory of this user's with mode 0700; or holds an `AGENTS.md` or
-`AGENTS.override.md`. `credential_env` does not apply to `codex`. Log the worker in there once yourself:
+Codex runs from `client_home`, a directory of the worker's own that holds only the worker's login. The
+client writes under its home on every run, even to print its version, so every run has both `HOME` and
+`CODEX_HOME` set: to `client_home` for the call, and to a new empty directory, removed afterwards, for
+reading the version and for the launch check. The client never runs under the service's own home, the
+operator's own login, settings, instructions and skills are never read, and the worker never copies or
+touches the operator's login. A relative `client_home` is taken from the config file's directory, like
+`state_dir`, and the client always gets the absolute path. The worker refuses to start the client when
+`client_home` is unset; is the operator's own home; is the operator's client home (`CODEX_HOME` in the
+environment the worker starts with, and `~/.codex`), inside it or around it; is not a directory of this
+user's with mode 0700; or holds an `AGENTS.md` or `AGENTS.override.md`. `credential_env` does not apply to
+`codex`. Log the worker in there once yourself:
 
 ```sh
 mkdir -m 700 /path/to/worker-home
