@@ -213,10 +213,16 @@ class Worker:
         return self.clock() - datetime.fromisoformat(oldest).timestamp() >= max_wait
 
     def _next_phase(self, conversation_id: str, target_head: int, accepted: int, published: int) -> str:
-        """After a batch or a publication: another due batch first, unless the summary is far behind."""
+        """After a batch or a publication: another due batch first, unless the summary is far behind.
+
+        One publication covers at most `indexer.max_manifest_items` posts, so the summary is also published before a
+        further batch would leave more unpublished posts than that.
+        """
         with connection(self.config.db_path) as conn:
             due = self._due(conn, conversation_id, target_head, accepted)
-        if accepted > published and not (due and accepted - published < SUMMARY_BACKLOG):
+        unpublished = accepted - published
+        room = self.config.indexer.max_manifest_items - self.settings.batch_size
+        if unpublished > 0 and not (due and unpublished < SUMMARY_BACKLOG and unpublished <= room):
             return "compacting"
         return "pending" if due else "idle"
 

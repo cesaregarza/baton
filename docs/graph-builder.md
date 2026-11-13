@@ -348,10 +348,12 @@ table) has waited `max_wait_seconds` (default 21600, six hours; at most 604800).
 `max_wait_seconds = 0` every waiting post is due at once. Deciding needs no export and no model call, and
 a new post alone no longer makes a thread pending; `target_head` still tracks the canonical head. After a
 batch is applied the thread takes the next due batch at once, and is summarized (the compact phase, then
-publication) when no further batch is due or when the published summary is 100 or more posts behind the
-graph. A backlog therefore costs one summary call, not one per batch, and one publication covers every
-batch accepted since the last. Known limit: a thread that blocks in the middle of a backlog can leave up
-to 99 graphed posts without a published summary until it is reset; readers get those posts raw, and the
+publication) when no further batch is due, when the published summary is 100 or more posts behind the
+graph, or when one more batch would leave more unpublished posts than one publication covers
+(`indexer.max_manifest_items`; a `batch_size` above it is refused when the configuration is read). A
+backlog therefore costs one summary call, not one per batch, and one publication covers every batch
+accepted since the last. Known limit: a thread that blocks in the middle of a backlog can leave up to 99
+graphed posts without a published summary until it is reset; readers get those posts raw, and the
 ledger's `accepted_W` and `published_W` show the gap.
 
 Every model launch is reserved first in one atomically replaced ledger (`ledger.json`) under a

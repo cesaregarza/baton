@@ -749,6 +749,22 @@ def test_a_backlog_runs_its_batches_before_one_summary_unless_the_summary_is_far
         assert published(db, cid) == [(100, 1, 2), (151, 2, 4)]
 
 
+def test_a_backlog_is_published_before_it_would_outgrow_one_publication(tmp_path) -> None:
+    indexer = {"max_manifest_items": 2}  # one publication covers at most two posts
+    config = worker_config(tmp_path, indexer, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 4)
+    config = worker_config(tmp_path, indexer, conversations=[cid])
+    clock = Clock()
+    record = run_until_idle(Worker(config, transport=ScriptedTransport(), clock=clock), clock)[-1]["records"][cid]
+    assert (record["phase"], record["accepted_W"], record["published_W"]) == ("idle", 4, 4)
+    with connect(config.db_path) as db:
+        assert published(db, cid) == [(2, 1, 1), (4, 2, 2)]
+    # A batch that no publication could cover is refused when the configuration is read.
+    with pytest.raises(ConfigError, match="max_manifest_items"):
+        worker_config(tmp_path, indexer, conversations=[cid], batch_size=3)
+
+
 def test_a_summary_request_states_a_word_limit_and_a_rejection_states_the_measured_bytes(tmp_path) -> None:
     limits = {"max_artifact_bytes": 120}
     config = worker_config(tmp_path, limits, conversations=["placeholder"])
