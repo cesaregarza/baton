@@ -66,3 +66,5 @@ include = ["baton"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A test still running after this many seconds prints every thread's stack, so a hang names its test.
+faulthandler_timeout = 60
