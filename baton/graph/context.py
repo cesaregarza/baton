@@ -5,7 +5,8 @@ touch instead of the whole of it:
 
     outline   every strand on one line, so a new statement can be filed under any of them
     entries   the standing statements and active decisions chosen for these posts, one whole line each
-    cards     the summary, open work and evidence of every strand a shown entry belongs to
+    cards     the summary and open-work lines, evidence and next line ids of every strand a shown entry
+              belongs to
     refresh   strands holding statements newer than their summary: each is owed a refresh, so its card and
               those statements are shown whatever else is left out
     next_ids  the strand and decision ids a proposal allocates from
@@ -18,6 +19,7 @@ import re
 from typing import Any
 
 from baton.database import memory, store
+from baton.graph import lines
 from baton.graph.contract import GraphError
 from baton.graph.entries import QUERY_WORDS, Entries
 from baton.graph.snapshot import ordinal_key, statement_key
@@ -79,9 +81,14 @@ class Context:
         }
 
     def _card(self, strand_id: str) -> str:
-        """A strand's card as readers see it, plus the evidence its summary cites: a refresh has to cite its own."""
+        """A strand's card as readers see it, plus what an edit of it needs.
+
+        That is the evidence its summary cites, since an edit cites its own, and the ids its next lines take: the
+        current lines cannot say which ids retired lines have used.
+        """
         [(_, card)] = self._entries.find(strand_id)
-        return f"{card}\nEvidence: {' '.join(self._state['strands'][strand_id]['evidence'])}"
+        strand = self._state["strands"][strand_id]
+        return f"{card}\nEvidence: {' '.join(strand['evidence'])}\nNext line IDs: {' '.join(lines.next_ids(strand))}"
 
     def _hits(self, post: dict[str, Any]) -> list[str]:
         if post["seq"] not in self._found:

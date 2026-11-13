@@ -61,15 +61,34 @@ def statement(seq, text, strands, *, ordinal=1, quote=None):
     }
 
 
-def strand(sid, end, *, resolved=False):
+def lines(sid, texts, kind=""):
+    return [{"id": f"{sid}.{kind}{n}", "text": text} for n, text in enumerate(texts, 1)]
+
+
+def strand(sid, end):
+    """A new strand, listed whole."""
     return {
         "id": sid,
         "title": "Format" if sid == "S1" else "Storage and reader",
-        "summary": "JSON remains applicable; receipt retention is one hour." if end > 2 else "Initial proposal.",
-        "open_work": [] if resolved else ["Implement the reader using files, preserving quotes."],
-        "state": "resolved" if resolved else "active",
+        "summary": lines(sid, ["Initial proposal."]),
+        "open_work": lines(sid, ["Implement the reader using files, preserving quotes."], "w"),
+        "state": "active",
         "evidence": [f"post:{end}"],
     }
+
+
+def edit(sid, end, **changes):
+    """An edit of an existing strand; one that changes nothing says its summary still holds through `end`."""
+    unchanged = {"add": [], "replace": [], "drop": [], "work_add": [], "work_done": [], "state": None}
+    return {"id": sid, **unchanged, "evidence": [f"post:{end}"]} | changes
+
+
+def refresh(sid, end, *, resolved=False):
+    """The second batch's refresh: the summary line rewritten, and a resolved strand's open work done."""
+    changes = {"replace": [{"id": f"{sid}.1", "text": "JSON remains applicable; receipt retention is one hour."}]}
+    if resolved:
+        changes |= {"work_done": [f"{sid}.w1"], "state": "resolved"}
+    return edit(sid, end, **changes)
 
 
 def edge(a, b, kind="responds_to", seq=3):
@@ -81,7 +100,8 @@ def proposal(request):
         "binding": request["binding"],
         "statements": [],
         "relevance_updates": [],
-        "strands": [],
+        "new_strands": [],
+        "strand_edits": [],
         "decisions": [],
         "edges": [],
         "dispositions": [],
@@ -91,7 +111,7 @@ def proposal(request):
             statement(1, "Use JSON — keep 24-hour receipts.", ["S1"]),
             statement(2, "Use SQLite.", ["S2"]),
         ]
-        result["strands"] = [strand("S1", 2), strand("S2", 2)]
+        result["new_strands"] = [strand("S1", 2), strand("S2", 2)]
         result["edges"] = [edge("2-1", "1-1", seq=2)]
     else:
         result["statements"] = [
@@ -104,7 +124,7 @@ def proposal(request):
             {"id": "1-1", "relevance": "partially_superseded", "surviving_text": "Use JSON.", "evidence": ["3-1"]},
             {"id": "2-1", "relevance": "completely_superseded", "surviving_text": None, "evidence": ["3-2"]},
         ]
-        result["strands"] = [strand("S1", 5, resolved=True), strand("S2", 5)]
+        result["strand_edits"] = [refresh("S1", 5, resolved=True), refresh("S2", 5)]
         result["decisions"] = [
             {
                 "id": "D1",
@@ -165,10 +185,10 @@ def test_incremental_native_publication_live_tail_and_history(tmp_path):
             "S2 | active | 1 statements, summarized through post 2 | Storage and reader",
         ],
         "cards": [
-            "S1 | active | Format\nInitial proposal.\nOpen work:\n"
-            "- Implement the reader using files, preserving quotes.\nEvidence: post:2",
-            "S2 | active | Storage and reader\nInitial proposal.\nOpen work:\n"
-            "- Implement the reader using files, preserving quotes.\nEvidence: post:2",
+            "S1 | active | Format\nS1.1 Initial proposal.\nOpen work:\n"
+            "S1.w1 Implement the reader using files, preserving quotes.\nEvidence: post:2\nNext line IDs: S1.2 S1.w2",
+            "S2 | active | Storage and reader\nS2.1 Initial proposal.\nOpen work:\n"
+            "S2.w1 Implement the reader using files, preserving quotes.\nEvidence: post:2\nNext line IDs: S2.2 S2.w2",
         ],
         "entries": [
             "1-1 | S1 | responds_to<2-1 | Use JSON — keep 24-hour receipts.",
@@ -235,10 +255,10 @@ def test_rejections_leave_state_bytes_unchanged_and_allow_correction(tmp_path):
     bad["edges"].append(edge("1-1", "4-1"))
     invalid.append((bad, "cycle"))
     bad = copy.deepcopy(valid)
-    bad["strands"] = bad["strands"][:1]
+    bad["strand_edits"] = bad["strand_edits"][:1]
     invalid.append((bad, "refreshed summary"))
     bad = copy.deepcopy(valid)
-    bad["strands"][0]["statement_ids"] = ["1-1"]  # the host keeps the membership; a proposal cannot state it
+    bad["strand_edits"][0]["statement_ids"] = ["1-1"]  # the host keeps the membership; a proposal cannot state it
     invalid.append((bad, "unknown keys"))
     bad = copy.deepcopy(valid)
     bad["relevance_updates"][0]["evidence"] = ["post:6"]
@@ -274,8 +294,8 @@ def test_rejections_leave_state_bytes_unchanged_and_allow_correction(tmp_path):
         "D2 | S1 | rests on 1-1 | changed at post 5 | Use JSON.",
     ]
     assert request3["context"]["cards"][0] == (
-        "S1 | resolved | Format\nJSON remains applicable; receipt retention is one hour.\n"
-        "Open work:\n(none)\nEvidence: post:5"
+        "S1 | resolved | Format\nS1.1 JSON remains applicable; receipt retention is one hour.\n"
+        "Open work:\n(none)\nEvidence: post:5\nNext line IDs: S1.2 S1.w2"
     )
     assert request3["context"]["next_ids"] == {"strand": "S3", "decision": "D3"}
 
@@ -357,7 +377,8 @@ def test_source_limits_artifact_aliases_and_disposition(tmp_path):
         "binding": request["binding"],
         "statements": [],
         "relevance_updates": [],
-        "strands": [],
+        "new_strands": [],
+        "strand_edits": [],
         "decisions": [],
         "edges": [],
         "dispositions": [{"seq": 1, "reason": "Ceremony."}],

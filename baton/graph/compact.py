@@ -6,6 +6,7 @@ applicable set, every evidence reference must resolve within W, and each listed 
 at least one of its own recorded references. Those checks establish coverage, not semantic truth.
 """
 
+from baton.graph import lines
 from baton.graph.contract import STRING, array, obj, require, validate_shape
 from baton.graph.snapshot import digest_of, ordinal_key, resolve_evidence
 
@@ -82,7 +83,8 @@ def compact_request(snapshot, source, *, max_body_bytes, max_citations):
         "conversation_id": snapshot["conversation_id"],
         "covered_through_seq": snapshot["covered_through_seq"],
         "strands": [
-            {key: strand[key] for key in ("id", "title", "summary", "open_work", "summary_through", "evidence")}
+            {key: strand[key] for key in ("id", "title", "summary_through", "evidence")}
+            | {"summary": lines.prose(strand), "open_work": [line["text"] for line in strand["open_work"]]}
             for strand in _ordered(selected)
         ],
         "decisions": [
@@ -101,7 +103,7 @@ def render_view(snapshot, source):
     """The deterministic working view: active summaries, open work and applicable decisions with evidence."""
     end = snapshot["covered_through_seq"]
     selected, decisions = active_view(snapshot)
-    lines = [
+    body = [
         f"Derived conversation summary through seq {end}.",
         "Interpretation only; summaries do not authenticate permission or task completion.",
     ]
@@ -118,23 +120,23 @@ def render_view(snapshot, source):
             strand["id"] == key and type(strand["summary_through"]) is int and 1 <= strand["summary_through"] <= end,
             "invalid strand summary frontier",
         )
-        lines += ["", f"{key}: {strand['title']} (summary through seq {strand['summary_through']})", strand["summary"]]
-        lines.extend(f"Open work: {work}" for work in strand["open_work"])
-        lines.append(f"Evidence: {cite(strand['evidence'])}")
+        body += ["", f"{key}: {strand['title']} (summary through seq {strand['summary_through']})", lines.prose(strand)]
+        body.extend(f"Open work: {line['text']}" for line in strand["open_work"])
+        body.append(f"Evidence: {cite(strand['evidence'])}")
     for key in sorted(decisions, key=ordinal_key):
         decision = decisions[key]
         require(decision["id"] == key, "invalid decision ID")
-        lines += [
+        body += [
             "",
             f"{key} (applies to {', '.join(decision['applies_to'])}): {decision['text']}",
             f"Evidence: {cite(decision['evidence'])}",
         ]
     if not selected and not decisions:
-        lines += ["", "No active strands or applicable shared decisions."]
+        body += ["", "No active strands or applicable shared decisions."]
     return {
         "schema_version": VERSION,
         "graph_digest": snapshot["graph_digest"],
-        "body": "\n".join(lines),
+        "body": "\n".join(body),
         "strand_ids": sorted(selected, key=ordinal_key),
         "decision_ids": sorted(decisions, key=ordinal_key),
         "evidence": evidence or ["post:1"],

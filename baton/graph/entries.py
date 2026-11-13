@@ -99,7 +99,7 @@ class Entries:
     def find(self, wanted: str) -> list[tuple[str, str]]:
         """The whole entries one id names, as (entry id, text); empty when it names nothing standing.
 
-        A statement or decision id names itself, a strand id its summary and open work, and `post:N` every
+        A statement or decision id names itself, a strand id its summary and open-work lines, and `post:N` every
         standing statement taken from post N.
         """
         if wanted in self._entries:
@@ -167,10 +167,11 @@ def _decision(decision, standing):
 
 
 def _card(strand):
-    """A strand opened whole: its heading line, its summary, then its open work."""
-    work = "".join(f"\n- {_flat(item)}" for item in strand["open_work"]) or "\n(none)"
+    """A strand opened whole: its heading line, its summary lines, then its open work, each line led by its id."""
     heading = f"{strand['id']} | {strand['state']} | {_flat(strand['title'])}"
-    return f"{heading}\n{strand['summary'].strip()}\nOpen work:{work}"
+    summary = [f"{line['id']} {_flat(line['text'])}" for line in strand["summary"]]
+    work = [f"{line['id']} {_flat(line['text'])}" for line in strand["open_work"]] or ["(none)"]
+    return "\n".join([heading, *summary, "Open work:", *work])
 
 
 def words(query: str) -> list[str]:

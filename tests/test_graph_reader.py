@@ -17,7 +17,7 @@ from conftest import make_config
 from test_aliases import dispatch, payload, rpc
 from test_artifact_reads import publish as publish_prose
 from test_artifact_reads import reads_config
-from test_graph_builder import proposal, snapshot
+from test_graph_builder import edit, proposal, snapshot
 from test_index_writer import lose, say
 from test_index_writer import snapshot as table_snapshot
 
@@ -76,7 +76,6 @@ def advance_published(db, config, conversation_id, tmp_path: Path, producer="alp
     request = prepare(source, state, request_path, batch_size=1)
     end = request["binding"]["batch"]["end"]
     post = request["new_posts"][0]
-    strand = load_json(state)["strands"]["S2"]
     candidate = {
         "binding": request["binding"],
         "statements": [
@@ -92,13 +91,8 @@ def advance_published(db, config, conversation_id, tmp_path: Path, producer="alp
             }
         ],
         "relevance_updates": [],
-        "strands": [
-            {
-                **{k: strand[k] for k in ("id", "title", "open_work", "state")},
-                "summary": f"Reader asked about seq {end}.",
-                "evidence": [f"post:{end}"],
-            }
-        ],
+        "new_strands": [],
+        "strand_edits": [edit("S2", end, replace=[{"id": "S2.1", "text": f"Reader asked about seq {end}."}])],
         "decisions": [],
         "edges": [],
         "dispositions": [],
@@ -328,8 +322,8 @@ def test_entry_reads_answer_a_search_with_single_lines_and_ids_with_whole_entrie
         "entries": [
             "4-1 | S1 S2 | responds_to>1-1 responds_to>3-2 | Exact source quotes remain mandatory.",
             "D2 | S1 | rests on 1-1 | changed at post 5 | Use JSON.",
-            "S2 | active | Storage and reader\nJSON remains applicable; receipt retention is one hour.\n"
-            "Open work:\n- Implement the reader using files, preserving quotes.",
+            "S2 | active | Storage and reader\nS2.1 JSON remains applicable; receipt retention is one hour.\n"
+            "Open work:\nS2.w1 Implement the reader using files, preserving quotes.",
             "3-1 | S1 | supersedes>1-1 | Keep receipts for one hour.",
             "3-2 | S2 | responds_to<4-1 | Use files instead of SQLite.",
         ],

@@ -16,6 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from test_graph_builder import edit
 from test_index_writer import converse, index_config, say
 
 from baton import config as config_module
@@ -103,7 +104,8 @@ def extraction_candidate(request):
         "edges": [],
         "dispositions": [],
         "decisions": [],
-        "strands": [],
+        "new_strands": [],
+        "strand_edits": [],
     }
     for post in request["new_posts"]:
         candidate["statements"].append(
@@ -118,20 +120,23 @@ def extraction_candidate(request):
                 "evidence": [f"post:{post['seq']}"],
             }
         )
-    candidate["strands"] = [
+    notes = [{"id": "S1.1", "text": f"Notes through {end}."}]
+    if start > 1:
+        candidate["strand_edits"] = [edit("S1", end, replace=notes, evidence=[f"{end}-1"])]
+        return candidate
+    candidate["new_strands"] = [
         {
             "id": "S1",
             "title": "Release",
-            "summary": f"Notes through {end}.",
+            "summary": notes,
             "state": "active",
-            "open_work": ["Review the notes."],
+            "open_work": [{"id": "S1.w1", "text": "Review the notes."}],
             "evidence": [f"{end}-1"],
         }
     ]
-    if start == 1:
-        candidate["decisions"] = [
-            {"id": "D1", "text": "Keep the notes.", "status": "active", "applies_to": ["all"], "evidence": ["post:1"]}
-        ]
+    candidate["decisions"] = [
+        {"id": "D1", "text": "Keep the notes.", "status": "active", "applies_to": ["all"], "evidence": ["post:1"]}
+    ]
     return candidate
 
 

@@ -38,13 +38,13 @@ def decision(did: str, text: str, applies_to: list[str], evidence: list[str], ch
     }
 
 
-def strand(sid: str, title: str, state: str, summary: str, work: list[str], members: list[str], through: int) -> dict:
+def strand(sid: str, title: str, state: str, summary: list[str], work: list[str], members: list[str], through: int):
     return {
         "id": sid,
         "title": title,
         "state": state,
-        "summary": summary,
-        "open_work": work,
+        "summary": [{"id": f"{sid}.{n}", "text": text} for n, text in enumerate(summary, 1)],
+        "open_work": [{"id": f"{sid}.w{n}", "text": text} for n, text in enumerate(work, 1)],
         "statement_ids": members,
         "summary_through": through,
     }
@@ -74,13 +74,13 @@ def graph() -> dict:
     ]
     strands = [
         strand(
-            "S1", "Receipt  format", "resolved", "Receipts are JSON, kept one hour.\n", [], ["1-1", "3-1", "4-1"], 5
+            "S1", "Receipt  format", "resolved", ["Receipts are JSON, kept one hour.\n"], [], ["1-1", "3-1", "4-1"], 5
         ),
         strand(
             "S2",
             "Index storage",
             "active",
-            "The index moved from SQLite to flat files.",
+            ["The index moved from SQLite", "to flat files."],
             ["Write the reader.", "Pick an owner\nfor the migration."],
             ["2-1", "3-2", "4-1", "12-1"],
             12,
@@ -134,13 +134,14 @@ def test_a_line_carries_the_id_strands_connections_and_standing_text() -> None:
 
 def test_ids_load_strands_and_posts_and_say_why_nothing_came_back() -> None:
     entries = Entries(graph())
-    card = "S1 | resolved | Receipt format\nReceipts are JSON, kept one hour.\nOpen work:\n(none)"
+    card = "S1 | resolved | Receipt format\nS1.1 Receipts are JSON, kept one hour.\nOpen work:\n(none)"
     assert entries.find("S1") == [("S1", card)]
+    # Every summary and open-work line on its own line, led by its id.
     assert entries.find("S2") == [
         (
             "S2",
-            "S2 | active | Index storage\nThe index moved from SQLite to flat files.\n"
-            "Open work:\n- Write the reader.\n- Pick an owner for the migration.",
+            "S2 | active | Index storage\nS2.1 The index moved from SQLite\nS2.2 to flat files.\n"
+            "Open work:\nS2.w1 Write the reader.\nS2.w2 Pick an owner for the migration.",
         )
     ]
     assert [found for found, _ in entries.find("post:3")] == ["3-1", "3-2"]

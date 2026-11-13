@@ -69,7 +69,7 @@ def test_compact_contract_rejects_coverage_gaps_and_stale_digests() -> None:
             "S1": {
                 "id": "S1",
                 "title": "T",
-                "summary": "S",
+                "summary": [{"id": "S1.1", "text": "S"}],
                 "open_work": [],
                 "state": "active",
                 "statement_ids": ["1-1"],
@@ -80,7 +80,7 @@ def test_compact_contract_rejects_coverage_gaps_and_stale_digests() -> None:
             "S2": {
                 "id": "S2",
                 "title": "Closed",
-                "summary": "Done",
+                "summary": [{"id": "S2.1", "text": "Done"}],
                 "open_work": [],
                 "state": "resolved",
                 "statement_ids": ["2-1"],
