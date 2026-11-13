@@ -439,9 +439,9 @@ def test_publication_exhaustion_blocks_and_input_overflow_blocks_before_any_call
     assert overflow["records"][other]["phase"] == "blocked"
     assert overflow["records"][other]["error_category"] == "input_limit" and transport.calls == []
     # The prepare failure's type decides the block, never its wording.
-    from baton.graph.operations import MissingRecall
+    from baton.graph.operations import InputOverflow
 
-    for raised, category in ((MissingRecall("exceeds"), "missing_recall"), (GraphError("recall"), "unsafe_source")):
+    for raised, category in ((InputOverflow("recall"), "input_limit"), (GraphError("exceeds"), "unsafe_source")):
         root = tmp_path / category
         prepared = worker_config(root, conversations=["placeholder"])
         with connect(prepared.db_path) as db:

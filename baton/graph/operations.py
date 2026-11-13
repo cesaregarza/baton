@@ -20,10 +20,6 @@ from baton.graph.storage import STATE_VERSION, atomic_json, distinct_paths, load
 from baton.graph.validation import build_patch
 
 
-class MissingRecall(GraphError):
-    """A requested recall statement is not in the checkpoint."""
-
-
 class InputOverflow(GraphError):
     """The next whole post does not fit the input byte limit even with only the graph context it must carry."""
 

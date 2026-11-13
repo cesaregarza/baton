@@ -362,7 +362,7 @@ message text, and the category alone decides what happens next:
 | `cancelled` | the service stops during the call | spent; nothing returned is applied |
 | `input_limit` | serialized input over `max_input_bytes` (any provider), or a prepare overflow | blocked at once |
 | `isolation` | a native client recorded a permission denial, a tool use or a disallowed event; a refused environment name | blocked at once, whatever else the call reported |
-| `missing_recall`, `unsafe_source` | prepare, export or load failures | blocked at once |
+| `unsafe_source` | prepare, export or load failures | blocked at once |
 | `timeout` | the host's wall-time limit ended the call | charged |
 | `output_limit` | the response is over the byte limit | charged |
 | `malformed` | an answer that is not the expected shape | charged |

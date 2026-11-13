@@ -30,7 +30,7 @@ from baton.graph.contract import SCHEMA, GraphError, current
 from baton.graph.export import export_source
 from baton.graph.failure import DURABLE, REFUSALS, Category, TransportError
 from baton.graph.ledger import RETRY_DELAY, Budget, Ledger, WorkerBusy, next_utc_day, refusal_delay
-from baton.graph.operations import InputOverflow, MissingRecall, apply, prepare
+from baton.graph.operations import InputOverflow, apply, prepare
 from baton.graph.publication import publish_graph
 from baton.graph.source import canonical, digest, load_json, load_source
 from baton.graph.storage import atomic_json, load_state, state_lock
@@ -362,8 +362,6 @@ class Worker:
                 batch_size=self.settings.batch_size,
                 max_input_bytes=self.settings.max_input_bytes,
             )
-        except MissingRecall:
-            raise Blocked(Category.MISSING_RECALL) from None
         except InputOverflow:
             raise Blocked(Category.INPUT_LIMIT) from None
         except GraphError:
