@@ -1,8 +1,8 @@
 """A strand's summary and open work as lines with stable ids, and the edit that refreshes them.
 
-A refresh that restated a strand's whole summary paid every batch to write again what had not changed. Each
-claim is now a line, summary lines `S3.1`, `S3.2` and open-work lines `S3.w1`, and a refresh of an existing
-strand is an edit that names only what changes. A replaced, dropped or finished line moves to the strand's
+Restating a whole summary at every refresh would pay each batch to write again what has not changed. So each
+claim is a line, summary lines `S3.1`, `S3.2` and open-work lines `S3.w1`, and a refresh of an existing strand
+is an edit that names only what changes. A replaced, dropped or finished line moves to the strand's
 `line_history` with the batch end it left at and the evidence of the edit that retired it, so nothing a summary
 once said is lost. A replaced line keeps its id and its place: the id names the line, not one wording of it.
 
@@ -73,7 +73,7 @@ def edit(strand: dict[str, Any], change: dict[str, Any], end: int) -> None:
     """Apply one strand edit in place, or raise a GraphError for the first rule it breaks.
 
     The edit may name only the lines the strand has now, which are the lines its card showed. Its evidence becomes
-    the strand's evidence, as each refresh's did when it restated the summary whole.
+    the strand's evidence: a strand's evidence is what its latest refresh rests on.
     """
     summary = {line["id"]: line["text"] for line in strand["summary"]}
     work = {line["id"]: line["text"] for line in strand["open_work"]}
