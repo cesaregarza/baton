@@ -25,7 +25,7 @@ class MissingRecall(GraphError):
 
 
 class InputOverflow(GraphError):
-    """The retained context plus the next whole post does not fit the input byte limit."""
+    """The next whole post does not fit the input byte limit even with only the graph context it must carry."""
 
 
 def request_identity(request):
@@ -69,10 +69,10 @@ def prepare(source_path, state_path, request_path, *, batch_size=20, max_input_b
     if request is None:
         ranked = context.ranked(posts[:1])
         request = fitted(1, [])
-        require(
-            request is not None,
-            "next whole post exceeds max-input-bytes (UTF-8) with only the graph context it must carry",
-        )
+        if request is None:
+            raise InputOverflow(
+                "next whole post exceeds max-input-bytes (UTF-8) with only the graph context it must carry"
+            )
         kept, over = 0, len(ranked)  # the longest prefix known to fit, the shortest known not to
         while over - kept > 1:
             middle = (kept + over) // 2
