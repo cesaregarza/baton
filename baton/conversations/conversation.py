@@ -384,12 +384,15 @@ class Conversation:
         limit: int = 50,
         before_seq: int | None = None,
         config: Config | None = None,
+        *,
+        through_seq: int | None = None,
     ) -> dict[str, Any]:
         """A readable conversation page, oldest first, with retained gaps reported explicitly.
 
         Non-view-all roles see retained copies while they are participants. A role with
         ``can_view_all_conversations`` sees retained history from before it joined. Reading
         marks nothing read and moves no cursor. ``before_seq`` reads backwards, oldest first.
+        ``through_seq`` caps forward reads at a fixed inclusive head; it cannot be combined with backwards reads.
         """
         conn = self.connection
         conversation_id = self.id
@@ -397,11 +400,13 @@ class Conversation:
             not 1 <= limit <= message_limits.MAX_PAGE_MESSAGES
             or after_seq < 0
             or (before_seq is not None and before_seq < 1)
+            or (through_seq is not None and (through_seq < 0 or before_seq is not None))
         ):
             raise InvalidRequest(
-                f"limit must be 1-{message_limits.MAX_PAGE_MESSAGES}, after_seq at least 0 and before_seq at least 1"
+                f"limit must be 1-{message_limits.MAX_PAGE_MESSAGES}, after_seq at least 0 and before_seq at least 1; "
+                "through_seq must be at least 0 and cannot accompany before_seq"
             )
-        with conn.transaction():
+        with conn.snapshot():
             conversation = queries._load(conn, conversation_id)
             participant = conn.execute(
                 "SELECT added_at FROM participants WHERE conversation_id = ? AND role = ?", (conversation_id, role)
@@ -422,6 +427,8 @@ class Conversation:
                 raise NotAParticipant(f"{role} is not in {conversation_id}")
             backwards = before_seq is not None
             upper_seq = min(conversation["last_seq"], before_seq - 1) if backwards else conversation["last_seq"]
+            if through_seq is not None:
+                upper_seq = min(upper_seq, through_seq)
             lower_seq = after_seq + 1
             access_start = retention._access_start_seq(conn, conversation_id, role, participant, conversation, view_all)
             known_lower = max(lower_seq, access_start) if access_start is not None else None
@@ -434,7 +441,7 @@ class Conversation:
                     **values,
                     "conversation_id": conversation_id,
                     "after_seq": after_seq,
-                    "before_seq": before_seq if backwards else 2**62,
+                    "before_seq": upper_seq + 1,
                     "limit": limit,
                 },
             ).fetchall()

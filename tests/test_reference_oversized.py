@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 import reference_support as refs
 import topic_grant_tools_support as support
 from reference_support import BOARDS, NAME, core_edit, f5, f11, write_revisions
@@ -46,40 +45,32 @@ def an_answer(text):
     return json.loads(text)
 
 
-@pytest.mark.parametrize("revision", [2**63, 2**64], ids=["2**63", "2**64"])
-def test_a_revision_beyond_the_databases_integers_is_an_unknown_revision_and_the_call_is_audited(build_scene, revision):
-    """R4. The document is at 3 and a revision of 2**63 or 2**64 is asked for: the refusal is the one for revision 4,
-    with the number asked for and the number the document is at. It is an answer, and the call has its audit line."""
+def test_numbers_beyond_the_databases_integers_are_answered_as_any_past_the_end_and_each_call_is_audited(build_scene):
+    """The document is at 3. R4: a revision of 2**63 or 2**64 is asked for, and the refusal is the one for revision 4,
+    with the number asked for and the number the document is at. R6: a history cursor as large as 2**63 pages to
+    nothing and comes back as `next_revision`, as a cursor of 50 does. Each is an answer, and each call has its audit
+    line. GUARD, R11: the compare is made in Python, so an `expected_revision` of 2**63 never reaches the database: for
+    the document at 3, and for one that does not exist, it is refused as stale with the number the document is at,
+    and no row of either table changes."""
     # Mutant 19: a revision beyond the current one treated as anything but unknown.
     scene = build_scene()
 
     async def scenario(client):
-        await support.stage(client, scene.host)
+        await support.stage(client, scene.host, paths=refs.REFERENCE_TOPICS)
         await write_revisions(client, scene, BOARDS, NAME, 3)
-        lines = len(scene.audit())
-        asked = {"topic": BOARDS, "name": NAME, "revision": revision}
-        refusal = an_answer(await answer_text(client, scene.host, "read_reference", asked))
-        assert refusal == {"error": "unknown_reference", "detail": f11(NAME, BOARDS, revision, 3)}
-        assert len(scene.audit()) == lines + 1, "the call left no audit line"
-        line = scene.audit()[-1]
-        assert (line["tool"], line["outcome"], line["topic"], line["reference"]) == (
-            "read_reference",
-            "unknown_reference",
-            BOARDS,
-            NAME,
-        )
-
-    play(scene.host, scenario)
-
-
-def test_a_history_cursor_beyond_the_databases_integers_reads_an_empty_page_and_the_call_is_audited(build_scene):
-    """R6. A cursor past the last revision, as large as 2**63, pages to nothing and comes back as `next_revision`, as a
-    cursor of 50 does on a document at 3. The call has its audit line."""
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host)
-        await write_revisions(client, scene, BOARDS, NAME, 3)
+        for revision in (2**63, 2**64):
+            lines = len(scene.audit())
+            asked = {"topic": BOARDS, "name": NAME, "revision": revision}
+            refusal = an_answer(await answer_text(client, scene.host, "read_reference", asked))
+            assert refusal == {"error": "unknown_reference", "detail": f11(NAME, BOARDS, revision, 3)}, revision
+            assert len(scene.audit()) == lines + 1, f"revision {revision} left no audit line"
+            line = scene.audit()[-1]
+            assert (line["tool"], line["outcome"], line["topic"], line["reference"]) == (
+                "read_reference",
+                "unknown_reference",
+                BOARDS,
+                NAME,
+            ), revision
         lines = len(scene.audit())
         asked = {"topic": BOARDS, "name": NAME, "after_revision": 2**63}
         page = an_answer(await answer_text(client, scene.host, "reference_history", asked))
@@ -91,7 +82,7 @@ def test_a_history_cursor_beyond_the_databases_integers_reads_an_empty_page_and_
             "revisions": [],
             "next_revision": 2**63,
         }
-        assert len(scene.audit()) == lines + 1, "the call left no audit line"
+        assert len(scene.audit()) == lines + 1, "the history call left no audit line"
         line = scene.audit()[-1]
         assert (line["tool"], line["outcome"], line["topic"], line["topic_id"], line["reference"]) == (
             "reference_history",
@@ -100,19 +91,6 @@ def test_a_history_cursor_beyond_the_databases_integers_reads_an_empty_page_and_
             scene.topic_id(BOARDS),
             NAME,
         )
-
-    play(scene.host, scenario)
-
-
-def test_an_edit_expecting_a_revision_beyond_the_databases_integers_is_stale_and_writes_nothing(build_scene):
-    """GUARD. R11. The compare is made in Python, so an `expected_revision` of 2**63 never reaches the database: for a
-    document at 3, and for one that does not exist, it is refused as stale with the number the document is at, and no
-    row of either table changes."""
-    scene = build_scene()
-
-    async def scenario(client):
-        await support.stage(client, scene.host)
-        await write_revisions(client, scene, BOARDS, NAME, 3)
         tables = scene.tables()
         for name, current in ((NAME, 3), ("not-there", 0)):
             stale = await core_edit(client, scene, BOARDS, name, "text", 2**63)

@@ -25,6 +25,8 @@ for connecting tools to AI applications. You decide which agents can access it a
 - **Notify an agent** when work is waiting, using an optional webhook, local command, or integration.
 - **Filter interruptions** with a lightweight model secretary. The
   [Codex and Claude Code skills](integrations/secretary/README.md) install its worker and delivery hooks.
+- **Build an offline conversation graph** from a saved thread with the
+  [API harness or native Codex/Claude Code skills](docs/graph-builder.md).
 
 Baton stores and delivers messages; it does not run agents for you. A notification tells a recipient to
 look, but it does not prove that the recipient read or acted on a message.
@@ -142,7 +144,7 @@ The [code map](docs/code-map.md) lists feature owners, shows where to make commo
 from the CLI or MCP tool through the domain objects to the database.
 
 ```sh
-uv sync
+uv sync --locked
 make check
 make test
 ```
@@ -151,6 +153,8 @@ make test
 imports and formats Python files. The same checks run in CI, with tool versions pinned in `pyproject.toml`
 and `uv.lock`. Without Make, run `uv run --locked ruff check .`, `uv run --locked ruff format --check .`,
 and `uv run --locked ty check` directly. See [Code quality](docs/code-quality.md) for the limits and typing conventions.
+The [testing guide](tests/README.md) explains which behaviors to protect, how to consolidate scenarios,
+and how to keep feedback fast.
 
 <a name="licence"></a>
 

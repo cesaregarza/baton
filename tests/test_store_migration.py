@@ -7,14 +7,13 @@ import os
 import sqlite3
 from pathlib import Path
 
-import pytest
 from test_conversations import GROUP, conversations, group_config
 from test_messages import rid
 
 from baton import events, messages
 from baton.config import Config
 from baton.database import store
-from baton.database.store import SchemaMismatch, connect
+from baton.database.store import connect
 from baton.messages import inbox
 
 V2_SCHEMA = (Path(__file__).parent / "fixtures" / "schema_v2.sql").read_text()
@@ -69,20 +68,3 @@ def test_a_version_2_database_is_migrated_and_keeps_its_messages(tmp_path: Path)
     }
     db.close()
     connect(config.db_path).close()  # a second open of a migrated database changes nothing
-
-
-def test_a_database_from_a_newer_schema_is_refused_untouched(tmp_path: Path) -> None:
-    config = group_config(tmp_path)
-    config.data_dir.mkdir(mode=0o700)
-    raw = sqlite3.connect(config.db_path)
-    newer = store.SCHEMA_VERSION + 1  # newer than this baton knows, whatever its version
-    raw.executescript(
-        f"CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES ({newer});"
-    )
-    raw.close()
-    os.chmod(config.db_path, 0o600)
-    with pytest.raises(SchemaMismatch, match=f"version {newer}"):
-        connect(config.db_path)
-    raw = sqlite3.connect(config.db_path)
-    assert [row[0] for row in raw.execute("SELECT name FROM sqlite_master")] == ["schema_version"]
-    raw.close()

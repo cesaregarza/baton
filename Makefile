@@ -19,4 +19,4 @@ format:
 	$(UV) run --locked ruff format .
 
 test:
-	$(UV) run --locked pytest -q
+	$(UV) run --locked pytest -q -n auto

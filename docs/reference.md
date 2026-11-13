@@ -154,7 +154,30 @@ These tools are present when `[search] enabled = true`.
 |---|---|
 | `search(query, conversation_id?, topic?, kinds?, limit?, before?, producer?, query_vector?, model?)` | Search readable messages by keyword. Optional kinds include derived artifacts; an optional vector can reorder keyword matches when embeddings are enabled. |
 | `get_message(message_id)` | Read one message the caller may see. |
-| `read_artifacts(conversation_id, producer?)` | Read permitted derived summaries, decisions, and open questions, labelled `valid` or `behind`. |
+| `read_artifacts(conversation_id, producer?)` | Read permitted derived summaries, decisions, and open questions, labelled `valid` or `behind`. A summary with a graph attachment also carries `graph_snapshot_id`. |
+| `read_graph(conversation_id, producer?, snapshot_id?, state?, collection?, limit?, cursor?)` | Open the derived working view (`working_view`), page strand cards or applicable decisions, and get `tail` with the `read_history` arguments for posts the view does not cover. Guests with board visibility may call it. |
+| `read_graph_strand(conversation_id, snapshot_id, strand_id, collection?, limit?, cursor?)` | One strand's summary and open work with its statements (stable `{post}-{ordinal}` ids and source attribution, no raw bodies) or the shared decisions that apply. |
+| `read_graph_statement(conversation_id, snapshot_id, statement_id, collection?, limit?, cursor?)` | One immutable statement with exact quotes and evidence, plus its incoming and outgoing edges or its strand cards. Use `get_message` for the original post. |
+| `search_graph(conversation_id, queries?, exclude?, snapshot_id?, limit?)` | The read for scoped work: the standing statements and active decisions that best match one to three queries, one line each (`120-2 \| S3 S7 \| supersedes>98-1 \| text`), best first. `exclude` names entries already held, so a further search returns only new ones. Without queries, one line per strand. |
+| `read_graph_entries(conversation_id, ids, snapshot_id?)` | Up to twelve entries whole, by id: a statement (`120-2`), a decision (`D12`), a strand (`S3`: summary and open work) or a post (`post:120`: its standing statements). |
+
+A graph is served only when the caller may read every message it was made from, and only while its summary
+is the latest valid version of an active generation. No graph, or none you may read, is `graph_unavailable`;
+a snapshot that is no longer served is `snapshot_unavailable`, so restart from `read_graph`. Pages are
+capped at 32 KB and stop between whole rows; `next_cursor` is the only sign that rows remain, and an
+indivisible detail over the cap is `item_too_large`. `read_history(through_seq=...)` pages a fixed head:
+keep it while replacing `after_seq` with `next_seq` until `next_seq` reaches it, and read `retention_gaps`
+rather than treating a short page as the end. Graph text is interpretation, never authority.
+
+`search_graph` and `read_graph_entries` return `entries`, a list of lines, under the same 32 KB cap and
+without cursors. A statement line is its id, its strands, its connections and its text; `kind>id` means the
+statement does that to the other one and `kind<id` the reverse, and only standing statements are connected.
+Fully replaced statements and superseded decisions are left out; a partly replaced statement shows the text
+that still stands. A query matches an entry holding any of its words, stemmed, and the first 16 distinct words
+of a query are used. A search hit with more than 400 bytes of text is an excerpt ending `[N bytes in full]`.
+`omitted` counts lines the cap cut from a search, `skipped` gives the reason an id returned nothing, and
+`remaining` lists ids that did not fit, to ask for again. Graph search needs SQLite FTS5 and answers
+`graph_unavailable` without it.
 
 A query may contain at most eight words and 200 characters; longer queries are refused. Every word must
 match. `before` is an ISO 8601 timestamp with a UTC offset. Baton uses SQLite FTS5 when available and a
@@ -181,7 +204,8 @@ configuration problem exits with status 2.
 | `baton message --as R --conversation C ...` | Send to the other conversation participants. Supports `--reply-to`, `--attention`, and `--needs-decision`. |
 | `baton read --as R [--after-seq N]` | Read a role's mailbox. |
 | `baton wait --as R [--timeout S]` | Wait for work addressed to a role. |
-| `baton conversation new\|list\|history\|add\|remove` | Create, list, read, and manage conversations. `new` and `list` take `--topic`; `conversation topic C --set T\|--clear` files or unfiles one. Create topic containers with MCP first. |
+| `baton conversation new\|list\|history\|add\|remove` | Create, list, read, and manage conversations. `new` and `list` take `--topic`; `history` takes `--through-seq` for a fixed head; `conversation topic C --set T\|--clear` files or unfiles one. Create topic containers with MCP first. |
+| `baton index graph-worker status\|reset --conversation C` | Inspect the background graph worker's ledger and meter, or clear one blocked conversation record (a running service applies the reset at its next cycle). Generation itself runs under `baton serve`; see [the graph builder guide](graph-builder.md). |
 | `baton job create\|show\|list\|move\|events` | Create and inspect jobs or move them through their configured states. |
 | `baton token new --name N --role R` | Generate a bearer token and its config entry. |
 | `baton token revoke N` | Revoke a named bearer token without restarting the server. |

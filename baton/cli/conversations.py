@@ -54,7 +54,20 @@ def add_commands(commands: Any) -> None:
     history.add_argument("conversation_id")
     history.add_argument("--after-seq", type=int, default=0)
     history.add_argument("--limit", type=int, default=50)
+    history.add_argument(
+        "--through-seq", type=int, help="fixed inclusive head for forward paging, such as a graph tail's through_seq"
+    )
     history.set_defaults(handler=read_history)
+
+    context = with_role(
+        conversation.add_parser("context", help="an authorized summary and raw tail; marks nothing read")
+    )
+    context.add_argument("conversation_id")
+    context.add_argument("--producer")
+    context.add_argument("--limit", type=int, default=50)
+    context.add_argument("--after-seq", type=int, help="continuation only: use with --through-seq")
+    context.add_argument("--through-seq", type=int, help="fixed head from continuation; use with --after-seq")
+    context.set_defaults(handler=read_context)
 
     for name, operation in (("add", Thread.add_participant), ("remove", Thread.remove_participant)):
         change = with_role(conversation.add_parser(name, help=f"{name} a participant"))
@@ -77,5 +90,22 @@ def read_history(config: Config, args: argparse.Namespace) -> dict[str, Any]:
     conversations.require_enabled(config)
     return db(
         config,
-        lambda conn: Agent(conn, config, args.role).thread(args.conversation_id).read(args.after_seq, args.limit),
+        lambda conn: (
+            Agent(conn, config, args.role)
+            .thread(args.conversation_id)
+            .read(args.after_seq, args.limit, through_seq=args.through_seq)
+        ),
+    )
+
+
+def read_context(config: Config, args: argparse.Namespace) -> dict[str, Any]:
+    return db(
+        config,
+        lambda conn: (
+            Agent(conn, config, args.role)
+            .thread(args.conversation_id)
+            .read_context(
+                producer=args.producer, limit=args.limit, after_seq=args.after_seq, through_seq=args.through_seq
+            )
+        ),
     )

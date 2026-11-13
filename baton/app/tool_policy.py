@@ -41,6 +41,7 @@ POLICIES = (
     ToolPolicy("create_conversation", SCOPE_WRITE, False, "conversation", guest="yes", identity="guest"),
     ToolPolicy("list_conversations", group="conversation", guest="yes", error_result=True),
     ToolPolicy("read_history", group="conversation", guest="yes"),
+    ToolPolicy("read_context", group="conversation"),
     ToolPolicy("add_participant", SCOPE_WRITE, False, "conversation"),
     ToolPolicy("remove_participant", SCOPE_WRITE, False, "conversation"),
     ToolPolicy("set_topic", SCOPE_WRITE, False, "conversation", guest="grant", identity="bound"),
@@ -64,6 +65,13 @@ POLICIES = (
     ToolPolicy("search", group="search", guest="yes"),
     ToolPolicy("get_message", group="search", guest="yes"),
     ToolPolicy("read_artifacts", group="artifact"),
+    # Graph reads serve a derived view only when the caller can read every source input; that same predicate
+    # already lets a guest with board visibility read board copies, so these are deliberately guest tools.
+    ToolPolicy("read_graph", group="graph", guest="yes"),
+    ToolPolicy("read_graph_strand", group="graph", guest="yes"),
+    ToolPolicy("read_graph_statement", group="graph", guest="yes"),
+    ToolPolicy("search_graph", group="graph", guest="yes"),
+    ToolPolicy("read_graph_entries", group="graph", guest="yes"),
     ToolPolicy("read_secretary_summaries"),
 )
 BY_NAME = {policy.name: policy for policy in POLICIES}
@@ -78,6 +86,7 @@ CONVERSATION_TOOLS = registrations("conversation", "reference")
 REFERENCE_TOOLS = registrations("reference")
 SEARCH_TOOLS = registrations("search")
 ARTIFACT_TOOLS = registrations("artifact")
+GRAPH_TOOLS = registrations("graph")
 GUEST_TOOLS = frozenset(p.name for p in POLICIES if p.guest in {"yes", "binding"})
 REFERENCE_GUEST_TOOLS = frozenset(p.name for p in POLICIES if p.group == "reference" and p.guest == "binding")
 GUEST_IDENTIFIED = frozenset(p.name for p in POLICIES if p.identity == "guest")

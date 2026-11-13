@@ -281,8 +281,14 @@ def test_a_display_name_with_markup_is_escaped_in_each_needs_label(tmp_path) -> 
 def test_a_display_name_with_markup_is_escaped_in_the_needs_pager(tmp_path) -> None:
     config = projection_config(tmp_path, display_name=MARKUP, attention_role="person")
     room = seeded(config)["room"]
-    for n in range(dashboard.MAX_NEEDS):  # one page more than fits: the pager shows
-        say(config, room, "orchestrator", f"ask {n}", attention=["person"])
+    conn = connect(config.db_path)
+    try:
+        for n in range(dashboard.MAX_NEEDS):  # one page more than fits: the pager shows
+            conversations.send(
+                conn, config, sender="orchestrator", conversation_id=room, text=f"ask {n}", attention=["person"]
+            )
+    finally:
+        conn.close()
     body = text(get(config, "/needs"))
     assert f"Older messages for {ESCAPED}" in body
     assert "<b>Team</b>" not in body

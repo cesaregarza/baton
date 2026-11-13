@@ -1,9 +1,4 @@
-"""Shared setup for the topic grant tests: a database with aliases and topics, a clock, and checks that
-say what is missing instead of raising.
-
-`baton/topics/grants.py` and its tables may not exist yet. Nothing here imports the module at the top
-level: `grants_module()` asserts it exists first, so against a base without it every test that needs it
-fails on that assertion and never as an ImportError, a collection error or an OperationalError.
+"""Shared setup for the topic grant tests: a database with aliases and topics, and a controlled clock.
 
 The clock is patched into the module's `_now()`, as the module's contract says. The digest and the alias
 code are recomputed here from the spec, not by the code under test, so a digest that drifts from the
@@ -14,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import importlib.util
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -77,12 +71,8 @@ AUTHORIZATION_COLUMNS = ("authorized_by", "authorized_at", "authorized_digest", 
 
 
 def grants_module() -> ModuleType:
-    """The module under test, or a failed assertion saying it is not there."""
-    assert importlib.util.find_spec("baton.topics.grants") is not None, "baton/topics/grants.py does not exist yet"
-    module = importlib.import_module("baton.topics.grants")
-    for name in ("propose", "authorize", "revoke", "list_grants", "covering_grant", "_now"):
-        assert hasattr(module, name), f"baton.topics.grants has no {name}"
-    return module
+    """Load the domain API used by grant scenarios and the controlled clock."""
+    return importlib.import_module("baton.topics.grants")
 
 
 def table_exists(db: sqlite3.Connection, name: str) -> bool:

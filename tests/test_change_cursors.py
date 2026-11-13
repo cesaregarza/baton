@@ -118,18 +118,20 @@ def test_pruned_cursors_keep_the_reset_position(log, operation, number: str) -> 
     assert raised.value.extra == {"resync": True, "reset_cursor": "current:3"}
 
 
-@pytest.mark.parametrize("command", ["changes", "wait"])
-@pytest.mark.parametrize("number", INVALID_NUMBERS)
-def test_cli_refuses_invalid_numbers_as_json_without_writing(host, conn, capsys, command: str, number: str) -> None:
+def test_cli_refuses_invalid_numbers_as_json_without_writing(host, conn, capsys) -> None:
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     before = {path.name: path.read_bytes() for path in host.config.data_dir.glob("baton.db*")}
     config_path = host.config.data_dir.parent / "baton.toml"
-    args = ["--config", str(config_path), "index", command, "--after", f"{changes.epoch(conn)}:{number}"]
-    if command == "wait":
-        args.extend(["--timeout", "0"])
+    for command in ("changes", "wait"):
+        for case in INVALID_NUMBERS:
+            (number,) = case.values
+            args = ["--config", str(config_path), "index", command, "--after", f"{changes.epoch(conn)}:{number}"]
+            if command == "wait":
+                args.extend(["--timeout", "0"])
 
-    assert cli.main(args) == 1
-    captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"error": "invalid_request", "detail": INVALID_DETAIL}
-    assert captured.err == ""
-    assert {path.name: path.read_bytes() for path in host.config.data_dir.glob("baton.db*")} == before
+            sent = (command, case.id)
+            assert cli.main(args) == 1, sent
+            captured = capsys.readouterr()
+            assert json.loads(captured.out) == {"error": "invalid_request", "detail": INVALID_DETAIL}, sent
+            assert captured.err == "", sent
+            assert {path.name: path.read_bytes() for path in host.config.data_dir.glob("baton.db*")} == before, sent

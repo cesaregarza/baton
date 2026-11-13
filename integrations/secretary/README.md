@@ -153,6 +153,73 @@ systemctl --user daemon-reload
 
 Remove only this integration's hook entries from the project settings, preserving all unrelated configuration. Retain or remove the private instance directory according to the owner's data-retention choice; do not discard pending decisions implicitly.
 
+## Retained-thread bridge
+
+[`thread/secretary_bridge.py`](thread/secretary_bridge.py) lets a long-lived agent thread act as a secretary
+policy's command model, protocol version 4. Baton runs `secretary_bridge.py model` once per model turn; the thread
+loops `receive`, `read` and `reply` against the same file. [`thread/GUIDANCE.md`](thread/GUIDANCE.md) is the
+thread's standing guidance, versioned with the bridge: it names the `BRIDGE_VERSION` it matches.
+
+Host contract:
+
+- The bridge runs under the system interpreter with `-I` and never imports `baton`. It sits beside a host-provided
+  `secretary_gate` module that supplies the names listed in `GATE_NAMES`, including the spool's root, `GATE_DIR`;
+  a gate lacking one stops the bridge at import, naming it.
+- The policy's model command, the spool, the deadlines and every answer check are the host's existing ones. An
+  answer holding half of a surrogate pair, which the checks could not encode, is refused as invalid.
+- Each output that hands the thread a live turn includes `reply_form`: a command ending in a quoted heredoc opener,
+  and its closing line, unique to the turn. The thread submits the command, a newline, its serializer's one-line
+  JSON, a newline and the closing line, so the shell evaluates nothing in the answer. A reply whose stdin is a
+  terminal, empty, or an open pipe that stays silent is refused and the turn stays open.
+- Each turn's first page carries the three trusted developer layers, so Baton's instructions, including the
+  full-page summary rule, are present on every turn.
+- Every printed line fits what the thread's tools display whole (`PAGE_TOKENS`, counted conservatively for non-ASCII
+  text). The header counts the turn's pages; each page indexes its events, and an event or layer larger than a page
+  arrives in numbered parts on consecutive pages. Every output carries a `status`; one for a turn that can no longer
+  be answered (`late`, `not_outstanding`) says to stop and return to `receive`.
+
+To adopt a new version, do these steps in order. "The process list" means every process whose command line holds
+the bridge path. It includes the shell of a command session that runs a `receive`. An idle spool alone is not
+enough: a waiting `receive` holds nothing in the spool, so `status` reports `idle`, and it keeps the bytes it
+started with, so it can take the next turn on the old bridge.
+
+1. Hold. Turn off the host's secretary gate and thread mode, the switches that let Baton offer turns to the
+   thread, and verify both. While both are off, nothing can offer a turn. Enable neither until step 7 passes.
+2. Retire the thread's receive loop. If the thread is not mid-turn (its latest turn completed, or it is not
+   loaded), no `receive` should be running. If it is mid-turn (its receive loop is a pending call), interrupt that
+   turn so it starts no further `receive`. A `receive` still running exits by itself at its `--wait` bound; wait
+   for it. Waiting is enough; do not end any process.
+3. Require an empty process list and `secretary_bridge.py status` reporting the spool `idle`. If it reports `live`
+   or `abandoned`, stop and report it. Keep copies of the installed bridge's bytes and its resume message for
+   rollback.
+4. Immediately before the swap, recheck all of it: gate and mode off, the thread not mid-turn, an empty process
+   list and an idle spool. If any check fails, go back to step 2.
+5. Install. Write the new bytes to a temporary file in the same directory, give it the same owner and mode, and
+   rename it over the bridge.
+6. Run `status` again and check that it exits 0 and reports the spool `idle`, and that the process list is still
+   empty.
+7. Resume the same thread with the rendered resume message below. Check that it acknowledges the new version and
+   runs exactly one `receive`, and that the process list shows that one `receive` (with any shell that runs it) and
+   nothing else. Only then may gate and mode be enabled.
+
+The resume message is the guidance, preceded by one line naming the host's command.
+[`thread/resume_message.py`](thread/resume_message.py) renders it: `BRIDGE: ` and its one argument, a blank line,
+then the guidance's bytes; it refuses an empty or multi-line command.
+
+```sh
+python3 -I integrations/secretary/thread/resume_message.py "$BRIDGE_COMMAND" > resume-message.txt
+```
+
+`BRIDGE_COMMAND` is the interpreter, `-I` and the installed bridge's path. The thread acknowledges with the
+version; the next `receive` header shows `bridge_version` and `reply_form`. If that header shows no version or a
+different one, a process older than the swap took the turn: turn gate and mode off at once, keep them off, report
+the header's version line, and do not retry the install.
+
+To roll back, hold, retire the loop and require an empty process list and an idle spool as in steps 1 to 4. Then
+reinstall the previous bridge bytes kept in step 3 the same way, and make the checks of step 6. Resume the same
+thread with the previous version's resume message, also kept in step 3, and check that it acknowledges the
+previous version, with the other step 7 checks, before enabling gate and mode.
+
 ## Where the behavior lives
 
 The skills in this directory guide installation. The installed Python runtime is

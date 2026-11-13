@@ -84,6 +84,21 @@ def _write_version(
     )
     if prior_id is not None:
         conn.execute("INSERT INTO artifact_depends_on (version_id, prior_id) VALUES (?, ?)", (version_id, prior_id))
+    if "graph_snapshot" in artifact:  # validated by the commit before this write; stored in the same transaction
+        snapshot = artifact["graph_snapshot"]
+        conn.execute(
+            "INSERT INTO graph_snapshots (version_id, conversation_id, covered_through_seq, graph_digest, revision,"
+            " snapshot, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                version_id,
+                snapshot["conversation_id"],
+                snapshot["covered_through_seq"],
+                snapshot["graph_digest"],
+                snapshot["revision"],
+                json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                _now(),
+            ),
+        )
     return version_id
 
 

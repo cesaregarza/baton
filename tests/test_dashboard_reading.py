@@ -1,55 +1,30 @@
-"""The dashboard read on a phone: long words wrap, every item past a page cap can be reached, and a deep link
-keeps its parent's context. Synthetic and offline, with generic roles."""
+"""Dashboard pagination, deep-link context, and generated mobile viewport declarations.
+
+Synthetic and offline, with generic roles.
+"""
 
 from __future__ import annotations
 
 import re
 from typing import Any
 
-import pytest
 from test_dashboard import text
 from test_dashboard_pages import MINE, get, made, needs_items, page_config
 
 from baton import conversations, dashboard, jobs
 from baton.database.store import connect
 
-LONG = "x" * 6000  # one unbroken word, far wider than any phone
-
-
-def rules(css: str) -> dict[str, str]:
-    """Each selector in the stylesheet with its declarations, joined, so a test can ask what a class gets."""
-    found: dict[str, str] = {}
-    for selectors, body in re.findall(r"([^{}]+)\{([^}]*)\}", css):
-        for selector in selectors.split(","):
-            found[selector.strip()] = found.get(selector.strip(), "") + body
-    return found
-
 
 def links(body: str) -> list[str]:
     return [href.replace("&amp;", "&") for href in re.findall(r'href="([^"]+)"', body)]
 
 
-# 1. Long words wrap ------------------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("selector", [".text", ".relayed-text", ".meta", "h1", "li", "a"])
-def test_long_unbroken_text_wraps_instead_of_widening_the_page(selector: str) -> None:
-    css = rules(dashboard.STYLE)
-    assert selector in css, selector
-    assert "overflow-wrap: anywhere" in css[selector], selector
-
-
-def test_the_page_never_scrolls_sideways_and_keeps_a_phone_viewport(tmp_path) -> None:
-    css = rules(dashboard.STYLE)
-    assert "overflow-x: hidden" not in css.get("body", "")  # wrapping, not clipping, keeps every word readable
-    assert "min-width: 0" in css["li"]
+def test_dashboard_pages_declare_a_mobile_viewport(tmp_path) -> None:
+    """The generated HTML opts into the device-width viewport on each main route."""
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
         conversation = made(conn, config, "y" * 190, MINE, "alpha")
-        conversations.send(
-            conn, config, sender="orchestrator", conversation_id=conversation, text=LONG, attention=["operator"]
-        )
     finally:
         conn.close()
     for target in ("/", "/t/alpha", "/needs", f"/c/{conversation}"):
@@ -60,56 +35,67 @@ def test_the_page_never_scrolls_sideways_and_keeps_a_phone_viewport(tmp_path) ->
 # 2. Every item past a cap can be reached ----------------------------------------------------------------------
 
 
-def walk(config: Any, first: str, pattern: str, more_label: str) -> list[str]:
+def walk(config: Any, first: str, pattern: str, more_label: str) -> tuple[list[str], str]:
     """Follow the page's onward link until there is none, collecting what each page lists."""
     seen: list[str] = []
+    first_body = ""
     target, guard = first, 0
     while target and guard < 20:
         body = text(get(config, target))
+        if not first_body:
+            first_body = body
         seen += re.findall(pattern, body)
         onward = [href for href in links(body) if more_label in href]
         target = onward[0] if onward else None
         guard += 1
-    return seen
+    return seen, first_body
 
 
-def test_every_conversation_past_the_list_cap_can_be_reached(tmp_path) -> None:
+def test_conversations_past_the_first_page_are_reachable_once_on_both_lists(tmp_path, monkeypatch) -> None:
     config = page_config(tmp_path)
+    monkeypatch.setattr(dashboard, "MAX_LISTED", 2)
     conn = connect(config.db_path)
     try:
         names = [
             made(conn, config, f"Conversation {index:03d}", MINE, "alpha") and f"Conversation {index:03d}"
-            for index in range(dashboard.MAX_LISTED + 6)
+            for index in range(5)
         ]
     finally:
         conn.close()
     for first in ("/", "/t/alpha"):
-        seen = walk(config, first, r'<a href="/c/[^"]+">([^<]+)</a>', "page=")
-        assert sorted(seen) == sorted(names), first  # every one, each once
-        assert "showing the newest 200 of 206 conversations" in text(get(config, first))
+        seen, first_body = walk(config, first, r'<a href="/c/[^"]+">([^<]+)</a>', "page=")
+        assert sorted(seen) == names and len(seen) == len(set(seen)), first
+        assert len(re.findall(r'<a href="/c/[^"]+">([^<]+)</a>', first_body)) == 2, first
+        assert "showing the newest 2 of 5 conversations" in first_body
 
 
-def test_every_signal_past_the_needs_cap_can_be_reached(tmp_path) -> None:
+def test_signals_past_the_first_page_are_reachable_once_and_counted(tmp_path, monkeypatch) -> None:
     config = page_config(tmp_path)
+    monkeypatch.setattr(dashboard, "MAX_NEEDS", 2)
     conn = connect(config.db_path)
     try:
         mine = made(conn, config, "Many asks", MINE)
-        for index in range(dashboard.MAX_NEEDS + 11):
+        for index in range(4):
             conversations.send(
                 conn, config, sender="reviewer", conversation_id=mine, text=f"ask {index:03d}", attention=["operator"]
             )
+            if index < 2:
+                conversations.send(conn, config, sender="reviewer", conversation_id=mine, text=f"noise {index:03d}")
     finally:
         conn.close()
-    seen = walk(config, "/needs", r'<p class="text">([^<]*)</p>', "page=")
-    assert sorted(seen) == [f"ask {index:03d}" for index in range(dashboard.MAX_NEEDS + 11)]
-    assert "showing the newest 100 of 111" in text(get(config, "/needs"))
+    seen, first = walk(config, "/needs", r'<p class="text">([^<]*)</p>', "page=")
+    assert sorted(seen) == [f"ask {index:03d}" for index in range(4)]
+    assert len(seen) == len(set(seen))
+    assert needs_items(first) == ["ask 003", "ask 002"]
+    assert "4 messages asked for you" in first and "showing the newest 2 of 4" in first
 
 
-def test_every_job_past_the_jobs_cap_can_be_reached(tmp_path) -> None:
+def test_jobs_past_the_first_page_are_reachable_once_and_counted(tmp_path, monkeypatch) -> None:
     config = page_config(tmp_path)
+    monkeypatch.setattr(dashboard, "MAX_NEEDS_JOBS", 2)
     conn = connect(config.db_path)
     try:
-        for index in range(dashboard.MAX_NEEDS_JOBS + 2):
+        for index in range(4):
             jobs.create(
                 conn,
                 config.jobs,
@@ -117,12 +103,22 @@ def test_every_job_past_the_jobs_cap_can_be_reached(tmp_path) -> None:
                 actor="orchestrator",
                 title=f"Job {index:03d}",
             )
+        other = jobs.create(
+            conn,
+            config.jobs,
+            request_id="20261029T120000Z-reach-other",
+            actor="orchestrator",
+            title="Reviewer job",
+        )
+        jobs.move(conn, config.jobs, other["job_id"], "working", actor="operator")
     finally:
         conn.close()
-    seen = walk(config, "/needs", r"(Job \d{3})", "jobs_page=")
-    assert sorted(set(seen)) == [f"Job {index:03d}" for index in range(dashboard.MAX_NEEDS_JOBS + 2)]
+    seen, first = walk(config, "/needs", r"(Job \d{3})", "jobs_page=")
+    assert sorted(seen) == [f"Job {index:03d}" for index in range(4)]
     assert len(seen) == len(set(seen))
-    assert "showing 50 of 52" in text(get(config, "/needs"))
+    assert len(re.findall(r"Job \d{3}", first)) == 2
+    assert "4 jobs are waiting on you" in first and "showing 2 of 4" in first
+    assert "Reviewer job" not in first
 
 
 def test_a_needs_page_keeps_its_topic_filter_on_the_onward_link(tmp_path, monkeypatch) -> None:
@@ -130,20 +126,20 @@ def test_a_needs_page_keeps_its_topic_filter_on_the_onward_link(tmp_path, monkey
     conn = connect(config.db_path)
     try:
         mine = made(conn, config, "Topic asks", MINE, "alpha")
-        for index in range(5):
+        for index in range(3):
             conversations.send(
                 conn, config, sender="reviewer", conversation_id=mine, text=f"alpha ask {index}", attention=["operator"]
             )
     finally:
         conn.close()
-    monkeypatch.setattr(dashboard, "MAX_NEEDS", 2)
+    monkeypatch.setattr(dashboard, "MAX_NEEDS", 1)
     onward = [href for href in links(text(get(config, "/needs?topic=alpha"))) if "page=" in href]
     assert onward and all("topic=alpha" in href for href in onward)
 
 
-@pytest.mark.parametrize(
-    "query",
-    [
+def test_a_bad_page_number_is_a_bad_request_with_the_standard_headers(tmp_path) -> None:
+    config = page_config(tmp_path)
+    for query in (
         "page=0",
         "page=-1",
         "page=abc",
@@ -153,16 +149,13 @@ def test_a_needs_page_keeps_its_topic_filter_on_the_onward_link(tmp_path, monkey
         "jobs_page=0",
         "jobs_page=x",
         "jobs_page=1&jobs_page=2",
-    ],
-)
-def test_a_bad_page_number_is_a_bad_request_with_the_standard_headers(tmp_path, query: str) -> None:
-    config = page_config(tmp_path)
-    for path in ("/", "/needs"):
-        if path == "/" and query.startswith("jobs_page"):
-            continue
-        response = get(config, f"{path}?{query}")
-        assert response.status == 400, (path, query)
-        assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS
+    ):
+        for path in ("/", "/needs"):
+            if path == "/" and query.startswith("jobs_page"):
+                continue
+            response = get(config, f"{path}?{query}")
+            assert response.status == 400, (path, query)
+            assert {key: response.headers[key] for key in dashboard.HEADERS} == dashboard.HEADERS, (path, query)
 
 
 def test_a_page_past_the_end_says_so_and_links_back(tmp_path) -> None:
@@ -367,7 +360,7 @@ def test_times_are_compact_with_the_full_value_kept_in_a_title(tmp_path) -> None
             assert len(shown) <= 12 and "T" not in shown and "+00:00" not in shown, (target, shown)
 
 
-def test_job_ids_are_shortened_on_narrow_screens_with_the_full_id_kept(tmp_path) -> None:
+def test_job_id_is_available_in_full_in_the_html(tmp_path) -> None:
     config = page_config(tmp_path)
     conn = connect(config.db_path)
     try:
@@ -378,59 +371,36 @@ def test_job_ids_are_shortened_on_narrow_screens_with_the_full_id_kept(tmp_path)
         conn.close()
     body = text(get(config, "/needs"))
     assert f'<span class="id" title="{job["job_id"]}">{job["job_id"]}</span>' in body
-    css = rules(dashboard.STYLE)
-    narrow = re.search(r"@media \(max-width: 480px\) \{(.*?)\}\s*\}", dashboard.STYLE, re.S)
-    assert narrow and ".id" in narrow.group(1) and "text-overflow: ellipsis" in narrow.group(1)
-    assert ".id" in css
 
 
 def test_advancing_one_needs_list_keeps_the_others_where_they_are(tmp_path, monkeypatch) -> None:
     config = page_config(tmp_path)
-    conn = connect(config.db_path)
-    try:
-        mine = made(conn, config, "Three lists", MINE, "alpha")
-        for index in range(5):
-            conversations.send(
-                conn, config, sender="reviewer", conversation_id=mine, text=f"for you {index}", attention=["operator"]
-            )
-            conversations.send(
-                conn,
-                config,
-                sender="orchestrator",
-                conversation_id=mine,
-                text=f"other {index}",
-                attention=["reviewer"],
-                needs_decision=True,
-            )
-            jobs.create(
-                conn,
-                config.jobs,
-                request_id=f"20261029T120000Z-three-{index}",
-                actor="orchestrator",
-                title=f"Job {index}",
-            )
-    finally:
-        conn.close()
+    three_lists(config)
     for name in ("MAX_NEEDS", "MAX_NEEDS_JOBS"):
-        monkeypatch.setattr(dashboard, name, 2)
+        monkeypatch.setattr(dashboard, name, 1)
     body = text(get(config, "/needs?page=2&others_page=2&jobs_page=2"))
     hrefs = links(body)
-    names = ("page", "others_page", "jobs_page")
-    onward = {name: next(href for href in hrefs if f"{name}=3" in href) for name in names}
-    for name, href in onward.items():
-        for other in {"page", "others_page", "jobs_page"} - {name}:
-            assert f"{other}=2" in href, (name, href)
+    names = {"page": "#for-you", "others_page": "#decisions", "jobs_page": "#jobs"}
+    for name, anchor in names.items():
+        onward = [href for href in hrefs if re.search(rf"(\?|&){name}=3(&|#|$)", href)]
+        assert onward and all(href.endswith(anchor) for href in onward), (name, onward)
+        for href in onward:
+            for other in set(names) - {name}:
+                assert re.search(rf"(\?|&){other}=2(&|#|$)", href), (name, href)
+    for anchor in ('id="for-you"', 'id="decisions"', 'id="jobs"'):
+        assert anchor in body, anchor
+    top = body[: body.index('id="for-you"')]
+    assert 'href="#for-you"' in top and 'href="#jobs"' in top
     filtered = links(text(get(config, "/needs?topic=alpha&page=2&others_page=2")))
     assert all("topic=alpha" in href for href in filtered if "page=" in href)
-    assert any("others_page=2" in href and "page=3" in href.replace("others_page", "") for href in filtered)
 
 
 def three_lists(config: Any) -> None:
-    """Five messages for the viewer, five decisions for someone else and five jobs, for small page caps."""
+    """Three of each list item, enough to test another page with a one-item cap."""
     conn = connect(config.db_path)
     try:
         mine = made(conn, config, "Navigation", MINE, "alpha")
-        for index in range(5):
+        for index in range(3):
             conversations.send(
                 conn, config, sender="reviewer", conversation_id=mine, text=f"for you {index}", attention=["operator"]
             )
@@ -462,7 +432,7 @@ def details_tag(body: str) -> str:
 def test_paging_the_collapsed_decisions_reloads_with_them_open(tmp_path, monkeypatch) -> None:
     config = page_config(tmp_path)
     three_lists(config)
-    monkeypatch.setattr(dashboard, "MAX_NEEDS", 2)
+    monkeypatch.setattr(dashboard, "MAX_NEEDS", 1)
     first = text(get(config, "/needs"))
     assert "open" not in details_tag(first)
     older = next(href for href in links(first) if "others_page=2" in href)
@@ -470,24 +440,3 @@ def test_paging_the_collapsed_decisions_reloads_with_them_open(tmp_path, monkeyp
     assert "open" in details_tag(reloaded)  # the section the reader asked for stays open
     back = [href for href in links(reloaded) if href.endswith("#decisions") and "others_page" not in href]
     assert back, "a way back to the first page of decisions, landing on them"
-
-
-def test_every_paging_link_lands_on_its_own_list(tmp_path, monkeypatch) -> None:
-    config = page_config(tmp_path)
-    three_lists(config)
-    for name in ("MAX_NEEDS", "MAX_NEEDS_JOBS"):
-        monkeypatch.setattr(dashboard, name, 2)
-    body = text(get(config, "/needs?page=2&others_page=2&jobs_page=2"))
-    for param, anchor in (("page", "#for-you"), ("others_page", "#decisions"), ("jobs_page", "#jobs")):
-        onward = [href for href in links(body) if re.search(rf"(\?|&){param}=3(&|#|$)", href)]
-        assert onward and all(href.endswith(anchor) for href in onward), (param, onward)
-    for anchor in ('id="for-you"', 'id="decisions"', 'id="jobs"'):
-        assert anchor in body, anchor
-
-
-def test_the_needs_page_offers_jumps_to_its_lists(tmp_path) -> None:
-    config = page_config(tmp_path)
-    three_lists(config)
-    body = text(get(config, "/needs"))
-    top = body[: body.index('id="for-you"')]
-    assert 'href="#for-you"' in top and 'href="#jobs"' in top

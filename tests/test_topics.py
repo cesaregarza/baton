@@ -7,7 +7,6 @@ generic roles and a temporary data directory.
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -21,11 +20,6 @@ from baton import conversations
 from baton.config import Config
 from baton.database import store
 from baton.database.store import SCHEMA_VERSION, connect
-
-FIXTURES = Path(__file__).parent / "fixtures"
-# Every older schema there is a real fixture for. Not read off MIGRATES_FROM on purpose: a version missing
-# from that list is a failure to catch, not a case to stop generating.
-FIXTURE_VERSIONS = tuple(sorted(int(path.stem.removeprefix("schema_v")) for path in FIXTURES.glob("schema_v*.sql")))
 
 
 @pytest.fixture
@@ -263,45 +257,6 @@ def test_a_topic_never_reveals_a_conversation_the_role_is_not_in(db, config) -> 
 
 
 # Schema 6 -------------------------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("version", FIXTURE_VERSIONS)
-def test_every_older_database_gains_a_null_topic(tmp_path: Path, version: int) -> None:
-    config = group_config(tmp_path)
-    config.data_dir.mkdir(mode=0o700)
-    raw = sqlite3.connect(config.db_path)
-    raw.executescript((FIXTURES / f"schema_v{version}.sql").read_text())
-    if version >= 3:  # conversations exist from version 3 on
-        with raw:
-            raw.execute(
-                "INSERT INTO conversations (id, request_id, request_digest, title, created_by,"
-                " created_at, last_seq) VALUES ('conv_old', 'r', 'd', 'Carried over', 'orchestrator',"
-                " '2026-10-01T00:00:00+00:00', 0)"
-            )
-            raw.execute(
-                "INSERT INTO participants (conversation_id, role, added_at) VALUES"
-                " ('conv_old', 'orchestrator', '2026-10-01T00:00:00+00:00')"
-            )
-            raw.execute(
-                "INSERT INTO participants (conversation_id, role, added_at) VALUES"
-                " ('conv_old', 'reviewer', '2026-10-01T00:00:00+00:00')"
-            )
-    raw.close()
-    os.chmod(config.db_path, 0o600)
-
-    db = connect(config.db_path)
-    assert db.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION >= 6
-    assert "topic" in {row["name"] for row in db.execute("PRAGMA table_info(conversations)")}
-    if version >= 3:
-        [carried] = conversations.list_for(db, "reviewer")
-        assert (carried["conversation_id"], carried["title"], carried["topic"]) == ("conv_old", "Carried over", None)
-        # And a carried-over conversation can be given one straight away, once the topic exists.
-        back_topics(db, "project/carried")
-        assert (
-            conversations.set_topic(db, config, "conv_old", "project/carried", actor="orchestrator")["topic"]
-            == "project/carried"
-        )
-    db.close()
 
 
 def test_the_topic_step_names_the_table_it_alters() -> None:

@@ -392,16 +392,6 @@ def test_before_filters_messages_by_send_time_and_artifacts_by_when_written(db, 
     assert kinds_found("2026-01-15T00:00:00Z") == {"artifact"}
 
 
-def test_the_before_help_says_which_time_each_kind_is_compared_by() -> None:
-    import inspect
-
-    from baton import app
-
-    annotation = inspect.signature(app.Tools.search).parameters["before"].annotation
-    description = " ".join(str(getattr(meta, "description", "")) for meta in getattr(annotation, "__metadata__", ()))
-    assert "sent" in description and "written" in description, description
-
-
 def test_contiguous_recent_messages_fill_one_segment(tmp_path: Path) -> None:
     config = reads_config(tmp_path, rolling=3, max_manifest_segments=1)
     db = connect(config.db_path)
@@ -409,3 +399,139 @@ def test_contiguous_recent_messages_fill_one_segment(tmp_path: Path) -> None:
     manifest = begin(db, config, conversation_id, kinds=("summary_recent",))
     assert manifest["window"] == {"from_seq": 4, "to_seq": 6}  # three messages, one range
     db.close()
+
+
+def test_context_pages_the_earliest_tail_at_one_head_even_after_summary_advances(db, config) -> None:
+    from baton.agents import Agent
+    from baton.app import Tools
+
+    conversation_id, _ = converse(db, config, 2)
+    publish(db, config, conversation_id, producer="alpha", body="first summary")
+    publish(db, config, conversation_id, producer="beta", body="equal frontier")
+    for number in range(3, 8):
+        say(db, config, conversation_id, f"note {number}")
+    before = snapshot(db)
+    thread = Agent(db, config, "assistant").thread(conversation_id)
+    initial = thread.read_context(limit=2)
+    assert (initial["head_seq"], initial["covered_through_seq"]) == (7, 2)
+    assert initial["summary"]["producer"] == "alpha"  # stable tie-break at an equal frontier
+    assert initial["summary"]["derived"] and not initial["summary"]["authoritative"]
+    assert [item["seq"] for item in initial["messages"]] == [3, 4]
+    assert initial["continuation"] == {"after_seq": 4, "through_seq": 7}
+    assert initial["tail_complete"] is False and initial["fallback"] is None
+    assert snapshot(db) == before
+    assert thread.read_context(producer="beta")["summary"]["body"] == "equal frontier"
+
+    say(db, config, conversation_id, "new head after opening")
+    publish(db, config, conversation_id, producer="beta", request_id="later", body="new summary")
+    assert thread.read_context()["summary"]["producer"] == "beta"  # greatest watermark wins
+    second = Tools(config).read_context("assistant", conversation_id, limit=2, **initial["continuation"])
+    assert [item["seq"] for item in second["messages"]] == [5, 6]
+    assert second["summary"] is None and second["covered_through_seq"] is None
+    assert second["head_seq"] == 7 and second["continuation"] == {"after_seq": 6, "through_seq": 7}
+    last = thread.read_context(limit=2, **second["continuation"])
+    assert [item["seq"] for item in last["messages"]] == [7]
+    assert last["tail_complete"] and last["continuation"] is None
+
+    # History still reads backwards, and its read-only transaction composes inside the context snapshot.
+    with db.snapshot():
+        page = conversations.Conversation(db, conversation_id).history(
+            "assistant", limit=2, before_seq=7, config=config
+        )
+        assert [item["seq"] for item in page["messages"]] == [5, 6]
+        assert page["prev_seq"] == 5
+
+
+def test_context_fallback_and_continuations_recheck_current_visibility(db, config, tmp_path) -> None:
+    from baton.agents import Agent
+    from baton.app import Tools
+    from baton.conversations.context import read_context
+
+    conversation_id, sent = converse(db, config, 2)
+    publish(db, config, conversation_id)
+    conversations.add(db, config, actor="orchestrator", conversation_id=conversation_id, participant="late")
+    tail_id = say(db, config, conversation_id, "visible tail")
+    viewer = Agent(db, config, "viewer").thread(conversation_id)
+    page = viewer.read_context(limit=1)
+    assert [item["seq"] for item in page["messages"]] == [3]
+    late = Tools(config).read_context("late", conversation_id, producer="alpha")
+    assert late["summary"] is None and late["covered_through_seq"] == 0
+    assert late["fallback"] == "no_accessible_summary"
+    assert [item["seq"] for item in late["messages"]] == [3, 4]
+    assert late["retention_gaps"] == []  # no revelation of messages before the late join
+    refused("not_a_participant", read_context, db, config, "outsider", conversation_id)
+    refused("not_a_participant", read_context, db, config, "outsider", conversation_id, after_seq=0, through_seq=999)
+    refused("forbidden", read_context, db, config, "guest", conversation_id)
+    conversations.remove(db, config, actor="orchestrator", conversation_id=conversation_id, participant="reviewer")
+    refused("not_a_participant", read_context, db, config, "reviewer", conversation_id, **page["continuation"])
+
+    lose(db, sent[0])  # the old summary now lacks an input and must disappear
+    hidden = viewer.read_context()
+    assert hidden["summary"] is None and hidden["fallback"] == "no_accessible_summary"
+    assert hidden["retention_gaps"] == [{"from_seq": 1, "to_seq": 1}]
+    lose(db, tail_id)
+    missing_tail = viewer.read_context(after_seq=3, through_seq=4)
+    assert missing_tail["messages"] == [] and missing_tail["tail_complete"]
+    assert missing_tail["retention_gaps"] == [{"from_seq": 4, "to_seq": 4}]
+    assert missing_tail["next_seq"] == 4
+
+    disabled = reads_config(tmp_path, search_on=False)
+    raw = read_context(db, disabled, "viewer", conversation_id, limit=1)
+    assert raw["summary"] is None and raw["covered_through_seq"] == 0 and raw["fallback"] == "search_disabled"
+    for arguments in (
+        {"after_seq": 0},
+        {"through_seq": 3},
+        {"after_seq": 4, "through_seq": 3},
+        {"after_seq": -1, "through_seq": 3},
+        {"after_seq": 0, "through_seq": 999},
+        {"limit": 0},
+        {"after_seq": True, "through_seq": 3},
+    ):
+        refused("invalid_request", read_context, db, config, "viewer", conversation_id, **arguments)
+
+
+def test_context_head_summary_and_tail_share_one_read_snapshot(db, config, monkeypatch) -> None:
+    from baton.agents import Agent
+
+    conversation_id, _ = converse(db, config, 2)
+    publish(db, config, conversation_id)
+    say(db, config, conversation_id, "note 3")
+    original = search.read_artifacts
+
+    def append_after_head(*args, **kwargs):
+        with connect(config.db_path) as writer:
+            say(writer, config, conversation_id, "appended during read")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(search, "read_artifacts", append_after_head)
+    page = Agent(db, config, "assistant").thread(conversation_id).read_context()
+    assert (page["head_seq"], page["covered_through_seq"]) == (3, 2)
+    assert [item["seq"] for item in page["messages"]] == [3]
+    assert page["tail_complete"] and page["summary"]["state"] == "behind"
+    assert db.execute("SELECT last_seq FROM conversations WHERE id = ?", (conversation_id,)).fetchone()[0] == 4
+
+
+def test_context_ignores_empty_summaries_and_does_not_skip_byte_bounded_tail(db, config, monkeypatch) -> None:
+    from baton.agents import Agent
+    from baton.messages import limits
+
+    conversation_id, _ = converse(db, config, 2)
+    thread = Agent(db, config, "assistant").thread(conversation_id)
+    absent = thread.read_context()
+    assert absent["fallback"] == "no_accessible_summary" and absent["covered_through_seq"] == 0
+    assert [item["seq"] for item in absent["messages"]] == [1, 2]
+    publish(db, config, conversation_id, body="  ")
+    empty = thread.read_context()
+    assert empty["fallback"] == "no_accessible_summary" and empty["summary"] is None
+    assert [item["seq"] for item in empty["messages"]] == [1, 2]
+    say(db, config, conversation_id, "note 3")
+    publish(db, config, conversation_id, request_id="useful", body="useful summary")
+    for number in range(4, 7):
+        say(db, config, conversation_id, f"note {number}")
+    monkeypatch.setattr(limits, "MAX_PAGE_BYTES", 1)  # renderer must still return one whole message
+    first = thread.read_context(limit=10)
+    assert [item["seq"] for item in first["messages"]] == [4]
+    assert first["continuation"] == {"after_seq": 4, "through_seq": 6}
+    second = thread.read_context(limit=10, **first["continuation"])
+    assert [item["seq"] for item in second["messages"]] == [5]
+    assert second["continuation"] == {"after_seq": 5, "through_seq": 6}

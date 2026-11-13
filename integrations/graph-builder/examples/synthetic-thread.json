@@ -1,0 +1,53 @@
+{
+  "conversation_id": "conv_synthetic_graph_demo",
+  "messages": [
+    {
+      "seq": 1,
+      "message_id": "demo-1",
+      "author": "planner",
+      "at": "2026-01-01T10:01:00Z",
+      "text": "Keep successful request receipts replayable for 24 hours; that retention period is provisional. Also keep exact source quotes.",
+      "reply_to": null
+    },
+    {
+      "seq": 2,
+      "message_id": "demo-2",
+      "author": "engineer",
+      "at": "2026-01-01T10:02:00Z",
+      "text": "Use SQLite for the graph prototype. A separate JSON export can serve readers.",
+      "reply_to": null
+    },
+    {
+      "seq": 3,
+      "message_id": "demo-3",
+      "author": "reviewer",
+      "at": "2026-01-01T10:03:00Z",
+      "text": "Responding to both earlier proposals: keep exact source quotes and replayable successful request receipts, but reduce receipt retention to one hour. Replace SQLite with one atomic JSON state file because this offline prototype has one writer.",
+      "reply_to": "demo-2"
+    },
+    {
+      "seq": 4,
+      "message_id": "demo-4",
+      "author": "planner",
+      "at": "2026-01-01T10:04:00Z",
+      "text": "Agreed: keep successful request receipts replayable, with one-hour retention replacing the 24-hour clause; exact source quotes still apply. The atomic JSON state file replaces SQLite entirely. Format selection is resolved, and the source-quote constraint applies to both storage and reader work.",
+      "reply_to": "demo-3"
+    },
+    {
+      "seq": 5,
+      "message_id": "demo-5",
+      "author": "engineer",
+      "at": "2026-01-01T10:05:00Z",
+      "text": "The reader still needs a compact view with the unprocessed raw tail. Implementation is pending; do not call the reader complete. Keep the source-quote constraint from the resolved format discussion.",
+      "reply_to": "demo-4"
+    },
+    {
+      "seq": 6,
+      "message_id": "demo-6",
+      "author": "reviewer",
+      "at": "2026-01-01T10:06:00Z",
+      "text": "New reader question: should the compact view show a per-strand summary frontier? This remains unanswered.",
+      "reply_to": "demo-5"
+    }
+  ]
+}

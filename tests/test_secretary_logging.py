@@ -58,7 +58,7 @@ def test_http_client_request_url_does_not_reach_process_stderr(tmp_path) -> None
             pass
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     server_thread.start()
     try:
         with make_world(tmp_path) as world:
@@ -66,7 +66,7 @@ def test_http_client_request_url_does_not_reach_process_stderr(tmp_path) -> None
             policy["summary_bytes"] = 4000
             policy["model"] = {
                 "provider": "openai",
-                "model": "gpt-6-luna",
+                "model": "configured-triage-model",
                 "base_url": f"http://127.0.0.1:{server.server_port}/{marker}/v1",
                 "api_key_env": "SECRETARY_LOG_TEST_KEY",
                 "timeout_seconds": 5,

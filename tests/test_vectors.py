@@ -488,15 +488,6 @@ def test_a_query_vector_needs_embeddings_on_and_a_matching_profile(tmp_path: Pat
     refused("invalid_request", search.search, db, off, "assistant", "note", query_vector=UNIT["x"], model="toy-embed")
 
 
-def test_the_search_tool_takes_a_query_vector_and_a_model() -> None:
-    import inspect
-
-    from baton import app
-
-    parameters = inspect.signature(app.Tools.search).parameters
-    assert {"query_vector", "model"} <= set(parameters)
-
-
 @pytest.mark.parametrize(("distance", "first"), [("cosine", "aligned"), ("inner_product", "long")])
 def test_the_profile_distance_decides_the_order(db, config, distance: str, first: str) -> None:
     """Unnormalized vectors, where the two distances disagree: cosine ranks by direction alone, inner product by

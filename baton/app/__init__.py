@@ -34,6 +34,7 @@ from .catalog import AUDITED_IDS as AUDITED_IDS
 from .catalog import CONVERSATION_TOOLS as CONVERSATION_TOOLS
 from .catalog import CORE_PROOF_NOTE as CORE_PROOF_NOTE
 from .catalog import GRANT_TOOLS as GRANT_TOOLS
+from .catalog import GRAPH_TOOLS as GRAPH_TOOLS
 from .catalog import GUEST_IDENTIFIED as GUEST_IDENTIFIED
 from .catalog import GUEST_TOOLS as GUEST_TOOLS
 from .catalog import IDENTIFIED_CHANGES as IDENTIFIED_CHANGES
@@ -54,6 +55,8 @@ from .tools import Tools as Tools
 from .tools import _conversation_cursor as _conversation_cursor
 
 log = logging.getLogger("baton.app")
+# How long shutdown waits for the graph worker to cancel its call and reap its process group.
+GRAPH_WORKER_SHUTDOWN_SECONDS = 60
 
 
 def create_app(config: Config, integrations: dict[str, Integration] | None = None) -> ASGIApp:
@@ -85,7 +88,7 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
     for name, scope, read_only in (
         TOOLS
         + (CONVERSATION_TOOLS if config.conversations.enabled else ())
-        + (SEARCH_TOOLS + ARTIFACT_TOOLS if config.search.enabled else ())
+        + (SEARCH_TOOLS + ARTIFACT_TOOLS + GRAPH_TOOLS if config.search.enabled else ())
     ):
         server.add_tool(
             guard.wrap(name, scope, getattr(tools, name)),
@@ -147,12 +150,22 @@ def serve(config: Config) -> None:
         loop = getattr(integration, "run", None)
         if loop is not None:  # an integration with work of its own runs it beside the server, until stop
             threading.Thread(target=loop, args=(stop,), daemon=True, name=name).start()
+    graph_worker = None
+    if config.graph_worker.enabled:  # the background graph producer; foreground tools never wait on it
+        from baton.graph.worker import serve as serve_graph_worker
+
+        graph_worker = threading.Thread(
+            target=serve_graph_worker, args=(config, stop), daemon=True, name="graph-worker"
+        )
+        graph_worker.start()
     view = dashboard.start(config)
     seat_view = seat.start(config)
     try:
         uvicorn.run(app, host=config.listen_host, port=config.listen_port, log_level="info")
     finally:
         stop.set()
+        if graph_worker is not None:  # the stop cancels any in-flight model process; wait for its cleanup
+            graph_worker.join(timeout=GRAPH_WORKER_SHUTDOWN_SECONDS)
         for bound in (view, seat_view):
             if bound is not None:
                 bound.shutdown()

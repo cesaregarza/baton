@@ -44,16 +44,11 @@ def begin_batch(
     conversation_id: str,
     kinds: list[str],
     generation: str | None = None,
+    through_seq: int | None = None,
 ) -> dict[str, Any]:
     """Issue a manifest naming exactly which messages the batch reads, and what each kind builds on."""
     generations._require_producer(config, producer)
-    if isinstance(kinds, list) and RECENT in kinds:
-        if not config.search.rolling_window_messages:
-            raise InvalidRequest(f"{RECENT} needs [search] rolling_window_messages")
-        if kinds != [RECENT]:
-            raise InvalidRequest(f"{RECENT} is a batch of its own")
-    elif not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds) or not set(kinds) <= set(KINDS):
-        raise InvalidRequest(f"kinds is a non-empty list of distinct kinds from {', '.join(KINDS)}")
+    _validate_kinds(config, kinds, through_seq)
     limits = config.indexer
     with conn.transaction():
         generations._retire_generations(conn, config)
@@ -64,6 +59,8 @@ def begin_batch(
         ).fetchone()
         if conversation is None:
             raise UnknownConversation(f"there is no conversation {conversation_id}")
+        if through_seq is not None and through_seq > conversation["last_seq"]:
+            raise InvalidRequest("through_seq exceeds the conversation head")
         if not _has_copies(conn, conversation_id):  # a summary of nothing is never required, so never made
             raise NothingToIndex(f"no message in {conversation_id} has a copy left")
         open_batches = conn.execute(
@@ -82,7 +79,11 @@ def begin_batch(
             }
         else:
             plans = {kind: provenance._kind_plan(conn, producer, generation, conversation_id, kind) for kind in kinds}
-        window = provenance._window(conn, config, conversation_id, plans, conversation["last_seq"])
+        window = provenance._window(
+            conn, config, conversation_id, plans, through_seq if through_seq is not None else conversation["last_seq"]
+        )
+        if through_seq is not None and window["window"]["to_seq"] != through_seq:
+            raise InvalidRequest("manifest limits stop before through_seq; adjust limits or use a smaller checkpoint")
         if generation is None:  # the first batch makes the producer's one generation; `dirty` never does
             generations._require_slot(conn, config, producer)
             generation = "gen_" + secrets.token_hex(8)
@@ -124,6 +125,19 @@ def begin_batch(
         )
         conn.execute("UPDATE generations SET last_write_at = ? WHERE id = ?", (storage._now(), generation))
     return manifest
+
+
+def _validate_kinds(config: Config, kinds: list[str], through_seq: int | None) -> None:
+    if isinstance(kinds, list) and RECENT in kinds:
+        if not config.search.rolling_window_messages:
+            raise InvalidRequest(f"{RECENT} needs [search] rolling_window_messages")
+        if kinds != [RECENT]:
+            raise InvalidRequest(f"{RECENT} is a batch of its own")
+    elif not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds) or not set(kinds) <= set(KINDS):
+        raise InvalidRequest(f"kinds is a non-empty list of distinct kinds from {', '.join(KINDS)}")
+    if through_seq is not None:
+        if type(through_seq) is not int or through_seq < 1 or kinds != ["summary"]:
+            raise InvalidRequest("through_seq is a positive integer for a cumulative summary batch only")
 
 
 def read_batch(conn: Connection, config: Config, producer: str, batch_id: str, page: int) -> dict[str, Any]:
@@ -310,6 +324,25 @@ def _validate_artifact_inputs(
             segments=len(merged),
             items=provenance._count(merged),
         )
+    if "graph_snapshot" in artifact:
+        _validate_graph_snapshot(conn, manifest, artifact["graph_snapshot"])
+
+
+def _validate_graph_snapshot(conn: Connection, manifest: dict, snapshot: dict) -> None:
+    """The attachment is checked against the canonical native posts, never against the producer's own files."""
+    from baton.graph import snapshot as graph_snapshot  # the graph package publishes through this module
+    from baton.graph.contract import GraphError
+    from baton.graph.export import native_prefix
+
+    try:
+        if snapshot.get("conversation_id") != manifest["conversation_id"]:
+            raise GraphError("graph snapshot names another conversation")
+        if snapshot.get("covered_through_seq") != manifest["window"]["to_seq"]:
+            raise GraphError("graph snapshot W differs from the summary's coverage")
+        native = native_prefix(conn, manifest["conversation_id"], manifest["window"]["to_seq"])
+        graph_snapshot.validate(snapshot, native)
+    except GraphError as error:
+        raise InvalidRequest(f"graph_snapshot rejected: {error}") from None
 
 
 def _write_message_vectors(conn: Connection, manifest: dict, embedding: dict | None, owed: dict) -> None:
@@ -401,18 +434,7 @@ def _commit_request(payload: Any) -> tuple[str, list[dict[str, Any]], list[dict[
     artifacts = payload.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise InvalidRequest("artifacts is a non-empty list")
-    canonical = []
-    for artifact in artifacts:
-        if not isinstance(artifact, dict) or artifact.get("kind") not in (*KINDS, RECENT):
-            raise InvalidRequest(f"each artifact has a kind from {', '.join((*KINDS, RECENT))}")
-        body, citations, expected = artifact.get("body"), artifact.get("citations"), artifact.get("expected_version")
-        if not isinstance(body, str):
-            raise InvalidRequest(f"the {artifact['kind']} body is a string")
-        if not isinstance(citations, list) or not all(isinstance(cited, str) for cited in citations):
-            raise InvalidRequest(f"the {artifact['kind']} citations are a list of message ids")
-        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
-            raise InvalidRequest(f"the {artifact['kind']} expected_version is a whole number")
-        canonical.append({"kind": artifact["kind"], "body": body, "citations": citations, "expected_version": expected})
+    canonical = [_commit_artifact(artifact) for artifact in artifacts]
     if len({artifact["kind"] for artifact in canonical}) != len(canonical):
         raise InvalidRequest("each kind appears once in a commit")
     vectors, skips = (
@@ -423,6 +445,24 @@ def _commit_request(payload: Any) -> tuple[str, list[dict[str, Any]], list[dict[
     if len(set(seen)) != len(seen):
         raise InvalidRequest("each item has one vector or one skip, not both and not twice")
     return request_id, sorted(canonical, key=lambda artifact: artifact["kind"]), vectors, skips
+
+
+def _commit_artifact(artifact: Any) -> dict[str, Any]:
+    if not isinstance(artifact, dict) or artifact.get("kind") not in (*KINDS, RECENT):
+        raise InvalidRequest(f"each artifact has a kind from {', '.join((*KINDS, RECENT))}")
+    body, citations, expected = artifact.get("body"), artifact.get("citations"), artifact.get("expected_version")
+    if not isinstance(body, str):
+        raise InvalidRequest(f"the {artifact['kind']} body is a string")
+    if not isinstance(citations, list) or not all(isinstance(cited, str) for cited in citations):
+        raise InvalidRequest(f"the {artifact['kind']} citations are a list of message ids")
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+        raise InvalidRequest(f"the {artifact['kind']} expected_version is a whole number")
+    entry = {"kind": artifact["kind"], "body": body, "citations": citations, "expected_version": expected}
+    if "graph_snapshot" in artifact:  # part of the commit's identity: a different graph is a different commit
+        if artifact["kind"] != "summary" or not isinstance(artifact["graph_snapshot"], dict):
+            raise InvalidRequest("graph_snapshot is an object attached to a summary artifact only")
+        entry["graph_snapshot"] = artifact["graph_snapshot"]
+    return entry
 
 
 def _replay(conn: Connection, receipt: Row) -> dict[str, Any]:

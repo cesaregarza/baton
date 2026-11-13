@@ -59,7 +59,7 @@ keep have empty summaries.
 
 Policy version 3 requires a principal, stable `secretary_id`, explicit model and decision-engine settings, and
 all page, retry, threshold, and digest limits. The model ID and provider URL are explicit policy choices; the
-example's `gpt-6-luna` is not a forced default.
+example's `example-model-id` placeholder is not a forced default.
 
 ```json
 {
@@ -71,7 +71,7 @@ example's `gpt-6-luna` is not a forced default.
   "max_tool_calls": 2,
   "model": {
     "provider": "openai",
-    "model": "gpt-6-luna",
+    "model": "example-model-id",
     "base_url": "https://api.openai.com/v1",
     "api_key_env": "OPENAI_API_KEY",
     "timeout_seconds": 20,

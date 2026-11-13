@@ -18,6 +18,7 @@ baton/
   jobs.py              Job creation, transitions, revisions and events
   database/            Connection driver, checked files, schema and migrations
   derived/             Index generations, batches, artifacts and vectors
+  graph/               Source-bound graph producer, background worker, canonical snapshot publication and readers
   integrations/        Outbound service integrations
   auth.py              Credentials, OAuth and token lifetime
   aliases.py           Guest aliases and role bindings
@@ -44,7 +45,7 @@ import from those canonical modules. The separate Python API exports `Secretary`
 | Task | Start here | Related code |
 | --- | --- | --- |
 | Add or change a CLI flag | `cli/<feature>.py` | `cli/main.py` wires the command families; `cli/remote.py` forwards remote calls |
-| Add or change an MCP tool | `app/tools.py`, `app/topic_tools.py`, or `app/reference_tools.py` | `app/tool_policy.py` declares registration and caller policy; `app/guard.py` enforces it |
+| Add or change an MCP tool | `app/tools.py`, `app/topic_tools.py`, `app/reference_tools.py` or `app/graph_tools.py` | `app/tool_policy.py` declares registration and caller policy; `app/guard.py` enforces it |
 | Change configured capabilities or guest restrictions | `agents/permissions.py` | `Permissions` owns capability checks; the MCP guard supplies authenticated context |
 | Change an agent's thread access | `agents/thread.py` | Binds read, send and membership operations to the agent's role |
 | Change who a message is sent as | `agents/agent.py` | Authentication resolves the role before constructing an agent |
@@ -60,6 +61,14 @@ import from those canonical modules. The separate Python API exports `Secretary`
 | Change connection mechanics | `database/driver.py` | `files.py` checks private database files |
 | Change the authoritative schema | `database/schema.py`, `database/migrations.py` | `database/store.py` opens and initializes the database |
 | Change secretary policy validation or installed-instance configuration | `config/secretary.py` | Owns `Policy`, `load_policy`, `fingerprint`, and `IntegrationConfig`; the Baton host TOML format is unchanged |
+| Change offline graph extraction, validation, local persistence or provider calls | `graph/contract.py`, `graph/operations.py`, `graph/validation.py` | `graph/source.py`, `graph/storage.py`, `graph/provider.py`; `python -m baton.graph` and `baton-graph` share `graph/cli.py` |
+| Change what an extraction request shows of the graph | `graph/context.py` | `graph/entries.py` renders the lines and runs the search; `validation.build_patch` rejects changes to anything not shown |
+| Export a native graph source or publish completed graph W | `graph/export.py`, `graph/publication.py` | `cli/index.py`; uses existing `derived` batch/receipt APIs, no alternate writer. `publication.publish_graph(view=..., attach_graph=True)` commits the compact view with its canonical snapshot in one derived transaction |
+| Change the canonical graph snapshot or its host validation | `graph/snapshot.py` | Shared by the worker and `derived/batches.py`; `derived/storage.py` writes `graph_snapshots` in the commit transaction |
+| Change the compact working view contract or its structural checks | `graph/compact.py` | Request shape, writing instructions, deterministic rendering and `validate_compact` |
+| Change the background graph worker's scheduling, budgets or recovery | `graph/worker.py`, `graph/ledger.py` | `config/graph_worker.py` validates `[graph_worker]`; `baton serve` starts it; `baton index graph-worker status\|reset` administers it |
+| Change a producer transport or native client isolation | `graph/transport.py`, `graph/native.py` | `graph/failure.py` defines the failure categories and refusals; `graph/provider.py` keeps the HTTP call; native adapters verify the configured client version and reject action events; `graph/isolation.py` checks what the Codex launch sends against a loopback capture and what its session record shows |
+| Change graph reads served to roles and guests | `graph/reader.py` | `app/graph_tools.py` is the MCP adapter; `search.served_summaries`/`summary_winner` select the same summary as `read_context` |
 | Change the model's inbox context or size limits | `agents/secretary/inbox/window.py` | `inbox/read.py` and `inbox/sources.py` load visible records and source context; oversized full windows fail |
 | Change wake/hold/keep assessment and callback lifecycle | `agents/secretary/attention/decide.py` | Coordinates the window, model call, cache and visibility recheck |
 | Change model or independent decision-engine transport | `agents/secretary/connections/` | `connections/model.py` selects model transport; `connections/decisions.py` owns typed engine adapters; `connections/transport.py` bounds I/O |

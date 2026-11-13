@@ -16,10 +16,12 @@ dependencies = [
 
 [project.scripts]
 baton = "baton.cli:main"
+baton-graph = "baton.graph.cli:main"
 
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pytest-xdist==3.8.0",
     "ruff==0.17.3",
     "ty==0.0.97",
 ]
@@ -64,3 +66,5 @@ include = ["baton"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A test still running after this many seconds prints every thread's stack, so a hang names its test.
+faulthandler_timeout = 60
