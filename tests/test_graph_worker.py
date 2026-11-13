@@ -197,7 +197,14 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
         "base_url": "https://provider.invalid/v1",
         "allow_no_key": True,
     }
-    native_base = {"provider": "codex", "base_url": None, "allow_no_key": False, "client_version": "1.2.3"}
+    home = str(tmp_path / "worker-home")
+    native_base = {
+        "provider": "codex",
+        "base_url": None,
+        "allow_no_key": False,
+        "client_version": "1.2.3",
+        "client_home": home,
+    }
     for bad, match in (
         ({"producer": "nobody"}, "indexer.producers"),
         ({"state_dir": str(config.data_dir / "graphs")}, "outside host.data_dir"),
@@ -216,13 +223,16 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
         ({**native_base, "client_version": None}, "client_version"),
         ({**native_base, "provider": "claude", "client_version": "latest"}, "client_version"),
         ({"client_version": "1.2.3"}, "client_version"),
+        # The event-stream client runs from a home of the worker's own, whose login is its only credential.
+        ({**native_base, "client_home": None}, "client_home"),
+        ({**native_base, "credential_env": ["CODEX_HOME"]}, "its credential is in client_home"),
+        ({**native_base, "provider": "claude"}, "codex only"),
+        ({"client_home": home}, "native providers only"),
     ):
         with pytest.raises(ConfigError, match=match):
             config_module.graph_worker.parse({**base, **bad}, config.indexer, config.data_dir)
-    native = config_module.graph_worker.parse(
-        {**base, **native_base, "credential_env": ["CODEX_HOME"]}, config.indexer, config.data_dir
-    )
-    assert native.command == ("codex",) and native.credential_env == ("CODEX_HOME",)
+    native = config_module.graph_worker.parse({**base, **native_base}, config.indexer, config.data_dir)
+    assert native.command == ("codex",) and native.credential_env == () and native.client_home == Path(home)
     assert native.client_version == "1.2.3"
     durations = config_module.graph_worker.parse(
         {**base, "poll_seconds": 2.5, "call_timeout_seconds": 0.5 + 1}, config.indexer, config.data_dir
@@ -235,6 +245,75 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
     assert (
         config_module.graph_worker.parse({**base, "enabled": False}, config.indexer, config.data_dir).enabled is False
     )
+
+
+def native_settings(tmp_path: Path, client_home: str, **fields) -> dict:
+    return {
+        "enabled": True,
+        "producer": "alpha",
+        "state_dir": str(tmp_path / "graph-state"),
+        "conversations": ["conv_a"],
+        "provider": "codex",
+        "model": "m",
+        "client_version": "1.2.3",
+        "client_home": client_home,
+        **fields,
+    }
+
+
+@pytest.mark.parametrize(
+    ("operator_client", "client_home", "refused"),
+    [
+        ("clients/operator", "clients/operator", True),  # the operator's client home, named in the environment
+        ("clients/operator", "clients/operator/worker", True),  # inside it
+        ("clients/operator", "clients", True),  # around it
+        (None, "operator/.codex", True),  # the default under the operator's home
+        (None, "operator/.codex/worker", True),
+        ("clients/operator", "operator/.codex", True),  # the default stays the operator's
+        ("clients/operator", "operator", True),  # the operator's home itself
+        ("clients/operator", "clients/worker", False),  # a home of the worker's own beside them
+    ],
+)
+def test_the_worker_never_runs_from_the_operators_client_home(
+    tmp_path, monkeypatch, operator_client, client_home, refused
+) -> None:
+    config = index_config(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "operator"))
+    if operator_client is None:
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+    else:
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / operator_client))
+    raw = native_settings(tmp_path, str(tmp_path / client_home))
+    if refused:
+        with pytest.raises(ConfigError, match="not the operator's"):
+            config_module.graph_worker.parse(raw, config.indexer, config.data_dir)
+    else:
+        assert config_module.graph_worker.parse(raw, config.indexer, config.data_dir).client_home == Path(
+            raw["client_home"]
+        )
+
+
+def test_a_relative_client_home_is_the_absolute_home_the_launch_runs_from(tmp_path, monkeypatch) -> None:
+    from test_graph_transports import FAKE_VERSION, LIMITS, REQUEST, fake, recorded
+
+    from baton.graph.contract import SCHEMA
+    from baton.graph.transport import for_config
+
+    config = index_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    home = tmp_path / "conf" / "worker-home"
+    home.mkdir(parents=True)
+    home.chmod(0o700)
+    command, dump = fake(tmp_path, "codex")
+    raw = native_settings(tmp_path, "worker-home", command=command, client_version=FAKE_VERSION)
+    # A config file named by a relative path has a relative directory; its relative paths are taken from there.
+    settings = config_module.graph_worker.parse(raw, config.indexer, config.data_dir, base=Path("conf"))
+    assert settings.client_home == home
+    produced = for_config(settings).produce(REQUEST, SCHEMA, LIMITS)
+    call = recorded(dump)
+    assert call["env"]["HOME"] == call["env"]["CODEX_HOME"] == str(home)
+    # The call's session record was written there, found there and removed once it passed.
+    assert produced["candidate"] == {"echo": "req-1"} and not list(home.rglob("rollout-*.jsonl"))
 
 
 def test_a_host_without_full_text_search_is_refused_when_the_worker_starts(tmp_path, monkeypatch) -> None:
@@ -699,7 +778,7 @@ def wait_for(predicate, seconds=10.0):
 
 
 def test_service_owns_its_directory_for_life_and_stop_cancels_the_native_call(tmp_path) -> None:
-    from test_graph_transports import FAKE_VERSION, alive, fake, wait_gone
+    from test_graph_transports import FAKE_VERSION, alive, fake, wait_gone, worker_home
 
     from baton.graph import native
     from baton.graph.worker import serve
@@ -709,7 +788,7 @@ def test_service_owns_its_directory_for_life_and_stop_cancels_the_native_call(tm
         cid, _ = converse(db, config, 2)
     config = worker_config(tmp_path, conversations=[cid], poll_seconds=3600, call_timeout_seconds=600)
     command, dump = fake(tmp_path, "codex", "hang")
-    worker = Worker(config, transport=native.CodexTransport(command, "m", [], FAKE_VERSION))
+    worker = Worker(config, transport=native.CodexTransport(command, "m", [], FAKE_VERSION, home=worker_home(tmp_path)))
     stop = threading.Event()
     service = threading.Thread(target=serve, args=(config, stop), kwargs={"worker": worker}, daemon=True)
     service.start()

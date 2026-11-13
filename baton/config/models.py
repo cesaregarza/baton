@@ -184,6 +184,8 @@ class GraphWorker:
     command: tuple[str, ...] = ()
     # The exact native client version the operator inspected; a client reporting any other is never launched.
     client_version: str | None = None
+    # The worker's own home for the event-stream client: only the worker's login, mode 0700.
+    client_home: Path | None = None
     generation: str | None = None
     poll_seconds: float = 30
     batch_size: int = 20

@@ -1,13 +1,18 @@
 """Native producer clients: launch an installed, authenticated Codex or Claude Code once per reserved call.
 
-Native means the operator's own client and subscription authentication, not an API key substituted on the
-side. Isolation is preventative first: a fixed argv, an explicit model, an isolated temporary working
-directory, no shell, read-only sandboxing and never-approval, every documented retrieval or side-effect
-capability family disabled, an allowlisted environment and bounded stdin/stdout/stderr/wall time. Event
-checking then supplements that: any action-bearing or unknown event invalidates the attempt. Every launch
-first verifies the client again, through the exact executable it is about to run: the client must report the
-operator's configured `client_version` and document the flags and features of the inspected profile below.
-Nothing here runs a model during verification.
+Native means a client's own subscription authentication, not an API key substituted on the side. Both run
+with a fixed argv, an explicit model, an isolated temporary working directory, no shell, read-only
+sandboxing and never-approval, an allowlisted environment and bounded stdin/stdout/stderr/wall time. Every
+launch first verifies the client again, through the exact executable it is about to run: it must report the
+operator's configured `client_version`. Nothing here runs a model during verification.
+
+Codex runs from the worker's own client home, which holds only the worker's login, and its own switches are
+not trusted to remove its tools: before every launch the same launch runs against a loopback capture
+(`baton.graph.isolation`) from an empty home with a fixed probe, and is refused unless the request it sends
+offers no tools and carries only Baton's instructions and content. After every call its session record must
+show only messages and reasoning, and a turn the worker accepts must be recorded as this call's finished turn.
+Claude Code takes its instructions as a system prompt with every tool removed, and its result is refused if it
+records a tool use.
 
 A finished process is classified from typed fields only, whatever its exit status: an attempted action first,
 then an error the provider refused before doing any work (a refusal), then any other reported error.
@@ -20,6 +25,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -29,10 +35,11 @@ from pathlib import Path
 from typing import Any
 
 from baton.graph.failure import REFUSALS, Category, TransportError, status_category
+from baton.graph.isolation import LoopbackStub, record_gaps, record_problems
 from baton.graph.source import canonical
 from baton.graph.transport import Limits
 
-# Capability families disabled by `-c features.NAME=false`; each must appear in `codex features list`.
+# Capability families disabled by `-c features.NAME=false`. The launch check, not this list, shows the result.
 CODEX_FEATURES = (
     "shell_tool",
     "apps",
@@ -47,19 +54,33 @@ CODEX_FEATURES = (
     "request_permissions_tool",
     "sleep_tool",
 )
-CODEX_OVERRIDES = ('approval_policy="never"', 'web_search="disabled"')
-CODEX_EXEC_FLAGS = (
-    "--ignore-user-config",
-    "--ephemeral",
-    "--sandbox",
-    "--skip-git-repo-check",
-    "--model",
-    "--json",
-    "--output-schema",
-    "--output-last-message",
-    "--cd",
-    "--config",
+CODEX_OVERRIDES = (
+    'approval_policy="never"',
+    'web_search="disabled"',
+    # The instruction sources the client would add beside Baton's own, and the tools no catalog field governs.
+    "include_permissions_instructions=false",
+    "include_collaboration_mode_instructions=false",
+    "include_environment_context=false",
+    "skills.include_instructions=false",
+    "features.goals=false",
+    "features.incremental_tools=false",
+    "tools.experimental_request_user_input={enabled=false}",
 )
+# The fields through which the client's catalog entry for a model adds tools whatever the switches say.
+CODEX_CATALOG_CLEARED = {
+    "tool_mode": "direct",
+    "multi_agent_version": None,
+    "experimental_supported_tools": [],
+    "apply_patch_tool_type": None,
+}
+# The built-in provider's endpoint. Only the launch check sets it, to point the client at its loopback capture.
+CODEX_BASE_URL_KEY = "openai_base_url"
+# What the launch check sends in place of thread content: fixed, made up, and never a post.
+CODEX_PROBE = canonical({"probe": "A fixed request for the launch check. It holds no thread text."})
+CODEX_PROBE_TIMEOUT = 60
+CODEX_RECORD_BYTES = 64 * 1024 * 1024
+CODEX_CATALOG_OUTPUT = 16 * 1024 * 1024
+THREAD_ID = re.compile(r"[0-9A-Fa-f-]{8,64}")
 CLAUDE_FLAGS = (
     "--print",
     "--output-format",
@@ -224,8 +245,8 @@ def resolve_executable(command: list[str], env: dict[str, str]) -> str:
     return os.path.realpath(found)
 
 
-def _introspect(argv: list[str], executable: str, env: dict[str, str]) -> str:
-    """Version, help or feature-list output: a client command that never runs a model."""
+def _introspect(argv: list[str], executable: str, env: dict[str, str], max_stdout: int = VERIFY_OUTPUT) -> str:
+    """Version, help or catalog output: a client command that never runs a model."""
     try:
         with tempfile.TemporaryDirectory(prefix="baton-graph-verify-") as cwd:
             result = run_process(
@@ -235,7 +256,7 @@ def _introspect(argv: list[str], executable: str, env: dict[str, str]) -> str:
                 env=env,
                 cwd=cwd,
                 timeout=VERIFY_TIMEOUT,
-                max_stdout=VERIFY_OUTPUT,
+                max_stdout=max_stdout,
             )
     except TransportError:
         result = None
@@ -341,31 +362,70 @@ class NativeClient:
         return reported
 
 
+def private_home(path: str | None) -> str:
+    """The worker's own client home: an absolute path to a directory, not a symlink, that only this user may enter.
+
+    It must be absolute because the client runs in a temporary working directory, where a relative home would
+    name somewhere else.
+    """
+    try:
+        info = os.lstat(path) if path and os.path.isabs(path) else None
+    except OSError:
+        info = None
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        raise TransportError(Category.UNVERIFIED_CLIENT, "graph_worker.client_home is not an absolute directory path")
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise TransportError(Category.UNVERIFIED_CLIENT, "graph_worker.client_home must be this user's, mode 0700")
+    return str(path)
+
+
+@dataclass(frozen=True)
+class LaunchFiles:
+    """What one call's launch reads, written to that call's private temporary directory."""
+
+    schema: str
+    catalog: str
+    instructions: str
+
+
 @dataclass
 class CodexTransport(NativeClient):
-    """`codex exec` with read-only sandbox, never-approval and every capability family disabled."""
+    """`codex exec` from the worker's own client home, checked against a loopback capture before every launch.
+
+    `home` is both HOME and CODEX_HOME for the client, so nothing of the operator's own login, instructions or
+    skills is read. Constructing the transport refuses a home that is missing or open to other users, and any
+    credential variable: the login in the home is the only credential, so the launch check's environment holds
+    none.
+    """
 
     mode: str = "codex"
+    home: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.credential_env:
+            raise TransportError(Category.ISOLATION, "codex takes its credential from client_home, never a variable")
+        private_home(self.home)
 
     def profile(self, executable: str, env: dict[str, str]) -> dict[str, Any]:
+        private_home(self.home)
+        for name in ("AGENTS.md", "AGENTS.override.md"):  # read from the home into every request
+            if os.path.lexists(os.path.join(str(self.home), name)):
+                raise TransportError(Category.UNVERIFIED_CLIENT, f"graph_worker.client_home holds {name}")
         version = self.require_version(self.introspect(executable, env, "--version"), r"codex-cli (\d+\.\d+\.\d+)")
-        _require_flags(self.introspect(executable, env, "exec", "--help"), CODEX_EXEC_FLAGS, "codex exec")
-        features = self.introspect(executable, env, "features", "list")
-        listed = {line.split()[0] for line in _lines(features)}
-        unknown = [name for name in CODEX_FEATURES if name not in listed]
-        if unknown:
-            raise TransportError(
-                Category.UNVERIFIED_CLIENT, f"codex does not recognize feature {unknown[0]}; isolation unverified"
-            )
-        return {"mode": self.mode, "version": version, "features_disabled": list(CODEX_FEATURES)}
+        return {"mode": self.mode, "version": version}
 
-    def argv(self, schema_path: str, output_path: str, cwd: str) -> list[str]:
-        overrides = [*CODEX_OVERRIDES, *(f"features.{name}=false" for name in CODEX_FEATURES)]
+    def argv(self, files: LaunchFiles, output_path: str, cwd: str, *extra: str) -> list[str]:
+        overrides = [
+            *CODEX_OVERRIDES,
+            *(f"features.{name}=false" for name in CODEX_FEATURES),
+            f"model_catalog_json={json.dumps(files.catalog)}",
+            f"model_instructions_file={json.dumps(files.instructions)}",
+            *extra,
+        ]
         return [
             *self.command,
             "exec",
             "--ignore-user-config",
-            "--ephemeral",
             "--sandbox",
             "read-only",
             "--skip-git-repo-check",
@@ -373,7 +433,7 @@ class CodexTransport(NativeClient):
             self.model,
             "--json",
             "--output-schema",
-            schema_path,
+            files.schema,
             "--output-last-message",
             output_path,
             "-C",
@@ -382,37 +442,173 @@ class CodexTransport(NativeClient):
             "-",
         ]
 
+    def environment(self, home: str) -> dict[str, str]:
+        env = child_environment([])  # no credential variable: the only login is the one in `home`
+        env["HOME"] = env["CODEX_HOME"] = home
+        return env
+
     def produce(
         self, request: dict[str, Any], schema: dict[str, Any], limits: Limits, *, stop: threading.Event | None = None
     ) -> dict[str, Any]:
         instructions, content = _channels(request)
-        prompt = instructions.encode("utf-8") + b"\n\n" + content  # `exec` has no separate instruction channel
-        _require_input_within(len(prompt), limits)
+        input_bytes = len(instructions.encode("utf-8")) + len(content)
+        _require_input_within(input_bytes, limits)
         executable = self.launch_executable()
-        with tempfile.TemporaryDirectory(prefix="baton-graph-codex-") as cwd:
-            schema_path, output_path = os.path.join(cwd, "schema.json"), os.path.join(cwd, "last-message.json")
-            Path(schema_path).write_text(json.dumps(schema), encoding="utf-8")
+        with tempfile.TemporaryDirectory(prefix="baton-graph-launch-") as scratch:  # 0700, removed afterwards
+            files = LaunchFiles(
+                *(os.path.join(scratch, name) for name in ("schema.json", "catalog.json", "instructions.md"))
+            )
+            Path(files.schema).write_text(json.dumps(schema), encoding="utf-8")
+            Path(files.instructions).write_text(instructions, encoding="utf-8")
+            self._check_launch(executable, files, scratch, instructions, stop)
+            cwd, output_path = os.path.join(scratch, "cwd"), os.path.join(scratch, "last-message.json")
+            os.mkdir(cwd, 0o700)
             result = run_process(
-                self.argv(schema_path, output_path, cwd),
+                self.argv(files, output_path, cwd),
                 executable=executable,
-                stdin=prompt,
-                env=child_environment(self.credential_env),
+                stdin=content,
+                env=self.environment(private_home(self.home)),
                 cwd=cwd,
                 timeout=limits.timeout,
                 max_stdout=limits.max_response_bytes,
                 stop=stop,
             )
             _check_process(result)
-            usage, turns = check_codex_events(result.stdout, result.returncode)
+            usage, turns = self._judge(result, content.decode("utf-8"))
             candidate = _last_message(output_path, limits.max_response_bytes)
         return {
             "candidate": candidate,
             "usage": usage,
-            "input_bytes": len(prompt),
+            "input_bytes": input_bytes,
             "output_bytes": len(result.stdout),
             "elapsed": result.elapsed,
             "turns": turns,
         }
+
+    def _check_launch(
+        self, executable: str, files: LaunchFiles, scratch: str, instructions: str, stop: threading.Event | None
+    ) -> None:
+        """Run this launch against a loopback capture, from an empty home with the fixed probe; refuse what it sends.
+
+        The probe never carries a credential: its home is new and empty and its environment names none. It never
+        reaches the network: the endpoint is the capture, every proxy variable points there too and the capture
+        refuses tunnels, so a request for any other address ends at 127.0.0.1. The catalog is written from the
+        client's own entry for the model, read in the same environment, with its tool fields cleared.
+        """
+        home, cwd = os.path.join(scratch, "probe-home"), os.path.join(scratch, "probe-cwd")
+        os.mkdir(home, 0o700)
+        os.mkdir(cwd, 0o700)
+        with LoopbackStub() as stub:
+            env = {**self.environment(home), **_proxied_to(stub.url)}
+            _write_catalog(
+                files.catalog,
+                self.model,
+                _introspect([*self.command, "debug", "models"], executable, env, CODEX_CATALOG_OUTPUT),
+            )
+            done = threading.Event()
+            relay = threading.Thread(target=_first_of, args=(done, stub.captured, stop), daemon=True)
+            relay.start()
+            run_process(
+                self.argv(
+                    files,
+                    os.path.join(scratch, "probe-message.json"),
+                    cwd,
+                    f"{CODEX_BASE_URL_KEY}={json.dumps(stub.url + '/v1')}",
+                ),
+                executable=executable,
+                stdin=CODEX_PROBE.encode("utf-8"),
+                env=env,
+                cwd=cwd,
+                timeout=CODEX_PROBE_TIMEOUT,
+                max_stdout=VERIFY_OUTPUT,
+                stop=done,
+            )
+            done.set()
+            relay.join()
+        if stop is not None and stop.is_set():
+            raise TransportError(Category.CANCELLED, "the launch check was cancelled by shutdown")
+        problems = stub.problems(instructions, CODEX_PROBE)
+        if problems:
+            more = f" and {len(problems) - 3} more" if len(problems) > 3 else ""
+            raise TransportError(Category.UNVERIFIED_CLIENT, f"the launch check found {'; '.join(problems[:3])}{more}")
+
+    def _judge(self, result: ProcessResult, content: str) -> tuple[Any, int]:
+        """Classify a finished call from its session record and event stream; returns usage and turn count.
+
+        A tool call the record shows outranks every other reading. A failed turn keeps the category its events
+        give, since its record need not show a finished turn. A turn the worker would accept must be recorded as
+        this call's: the thread the stream started, this content as the one user message, an answer and the
+        turn's completion. A record refused here is kept for the operator; any other is removed, since it holds
+        thread text.
+        """
+        thread_id = _thread_id(result.stdout)
+        record = self._session_record(thread_id)
+        text = record.read_text(encoding="utf-8", errors="replace") if record else ""
+        problems = record_problems(text)
+        if problems:
+            raise TransportError(Category.ISOLATION, f"the call's session record holds {problems[0]}")
+        try:
+            usage, turns = check_codex_events(result.stdout, result.returncode)
+        except TransportError:
+            if record:
+                record.unlink()
+            raise
+        if record is None or thread_id is None:
+            raise TransportError(Category.ISOLATION, "codex left no session record for the call")
+        gaps = record_gaps(text, thread_id, content)
+        if gaps:
+            raise TransportError(Category.ISOLATION, f"the call's session record lacks {gaps[0]}")
+        record.unlink()
+        return usage, turns
+
+    def _session_record(self, thread_id: str | None) -> Path | None:
+        """The one session record named by the call's thread, or None when there is none; more is refused."""
+        if thread_id is None:
+            return None
+        found = sorted(Path(str(self.home), "sessions").glob(f"*/*/*/rollout-*-{thread_id}.jsonl"))
+        if len(found) > 1 or any(path.stat().st_size > CODEX_RECORD_BYTES for path in found):
+            raise TransportError(
+                Category.ISOLATION, f"codex left {len(found)} session records for the call, or one too large"
+            )
+        return found[0] if found else None
+
+
+def _proxied_to(url: str) -> dict[str, str]:
+    """Every proxy variable pointed at the capture, except for the capture itself."""
+    proxies = {name: url for base in ("http_proxy", "https_proxy", "all_proxy") for name in (base, base.upper())}
+    return {**proxies, "no_proxy": "127.0.0.1", "NO_PROXY": "127.0.0.1"}
+
+
+def _first_of(done: threading.Event, *events: threading.Event | None) -> None:
+    """Set `done` as soon as any of `events` is set, or end once something else set it."""
+    while not done.wait(0.05):
+        if any(event is not None and event.is_set() for event in events):
+            done.set()
+
+
+def _write_catalog(path: str, model: str, listing: str) -> None:
+    """A one-model catalog: the client's own entry for `model`, with the fields that add tools cleared."""
+    try:
+        models = json.loads(listing)["models"]
+        entry = next(m for m in models if isinstance(m, dict) and m.get("slug") == model)
+    except (ValueError, KeyError, TypeError, StopIteration):
+        raise TransportError(
+            Category.UNVERIFIED_CLIENT, "the client's model catalog has no entry for the model"
+        ) from None
+    Path(path).write_text(json.dumps({"models": [{**entry, **CODEX_CATALOG_CLEARED}]}), encoding="utf-8")
+
+
+def _thread_id(stdout: bytes) -> str | None:
+    """The thread the event stream says it started, which names the call's session record."""
+    for line in _lines(stdout.decode("utf-8", "replace")):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "thread.started":
+            thread_id = event.get("thread_id")
+            return thread_id if isinstance(thread_id, str) and THREAD_ID.fullmatch(thread_id) else None
+    return None
 
 
 def _last_message(path: str, bound: int) -> dict[str, Any]:

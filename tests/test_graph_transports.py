@@ -2,14 +2,15 @@
 
 No live inference. The native fixtures under tests/fixtures stand in for installed clients so the host's own
 guarantees can be checked: exact argv restrictions, an allowlisted environment, an isolated working directory,
-rejection of every action-bearing event, one launch per reserved call, and process-group cleanup when the
-wall-time or byte bounds are exceeded.
+the event-stream client's loopback launch check and session-record check, rejection of every action-bearing
+event, one launch per reserved call, and process-group cleanup when the wall-time or byte bounds are exceeded.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -55,8 +56,25 @@ def install(tmp_path: Path, name: str, dump: Path, version: str) -> list[str]:
     return [str(target)]
 
 
-def recorded(dump: Path) -> dict:
-    return json.loads((dump / "call.json").read_text())
+def worker_home(tmp_path: Path) -> str:
+    """The event-stream client's own home, private as the worker requires."""
+    home = tmp_path / "worker-home"
+    home.mkdir(mode=0o700, exist_ok=True)
+    return str(home)
+
+
+def client(tmp_path: Path, name: str, command: list[str]) -> native.NativeClient:
+    if name == "codex":
+        return native.CodexTransport(command, "m", [], FAKE_VERSION, home=worker_home(tmp_path))
+    return native.ClaudeTransport(command, "m", [], FAKE_VERSION)
+
+
+def recorded(dump: Path, name: str = "call") -> dict:
+    return json.loads((dump / f"{name}.json").read_text())
+
+
+def overrides(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i, part in enumerate(argv) if part == "-c"]
 
 
 def alive(pid: int) -> bool:
@@ -210,38 +228,31 @@ def test_http_calls_end_at_the_total_deadline_or_on_stop_with_nothing_left_runni
 
 def test_codex_transport_pins_isolation_and_rejects_every_action_family(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("BATON_TOKEN", "must-not-cross")
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     monkeypatch.setenv("UNRELATED_SECRET", "nope")
     command, dump = fake(tmp_path, "codex")
-    transport = native.CodexTransport(command, "gpt-synthetic", ["CODEX_HOME"], FAKE_VERSION)
-    verified = transport.verify()
-    assert verified["version"] == FAKE_VERSION and set(verified["features_disabled"]) == set(native.CODEX_FEATURES)
+    home = worker_home(tmp_path)
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=home)
+    assert transport.verify() == {"mode": "codex", "version": FAKE_VERSION}
     produced = transport.produce(REQUEST, SCHEMA, LIMITS)
     assert produced["candidate"] == {"echo": "req-1"} and produced["turns"] == 1
     assert produced["usage"] == {"input_tokens": 11, "cached_input_tokens": 0, "output_tokens": 5}
     call = recorded(dump)
     argv = call["argv"]
-    assert argv[:7] == [
-        "exec",
-        "--ignore-user-config",
-        "--ephemeral",
-        "--sandbox",
-        "read-only",
-        "--skip-git-repo-check",
-        "--model",
-    ]
-    assert argv[7] == "gpt-synthetic" and "--json" in argv and argv[-1] == "-"
-    overrides = [argv[i + 1] for i, part in enumerate(argv) if part == "-c"]
-    assert overrides[:2] == ['approval_policy="never"', 'web_search="disabled"']
-    assert set(overrides[2:]) == {f"features.{name}=false" for name in native.CODEX_FEATURES}
+    assert argv[:6] == ["exec", "--ignore-user-config", "--sandbox", "read-only", "--skip-git-repo-check", "--model"]
+    assert argv[6] == "m" and "--json" in argv and "--ephemeral" not in argv and argv[-1] == "-"
+    switches = [*native.CODEX_OVERRIDES, *(f"features.{name}=false" for name in native.CODEX_FEATURES)]
+    files = dict(override.split("=", 1) for override in overrides(argv)[len(switches) :])
+    assert overrides(argv)[: len(switches)] == switches
+    assert list(files) == ["model_catalog_json", "model_instructions_file"]
     assert "--tools" not in argv and not any("apply_patch" in part for part in argv)
     cwd = argv[argv.index("-C") + 1]
-    assert call["cwd"] == cwd and cwd.startswith(tempfile_root()) and not Path(cwd).exists()  # isolated and gone
-    assert Path(argv[argv.index("--output-schema") + 1]).parent == Path(cwd)
-    assert call["env"]["CODEX_HOME"] == str(tmp_path / "codex-home")
+    scratch = Path(cwd).parent  # private to the call and removed after it
+    assert call["cwd"] == cwd and cwd.startswith(tempfile_root()) and not scratch.exists()
+    written = [argv[argv.index("--output-schema") + 1], *(json.loads(path) for path in files.values())]
+    assert {Path(path).parent for path in written} == {scratch}
+    assert call["env"]["HOME"] == call["env"]["CODEX_HOME"] == home
     assert "BATON_TOKEN" not in call["env"] and "UNRELATED_SECRET" not in call["env"]
     assert set(call["env"]) <= set(native.ENV_ALLOWLIST) | {"CODEX_HOME"}
-    assert call["stdin"].startswith(REQUEST["instructions"]) and '"new_posts"' in call["stdin"]
     # The event stream is read whatever the exit status; an action outranks every other reading of it.
     for mode, category in (
         ("action", "isolation"),
@@ -258,8 +269,8 @@ def test_codex_transport_pins_isolation_and_rejects_every_action_family(tmp_path
         with pytest.raises(TransportError) as refused:
             transport.produce(REQUEST, SCHEMA, LIMITS)
         assert refused.value.category == category, mode
-    with pytest.raises(TransportError) as crossing:
-        native.CodexTransport(command, "m", ["BATON_TOKEN"], FAKE_VERSION).produce(REQUEST, SCHEMA, LIMITS)
+    with pytest.raises(TransportError) as crossing:  # the home's login is the only credential
+        native.CodexTransport(command, "m", ["BATON_TOKEN"], FAKE_VERSION, home=home)
     assert crossing.value.category == "isolation"
     (dump / "mode").write_text("bigfile")  # the last-message file is bounded like stdout
     with pytest.raises(TransportError) as big:
@@ -268,19 +279,124 @@ def test_codex_transport_pins_isolation_and_rejects_every_action_family(tmp_path
     with pytest.raises(TransportError) as oversized:
         transport.produce(REQUEST, SCHEMA, Limits(5, 10, 100_000, 400))
     assert oversized.value.category == "input_limit"
-    for mode, version, detail in (
-        ("ok", "9.8.6", "version"),
-        ("no_schema_flag", FAKE_VERSION, "--output-schema"),
-        ("missing_feature", FAKE_VERSION, "shell_tool"),
-        ("no_sleep_tool", FAKE_VERSION, "sleep_tool"),
-    ):
-        (dump / "mode").write_text(mode)
-        (dump / "version").write_text(version)
-        with pytest.raises(TransportError, match=detail) as unverified:
-            native.CodexTransport(command, "m", [], FAKE_VERSION).verify()
-        assert unverified.value.category == "unverified_client", mode
-    settings = GraphWorker(enabled=True, provider="codex", model="m", command=tuple(command), client_version="1.0.0")
+    (dump / "version").write_text("9.8.6")
+    with pytest.raises(TransportError, match="version") as unverified:
+        transport.verify()
+    assert unverified.value.category == "unverified_client"
+    settings = GraphWorker(
+        enabled=True,
+        provider="codex",
+        model="m",
+        command=tuple(command),
+        client_version="1.0.0",
+        client_home=Path(home),
+    )
     assert for_config(settings).mode == "codex"
+
+
+def test_a_clean_launch_passes_its_loopback_check_and_runs_from_the_worker_home(tmp_path) -> None:
+    command, dump = fake(tmp_path, "codex")
+    home = worker_home(tmp_path)
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=home)
+    content = canonical({key: value for key, value in REQUEST.items() if key != "instructions"})
+    proxies = {name for base in ("http_proxy", "https_proxy", "all_proxy") for name in (base, base.upper())}
+    for mode in ("ok", "post_probe"):  # the client's WebSocket turn, and its HTTP fallback
+        (dump / "mode").write_text(mode)
+        assert transport.produce(REQUEST, SCHEMA, LIMITS)["candidate"] == {"echo": "req-1"}
+        probe, call = recorded(dump, "probe"), recorded(dump)
+        # The check ran this same launch from an empty home of its own, with the fixed probe as the content,
+        # no credential in its environment and every address it could reach at the loopback capture.
+        assert overrides(probe["argv"])[:-1] == overrides(call["argv"])
+        endpoint = overrides(probe["argv"])[-1]
+        assert endpoint.startswith(f'{native.CODEX_BASE_URL_KEY}="http://127.0.0.1:') and endpoint.endswith('/v1"')
+        assert probe["env"]["HOME"] == probe["env"]["CODEX_HOME"] != home and probe["stdin"] == native.CODEX_PROBE
+        assert set(probe["env"]) <= {*native.ENV_ALLOWLIST, "CODEX_HOME", "no_proxy", "NO_PROXY", *proxies}
+        assert all(probe["env"][name].startswith("http://127.0.0.1:") for name in proxies)
+        # The call itself: the worker's home, the instructions in their own file, the content alone on stdin, and
+        # the client's own catalog entry for the model with every field that adds tools cleared.
+        assert call["env"]["HOME"] == call["env"]["CODEX_HOME"] == home
+        assert call["instructions"] == REQUEST["instructions"] and call["stdin"] == content
+        assert call["catalog"] == [{"slug": "m", "base_instructions": "Built-in.", **native.CODEX_CATALOG_CLEARED}]
+        assert not Path(call["cwd"]).parent.exists() and not list(Path(home).rglob("*.jsonl"))
+
+
+def test_a_launch_whose_request_offers_a_tool_is_refused_before_any_call(tmp_path, monkeypatch) -> None:
+    command, dump = fake(tmp_path, "codex", "offers_tool")
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=worker_home(tmp_path))
+    with pytest.raises(TransportError, match="a tools field") as offered:
+        transport.produce(REQUEST, SCHEMA, LIMITS)
+    assert offered.value.category == "unverified_client"
+    assert (dump / "probe.json").exists() and not (dump / "call.json").exists()
+    # The catalog's own entry adds tools whatever the switches say; a launch that kept its fields is refused too.
+    (dump / "mode").write_text("ok")
+    with monkeypatch.context() as patch:
+        patch.setattr(native, "CODEX_CATALOG_CLEARED", {})
+        assert refusal(transport, REQUEST, LIMITS) == "unverified_client" and not (dump / "call.json").exists()
+    for mode, detail in (("probe_credential", "a request carrying a credential"), ("no_model_entry", "no entry")):
+        (dump / "mode").write_text(mode)
+        with pytest.raises(TransportError, match=detail) as refused:
+            transport.produce(REQUEST, SCHEMA, LIMITS)
+        assert refused.value.category == "unverified_client" and not (dump / "call.json").exists(), mode
+
+
+def test_a_session_record_holding_a_tool_call_refuses_the_attempt(tmp_path) -> None:
+    command, dump = fake(tmp_path, "codex", "record_tool")
+    home = worker_home(tmp_path)
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=home)
+    # The event stream shows only reasoning and the answer; the record, kept for the operator, shows the call.
+    with pytest.raises(TransportError, match="custom_tool_call") as recorded_tool:
+        transport.produce(REQUEST, SCHEMA, LIMITS)
+    assert recorded_tool.value.category == "isolation" and (dump / "call.json").exists()
+    assert len(list(Path(home, "sessions").rglob("rollout-*.jsonl"))) == 1
+    (dump / "mode").write_text("no_record")
+    assert refusal(transport, REQUEST, LIMITS) == "isolation"
+
+
+@pytest.mark.parametrize(
+    ("mode", "lacks"),
+    [
+        ("empty_record", "a session entry for this thread alone"),
+        ("meta_only_record", "this call's content as its one user message"),
+        ("other_thread_record", "a session entry for this thread alone"),
+        ("other_content_record", "this call's content as its one user message"),
+    ],
+)
+def test_a_session_record_that_does_not_show_this_calls_finished_turn_refuses_the_attempt(
+    tmp_path, mode, lacks
+) -> None:
+    command, dump = fake(tmp_path, "codex", mode)
+    home = worker_home(tmp_path)
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=home)
+    # The event stream shows a finished turn; a record that does not show it was this call's proves nothing.
+    with pytest.raises(TransportError, match=f"lacks {re.escape(lacks)}") as unproven:
+        transport.produce(REQUEST, SCHEMA, LIMITS)
+    assert unproven.value.category == "isolation"
+    assert len(list(Path(home, "sessions").rglob("rollout-*.jsonl"))) == 1  # kept for the operator
+
+
+def test_the_event_stream_client_runs_only_from_a_private_home_without_instructions(tmp_path) -> None:
+    command, dump = fake(tmp_path, "codex")
+    home = tmp_path / "worker-home"
+    with pytest.raises(TransportError, match="not an absolute directory path"):
+        native.CodexTransport(command, "m", [], FAKE_VERSION, home=str(home))
+    home.mkdir(mode=0o700)
+    # The client runs in a temporary working directory, where a relative home names another place.
+    with pytest.raises(TransportError, match="not an absolute directory path"):
+        native.CodexTransport(command, "m", [], FAKE_VERSION, home=os.path.relpath(home))
+    (tmp_path / "linked-home").symlink_to(home)
+    for path, mode in ((home, 0o755), (tmp_path / "linked-home", 0o700)):
+        home.chmod(mode)
+        with pytest.raises(TransportError) as open_home:
+            native.CodexTransport(command, "m", [], FAKE_VERSION, home=str(path))
+        assert open_home.value.category == "unverified_client"
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=str(home))
+    (home / "AGENTS.md").write_text("instructions the check's empty home would not show")
+    with pytest.raises(TransportError, match="AGENTS.md") as instructed:
+        transport.produce(REQUEST, SCHEMA, LIMITS)
+    assert instructed.value.category == "unverified_client"
+    (home / "AGENTS.md").unlink()
+    home.chmod(0o750)  # opened after the worker started
+    assert refusal(transport, REQUEST, LIMITS) == "unverified_client" and not (dump / "probe.json").exists()
 
 
 def tempfile_root() -> str:
@@ -359,9 +475,7 @@ def test_claude_transport_pins_flags_and_parses_structured_output_only(tmp_path,
 @pytest.mark.parametrize("name", ["codex", "claude"])
 def test_native_clients_launch_only_after_verifying_the_executable_about_to_run(tmp_path, name) -> None:
     command, dump = fake(tmp_path, name)
-    transport = (native.CodexTransport if name == "codex" else native.ClaudeTransport)(
-        install(tmp_path, name, dump, "9.8.6"), "m", [], FAKE_VERSION
-    )
+    transport = client(tmp_path, name, install(tmp_path, name, dump, "9.8.6"))
     with pytest.raises(TransportError) as mismatched:
         transport.produce(REQUEST, SCHEMA, LIMITS)
     assert mismatched.value.category == "unverified_client" and not (dump / "call.json").exists()
@@ -394,40 +508,35 @@ def test_a_client_script_rewritten_under_its_interpreter_is_verified_again_befor
     assert f'"{FAKE_VERSION}"' in original  # the version a fake client reports by default
     script = tmp_path / f"{name}_client.py"
     script.write_text(original)
-    transport = (native.CodexTransport if name == "codex" else native.ClaudeTransport)(
-        [sys.executable, str(script), str(dump)], "m", [], FAKE_VERSION
-    )
+    transport = client(tmp_path, name, [sys.executable, str(script), str(dump)])
     assert transport.verify()["version"] == FAKE_VERSION
     script.write_text(original.replace(f'"{FAKE_VERSION}"', '"9.8.6"'))
     assert refusal(transport, REQUEST, LIMITS) == "unverified_client" and not (dump / "call.json").exists()
 
 
-def test_the_input_bound_covers_the_whole_prompt_the_event_stream_client_receives(tmp_path) -> None:
+def test_the_input_bound_covers_the_instructions_file_and_the_content(tmp_path) -> None:
     command, dump = fake(tmp_path, "codex")
-    transport = native.CodexTransport(command, "m", [], FAKE_VERSION)
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=worker_home(tmp_path))
     request = {"instructions": "synthetic", "binding": {"request_id": "req-1"}}
     channels = len(b"synthetic") + len(canonical({"binding": {"request_id": "req-1"}}).encode("utf-8"))
-    # The prompt joins instructions and content with two newlines, so the channels alone are two bytes short.
-    assert refusal(transport, request, Limits(5, channels, 100_000, 400)) == "input_limit"
-    assert not (dump / "call.json").exists()
-    produced = transport.produce(request, SCHEMA, Limits(5, channels + 2, 100_000, 400))
-    assert produced["input_bytes"] == channels + 2 == len(recorded(dump)["stdin"].encode("utf-8"))
+    assert refusal(transport, request, Limits(5, channels - 1, 100_000, 400)) == "input_limit"
+    assert not (dump / "probe.json").exists() and not (dump / "call.json").exists()
+    produced = transport.produce(request, SCHEMA, Limits(5, channels, 100_000, 400))
+    call = recorded(dump)
+    assert produced["input_bytes"] == channels == len((call["instructions"] + call["stdin"]).encode("utf-8"))
 
 
 def test_line_separators_inside_client_output_split_nothing(tmp_path) -> None:
     command, dump = fake(tmp_path, "codex", "line_separators")
-    transport = native.CodexTransport(command, "m", [], FAKE_VERSION)
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=worker_home(tmp_path))
     # An agent message holding U+2028 and U+0085 raw is one event, not two halves that fail to parse.
     assert transport.produce(REQUEST, SCHEMA, LIMITS)["candidate"] == {"echo": "req-1"}
-    # A listing without sleep_tool shows the name only after a U+2028 inside another row: it is not listed.
-    (dump / "mode").write_text("separated_listing")
-    assert refusal(transport, REQUEST, LIMITS) == "unverified_client"
 
 
 @pytest.mark.parametrize("name", ["codex", "claude"])
 def test_native_timeouts_and_output_bounds_kill_the_client_and_its_descendants(tmp_path, name) -> None:
     command, dump = fake(tmp_path, name, "hang")
-    transport = (native.CodexTransport if name == "codex" else native.ClaudeTransport)(command, "m", [], FAKE_VERSION)
+    transport = client(tmp_path, name, command)
     started = time.monotonic()
     with pytest.raises(TransportError) as timed_out:
         transport.produce(
