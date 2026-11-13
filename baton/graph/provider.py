@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from baton.graph.contract import require
+from baton.graph.contract import SCHEMA_NAME, require
 from baton.graph.failure import Category, TransportError, status_category
 from baton.graph.operations import apply, prepare
 from baton.graph.source import canonical
@@ -31,7 +31,7 @@ class ProviderOptions:
     token_parameter: str = "max_completion_tokens"
 
 
-def provider_payload(request, options, schema=None, schema_name="baton_graph_proposal_v1"):
+def provider_payload(request, options, schema=None, schema_name=SCHEMA_NAME):
     require(options.response_format in {"json_schema", "json_object", "plain"}, "unsupported response format")
     require(options.token_parameter in {"max_completion_tokens", "max_tokens"}, "unsupported token parameter")
     content = {key: value for key, value in request.items() if key != "instructions"}
@@ -100,7 +100,7 @@ def call_provider(
     options,
     *,
     schema=None,
-    schema_name="baton_graph_proposal_v1",
+    schema_name=SCHEMA_NAME,
     max_input_bytes=100_000,
     max_response_bytes=MAX_RESPONSE_BYTES,
     client=None,
@@ -129,7 +129,7 @@ async def call_provider_async(
     options,
     *,
     schema=None,
-    schema_name="baton_graph_proposal_v1",
+    schema_name=SCHEMA_NAME,
     max_input_bytes=100_000,
     max_response_bytes=MAX_RESPONSE_BYTES,
     client=None,
@@ -256,21 +256,13 @@ def run(
     *,
     batch_size=20,
     max_input_bytes=100_000,
-    recall_statements=(),
     client=None,
 ):
     distinct_paths(source=source_path, state=state_path, request=request_path, proposal=proposal_path)
     require(not Path(proposal_path).exists(), "proposal artifact already exists; choose a new path")
     # Validate credentials/options before creating any request artifact.
     provider_headers(options)
-    request = prepare(
-        source_path,
-        state_path,
-        request_path,
-        batch_size=batch_size,
-        max_input_bytes=max_input_bytes,
-        recall_statements=recall_statements,
-    )
+    request = prepare(source_path, state_path, request_path, batch_size=batch_size, max_input_bytes=max_input_bytes)
     produced = call_provider(request, options, max_input_bytes=max_input_bytes, client=client)
     atomic_json(proposal_path, produced["candidate"], replace=False)
     receipt = apply(source_path, state_path, request_path, proposal_path)

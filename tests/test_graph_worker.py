@@ -1,9 +1,10 @@
-"""The background graph worker on synthetic SQLite with scripted producers: scheduling, budgets, recovery.
+"""The background graph worker on synthetic SQLite with scripted producers: scheduling, recovery, publication.
 
 Nothing here runs a model. A scripted `Transport` stands in for every provider so the host's own
-guarantees can be checked: one reserved call per launch, saved candidates reused before new calls, terminal
-blocks that survive restarts and new posts, compact-only retries, zero-call publication recovery, and the
-atomic snapshot publication that the MCP readers later serve.
+guarantees can be checked: saved candidates reused before new calls, terminal blocks that survive restarts
+and new posts, compact-only retries, zero-call publication recovery, and the atomic snapshot publication
+that the MCP readers later serve. The call budget is checked in `test_graph_worker_budget` and the compact
+contract in `test_graph_compact`; both use the scripted producers defined here.
 """
 
 from __future__ import annotations
@@ -17,22 +18,20 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from test_graph_builder import proposal as graph_proposal
 from test_index_writer import converse, index_config, say
 
 from baton import config as config_module
 from baton.config import ConfigError
 from baton.database.store import connect
-from baton.graph import compact, ledger
+from baton.graph import ledger
 from baton.graph import snapshot as snapshot_module
-from baton.graph.contract import GraphError
+from baton.graph.contract import GraphError, current
 from baton.graph.failure import TransportError
 from baton.graph.source import load_json
 from baton.graph.worker import Worker, reset, status
 
 DAY = 86_400.0
 USAGE = {"input_tokens": 11, "cached_input_tokens": 3, "output_tokens": 5}
-REFUSALS = ("authentication", "rate_limited", "provider_unavailable", "provider_refused", "unverified_client")
 
 
 def worker_config(tmp_path: Path, indexer: dict | None = None, **worker) -> config_module.Config:
@@ -105,7 +104,6 @@ class ScriptedTransport:
 def extraction_candidate(request):
     """One statement per new post in strand S1, a decision on the first batch: valid for any synthetic thread."""
     start, end = (request["binding"]["batch"][key] for key in ("start", "end"))
-    members = sorted(request["retained_state"]["strands"].get("S1", {}).get("statement_ids", []))
     candidate = {
         "binding": request["binding"],
         "statements": [],
@@ -128,7 +126,6 @@ def extraction_candidate(request):
                 "evidence": [f"post:{post['seq']}"],
             }
         )
-        members.append(f"{post['seq']}-1")
     candidate["strands"] = [
         {
             "id": "S1",
@@ -136,8 +133,6 @@ def extraction_candidate(request):
             "summary": f"Notes through {end}.",
             "state": "active",
             "open_work": ["Review the notes."],
-            "summary_through": end,
-            "statement_ids": members,
             "evidence": [f"{end}-1"],
         }
     ]
@@ -238,6 +233,14 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
     )
 
 
+def test_a_host_without_full_text_search_is_refused_when_the_worker_starts(tmp_path, monkeypatch) -> None:
+    config = worker_config(tmp_path, conversations=["conv_a"])
+    monkeypatch.setattr("baton.database.store.fts5_available", lambda conn: False)
+    # Extraction chooses what to show the model by search; a worker that could not would only block later.
+    with pytest.raises(GraphError, match="FTS5"):
+        Worker(config, transport=ScriptedTransport())
+
+
 def test_worker_extracts_compacts_publishes_and_readers_see_the_snapshot(tmp_path) -> None:
     config = worker_config(tmp_path, conversations=["placeholder"])
     with connect(config.db_path) as db:
@@ -285,186 +288,6 @@ def test_worker_extracts_compacts_publishes_and_readers_see_the_snapshot(tmp_pat
     assert reset(config, cid)["phase"] == "pending"
     with pytest.raises(Exception, match="unknown worker conversation"):
         reset(config, "conv_nowhere")
-
-
-def test_calls_are_reserved_before_launch_and_exhaustion_blocks_durably(tmp_path) -> None:
-    config = worker_config(tmp_path, conversations=["placeholder"])
-    with connect(config.db_path) as db:
-        cid, _ = converse(db, config, 2)
-    config = worker_config(tmp_path, conversations=[cid])
-    clock = Clock()
-    transport = ScriptedTransport(["timeout", "garbage"])
-    worker = Worker(config, transport=transport, clock=clock)
-    first = worker.cycle()
-    record = first["records"][cid]
-    assert (record["phase"], record["attempts"], record["error_category"]) == ("extracting", 1, "timeout")
-    assert record["not_before"] == clock.now + ledger.RETRY_DELAY
-    assert worker.cycle()["stepped"] == []  # not before the retry delay
-    clock.now += ledger.RETRY_DELAY
-    second = worker.cycle()
-    record = second["records"][cid]
-    # The second call was the last one allowed for this base W; its rejection is terminal at once.
-    assert (record["phase"], record["attempts"], record["error_category"]) == ("blocked", 2, "extraction_failed")
-    clock.now += ledger.RETRY_DELAY
-    assert worker.cycle()["stepped"] == [] and len(transport.calls) == 2
-    # A timeout left no candidate, so the second request carried no correction; the saved rejection would.
-    assert "correction" not in transport.calls[1]["request"]
-    assert load_json(next((worker.paths(cid).root / "proposals").glob("*.json"))) == {"unexpected": True}
-    with connect(config.db_path) as db:
-        say(db, config, cid, "note 3")  # new posts do not clear a terminal block
-    clock.now += DAY
-    restarted = Worker(config, transport=ScriptedTransport(), clock=clock)
-    after = restarted.cycle()
-    assert after["records"][cid]["phase"] == "blocked" and after["stepped"] == []
-    assert restarted.transport.calls == []
-    with connect(config.db_path) as db:
-        assert published(db, cid) == []
-    # A reset works while a service owns the directory: it is left as a request the worker applies itself.
-    requests = config.graph_worker.state_dir / "reset-requests"
-    with ledger.Ledger.open(config.graph_worker.state_dir):
-        assert reset(config, cid)["reset"] == "requested"
-        with pytest.raises(GraphError, match="unknown worker conversation"):
-            reset(config, "conv_nowhere")
-    assert status(config)["conversations"][cid]["phase"] == "blocked"  # nothing applied outside the worker
-    (requests / "conv_nowhere").write_text("")  # a request for no record is ignored and removed
-    recovered = run_until_idle(restarted, clock)
-    assert recovered[0]["records"][cid]["phase"] != "blocked" and "conv_nowhere" not in recovered[0]["records"]
-    assert recovered[-1]["records"][cid]["published_W"] == 3
-    assert not list(requests.iterdir())
-
-
-def test_provider_refusals_are_refunded_never_block_and_back_off_to_an_hourly_ceiling(tmp_path) -> None:
-    config = worker_config(tmp_path, conversations=["placeholder"])
-    with connect(config.db_path) as db:
-        cid, _ = converse(db, config, 2)
-    config = worker_config(tmp_path, conversations=[cid], daily_call_cap=2)
-    clock = Clock()
-    day = ledger.utc_day(clock.now)
-    transport = ScriptedTransport(["rate_limited"] * 9 + ["ok"] + list(REFUSALS) + ["ok"])
-    worker = Worker(config, transport=transport, clock=clock)
-
-    def refused_until_answered(expected):
-        waits = []
-        for category in expected:
-            record = worker.cycle()["records"][cid]
-            assert (record["phase"], record["attempts"], record["error_category"]) == ("extracting", 0, category)
-            waits.append(record["not_before"] - clock.now)
-            clock.now = record["not_before"]
-        return waits
-
-    # Refused calls are refunded and never block; the wait doubles from one minute to an hourly ceiling.
-    assert refused_until_answered(["rate_limited"] * 9) == [60, 120, 240, 480, 960, 1920, 3600, 3600, 3600]
-    assert (status(config)["calls"], status(config)["refused"]) == ({day: 9}, {day: 9})
-    # The next answered call proceeds normally: nine refusals did not use up a daily cap of two.
-    answered = worker.cycle()["records"][cid]
-    assert (answered["phase"], answered["accepted_W"], answered["refusals"]) == ("compacting", 2, 0)
-    with connect(config.db_path) as db:
-        say(db, config, cid, "note 3")
-        say(db, config, cid, "note 4")
-    while worker.cycle()["records"][cid]["phase"] != "pending":  # compaction and publication make no call
-        pass
-    assert refused_until_answered(REFUSALS) == [60, 120, 240, 480, 960]
-    results = run_until_idle(worker, clock)
-    assert (results[-1]["records"][cid]["published_W"], len(transport.calls)) == (4, 16)
-    assert (status(config)["calls"], status(config)["refused"]) == ({day: 16}, {day: 14})
-    assert [entry["outcome"] for entry in status(config)["recent_calls"]][-6:] == [*REFUSALS, "returned"]
-    # Durable causes are unchanged: an isolation failure blocks after one call. A charged failure clears the
-    # consecutive-refusal count, and two charged failures block.
-    worker = Worker(worker_config(tmp_path, conversations=[cid], daily_call_cap=0), transport=transport, clock=clock)
-    with connect(config.db_path) as db:
-        say(db, config, cid, "note 5")
-    transport.script = ["isolation"]
-    record = run_until_idle(worker, clock)[-1]["records"][cid]
-    assert (record["phase"], record["attempts"], record["error_category"]) == ("blocked", 1, "isolation")
-    reset(config, cid)
-    transport.script = ["provider_refused", "request_rejected", "provider_error"]
-    records = [result["records"][cid] for result in run_until_idle(worker, clock)]
-    assert [(r["attempts"], r["refusals"], r["error_category"]) for r in records] == [
-        (0, 1, "provider_refused"),
-        (1, 0, "request_rejected"),
-        (2, 0, "extraction_failed"),
-    ]
-    assert records[-1]["phase"] == "blocked" and len(transport.calls) == 20
-
-
-def test_daily_cap_defers_without_clearing_attempts_and_cycle_cap_spreads_calls(tmp_path) -> None:
-    config = worker_config(tmp_path, conversations=["placeholder"], daily_call_cap=1)
-    with connect(config.db_path) as db:
-        first_cid, _ = converse(db, config, 2)
-        second_cid, _ = converse(db, config, 2)
-    pair = [first_cid, second_cid]
-    config = worker_config(tmp_path, conversations=pair, daily_call_cap=1)
-    clock = Clock()
-    transport = ScriptedTransport()
-    worker = Worker(config, transport=transport, clock=clock)
-    cycle = worker.cycle()
-    assert cycle["model_calls"] == 1 and len(transport.calls) == 1
-    deferred = [cid for cid, record in cycle["records"].items() if record["not_before"] > clock.now]
-    served = [cid for cid, record in cycle["records"].items() if record["phase"] == "compacting"]
-    assert len(deferred) == 1 and len(served) == 1
-    assert cycle["records"][deferred[0]]["error_category"] == "daily_cap"
-    assert cycle["records"][deferred[0]]["not_before"] == ledger.next_utc_day(clock.now)
-    again = worker.cycle()  # the day's budget is spent: no launch, the other conversation keeps moving
-    assert len(transport.calls) == 1 and again["records"][served[0]]["phase"] == "publishing"
-    clock.now = ledger.next_utc_day(clock.now) + 1
-    results = run_until_idle(worker, clock, cycles=20)
-    assert all(r["published_W"] == 2 for r in results[-1]["records"].values())
-    assert len(transport.calls) == 2
-    # The per-cycle ceiling spreads launches across cycles and round-robin serves the other conversation first.
-    with connect(config.db_path) as db:
-        for cid in pair:
-            say(db, config, cid, "note 3")
-    spread = Worker(worker_config(tmp_path, conversations=pair, calls_per_cycle=1), transport=transport, clock=clock)
-    one = spread.cycle()
-    assert one["model_calls"] == 1 and len(transport.calls) == 3
-    waiting = [cid for cid, record in one["records"].items() if record["phase"] == "extracting"]
-    moved = [cid for cid, record in one["records"].items() if record["phase"] == "compacting"]
-    assert len(waiting) == 1 and len(moved) == 1 and one["records"][waiting[0]]["attempts"] == 0
-    two = spread.cycle()
-    assert two["model_calls"] == 1 and two["records"][waiting[0]]["phase"] == "compacting"
-    assert two["stepped"][0] == waiting[0]  # the position advanced, so the waiting conversation went first
-    final = run_until_idle(spread, clock, cycles=20)[-1]
-    assert all(r["published_W"] == 3 for r in final["records"].values())
-
-
-def test_unlimited_daily_cap_still_counts_calls_and_keeps_cycle_and_attempt_bounds(tmp_path) -> None:
-    settings = {"daily_call_cap": 0, "calls_per_cycle": 1, "batch_size": 1}
-    config = worker_config(tmp_path, conversations=["placeholder"], **settings)
-    with connect(config.db_path) as db:
-        first_cid, _ = converse(db, config, 5)
-        second_cid, _ = converse(db, config, 5)
-    pair = [first_cid, second_cid]
-    config = worker_config(tmp_path, conversations=pair, **settings)
-    clock = Clock()
-    day = ledger.utc_day(clock.now)
-    transport = ScriptedTransport()
-    worker = Worker(config, transport=transport, clock=clock)
-    results = []
-    while len(transport.calls) < 5 and len(results) < 40:
-        results.append(worker.cycle())
-    assert status(config)["calls"] == {day: 5}  # launches are still reserved and counted
-    # A restart keeps the day's counter, and neither it nor the default ceiling of 8 stops the catch-up.
-    restarted = Worker(config, transport=transport, clock=clock)
-    while len(transport.calls) < 10 and len(results) < 80:
-        results.append(restarted.cycle())
-    results += run_until_idle(restarted, clock)
-    assert ledger.utc_day(clock.now) == day and status(config)["calls"] == {day: 10}
-    assert all(r["published_W"] == 5 for r in results[-1]["records"].values())
-    assert max(result["model_calls"] for result in results) == 1  # the per-cycle ceiling still spreads launches
-    assert not any(r["error_category"] == "daily_cap" for result in results for r in result["records"].values())
-    # The attempt bound is untouched: two failed extraction calls still block durably.
-    with connect(config.db_path) as db:
-        say(db, config, first_cid, "note 6")
-    transport.script = ["timeout", "garbage"]
-    blocked = run_until_idle(restarted, clock)[-1]["records"][first_cid]
-    assert (blocked["phase"], blocked["attempts"], blocked["error_category"]) == ("blocked", 2, "extraction_failed")
-    assert len(transport.calls) == 12 and status(config)["calls"] == {day: 12}
-    clock.now = ledger.next_utc_day(clock.now) + 1
-    assert restarted.cycle()["stepped"] == [] and len(transport.calls) == 12  # a new day clears nothing
-    with connect(config.db_path) as db:
-        say(db, config, second_cid, "note 6")
-    run_until_idle(restarted, clock)
-    assert status(config)["calls"] == {ledger.utc_day(clock.now): 1}  # the counter still rolls over by UTC day
 
 
 def test_restart_consumes_the_in_flight_reservation_and_reuses_saved_candidates(tmp_path) -> None:
@@ -516,6 +339,33 @@ def test_restart_consumes_the_in_flight_reservation_and_reuses_saved_candidates(
     reused = restarted.cycle()
     assert reused["records"][cid]["accepted_W"] == 2 and reused["model_calls"] == 0
     assert restarted.transport.calls == []
+
+
+def test_a_saved_request_from_another_contract_is_prepared_again_with_a_full_attempt_count(tmp_path) -> None:
+    config = worker_config(tmp_path, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 2)
+    config = worker_config(tmp_path, conversations=[cid])
+    clock = Clock()
+    worker = Worker(config, transport=ScriptedTransport(["timeout"]), clock=clock)
+    worker.cycle()
+    # What an upgrade finds on disk: a request an earlier contract wrote, with both of its calls already spent.
+    request_path = next((worker.paths(cid).root / "requests").glob("*.json"))
+    older = {**load_json(request_path), "version": 1, "instructions": "An earlier producer contract."}
+    older["binding"] = {**older["binding"], "request_id": "older"}
+    request_path.write_text(json.dumps(older))
+    ledger_path = config.graph_worker.state_dir / "ledger.json"
+    ledger_file = load_json(ledger_path)
+    ledger_file["conversations"][cid].update(request_id="older", attempts=2)
+    ledger_path.write_text(json.dumps(ledger_file))
+    clock.now += ledger.RETRY_DELAY
+    restarted = Worker(config, transport=ScriptedTransport(), clock=clock)
+    accepted = restarted.cycle()
+    # No answer to the older request could be applied, so the batch is prepared again instead of blocking.
+    assert accepted["records"][cid]["accepted_W"] == 2 and len(restarted.transport.calls) == 1
+    request = restarted.transport.calls[0]["request"]
+    assert current(request) and request["binding"]["request_id"] != "older"
+    assert load_json(request_path) == request
 
 
 def test_compact_retries_alone_and_publication_recovers_with_zero_calls(tmp_path, monkeypatch) -> None:
@@ -603,9 +453,9 @@ def test_publication_exhaustion_blocks_and_input_overflow_blocks_before_any_call
     assert overflow["records"][other]["phase"] == "blocked"
     assert overflow["records"][other]["error_category"] == "input_limit" and transport.calls == []
     # The prepare failure's type decides the block, never its wording.
-    from baton.graph.operations import MissingRecall
+    from baton.graph.operations import InputOverflow
 
-    for raised, category in ((MissingRecall("exceeds"), "missing_recall"), (GraphError("recall"), "unsafe_source")):
+    for raised, category in ((InputOverflow("recall"), "input_limit"), (GraphError("exceeds"), "unsafe_source")):
         root = tmp_path / category
         prepared = worker_config(root, conversations=["placeholder"])
         with connect(prepared.db_path) as db:
@@ -827,150 +677,6 @@ def test_service_owns_its_directory_for_life_and_stop_cancels_the_native_call(tm
     idle_service.join(timeout=15)
     assert not idle_service.is_alive()
     assert reset(config, cid)["phase"] == "pending"  # released with the service
-
-
-def test_compact_contract_rejects_coverage_gaps_and_stale_digests() -> None:
-    source = {
-        "conversation_id": "c",
-        "messages": [
-            {
-                "seq": 1,
-                "message_id": "m1",
-                "author": "a",
-                "at": "t1",
-                "text": "one",
-                "reply_to": None,
-                "conversation_id": "c",
-            },
-            {
-                "seq": 2,
-                "message_id": "m2",
-                "author": "b",
-                "at": "t2",
-                "text": "two",
-                "reply_to": None,
-                "conversation_id": "c",
-            },
-        ],
-    }
-    graph_fixture = graph_proposal  # the synthetic proposal builder is reused only for its shape conventions
-    assert callable(graph_fixture)
-    statement = {
-        "id": "1-1",
-        "seq": 1,
-        "text": "one",
-        "quotes": ["one"],
-        "strand_ids": ["S1"],
-        "relevance": "directly_relevant",
-        "surviving_text": None,
-        "evidence": ["post:1"],
-        "source": {k: v for k, v in source["messages"][0].items() if k != "text"},
-        "relevance_evidence": ["post:1"],
-        "relevance_history": [],
-    }
-    state = {
-        "conversation_id": "c",
-        "watermark": 2,
-        "revision": 1,
-        "source_prefix_digest": snapshot_module.prefix_digest(source, 2),
-        "statements": {
-            "1-1": statement,
-            "2-1": {
-                **statement,
-                "id": "2-1",
-                "seq": 2,
-                "text": "two",
-                "quotes": ["two"],
-                "strand_ids": ["S2"],
-                "evidence": ["post:2"],
-                "relevance_evidence": ["post:2"],
-                "source": {k: v for k, v in source["messages"][1].items() if k != "text"},
-            },
-        },
-        "strands": {
-            "S1": {
-                "id": "S1",
-                "title": "T",
-                "summary": "S",
-                "open_work": [],
-                "state": "active",
-                "statement_ids": ["1-1"],
-                "summary_through": 2,
-                "evidence": ["post:1"],
-                "last_changed": 2,
-            },
-            "S2": {
-                "id": "S2",
-                "title": "Closed",
-                "summary": "Done",
-                "open_work": [],
-                "state": "resolved",
-                "statement_ids": ["2-1"],
-                "summary_through": 2,
-                "evidence": ["post:2"],
-                "last_changed": 2,
-            },
-        },
-        "decisions": {
-            "D1": {
-                "id": "D1",
-                "text": "Global",
-                "applies_to": ["all"],
-                "status": "active",
-                "evidence": ["post:2"],
-                "history": [],
-                "last_changed": 2,
-            },
-            "D2": {
-                "id": "D2",
-                "text": "Closed only",
-                "applies_to": ["S2"],
-                "status": "active",
-                "evidence": ["post:2"],
-                "history": [],
-                "last_changed": 2,
-            },
-        },
-        "edges": [],
-    }
-    snapshot = snapshot_module.project(state)
-    snapshot_module.validate(snapshot, source)
-    # Booleans equal integers in Python; the attachment boundary must not accept them as versions or seqs.
-    for mutate, match in (
-        (lambda s: s.update(schema_version=True), "schema_version"),
-        (lambda s: s["statements"]["1-1"].update(seq=True), "statement seq"),
-        (lambda s: s["statements"]["1-1"]["source"].update(seq=True), "source differs"),
-    ):
-        forged = json.loads(json.dumps(snapshot))
-        mutate(forged)
-        forged["graph_digest"] = snapshot_module.digest_of(forged)
-        with pytest.raises(Exception, match=match):
-            snapshot_module.validate(forged, source)
-    request = compact.compact_request(snapshot, source, max_body_bytes=12_000, max_citations=64)
-    assert [s["id"] for s in request["strands"]] == ["S1"] and [d["id"] for d in request["decisions"]] == ["D1"]
-    assert [a["author"] for a in request["authors"]] == ["a", "b"]  # a deduplicated author table for the evidence
-    good = compact_candidate(request, {})
-    accepted = compact.validate_compact(good, snapshot, source, max_body_bytes=12_000, max_citations=64)
-    assert accepted["citations"] == ["m1", "m2"]
-    for bad, match in (
-        ({"strand_ids": ["S1", "S2"]}, "strand_ids"),
-        ({"decision_ids": ["D1", "D2"]}, "decision_ids"),
-        ({"evidence": ["post:2"]}, "no recorded evidence for S1"),
-        ({"evidence": ["post:3"]}, "beyond completed W"),
-        ({"graph_digest": "0" * 64}, "digest"),
-        ({"body": "x" * 13}, "byte limit"),
-        ({"extra": 1}, "unknown keys"),
-    ):
-        with pytest.raises(Exception, match=match):
-            compact.validate_compact(
-                {**good, **bad}, snapshot, source, max_body_bytes=12 if "body" in bad else 12_000, max_citations=64
-            )
-    with pytest.raises(Exception, match="max_citations"):
-        compact.validate_compact(good, snapshot, source, max_body_bytes=12_000, max_citations=1)
-    rendered = compact.render_view(snapshot, source)
-    assert "S1: T" in rendered["body"] and "S2" not in rendered["body"] and "D2" not in rendered["body"]
-    assert compact.fits(rendered, snapshot, source, max_body_bytes=12_000, max_citations=64)
-    assert not compact.fits(rendered, snapshot, source, max_body_bytes=10, max_citations=64)
 
 
 def kinds(transport):

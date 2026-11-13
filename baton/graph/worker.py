@@ -26,11 +26,12 @@ from baton.database.store import connection
 from baton.errors import BatonError
 from baton.graph import compact
 from baton.graph import snapshot as snapshot_module
-from baton.graph.contract import SCHEMA, GraphError
+from baton.graph.context import require_search
+from baton.graph.contract import SCHEMA, GraphError, current
 from baton.graph.export import export_source
 from baton.graph.failure import DURABLE, REFUSALS, Category, TransportError
 from baton.graph.ledger import RETRY_DELAY, Budget, Ledger, WorkerBusy, meter_report, next_utc_day, refusal_delay
-from baton.graph.operations import InputOverflow, MissingRecall, apply, prepare
+from baton.graph.operations import InputOverflow, apply, prepare
 from baton.graph.publication import publish_graph
 from baton.graph.source import canonical, digest, load_json, load_source
 from baton.graph.storage import atomic_json, load_state, state_lock
@@ -112,6 +113,7 @@ class Worker:
     def __init__(self, config: Config, *, transport: Transport | None = None, clock: Any = time.time) -> None:
         if not config.graph_worker.enabled:
             raise GraphError("the graph worker is disabled ([graph_worker] enabled)")
+        require_search()
         self.config, self.settings, self.clock = config, config.graph_worker, clock
         self.transport = transport if transport is not None else for_config(self.settings)
         self.limits = Limits(
@@ -373,7 +375,11 @@ class Worker:
             binding = request.get("binding", {}) if isinstance(request, dict) else {}
             if binding.get("base_revision") != state["revision"] or binding.get("base_state_digest") != digest(state):
                 raise Blocked("unsafe_source")
-            return request, request_path
+            if current(request):
+                return request, request_path
+            # Written under another producer contract, so no answer to it could be applied. Its saved proposals
+            # are filed under its own id: the batch is prepared again and starts with a full attempt count.
+            request_path.unlink()
         try:
             request = prepare(
                 paths.source,
@@ -382,8 +388,6 @@ class Worker:
                 batch_size=self.settings.batch_size,
                 max_input_bytes=self.settings.max_input_bytes,
             )
-        except MissingRecall:
-            raise Blocked(Category.MISSING_RECALL) from None
         except InputOverflow:
             raise Blocked(Category.INPUT_LIMIT) from None
         except GraphError:

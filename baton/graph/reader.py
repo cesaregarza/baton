@@ -1,10 +1,14 @@
-"""Source-bound graph reads: the compact working view and drilldown over a published snapshot.
+"""Source-bound graph reads over a published snapshot: the working view, row drilldown and one-line entries.
 
 Every operation reads in one database snapshot and serves a graph only through the existing served-artifact
 predicate: the summary must be the latest valid version of an active generation whose every input message the
 caller may read. Authorization runs before any identifier, count or error that could reveal content. Pages are
 byte-bounded, stop between whole rows, and continue through strictly validated opaque cursors bound to one
 snapshot, tool, collection, target and captured head. Nothing here writes, and no model ever runs.
+
+The entry reads (`search_graph`, `read_graph_entries`) are how scoped work loads a thread: a search or a list
+of ids answered with the one-line entries of `baton.graph.entries`. They keep the same byte cap but take no
+cursor, because the response itself names what did not fit.
 """
 
 from __future__ import annotations
@@ -19,17 +23,25 @@ from baton.config import Config
 from baton.conversations import require_enabled
 from baton.database import Connection
 from baton.errors import GraphUnavailable, InvalidRequest, ItemTooLarge, SnapshotUnavailable
+from baton.graph.entries import Entries, words
 from baton.graph.snapshot import edge_key, ordinal_key, statement_key
 from baton.graph.source import canonical
 
 MAX_LIMIT = 50
 MAX_RESPONSE_BYTES = 32 * 1024
 HISTORY_LIMIT = 20
+MAX_QUERIES = 3
+MAX_QUERY_CHARS = 200
+MAX_IDS = 12
+MAX_EXCLUDE = 200
+MAX_ID_CHARS = 32
 STATES = ("active", "all")
 COLLECTIONS = {
     "read_graph": ("strands", "decisions"),
     "read_graph_strand": ("statements", "decisions"),
     "read_graph_statement": ("edges", "strands"),
+    "search_graph": ("entries",),
+    "read_graph_entries": ("entries",),
 }
 CURSOR_FIELDS = ("v", "tool", "conversation_id", "snapshot_id", "collection", "state", "target", "head_seq", "after")
 
@@ -136,6 +148,58 @@ def read_graph_statement(
         return _page(response, rows, request, opened)
 
 
+def search_graph(
+    conn: Connection,
+    config: Config,
+    role: str,
+    conversation_id: str,
+    *,
+    queries: list[str] | None = None,
+    exclude: list[str] | None = None,
+    snapshot_id: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """The standing statements and active decisions that best match the queries; with none, the strand outline.
+
+    `exclude` names entries the caller already holds; a search leaves them out and returns the next best.
+    """
+    queries, exclude = _queries(queries), _exclude(exclude)
+    request = _Request("search_graph", conversation_id, snapshot_id, "entries", limit, None)
+    with conn.snapshot():
+        opened = _open(conn, config, role, request, None)
+    entries = Entries(opened["snapshot"])
+    lines = entries.search(queries, limit, exclude) if queries else entries.outline()
+    return _fit(_label(opened), [(line, [line]) for line in lines], lambda rest: ("omitted", len(rest)))
+
+
+def read_graph_entries(
+    conn: Connection,
+    config: Config,
+    role: str,
+    conversation_id: str,
+    ids: list[str],
+    *,
+    snapshot_id: str | None = None,
+) -> dict[str, Any]:
+    """Whole entries by id, in the order asked and each once; `skipped` says why an id returned nothing."""
+    ids = _ids(ids)
+    request = _Request("read_graph_entries", conversation_id, snapshot_id, "entries", len(ids), None)
+    with conn.snapshot():
+        opened = _open(conn, config, role, request, None)
+    entries = Entries(opened["snapshot"])
+    response, groups, skipped, seen = _label(opened), [], {}, set()
+    for wanted in ids:
+        found = entries.find(wanted)
+        if not found:
+            skipped[wanted] = entries.why_missing(wanted)
+            continue
+        groups.append((wanted, [text for uid, text in found if uid not in seen]))
+        seen.update(uid for uid, _ in found)
+    if skipped:
+        response["skipped"] = skipped
+    return _fit(response, groups, lambda rest: ("remaining", [wanted for wanted, _ in rest]))
+
+
 class _Request:
     """Validated arguments of one read, with its cursor decoded and checked field by field."""
 
@@ -237,6 +301,73 @@ def _envelope(opened, request):
         "derived": True,
         "authoritative": False,
     }
+
+
+def _label(opened):
+    """An entry read before its lines: what they came from, kept short because the caller pays for every field."""
+    return {
+        "snapshot_id": opened["version"]["version_id"],
+        "covered_through_seq": opened["snapshot"]["covered_through_seq"],
+        "head_seq": opened["head_seq"],
+        "derived": True,
+        "authoritative": False,
+        "entries": [],
+    }
+
+
+def _queries(queries):
+    if queries is None:
+        return []
+    if not isinstance(queries, list) or len(queries) > MAX_QUERIES:
+        raise InvalidRequest(f"queries is a list of at most {MAX_QUERIES} strings")
+    for query in queries:
+        if not isinstance(query, str) or len(query) > MAX_QUERY_CHARS or not words(query):
+            raise InvalidRequest(f"each query is at most {MAX_QUERY_CHARS} characters and has at least one word")
+    return queries
+
+
+def _ids(ids):
+    if not _id_list(ids, 1, MAX_IDS):
+        raise InvalidRequest(f"ids is a list of 1-{MAX_IDS} entry ids such as 120-2, D12, S3 or post:120")
+    return list(dict.fromkeys(ids))
+
+
+def _exclude(exclude):
+    if exclude is None:
+        return []
+    if not _id_list(exclude, 0, MAX_EXCLUDE):
+        raise InvalidRequest(f"exclude is a list of at most {MAX_EXCLUDE} ids of entries you already hold")
+    return exclude
+
+
+def _id_list(value, least, most):
+    listed = isinstance(value, list) and least <= len(value) <= most
+    return listed and all(isinstance(item, str) and 0 < len(item) <= MAX_ID_CHARS for item in value)
+
+
+def _fit(response, groups, left_out):
+    """Add whole groups of lines, in order, for as long as the response stays within the byte cap.
+
+    Everything in the response is inside the cap: what it carries before any line is added, such as the reasons
+    for skipped ids, and `left_out(rest)`, the (field, value) that tells the caller which groups did not fit.
+    A response already over the cap is refused, with or without groups to add. So is a first group that cannot
+    fit, because no group is returned in part.
+    """
+    if _oversize(response):
+        raise ItemTooLarge("this read's notes alone exceed the response cap; ask for fewer ids at a time")
+    for index, (_, lines) in enumerate(groups):
+        rest = groups[index + 1 :]
+        trial = response | {"entries": response["entries"] + lines} | dict([left_out(rest)] if rest else [])
+        if _oversize(trial):
+            if index == 0:
+                raise ItemTooLarge("this graph entry exceeds the response cap and is never returned in part")
+            return response | dict([left_out(groups[index:])])
+        response["entries"] = trial["entries"]
+    return response
+
+
+def _oversize(response):
+    return len(canonical(response).encode("utf-8")) > MAX_RESPONSE_BYTES
 
 
 def _tail(conversation_id, covered, head):

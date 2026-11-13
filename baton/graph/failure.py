@@ -16,7 +16,6 @@ class Category(StrEnum):
     CANCELLED = "cancelled"
     INPUT_LIMIT = "input_limit"
     ISOLATION = "isolation"
-    MISSING_RECALL = "missing_recall"
     UNSAFE_SOURCE = "unsafe_source"
     TIMEOUT = "timeout"
     OUTPUT_LIMIT = "output_limit"
@@ -40,7 +39,7 @@ REFUSALS = frozenset(
         Category.UNVERIFIED_CLIENT,
     }
 )
-DURABLE = frozenset({Category.INPUT_LIMIT, Category.ISOLATION, Category.MISSING_RECALL, Category.UNSAFE_SOURCE})
+DURABLE = frozenset({Category.INPUT_LIMIT, Category.ISOLATION, Category.UNSAFE_SOURCE})
 
 
 class TransportError(GraphError):
