@@ -10,6 +10,7 @@ contract in `test_graph_compact`; both use the scripted producers defined here.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -67,8 +68,9 @@ class Clock:
 class ScriptedTransport:
     """Answers extraction requests with the synthetic graph fixture and compact requests with a scripted view.
 
-    `script` is consumed one entry per call: "ok", "garbage", "crash", a dict of compact overrides, or a failure
-    category, raised as that category. `verify_failures` verifications fail before verification passes.
+    `script` is consumed one entry per call: "ok", "garbage", "crash", a dict of compact overrides, a function
+    that edits the extraction candidate as a copying slip would, or a failure category, raised as that category.
+    `verify_failures` verifications fail before verification passes.
     """
 
     mode = "scripted"
@@ -98,6 +100,8 @@ class ScriptedTransport:
             candidate = compact_candidate(request, action if isinstance(action, dict) else {})
         else:
             candidate = extraction_candidate(request)
+            if callable(action):
+                action(request, candidate)
         return {"candidate": candidate, "usage": dict(USAGE), "input_bytes": 1, "output_bytes": 2, "turns": 1}
 
 
@@ -366,6 +370,76 @@ def test_a_saved_request_from_another_contract_is_prepared_again_with_a_full_att
     request = restarted.transport.calls[0]["request"]
     assert current(request) and request["binding"]["request_id"] != "older"
     assert load_json(request_path) == request
+
+
+MARKDOWN_POST = "## Plan\n**Ship** the `v2` build _today_, then tag it."
+
+
+def quoting(quote):
+    """A copying slip: the first post's statement quotes `quote` instead of its whole post."""
+
+    def slip(request, candidate):
+        candidate["statements"][0]["quotes"] = [quote]
+
+    return slip
+
+
+def two_posts(tmp_path, first):
+    config = worker_config(tmp_path, conversations=["placeholder"])
+    with connect(config.db_path) as db:
+        cid, _ = converse(db, config, 0)
+        say(db, config, cid, first)
+        say(db, config, cid, "note 2")
+    return worker_config(tmp_path, conversations=[cid]), cid
+
+
+def extract_once(config, cid, slip, caplog):
+    """One extraction cycle answered with `slip`: the record, and the proposal the worker saved for it."""
+    transport = ScriptedTransport([slip])
+    worker = Worker(config, transport=transport, clock=Clock())
+    with caplog.at_level(logging.INFO, logger="baton.graph.worker"):
+        record = worker.cycle()["records"][cid]
+    assert len(transport.calls) == 1
+    request = transport.calls[0]["request"]
+    return record, request, load_json(worker.paths(cid).proposal(request["binding"]["request_id"], 1)), worker
+
+
+def test_a_quote_copied_without_its_markdown_is_saved_as_the_exact_source_span(tmp_path, caplog) -> None:
+    config, cid = two_posts(tmp_path, MARKDOWN_POST)
+    record, _, saved, worker = extract_once(config, cid, quoting("Ship the v2 build today, then tag it"), caplog)
+    # The one span it matches, from its first character to its last, formatting inside kept.
+    span = "Ship** the `v2` build _today_, then tag it"
+    assert span in MARKDOWN_POST
+    assert (record["accepted_W"], saved["statements"][0]["quotes"]) == (2, [span])
+    assert load_json(worker.paths(cid).state)["statements"]["1-1"]["quotes"] == [span]
+    assert "1 of 1 inexact quotes repaired; binding copied exactly" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("post", "quote"),
+    [("`go` now, then *go* now", "go now"), (MARKDOWN_POST, "Ship the v3 build today")],
+    ids=["twice", "nowhere"],
+)
+def test_a_quote_matching_several_spans_or_none_without_markdown_is_still_refused(
+    tmp_path, caplog, post, quote
+) -> None:
+    config, cid = two_posts(tmp_path, post)
+    record, _, saved, _ = extract_once(config, cid, quoting(quote), caplog)
+    assert (record["accepted_W"], record["attempts"], record["error_category"]) == (0, 1, "rejected")
+    assert saved["statements"][0]["quotes"] == [quote]
+    assert "0 of 1 inexact quotes repaired" in caplog.text
+
+
+def test_a_mis_copied_binding_no_longer_refuses_the_proposal(tmp_path, caplog) -> None:
+    config, cid = two_posts(tmp_path, "note 1")
+
+    def slip(request, candidate):  # two characters inserted into the 64-character digest
+        copied = candidate["binding"]["base_state_digest"]
+        candidate["binding"] = {**candidate["binding"], "base_state_digest": copied[:10] + "ab" + copied[10:]}
+
+    record, request, saved, _ = extract_once(config, cid, slip, caplog)
+    assert record["accepted_W"] == 2 and saved["binding"] == request["binding"]
+    assert "0 of 0 inexact quotes repaired; binding restored" in caplog.text
 
 
 def test_compact_retries_alone_and_publication_recovers_with_zero_calls(tmp_path, monkeypatch) -> None:

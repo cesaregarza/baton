@@ -39,7 +39,9 @@ def test_calls_are_reserved_before_launch_and_exhaustion_blocks_durably(tmp_path
     assert worker.cycle()["stepped"] == [] and len(transport.calls) == 2
     # A timeout left no candidate, so the second request carried no correction; the saved rejection would.
     assert "correction" not in transport.calls[1]["request"]
-    assert load_json(next((worker.paths(cid).root / "proposals").glob("*.json"))) == {"unexpected": True}
+    # The rejected answer is saved as given, apart from the binding the worker sets from its request.
+    saved = load_json(next((worker.paths(cid).root / "proposals").glob("*.json")))
+    assert saved == {"unexpected": True, "binding": transport.calls[1]["request"]["binding"]}
     with connect(config.db_path) as db:
         say(db, config, cid, "note 3")  # new posts do not clear a terminal block
     clock.now += DAY

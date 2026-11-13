@@ -19,6 +19,9 @@ from baton.graph.source import canonical, digest, load_json, load_source, prefix
 from baton.graph.storage import STATE_VERSION, atomic_json, distinct_paths, load_state, state_lock
 from baton.graph.validation import build_patch
 
+# Markdown punctuation a producer drops when it copies a quote: emphasis, heading and code marks.
+QUOTE_FORMATTING = frozenset("*#`_")
+
 
 class InputOverflow(GraphError):
     """The next whole post does not fit the input byte limit even with only the graph context it must carry."""
@@ -102,6 +105,49 @@ def _request(source, state, base, posts, context):
     }
     request["binding"]["request_id"] = request_identity(request)
     return request
+
+
+def restore_copies(request, proposal):
+    """Correct a producer's copying slips in place, before the proposal is saved: `(quotes repaired, inexact, binding)`.
+
+    The binding is the host's own data, so it is set from the request; `binding` says whether the copy differed.
+    A quote that is not in its post is replaced with the one source span it matches once `QUOTE_FORMATTING` is
+    ignored on both sides. A quote with no such span, or with several, is left for apply to refuse. Apply still
+    checks the saved proposal, so every stored quote stays exact source text.
+    """
+    binding = proposal.get("binding") != request["binding"]
+    proposal["binding"] = copy.deepcopy(request["binding"])
+    start, posts = request["binding"]["batch"]["start"], request["new_posts"]
+    repaired = inexact = 0
+    statements = proposal.get("statements")
+    for item in statements if isinstance(statements, list) else []:
+        seq = item.get("seq") if isinstance(item, dict) else None
+        if type(seq) is not int or not 0 <= seq - start < len(posts) or not isinstance(item.get("quotes"), list):
+            continue  # left for validation to refuse
+        text = posts[seq - start]["text"]
+        for position, quote in enumerate(item["quotes"]):
+            if not isinstance(quote, str) or quote in text:
+                continue
+            inexact += 1
+            span = _unformatted_match(quote, text)
+            if span is not None:
+                item["quotes"][position] = span
+                repaired += 1
+    return repaired, inexact, binding
+
+
+def _unformatted_match(quote, text):
+    """The span of `text` that `quote` matches in exactly one place once both ignore `QUOTE_FORMATTING`, or None.
+
+    The span runs from the first matched character to the last and keeps any formatting inside it.
+    """
+    needle = "".join(char for char in quote if char not in QUOTE_FORMATTING)
+    kept = [index for index, char in enumerate(text) if char not in QUOTE_FORMATTING]
+    plain = "".join(text[index] for index in kept)
+    first = plain.find(needle) if needle else -1
+    if first < 0 or plain.find(needle, first + 1) >= 0:
+        return None
+    return text[kept[first] : kept[first + len(needle) - 1] + 1]
 
 
 def verify_request(request, proposal, source):

@@ -31,7 +31,7 @@ from baton.graph.contract import SCHEMA, GraphError, current
 from baton.graph.export import export_source
 from baton.graph.failure import DURABLE, REFUSALS, Category, TransportError
 from baton.graph.ledger import RETRY_DELAY, Budget, Ledger, WorkerBusy, meter_report, next_utc_day, refusal_delay
-from baton.graph.operations import InputOverflow, apply, prepare
+from baton.graph.operations import InputOverflow, apply, prepare, restore_copies
 from baton.graph.publication import publish_graph
 from baton.graph.source import canonical, digest, load_json, load_source
 from baton.graph.storage import atomic_json, load_state, state_lock
@@ -364,6 +364,14 @@ class Worker:
             raise self._retry_or_block(
                 ledger, conversation_id, EXTRACTION_CALLS, "extraction_failed", failed.category
             ) from None
+        repaired, inexact, binding = restore_copies(request, candidate)
+        log.info(
+            "graph proposal for %s: %d of %d inexact quotes repaired; binding %s",
+            conversation_id,
+            repaired,
+            inexact,
+            "restored" if binding else "copied exactly",
+        )
         attempt = ledger.record(conversation_id)["attempts"]
         atomic_json(paths.proposal(request_id, attempt), candidate, replace=False)
         try:
