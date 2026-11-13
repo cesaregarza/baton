@@ -9,8 +9,14 @@ notification itself or advances the principal's inbox.
 
 1. Baton builds an authorized, bounded, complete page of visible events, including visible reply parents and
    context about the principal's own sends. Page size also reserves model output space for required citations.
-   Pages are never truncated. An `InboxTooLarge` page can be retried and split; an event that still cannot fit
-   receives an operational notice. A trigger outside the bounded page is an error.
+   Pages are never truncated. A stored range over the bounds splits on its first `InboxTooLarge` raised before any
+   engine or model call; a refusal from the re-read after inference keeps the counted path, as a timeout or an
+   invalid answer does. A single event that cannot split keeps its counted refusals and backoff, then receives an
+   operational notice after `max_attempts`. A trigger that is not a visible event is an error. A visible trigger
+   that is not on the bounded page, beyond it or already behind it, makes that page historical catch-up: its result
+   has `trigger` null and `catch_up` true, and it never covers the trigger. A trigger beyond the page stays pending
+   until a page that holds it is assessed; one already behind it was covered by an earlier page, or waits in a
+   retry page.
 2. The harness sends four ordered prompt layers: stable secretary system instructions, operator-authored contextual
    knowledge, principal-specific instructions and summary limit, then the current event window. The first three
    layers are intended to remain stable across assessments; layered caching puts explicit breakpoints on them
@@ -31,13 +37,16 @@ notification itself or advances the principal's inbox.
    The response's source references are checked against offered context and source visibility is rechecked, but
    Baton does not verify the truth of summary claims. The prompt forbids invented assignments or approvals.
 6. Scan progress and delivered coverage are separate. Failed pages retry in their original mode with backoff.
-   Invalid model output and oversized windows count toward `max_attempts` and may split. Timeouts, rejected
+   Invalid model output and oversized windows count toward `max_attempts`. An oversized range that can split splits
+   on its first refusal; invalid output splits after `max_attempts`. Timeouts, rejected
    requests, and failed commands count only when another page has received a valid model answer under the same
    policy since this page last failed. A sustained model outage therefore keeps pages intact.
    Each poll reserves one full budget
    for a fresh alert and one for scheduled work. It runs one eligible scheduled lane per poll, alternating retry
    and digest priority, so a lane never receives a sliver of the budget. Held contiguous pages are batched into a
-   bounded digest after `digest_seconds`.
+   bounded digest after `digest_seconds`. A host that calls `AttentionQueue.digest` whenever a held page is due, and
+   `retry` only otherwise, gets the same alternation from stored state: a digest marks the earliest due retry it
+   passes over, and the next `digest` call takes that retry first.
    Pending receipts retain all decision IDs, surface wakes first, and announce new IDs even if older ones remain
    unacknowledged. Acknowledgement is idempotent by summary ID, and delivered ranges merge only when contiguous.
 
@@ -96,7 +105,8 @@ the example's `0.8` is configurable, not a hard-coded cutoff.
 `model.reasoning_effort` must contain 1–100 printable characters without surrounding whitespace; the provider
 determines accepted values, so values such as `minimal` are valid policy inputs.
 `retry_initial_seconds` and `retry_max_seconds` bound the retry backoff. `max_attempts` limits failures that are
-specific to a page, using the evidence described above, before splitting that page.
+specific to a page, using the evidence described above, before splitting that page, or before a single event's
+failure notice. An oversized range that can split does not wait for it: it splits on its first refusal.
 `digest_seconds` schedules held-page digests. `knowledge` and `instructions` are operator-authored text, each
 limited to 8 KiB; the full policy is limited to 16 KiB. `max_tool_calls` ranges from one to eight.
 `max_events` bounds page event/context entries, `context_bytes` bounds serialized input, and `summary_bytes`
@@ -194,12 +204,19 @@ independently of the contiguous delivered watermark. Acknowledge each validated 
 ID after successful delivery; retries with the same ID are safe. A later acknowledgement cannot advance across an
 earlier unacknowledged gap.
 
-`trigger` may identify `message:SEQ`, `job:JOB_ID:SEQ`, or `conversation`. It must fall within the bounded page.
+`trigger` may identify `message:SEQ`, `job:JOB_ID:SEQ`, or `conversation`. It must name a visible event. If it is
+not on the bounded page, that page is assessed as historical catch-up: the model is not told of the trigger, the
+result has `trigger` null and `catch_up` true, and it never covers the trigger. A trigger beyond the page stays
+pending, so handle that wake as one the secretary has not assessed. A trigger already behind the page was covered by
+an earlier page, or waits in a retry page, and the catch-up page leaves it as it was. A trigger is on a page when its
+event's position is after the page's start and at or before its end, so a trigger that ended one page is never on the
+next. The queue labels a saved result or a failure notice for a page by the same rule, from the same position.
 Use `hourly=True` for a digest of contiguous due held pages. The host chooses a callback budget greater than zero
 and at most 60 seconds; the engine timeout must be shorter than the assessment budget. Installed integrations check
 this at install and startup. Integration delivery has a separate required `delivery_timeout_seconds` setting; it
 does not inherit the engine timeout. Standalone decisions process one due retry before scanning new work, even
-when called with a newer trigger. In that case the returned page has no newer trigger attached; handle its result,
+when called with a newer trigger. In that case the returned page, an alert or a digest retry, has no newer trigger
+attached and is marked `catch_up`; handle its result,
 then call again for the newer event. An untriggered call while failed work is in backoff raises retryable
 `secretary_unavailable`. Calls for a different new event may still assess that fresh page during the backoff.
 Hourly calls consider only digest retries, so an alert waiting for retry cannot block a due digest.
@@ -245,7 +262,20 @@ the page-specific failure rule above.
 
 Before retrying, the queue checks for an already persisted result for the same policy, page, mode, activation floor,
 and current source content. It finishes that result without invoking the engine or model again. This closes the
-restart window between saving a summary or notice and recording queue completion.
+restart window between saving a summary or notice and recording queue completion. The result is returned only to a
+call with its trigger and catch-up label, as a cached result is; a call of another kind finishes the page with it,
+gets no result from that page, and goes on as if the page were done, so a callback scans the next page. A failure
+notice carries the call's trigger or catch-up label as a summary does, and a notice's id includes them.
+
+A caller that stalls between reading a stored page and changing it changes nothing if another caller changed the page
+meanwhile: a split or digest combine compares every column of the page as it was read, and a failure, a finish, and
+the discard of a page whose events are no longer visible compare all of them but the passed-over mark. That includes
+the due time, since a finish and an invalidation put a page back to an immediate retry with every counter at zero.
+An answer its page does not take is not its call's result. It stays saved: a later call under the same policy and
+labels finishes the page with it without asking the model again, and under another policy it is never restored. A scan
+stores its page only if no other scan has stored one from the same position since, so no event is in two stored pages.
+The discard and its empty acknowledgement are one transaction, so a caller that read the range as empty never deletes
+a page another caller finished, or acknowledges a range another caller changed.
 
 Pages use the configured `max_events`, `context_bytes`, `summary_bytes`, and citation budget. They are complete
 and never silently truncated. Retried and split pages preserve their original alert or digest mode.

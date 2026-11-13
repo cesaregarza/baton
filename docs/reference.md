@@ -248,14 +248,23 @@ delivery uses a separate required `delivery_timeout_seconds`, independent of eng
 mode handles one due retry before scanning new work, even for a newer trigger. Handle that returned page first,
 then call again for the new event. An untriggered call while failed work is in backoff raises retryable
 `secretary_unavailable`; a different new event can still be assessed during that backoff. Passing both `--since`
-and `--floor` requests an exact replay. An explicit trigger must
-belong to the bounded page or the call fails. Page size also reserves a citation budget from model output
+and `--floor` requests an exact replay. A trigger that is not a visible event fails the call, on every path. A
+visible trigger that is not on the bounded page makes that page historical catch-up: the result has `trigger` null
+and `catch_up` true, and never covers the trigger. One beyond the page stays pending; one already behind it was
+covered by an earlier page, or waits in a retry page. A trigger is on a page when its event's position is after the
+page's start and at or before its end. A due digest retry that a triggered call resumes is catch-up
+too. Page size also reserves a citation budget from model output
 capacity. Pages are never silently truncated. Transport failures back off in their original mode. Invalid model
-content/output and `InboxTooLarge` count toward `max_attempts` and may split. Timeouts, rejected requests, and
+content/output and `InboxTooLarge` count toward `max_attempts`. A stored range that is `InboxTooLarge` and can split
+splits on its first refusal before any engine or model call; a refusal from the re-read after inference keeps the
+counted path. A single event over the bounds gets its notice after `max_attempts`. Timeouts, rejected requests, and
 failed commands also count when another page has received a valid answer under the same policy since this page
 last failed; elapsed time alone never causes splitting. Each poll reserves one configured budget
 for a fresh alert and another for scheduled work. It runs one eligible scheduled lane per poll, alternating retry
-and digest priority, so a lane receives the full reserved budget rather than leftover time.
+and digest priority, so a lane receives the full reserved budget rather than leftover time. An hourly host that
+runs the queue's digest lane whenever a held page is due gets the same alternation from stored state: a digest marks
+the earliest due retry it passes over, and the next digest lane takes that retry first, clearing the mark as it
+does. A callback that attempts the marked retry in between clears the mark too, so the next lane digests.
 
 The worker batches contiguous due held pages into one bounded hourly digest at `digest_seconds` intervals.
 Hold, keep, and model-error pages remain eligible while scanning continues. Pending wake IDs stay queued, with
@@ -270,7 +279,12 @@ nonempty brief, including digest results with decision `keep`. Sanitized engine,
 are reported separately in worker health/status and logged without provider response bodies or credentials. A model outage
 without a forced engine wake remains an outage, while an unavailable model after a forced wake produces a notice.
 Digest failures retain digest mode and eventually produce a keep notice, never an alert or wake. After a crash,
-the queue reuses a saved result for the same policy and current source window before invoking either provider.
+the queue reuses a saved result for the same policy and current source window before invoking either provider,
+and returns it only to a call with its trigger and catch-up label; for a call of another kind it finishes that page
+and returns nothing from it. A split, combine, failure, finish or empty-page discard changes a stored page only as
+its caller read it, due time included, and a scan stores its page only from a position no other scan has stored from.
+An answer its page refuses stays saved for a later call under the same policy and labels, and is never restored under
+another.
 Model failures distinguish missing credentials, authentication rejection, invalid requests, timeouts, and outages.
 Connection/pool timeouts remain outages; read/write timeouts and HTTP 408/504 responses can count toward
 splitting only after another page answers. A supplied key clears a current missing-credential failure to

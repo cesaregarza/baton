@@ -64,9 +64,14 @@ class DecisionRun:
     # The baseline this attempt wrote, so later failures can still match its retained page.
     model_successes: int | None = field(default=None, init=False)
     model_policy: str = field(default="", init=False)
+    # Set when the caller's trigger is not on this page: the page is backlog catch-up, never the trigger's assessment.
+    catch_up: bool = field(default=False, init=False)
+    # Set once the engine or the model is asked about this page. A refusal after that, from the re-read after
+    # inference, is not the deterministic refusal before any model call that an early split is for.
+    consulted: bool = field(default=False, init=False)
 
     async def run(self) -> dict:
-        self.model_successes = None
+        self.model_successes, self.consulted = None, False
         self._check()
         async with DatabaseWorker() as database:
             policy = await database.call(load_policy, self.secretary.config, self.secretary.policy_path)
@@ -94,11 +99,17 @@ class DecisionRun:
         assert self.floor is not None  # Explicit positions are validated together; activation supplies both.
         window = await database.call(InboxWindow.read, config, policy, self.since, through=self.through)
         await database.call(log.bind, window.epoch, self.floor)
-        self._check_trigger(window)
+        # A trigger that is not a visible event is refused, for every caller. A visible one elsewhere is left
+        # unassessed, so this page is catch-up and its result never carries that trigger. The queue labels a saved
+        # result or a failure notice for the page by the same rule, from the same position.
+        position = await database.call(sources.trigger_position, config, policy.principal, self.trigger)
+        if not sources.holds_trigger(position, window.since, window.through):
+            self.trigger, self.catch_up = None, True
         context = self._context(policy, window)
         harness = SecretaryHarness(policy)
         verdict = None
         if window.events and not self.hourly:
+            self.consulted = True
             verdict = await harness.tools.evaluate(context, min(policy.decision_timeout, self._remaining()))
             await database.call(EngineHealth(log).record, harness.tools.health)
         forced = bool(
@@ -106,6 +117,9 @@ class DecisionRun:
         )
         context["engine_verdict"] = harness.tools.verdict
         context["wake_required"] = forced
+        # A catch-up page and an untriggered one have the same context, since neither names a trigger, so the label is
+        # keyed too: a cached result then always carries the label of the call that asks for it. The model is never
+        # told of it, and a call that is not catch-up keeps the key it always had.
         key = fingerprint(
             {
                 "policy": policy.digest,
@@ -114,13 +128,14 @@ class DecisionRun:
                 "prompt": INSTRUCTIONS,
                 "schema": RESPONSE_SCHEMA,
                 "harness": HARNESS_VERSION,
+                **({"catch_up": True} if self.catch_up else {}),
             }
         )
         cached = await database.call(log.get, key)
         if cached is not None:
             await database.call(persist, self.secretary, policy, cached)
             return {**cached, "cached": True}
-        outcome = Outcome(policy, window, self.floor, context["mode"], self.trigger)
+        outcome = Outcome(policy, window, self.floor, context["mode"], self.trigger, catch_up=self.catch_up)
         result = await self._infer(database, harness, context, outcome, key, forced)
         if not window.events:
             return result
@@ -191,6 +206,7 @@ class DecisionRun:
         log = AttentionLog(self.secretary.state_path, self.secretary.config.data_dir, policy.principal)
         health = ModelHealth(log, policy.digest)
         try:
+            self.consulted = True
             answer = await harness.assess(context, self._remaining())
             assessment = Assessment.parse(
                 answer,
@@ -207,24 +223,6 @@ class DecisionRun:
         self.model_successes = recorded["successes"]
         self.model_policy = policy.digest
         return assessment
-
-    def _check_trigger(self, window: InboxWindow) -> None:
-        if self.trigger is None or self.trigger == "conversation":
-            return
-        parts = self.trigger.split(":")
-        if parts[0] == "message":
-            included = any(
-                event["kind"] == "message"
-                and event["seq"] == int(parts[1])
-                and sources.delivered_to(window.principal, event["audience"])
-                for event in window.events
-            )
-        else:
-            included = any(event["job_id"] == parts[1] and event["seq"] == int(parts[2]) for event in window.events)
-        if not included:
-            raise InvalidRequest(
-                "trigger is outside this bounded inbox page; process earlier pages or specify its range"
-            )
 
     def _remaining(self) -> float:
         remaining = self.deadline - self.clock()

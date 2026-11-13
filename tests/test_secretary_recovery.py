@@ -16,7 +16,6 @@ from baton.agents.secretary.attention.runtime import DatabaseWorker
 from baton.agents.secretary.attention.state import AttentionLog
 from baton.agents.secretary.inbox.references import ReferenceWindow
 from baton.config.secretary import load_policy
-from baton.errors import InvalidRequest
 from baton.integrations.secretary.instance import Instance
 from baton.integrations.secretary.worker import Worker
 
@@ -53,7 +52,9 @@ def _backlog(world) -> Backlog:
     return Backlog(AttentionLog(world.state_path, world.config.data_dir, "planner"))
 
 
-def test_standalone_decide_advances_scan_past_hold_and_rejects_a_trigger_outside_its_page(tmp_path) -> None:
+def test_standalone_decide_advances_scan_past_hold_and_assesses_the_earliest_page_before_a_later_trigger(
+    tmp_path,
+) -> None:
     with make_world(tmp_path) as world:
         room = conversation(world)
         worker, model = _worker(
@@ -64,17 +65,23 @@ def test_standalone_decide_advances_scan_past_hold_and_rejects_a_trigger_outside
         world.policy_path.write_text(json.dumps(policy))
         secretary = worker.instance.secretary
         asyncio.run(secretary.activate())
-        say(world, room, "worker", "Hold this first message")
+        first = say(world, room, "worker", "Hold this first message")
         second = say(world, room, "reviewer", "The second page needs attention")
         trigger = f"message:{second['seqs']['planner']}"
-        with pytest.raises(InvalidRequest, match="outside this bounded inbox page"):
-            asyncio.run(secretary.decide(budget_seconds=5, trigger=trigger))
-        assert model.requests == []
 
-        first_result = asyncio.run(secretary.decide(budget_seconds=5))
+        # This call used to refuse a trigger beyond the bounded page before queueing the page, so while a backlog
+        # existed no callback moved it. It now assesses the earliest page as catch-up, without the trigger: the model
+        # is not told of it, and the result names none and says it is catch-up, so the caller decides that wake as
+        # one not yet reached.
+        first_result = asyncio.run(secretary.decide(budget_seconds=5, trigger=trigger))
+        assert first_result["decision"] == "hold" and first_result["trigger"] is None
+        assert first_result["catch_up"] is True
+        assert model.requests[0]["context"]["trigger"] is None
+        assert [event["message"]["id"] for event in model.requests[0]["context"]["events"]] == [first["message_id"]]
+
         second_result = asyncio.run(secretary.decide(budget_seconds=5, trigger=trigger))
-        assert first_result["decision"] == "hold"
-        assert second_result["decision"] == "wake"
+        assert second_result["decision"] == "wake" and second_result["trigger"] == trigger
+        assert "catch_up" not in second_result
         assert second_result["since"] == first_result["through_pos"]
         assert second_result["sources"] == [f"message:{second['message_id']}"]
         assert len(model.requests) == 2

@@ -144,10 +144,13 @@ def test_backlog_preserves_decision_and_scan_state_across_restart(tmp_path) -> N
     assert restarted.scanned() == 8
     assert restarted.ready() == []
     assert restarted.due(99.0) == []
-    assert restarted.due(100.0) == [page]
+    [stored] = restarted.due(100.0)
+    assert stored == page
 
     _decision(log, "summary", 7, 8)
-    retried = restarted.failed(page, now=100.0, error="model unavailable", initial=2.0, maximum=10.0)
+    # A failure is recorded against the page as it was read from the store.
+    assert restarted.failed(page, now=100.0, error="model unavailable", initial=2.0, maximum=10.0) is None
+    retried = restarted.failed(stored, now=100.0, error="model unavailable", initial=2.0, maximum=10.0)
     assert retried == Page(7, 8, mode="digest", attempts=1)
     assert restarted.failures() == 1
     assert restarted.due(101.0) == []
@@ -168,9 +171,10 @@ def test_backlog_prunes_acknowledged_page_but_keeps_assessment_and_receipt(tmp_p
     log.bind("epoch-a", 0)
     _decision(log, "previous", 0, 4)
     backlog = Backlog(log)
-    page = Page(0, 4)
-    backlog.enqueue(page, now=0.0)
-    backlog.finish(
+    # A page is finished as it was stored, the page a later compare-and-set compares against.
+    assert not backlog.finish(Page(0, 4), {"brief": "Built in memory", "mode": "alert", "decision_id": "x"}, 0.0, 1.0)
+    page = backlog.enqueue(Page(0, 4), now=0.0)
+    assert backlog.finish(
         page,
         {"brief": "Delivered summary", "mode": "alert", "decision_id": "previous"},
         now=0.0,
@@ -192,9 +196,7 @@ def test_backlog_prunes_acknowledged_page_but_keeps_assessment_and_receipt(tmp_p
 
 def test_backlog_held_pages_share_global_digest_deadline(tmp_path) -> None:
     backlog = Backlog(_log(tmp_path))
-    pages = [Page(0, 1), Page(1, 2), Page(2, 3)]
-    for page in pages:
-        backlog.enqueue(page, now=0.0)
+    pages = [backlog.enqueue(page, now=0.0) for page in (Page(0, 1), Page(1, 2), Page(2, 3))]
 
     for now, page in zip((10.0, 20.0, 30.0), pages, strict=True):
         backlog.finish(page, {"brief": "", "mode": "digest", "decision_id": "ignored"}, now, 20.0)
@@ -219,8 +221,7 @@ def test_backlog_refuses_replacement_that_leaves_a_gap(tmp_path) -> None:
 def test_backlog_due_and_ready_queries_use_their_indexes(tmp_path) -> None:
     log = _log(tmp_path)
     backlog = Backlog(log)
-    page = Page(0, 1)
-    backlog.enqueue(page, now=0.0)
+    page = backlog.enqueue(Page(0, 1), now=0.0)
     backlog.finish(
         page,
         {"brief": "summary", "mode": "alert", "decision_id": "summary"},
