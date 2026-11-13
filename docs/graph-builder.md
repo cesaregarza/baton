@@ -429,11 +429,13 @@ Which client version is trusted is operator configuration: `client_version` is r
 `claude`, refused for `http`, and has no default. Record the exact version you inspected; the worker
 launches only a client that reports exactly that version. Pointing `command` at a versioned executable
 path keeps an automatic update from changing the client under the worker. The flag and feature profiles
-stay in code and are checked against the client's own help output. No model launch happens without a
+stay in code and are checked against the client's own help output. Every model launch is preceded by a
 passing verification of the executable about to run: the worker resolves `command` the way the launch
-does (on the child's `PATH`, symlinks followed), runs that resolved file directly, and verifies again
-whenever the file differs from the one it verified or the last verification failed. A failed verification
-at service start is logged and leaves the worker running; it is the `unverified_client` refusal, shown in
+does (on the child's `PATH`, symlinks followed), verifies the client through that file, and runs that
+same file directly. It verifies before every launch, not only when a file changes, because `command`
+cannot name every file the client runs: an interpreter runs a script, and the script loads more. That
+costs a few short introspection processes per call and never a model run. A failed verification at
+service start is logged and leaves the worker running; it is the `unverified_client` refusal, shown in
 `status`, and clears without a restart once the client or the configuration is right.
 
 Codex runs `exec --ignore-user-config --ephemeral --sandbox read-only --skip-git-repo-check --json
