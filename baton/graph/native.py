@@ -250,13 +250,17 @@ def _require_flags(help_text: str, flags: tuple[str, ...], client: str) -> None:
             raise TransportError(Category.UNVERIFIED_CLIENT, f"{client} does not document {flag}")
 
 
-def _channels(request: dict[str, Any], limits: Limits) -> tuple[str, bytes]:
-    """The contract instructions and the serialized content; the input bound covers both together."""
+def _channels(request: dict[str, Any]) -> tuple[str, bytes]:
+    """The contract instructions and the serialized rest of the request."""
     instructions = request["instructions"]
     content = canonical({key: value for key, value in request.items() if key != "instructions"}).encode("utf-8")
-    if len(instructions.encode("utf-8")) + len(content) > limits.max_input_bytes:
-        raise TransportError(Category.INPUT_LIMIT, "serialized native prompt exceeds max_input_bytes (UTF-8)")
     return instructions, content
+
+
+def _require_input_within(size: int, limits: Limits) -> None:
+    """Refuse a launch whose input, counted as the client receives it, is over `max_input_bytes` (UTF-8)."""
+    if size > limits.max_input_bytes:
+        raise TransportError(Category.INPUT_LIMIT, "serialized native prompt exceeds max_input_bytes (UTF-8)")
 
 
 def _candidate(value: Any) -> dict[str, Any]:
@@ -371,8 +375,9 @@ class CodexTransport(NativeClient):
     def produce(
         self, request: dict[str, Any], schema: dict[str, Any], limits: Limits, *, stop: threading.Event | None = None
     ) -> dict[str, Any]:
-        instructions, content = _channels(request, limits)
+        instructions, content = _channels(request)
         prompt = instructions.encode("utf-8") + b"\n\n" + content  # `exec` has no separate instruction channel
+        _require_input_within(len(prompt), limits)
         executable = self.launch_executable()
         with tempfile.TemporaryDirectory(prefix="baton-graph-codex-") as cwd:
             schema_path, output_path = os.path.join(cwd, "schema.json"), os.path.join(cwd, "last-message.json")
@@ -498,7 +503,9 @@ class ClaudeTransport(NativeClient):
     def produce(
         self, request: dict[str, Any], schema: dict[str, Any], limits: Limits, *, stop: threading.Event | None = None
     ) -> dict[str, Any]:
-        instructions, content = _channels(request, limits)
+        instructions, content = _channels(request)
+        input_bytes = len(instructions.encode("utf-8")) + len(content)
+        _require_input_within(input_bytes, limits)
         executable = self.launch_executable()
         with tempfile.TemporaryDirectory(prefix="baton-graph-claude-") as cwd:
             empty_config = os.path.join(cwd, "mcp-empty.json")
@@ -518,7 +525,7 @@ class ClaudeTransport(NativeClient):
         return {
             "candidate": candidate,
             "usage": usage,
-            "input_bytes": len(instructions.encode("utf-8")) + len(content),
+            "input_bytes": input_bytes,
             "output_bytes": len(result.stdout),
             "elapsed": result.elapsed,
             "turns": turns,

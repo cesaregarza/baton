@@ -450,7 +450,8 @@ Claude Code runs `--print --output-format json --json-schema SCHEMA --model MODE
 --system-prompt INSTRUCTIONS` with only the serialized request content on stdin, reading
 `structured_output` and refusing any recorded permission denial or tool use; the turn count is reported,
 not judged, because structured output may take the SDK more than one turn. `--bare` is never used because
-it disables OAuth. `max_input_bytes` still measures instructions plus content. Keeping the instructions
+it disables OAuth. `max_input_bytes` bounds the input as the client receives it: instructions plus content,
+with the blank line between them for the one-prompt client. Keeping the instructions
 in their own channel lowers the chance that thread text steers a summary; it does not remove it, and the
 checks establish structure, exact quotes and coverage, not truth. Read-only sandboxing and never-approval
 contain whatever built-in surface documented controls cannot remove; a bounded pilot must inspect the

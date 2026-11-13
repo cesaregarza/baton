@@ -401,6 +401,18 @@ def test_a_client_script_rewritten_under_its_interpreter_is_verified_again_befor
     assert refusal(transport, REQUEST, LIMITS) == "unverified_client" and not (dump / "call.json").exists()
 
 
+def test_the_input_bound_covers_the_whole_prompt_the_event_stream_client_receives(tmp_path) -> None:
+    command, dump = fake(tmp_path, "codex")
+    transport = native.CodexTransport(command, "m", [], FAKE_VERSION)
+    request = {"instructions": "synthetic", "binding": {"request_id": "req-1"}}
+    channels = len(b"synthetic") + len(canonical({"binding": {"request_id": "req-1"}}).encode("utf-8"))
+    # The prompt joins instructions and content with two newlines, so the channels alone are two bytes short.
+    assert refusal(transport, request, Limits(5, channels, 100_000, 400)) == "input_limit"
+    assert not (dump / "call.json").exists()
+    produced = transport.produce(request, SCHEMA, Limits(5, channels + 2, 100_000, 400))
+    assert produced["input_bytes"] == channels + 2 == len(recorded(dump)["stdin"].encode("utf-8"))
+
+
 @pytest.mark.parametrize("name", ["codex", "claude"])
 def test_native_timeouts_and_output_bounds_kill_the_client_and_its_descendants(tmp_path, name) -> None:
     command, dump = fake(tmp_path, name, "hang")
