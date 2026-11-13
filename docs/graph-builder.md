@@ -134,10 +134,13 @@ statement text/quotes. A decision can outlive the discussion that established
 it. Semantic edge direction is from a response/supporting/contradicting/superseding/dependent statement
 to its referenced parent. Multiple edges may express multiple targets; raw reply metadata remains
 separate. Relevance is directly relevant, partially superseded with a surviving clause, or completely
-superseded. Accepted statement text, exact source quotes, statement-to-strand memberships, and strand
-titles are immutable. Relevance, summaries, open work, and decision status can change only in a normal
-batch that advances over new source posts; there is no correction-only revision. Decision text remains
-immutable; when a decision changes, supersede its existing D ID and add a new decision.
+superseded. Before it finishes, an extraction is asked to check every older statement its request shows,
+and every statement it wrote for an earlier post of the batch, against the later posts, and to mark what a
+later post replaces, reverses or narrows. Accepted statement text, exact source quotes,
+statement-to-strand memberships, and strand titles are immutable. Relevance, summaries, open work, and
+decision status can change only in a normal batch that advances over new source posts; there is no
+correction-only revision. Decision text remains immutable; when a decision changes, supersede its
+existing D ID and add a new decision.
 
 The read captures source head **H**, processed contiguous frontier **W**, and summary coverage for
 each strand. The tail is exactly `W < seq <= H`, with original text and author metadata. A touched

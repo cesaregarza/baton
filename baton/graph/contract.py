@@ -42,8 +42,11 @@ Status changes require supporting evidence. Keep immutable original extracted te
 change existing relevance only via relevance_updates, which may target only statements in
 context.entries.
 For new statements, set their final within-batch relevance directly in statements; do not also update
-them in relevance_updates. Never silently remove statements or decisions. Existing strand titles and
-decision text are immutable: supersede an old decision and allocate a new D ID to change its text.
+them in relevance_updates. Before you finish, check every older statement in context.entries and every
+statement you wrote for an earlier post of this batch against the later posts, and mark it partially or
+completely superseded wherever a later post replaces, reverses or narrows it. Never silently remove
+statements or decisions. Existing strand titles and decision text are immutable: supersede an old
+decision and allocate a new D ID to change its text.
 Only a decision in context.entries can be changed.
 All proposal arrays are required, including empty arrays for unchanged collections.
 Strings must be nonempty and string/reference arrays must be duplicate-free; local validation
