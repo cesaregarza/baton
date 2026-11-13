@@ -28,6 +28,9 @@ from baton.graph.transport import HttpTransport, Limits, for_config
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FAKE_VERSION = "9.8.7"  # what the fake clients report unless their dump names another version
+# A mode in which a fake client no longer passes the checks before its launch: its launch would offer a tool, or
+# its help no longer documents a flag the launch needs.
+FAILS_CHECKS = {"codex": "offers_tool", "claude": "no_tools_flag"}
 LIMITS = Limits(timeout=5, max_input_bytes=200_000, max_response_bytes=100_000, max_output_tokens=400)
 REQUEST = {
     "version": 1,
@@ -45,9 +48,9 @@ def fake(tmp_path: Path, name: str, mode: str = "ok") -> tuple[list[str], Path]:
     return [sys.executable, str(FIXTURES / f"graph_fake_{name}.py"), str(dump)], dump
 
 
-def install(tmp_path: Path, name: str, dump: Path, version: str) -> list[str]:
-    """Put a client executable at one fixed path, replacing any earlier one, that reports `version`."""
-    (dump / "version").write_text(version)
+def install(tmp_path: Path, name: str, dump: Path, mode: str) -> list[str]:
+    """Put a client executable at one fixed path, replacing any earlier one, that behaves as `mode`."""
+    (dump / "mode").write_text(mode)
     target, staged = tmp_path / f"{name}-client", tmp_path / f"{name}-client.new"
     fake_args = " ".join(shlex.quote(part) for part in (sys.executable, str(FIXTURES / f"graph_fake_{name}.py")))
     staged.write_text(f'#!/bin/sh\nexec {fake_args} {shlex.quote(str(dump))} "$@"\n')
@@ -65,8 +68,8 @@ def worker_home(tmp_path: Path) -> str:
 
 def client(tmp_path: Path, name: str, command: list[str]) -> native.NativeClient:
     if name == "codex":
-        return native.CodexTransport(command, "m", [], FAKE_VERSION, home=worker_home(tmp_path))
-    return native.ClaudeTransport(command, "m", [], FAKE_VERSION)
+        return native.CodexTransport(command, "m", [], home=worker_home(tmp_path))
+    return native.ClaudeTransport(command, "m", [])
 
 
 def recorded(dump: Path, name: str = "call") -> dict:
@@ -231,7 +234,7 @@ def test_codex_transport_pins_isolation_and_rejects_every_action_family(tmp_path
     monkeypatch.setenv("UNRELATED_SECRET", "nope")
     command, dump = fake(tmp_path, "codex")
     home = worker_home(tmp_path)
-    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=home)
+    transport = native.CodexTransport(command, "m", [], home=home)
     assert transport.verify() == {"mode": "codex", "version": FAKE_VERSION}
     produced = transport.produce(REQUEST, SCHEMA, LIMITS)
     assert produced["candidate"] == {"echo": "req-1"} and produced["turns"] == 1
@@ -270,7 +273,7 @@ def test_codex_transport_pins_isolation_and_rejects_every_action_family(tmp_path
             transport.produce(REQUEST, SCHEMA, LIMITS)
         assert refused.value.category == category, mode
     with pytest.raises(TransportError) as crossing:  # the home's login is the only credential
-        native.CodexTransport(command, "m", ["BATON_TOKEN"], FAKE_VERSION, home=home)
+        native.CodexTransport(command, "m", ["BATON_TOKEN"], home=home)
     assert crossing.value.category == "isolation"
     (dump / "mode").write_text("bigfile")  # the last-message file is bounded like stdout
     with pytest.raises(TransportError) as big:
@@ -279,25 +282,14 @@ def test_codex_transport_pins_isolation_and_rejects_every_action_family(tmp_path
     with pytest.raises(TransportError) as oversized:
         transport.produce(REQUEST, SCHEMA, Limits(5, 10, 100_000, 400))
     assert oversized.value.category == "input_limit"
-    (dump / "version").write_text("9.8.6")
-    with pytest.raises(TransportError, match="version") as unverified:
-        transport.verify()
-    assert unverified.value.category == "unverified_client"
-    settings = GraphWorker(
-        enabled=True,
-        provider="codex",
-        model="m",
-        command=tuple(command),
-        client_version="1.0.0",
-        client_home=Path(home),
-    )
+    settings = GraphWorker(enabled=True, provider="codex", model="m", command=tuple(command), client_home=Path(home))
     assert for_config(settings).mode == "codex"
 
 
 def test_a_clean_launch_passes_its_loopback_check_and_runs_from_the_worker_home(tmp_path) -> None:
     command, dump = fake(tmp_path, "codex")
     home = worker_home(tmp_path)
-    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=home)
+    transport = native.CodexTransport(command, "m", [], home=home)
     content = canonical({key: value for key, value in REQUEST.items() if key != "instructions"})
     proxies = {name for base in ("http_proxy", "https_proxy", "all_proxy") for name in (base, base.upper())}
     for mode in ("ok", "post_probe"):  # the client's WebSocket turn, and its HTTP fallback
@@ -322,7 +314,7 @@ def test_a_clean_launch_passes_its_loopback_check_and_runs_from_the_worker_home(
 
 def test_a_launch_whose_request_offers_a_tool_is_refused_before_any_call(tmp_path, monkeypatch) -> None:
     command, dump = fake(tmp_path, "codex", "offers_tool")
-    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=worker_home(tmp_path))
+    transport = native.CodexTransport(command, "m", [], home=worker_home(tmp_path))
     with pytest.raises(TransportError, match="a tools field") as offered:
         transport.produce(REQUEST, SCHEMA, LIMITS)
     assert offered.value.category == "unverified_client"
@@ -342,7 +334,7 @@ def test_a_launch_whose_request_offers_a_tool_is_refused_before_any_call(tmp_pat
 def test_a_session_record_holding_a_tool_call_refuses_the_attempt(tmp_path) -> None:
     command, dump = fake(tmp_path, "codex", "record_tool")
     home = worker_home(tmp_path)
-    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=home)
+    transport = native.CodexTransport(command, "m", [], home=home)
     # The event stream shows only reasoning and the answer; the record, kept for the operator, shows the call.
     with pytest.raises(TransportError, match="custom_tool_call") as recorded_tool:
         transport.produce(REQUEST, SCHEMA, LIMITS)
@@ -366,7 +358,7 @@ def test_a_session_record_that_does_not_show_this_calls_finished_turn_refuses_th
 ) -> None:
     command, dump = fake(tmp_path, "codex", mode)
     home = worker_home(tmp_path)
-    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=home)
+    transport = native.CodexTransport(command, "m", [], home=home)
     # The event stream shows a finished turn; a record that does not show it was this call's proves nothing.
     with pytest.raises(TransportError, match=f"lacks {re.escape(lacks)}") as unproven:
         transport.produce(REQUEST, SCHEMA, LIMITS)
@@ -378,18 +370,18 @@ def test_the_event_stream_client_runs_only_from_a_private_home_without_instructi
     command, dump = fake(tmp_path, "codex")
     home = tmp_path / "worker-home"
     with pytest.raises(TransportError, match="not an absolute directory path"):
-        native.CodexTransport(command, "m", [], FAKE_VERSION, home=str(home))
+        native.CodexTransport(command, "m", [], home=str(home))
     home.mkdir(mode=0o700)
     # The client runs in a temporary working directory, where a relative home names another place.
     with pytest.raises(TransportError, match="not an absolute directory path"):
-        native.CodexTransport(command, "m", [], FAKE_VERSION, home=os.path.relpath(home))
+        native.CodexTransport(command, "m", [], home=os.path.relpath(home))
     (tmp_path / "linked-home").symlink_to(home)
     for path, mode in ((home, 0o755), (tmp_path / "linked-home", 0o700)):
         home.chmod(mode)
         with pytest.raises(TransportError) as open_home:
-            native.CodexTransport(command, "m", [], FAKE_VERSION, home=str(path))
+            native.CodexTransport(command, "m", [], home=str(path))
         assert open_home.value.category == "unverified_client"
-    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=str(home))
+    transport = native.CodexTransport(command, "m", [], home=str(home))
     (home / "AGENTS.md").write_text("instructions the check's empty home would not show")
     with pytest.raises(TransportError, match="AGENTS.md") as instructed:
         transport.produce(REQUEST, SCHEMA, LIMITS)
@@ -408,7 +400,7 @@ def tempfile_root() -> str:
 def test_claude_transport_pins_flags_and_parses_structured_output_only(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("BATON_CONFIG", "/etc/baton.toml")
     command, dump = fake(tmp_path, "claude")
-    transport = native.ClaudeTransport(command, "claude-synthetic", [], FAKE_VERSION)
+    transport = native.ClaudeTransport(command, "claude-synthetic", [])
     assert transport.verify()["version"] == FAKE_VERSION
     compact_request = {**REQUEST, "compact_schema": compact.SCHEMA, "graph_digest": "d", "strands": [], "decisions": []}
     produced = transport.produce(compact_request, compact.SCHEMA, LIMITS)
@@ -458,34 +450,29 @@ def test_claude_transport_pins_flags_and_parses_structured_output_only(tmp_path,
         transport.produce(REQUEST, SCHEMA, Limits(5, len(REQUEST["instructions"]) + 10, 100_000, 400))
     assert oversized.value.category == "input_limit"
     # Help that only documents the similar --append-system-prompt flag does not document --system-prompt.
-    for mode, version, detail in (
-        ("ok", "9.8.6", "version"),
-        ("no_tools_flag", FAKE_VERSION, "--tools"),
-        ("no_system_prompt_flag", FAKE_VERSION, "--system-prompt"),
-    ):
+    for mode, detail in (("no_tools_flag", "--tools"), ("no_system_prompt_flag", "--system-prompt")):
         (dump / "mode").write_text(mode)
-        (dump / "version").write_text(version)
         with pytest.raises(TransportError, match=detail) as unverified:
-            native.ClaudeTransport(command, "m", [], FAKE_VERSION).verify()
+            native.ClaudeTransport(command, "m", []).verify()
         assert unverified.value.category == "unverified_client", mode
-    settings = GraphWorker(enabled=True, provider="claude", model="m", command=tuple(command), client_version="1.0.0")
+    settings = GraphWorker(enabled=True, provider="claude", model="m", command=tuple(command))
     assert for_config(settings).mode == "claude"
 
 
 @pytest.mark.parametrize("name", ["codex", "claude"])
 def test_native_clients_launch_only_after_verifying_the_executable_about_to_run(tmp_path, name) -> None:
     command, dump = fake(tmp_path, name)
-    transport = client(tmp_path, name, install(tmp_path, name, dump, "9.8.6"))
-    with pytest.raises(TransportError) as mismatched:
+    transport = client(tmp_path, name, install(tmp_path, name, dump, FAILS_CHECKS[name]))
+    with pytest.raises(TransportError) as failed:
         transport.produce(REQUEST, SCHEMA, LIMITS)
-    assert mismatched.value.category == "unverified_client" and not (dump / "call.json").exists()
-    # Replacing the executable with the configured version is picked up by the same transport, no restart.
-    install(tmp_path, name, dump, FAKE_VERSION)
+    assert failed.value.category == "unverified_client" and not (dump / "call.json").exists()
+    # Replacing the executable with one that passes is picked up by the same transport, no restart.
+    install(tmp_path, name, dump, "ok")
     assert transport.produce(REQUEST, SCHEMA, LIMITS)["candidate"] == {"echo": "req-1"}
     assert (dump / "call.json").exists()
-    # Every launch verifies again, so a replacement that reports another version is refused before it runs.
+    # Every launch verifies again, so a replacement that no longer passes is refused before it runs.
     (dump / "call.json").unlink()
-    install(tmp_path, name, dump, "9.8.6")
+    install(tmp_path, name, dump, FAILS_CHECKS[name])
     with pytest.raises(TransportError) as replaced:
         transport.produce(REQUEST, SCHEMA, LIMITS)
     assert replaced.value.category == "unverified_client" and not (dump / "call.json").exists()
@@ -505,18 +492,51 @@ def test_a_client_script_rewritten_under_its_interpreter_is_verified_again_befor
     # The command runs an interpreter on a script, so rewriting the script leaves the interpreter's file as it was.
     _, dump = fake(tmp_path, name)
     original = (FIXTURES / f"graph_fake_{name}.py").read_text()
-    assert f'"{FAKE_VERSION}"' in original  # the version a fake client reports by default
+    reads_mode = 'mode = (dump / "mode").read_text().strip() if (dump / "mode").exists() else "ok"'
+    assert reads_mode in original  # the dump says "ok"; the rewritten script ignores it
     script = tmp_path / f"{name}_client.py"
     script.write_text(original)
     transport = client(tmp_path, name, [sys.executable, str(script), str(dump)])
-    assert transport.verify()["version"] == FAKE_VERSION
-    script.write_text(original.replace(f'"{FAKE_VERSION}"', '"9.8.6"'))
+    assert transport.verify()["version"] == FAKE_VERSION and refusal(transport, REQUEST, LIMITS) is None
+    (dump / "call.json").unlink()
+    script.write_text(original.replace(reads_mode, f"mode = {FAILS_CHECKS[name]!r}"))
     assert refusal(transport, REQUEST, LIMITS) == "unverified_client" and not (dump / "call.json").exists()
+
+
+def test_the_version_is_read_under_a_new_empty_home_that_is_removed_afterwards(tmp_path, monkeypatch) -> None:
+    # The client writes under its home on every run, so reading its version never uses the service's home or the
+    # worker's: not when verifying, and not before a launch.
+    service_home = str(tmp_path / "service-home")
+    monkeypatch.setenv("HOME", service_home)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    command, dump = fake(tmp_path, "codex")
+    home = worker_home(tmp_path)
+    transport = native.CodexTransport(command, "m", [], home=home)
+    seen = []
+    for check in (transport.verify, lambda: transport.produce(REQUEST, SCHEMA, LIMITS)):
+        check()
+        seen.append(json.loads((dump / "version-env.json").read_text()))
+    for run in seen:
+        assert run["HOME"] == run["CODEX_HOME"] and run["HOME"] not in (service_home, home)
+        assert run["entries"] == [] and run["mode"] == "0o700" and not os.path.exists(run["HOME"])
+    assert seen[0]["HOME"] != seen[1]["HOME"]
+
+
+@pytest.mark.parametrize("name", ["codex", "claude"])
+def test_the_configured_client_launches_whatever_version_it_reports(tmp_path, name) -> None:
+    # No version is configured: an updated client runs once it passes the same checks, and its version is reported.
+    command, dump = fake(tmp_path, name)
+    home = {"client_home": Path(worker_home(tmp_path))} if name == "codex" else {}
+    transport = for_config(GraphWorker(enabled=True, provider=name, model="m", command=tuple(command), **home))
+    for printed, reported in (("123.4.5", "123.4.5"), ("development build", "unknown")):
+        (dump / "version").write_text(printed)
+        assert transport.verify()["version"] == reported
+        assert transport.produce(REQUEST, SCHEMA, LIMITS)["candidate"] == {"echo": "req-1"}, printed
 
 
 def test_the_input_bound_covers_the_instructions_file_and_the_content(tmp_path) -> None:
     command, dump = fake(tmp_path, "codex")
-    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=worker_home(tmp_path))
+    transport = native.CodexTransport(command, "m", [], home=worker_home(tmp_path))
     request = {"instructions": "synthetic", "binding": {"request_id": "req-1"}}
     channels = len(b"synthetic") + len(canonical({"binding": {"request_id": "req-1"}}).encode("utf-8"))
     assert refusal(transport, request, Limits(5, channels - 1, 100_000, 400)) == "input_limit"
@@ -528,7 +548,7 @@ def test_the_input_bound_covers_the_instructions_file_and_the_content(tmp_path) 
 
 def test_line_separators_inside_client_output_split_nothing(tmp_path) -> None:
     command, dump = fake(tmp_path, "codex", "line_separators")
-    transport = native.CodexTransport(command, "m", [], FAKE_VERSION, home=worker_home(tmp_path))
+    transport = native.CodexTransport(command, "m", [], home=worker_home(tmp_path))
     # An agent message holding U+2028 and U+0085 raw is one event, not two halves that fail to parse.
     assert transport.produce(REQUEST, SCHEMA, LIMITS)["candidate"] == {"echo": "req-1"}
 

@@ -19,12 +19,9 @@ from .models import ConfigError, GraphWorker, Indexer
 PROVIDERS = ("http", "codex", "claude")
 CONVERSATION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
-# The exact version a native client reports, as the operator inspected it; the worker trusts no other.
-CLIENT_VERSION = re.compile(r"\d+\.\d+\.\d+")
 # Names a model process must never receive: Baton's own credentials, secrets and configuration locations.
 FORBIDDEN_ENV_PREFIXES = ("BATON_",)
 NATIVE_COMMANDS = {"codex": ("codex",), "claude": ("claude",)}
-NATIVE_ONLY = ("client_version", "client_home")
 # (low, high, default, whole): durations may be fractional; counts, byte and token limits are whole numbers.
 LIMITS = {
     "poll_seconds": (1, 86400, 30, False),
@@ -49,6 +46,10 @@ def parse(raw: Any, indexer: Indexer, data_dir: Path, *, base: Path = Path("."))
         raise ConfigError("graph_worker.enabled must be a boolean (true or false, unquoted)")
     if not enabled:
         return GraphWorker()
+    if "client_version" in raw:
+        raise ConfigError(
+            "graph_worker.client_version is retired: the worker follows the installed client as it updates; remove it"
+        )
     producer = raw.get("producer")
     if not isinstance(producer, str) or producer not in indexer.producers:
         raise ConfigError("graph_worker.producer must name a producer listed in indexer.producers")
@@ -141,10 +142,8 @@ def _http_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise ConfigError("graph_worker.api_key_env must be an environment variable name")
     if (api_key_env is None) == (not allow_no_key):
         raise ConfigError("graph_worker needs exactly one of api_key_env or allow_no_key = true")
-    if raw.get("credential_env") or raw.get("command") or any(raw.get(k) is not None for k in NATIVE_ONLY):
-        raise ConfigError(
-            "graph_worker.credential_env, command, client_version and client_home apply to native providers only"
-        )
+    if raw.get("credential_env") or raw.get("command") or raw.get("client_home") is not None:
+        raise ConfigError("graph_worker.credential_env, command and client_home apply to native providers only")
     return {"base_url": base_url, "api_key_env": api_key_env, "allow_no_key": allow_no_key}
 
 
@@ -160,13 +159,7 @@ def _native_fields(raw: Mapping[str, Any], provider: str, data_dir: Path, base: 
     command = raw.get("command", list(NATIVE_COMMANDS[provider]))
     if not isinstance(command, list) or not command or not all(isinstance(part, str) and part for part in command):
         raise ConfigError("graph_worker.command must be a non-empty argv list for the native client (no shell)")
-    client_version = raw.get("client_version")
-    if not isinstance(client_version, str) or not CLIENT_VERSION.fullmatch(client_version):
-        raise ConfigError(
-            "graph_worker.client_version must be the exact version the native client reports (like 1.2.3); "
-            "it has no default"
-        )
-    fields = {"credential_env": tuple(names), "command": tuple(command), "client_version": client_version}
+    fields = {"credential_env": tuple(names), "command": tuple(command)}
     if provider != "codex":
         if raw.get("client_home") is not None:
             raise ConfigError("graph_worker.client_home applies to codex only")

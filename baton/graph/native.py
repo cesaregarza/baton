@@ -3,8 +3,11 @@
 Native means a client's own subscription authentication, not an API key substituted on the side. Both run
 with a fixed argv, an explicit model, an isolated temporary working directory, no shell, read-only
 sandboxing and never-approval, an allowlisted environment and bounded stdin/stdout/stderr/wall time. Every
-launch first verifies the client again, through the exact executable it is about to run: it must report the
-operator's configured `client_version`. Nothing here runs a model during verification.
+launch first verifies the client again, through the exact executable it is about to run. No version is pinned:
+the worker follows the installed client as it updates, and the version a client reports is returned with its
+verification, never compared. Trust rests on the checks below, run again each time, so a changed client fails
+closed.
+Nothing here runs a model during verification.
 
 Codex runs from the worker's own client home, which holds only the worker's login, and its own switches are
 not trusted to remove its tools: before every launch the same launch runs against a loopback capture
@@ -323,7 +326,6 @@ class NativeClient:
     command: list[str]
     model: str
     credential_env: list[str]
-    client_version: str
     mode: str = "native"
 
     def verify(self) -> dict[str, Any]:
@@ -334,8 +336,8 @@ class NativeClient:
         """The resolved file to launch, verified again just now.
 
         The command cannot name every file the client runs (an interpreter runs a script, and the script loads
-        more), so a record of file identities would miss a change to some of them. What the configuration pins is
-        the version the client reports, so the client is asked again before every launch.
+        more), so a record of file identities would miss a change to some of them, and the installed client may
+        update itself between calls. So the client is checked again before every launch, through this file.
         """
         return self._checked()[0]
 
@@ -351,15 +353,10 @@ class NativeClient:
     def introspect(self, executable: str, env: dict[str, str], *args: str) -> str:
         return _introspect([*self.command, *args], executable, env)
 
-    def require_version(self, text: str, pattern: str) -> str:
-        match = re.search(pattern, text)
-        reported = match.group(1) if match else "unknown"
-        if reported != self.client_version:
-            raise TransportError(
-                Category.UNVERIFIED_CLIENT,
-                f"{self.mode} reports version {reported}, not the configured client_version {self.client_version}",
-            )
-        return reported
+    def reported_version(self, executable: str, env: dict[str, str], pattern: str) -> str:
+        """The version the client reports, or "unknown"; it is returned with the verification, never compared."""
+        match = re.search(pattern, self.introspect(executable, env, "--version"))
+        return match.group(1) if match else "unknown"
 
 
 def private_home(path: str | None) -> str:
@@ -392,10 +389,12 @@ class LaunchFiles:
 class CodexTransport(NativeClient):
     """`codex exec` from the worker's own client home, checked against a loopback capture before every launch.
 
-    `home` is both HOME and CODEX_HOME for the client, so nothing of the operator's own login, instructions or
-    skills is read. Constructing the transport refuses a home that is missing or open to other users, and any
-    credential variable: the login in the home is the only credential, so the launch check's environment holds
-    none.
+    Every run of the client has both HOME and CODEX_HOME set: to `home` for the call, and to a new empty directory,
+    removed afterwards, for reading its version and for the launch check. The client writes under its home on every
+    run, so it never runs under the service's own home, and nothing of the operator's own login, settings,
+    instructions or skills is read. Constructing the transport refuses a home that is missing or open to other
+    users, and any credential variable: the login in the home is the only credential, so the launch check's
+    environment holds none.
     """
 
     mode: str = "codex"
@@ -411,7 +410,8 @@ class CodexTransport(NativeClient):
         for name in ("AGENTS.md", "AGENTS.override.md"):  # read from the home into every request
             if os.path.lexists(os.path.join(str(self.home), name)):
                 raise TransportError(Category.UNVERIFIED_CLIENT, f"graph_worker.client_home holds {name}")
-        version = self.require_version(self.introspect(executable, env, "--version"), r"codex-cli (\d+\.\d+\.\d+)")
+        with tempfile.TemporaryDirectory(prefix="baton-graph-version-") as home:  # 0700, removed afterwards
+            version = self.reported_version(executable, self.environment(home), r"codex-cli (\d+\.\d+\.\d+)")
         return {"mode": self.mode, "version": version}
 
     def argv(self, files: LaunchFiles, output_path: str, cwd: str, *extra: str) -> list[str]:
@@ -678,7 +678,7 @@ class ClaudeTransport(NativeClient):
     mode: str = "claude"
 
     def profile(self, executable: str, env: dict[str, str]) -> dict[str, Any]:
-        version = self.require_version(self.introspect(executable, env, "--version"), r"(\d+\.\d+\.\d+)")
+        version = self.reported_version(executable, env, r"(\d+\.\d+\.\d+)")
         _require_flags(self.introspect(executable, env, "--help"), CLAUDE_FLAGS, "claude")
         return {"mode": self.mode, "version": version, "flags": list(CLAUDE_FLAGS)}
 

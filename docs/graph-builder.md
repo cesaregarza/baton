@@ -401,7 +401,7 @@ message text, and the category alone decides what happens next:
 | `rate_limited` | HTTP 429 | refusal |
 | `provider_unavailable` | HTTP 408 or 5xx; the connection could not be made | refusal |
 | `provider_refused` | a native client reports an error and its typed fields show no work was done | refusal |
-| `unverified_client` | native client verification failed (version, flags, introspection, Codex's client home), or Codex's launch check refused what the launch sends | refusal |
+| `unverified_client` | native client verification failed (flags, introspection, Codex's client home), or Codex's launch check refused what the launch sends | refusal |
 
 A charged call counts against the request's two calls and the daily cap, the first failure waits 60
 seconds, and the second blocks. A refusal is a call the provider declined without doing any work, so it
@@ -466,11 +466,12 @@ directory, no shell, an allowlisted environment with only runtime basics (and, f
 configured `credential_env` names, never `BATON_*`), bounded stdin/stdout/stderr and wall time, and
 process-group cleanup on cancellation.
 
-Which client version is trusted is operator configuration: `client_version` is required for `codex` and
-`claude`, refused for `http`, and has no default. Record the exact version you inspected; the worker
-launches only a client that reports exactly that version. Pointing `command` at a versioned executable
-path keeps an automatic update from changing the client under the worker. Claude Code's flag profile stays
-in code and is checked against its own help output; Codex is checked by what its launch sends, below. Every
+No client version is pinned: the worker follows the installed client as it updates, and a config that still
+sets `client_version` is refused as retired. What holds an updated client to the same bounds is the checks,
+never its version. For Codex, every launch is checked by what the client sends and every call by its session
+record, both below; Claude Code's flag profile stays in code and is checked against its own help output. A
+changed client that no longer passes fails closed, as `unverified_client` before the launch or `isolation`
+after the call. The launch check runs without a login, so only the record check covers a logged-in turn. Every
 model launch is preceded by a passing verification of the executable about to run: the worker resolves
 `command` the way the launch does (on the child's `PATH`, symlinks followed), verifies the client through
 that file, and runs that same file directly. It verifies before every launch, not only when a file
@@ -480,14 +481,17 @@ Codex it adds the launch check, about two seconds. A failed verification at serv
 leaves the worker running; it is the `unverified_client` refusal, shown in `status`, and clears without a
 restart once the client or the configuration is right.
 
-Codex runs from `client_home`, a directory of the worker's own that holds only the worker's login. It is
-both `HOME` and `CODEX_HOME` for the client, so the operator's own login, settings, instructions and skills
-are never read, and the worker never copies or touches the operator's login. A relative `client_home` is
-taken from the config file's directory, like `state_dir`, and the client always gets the absolute path. The
-worker refuses to start the client when `client_home` is unset; is the operator's own home; is the
-operator's client home (`CODEX_HOME` in the environment the worker starts with, and `~/.codex`), inside it
-or around it; is not a directory of this user's with mode 0700; or holds an `AGENTS.md` or
-`AGENTS.override.md`. `credential_env` does not apply to `codex`. Log the worker in there once yourself:
+Codex runs from `client_home`, a directory of the worker's own that holds only the worker's login. The
+client writes under its home on every run, even to print its version, so every run has both `HOME` and
+`CODEX_HOME` set: to `client_home` for the call, and to a new empty directory, removed afterwards, for
+reading the version and for the launch check. The client never runs under the service's own home, the
+operator's own login, settings, instructions and skills are never read, and the worker never copies or
+touches the operator's login. A relative `client_home` is taken from the config file's directory, like
+`state_dir`, and the client always gets the absolute path. The worker refuses to start the client when
+`client_home` is unset; is the operator's own home; is the operator's client home (`CODEX_HOME` in the
+environment the worker starts with, and `~/.codex`), inside it or around it; is not a directory of this
+user's with mode 0700; or holds an `AGENTS.md` or `AGENTS.override.md`. `credential_env` does not apply to
+`codex`. Log the worker in there once yourself:
 
 ```sh
 mkdir -m 700 /path/to/worker-home

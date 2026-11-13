@@ -202,7 +202,6 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
         "provider": "codex",
         "base_url": None,
         "allow_no_key": False,
-        "client_version": "1.2.3",
         "client_home": home,
     }
     for bad, match in (
@@ -219,10 +218,7 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
         ({"publication_attempts": 2.0}, "whole number"),
         ({**native_base, "credential_env": ["BATON_TOKEN"]}, "Baton"),
         ({**native_base, "provider": "claude", "command": []}, "command"),
-        # The trusted client version is operator config: required for a native client, refused for http.
-        ({**native_base, "client_version": None}, "client_version"),
-        ({**native_base, "provider": "claude", "client_version": "latest"}, "client_version"),
-        ({"client_version": "1.2.3"}, "client_version"),
+        ({"client_version": "1.2.3"}, "client_version is retired"),
         # The event-stream client runs from a home of the worker's own, whose login is its only credential.
         ({**native_base, "client_home": None}, "client_home"),
         ({**native_base, "credential_env": ["CODEX_HOME"]}, "its credential is in client_home"),
@@ -233,7 +229,6 @@ def test_disabled_worker_makes_no_calls_and_enabled_config_is_validated(tmp_path
             config_module.graph_worker.parse({**base, **bad}, config.indexer, config.data_dir)
     native = config_module.graph_worker.parse({**base, **native_base}, config.indexer, config.data_dir)
     assert native.command == ("codex",) and native.credential_env == () and native.client_home == Path(home)
-    assert native.client_version == "1.2.3"
     durations = config_module.graph_worker.parse(
         {**base, "poll_seconds": 2.5, "call_timeout_seconds": 0.5 + 1}, config.indexer, config.data_dir
     )
@@ -255,10 +250,20 @@ def native_settings(tmp_path: Path, client_home: str, **fields) -> dict:
         "conversations": ["conv_a"],
         "provider": "codex",
         "model": "m",
-        "client_version": "1.2.3",
         "client_home": client_home,
         **fields,
     }
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_a_native_config_names_no_client_version_and_one_that_still_does_is_refused(tmp_path, provider) -> None:
+    config = index_config(tmp_path)
+    raw = native_settings(tmp_path, str(tmp_path / "worker-home"), provider=provider)
+    if provider != "codex":
+        del raw["client_home"]
+    assert config_module.graph_worker.parse(raw, config.indexer, config.data_dir).provider == provider
+    with pytest.raises(ConfigError, match="graph_worker.client_version is retired"):
+        config_module.graph_worker.parse({**raw, "client_version": "1.2.3"}, config.indexer, config.data_dir)
 
 
 @pytest.mark.parametrize(
@@ -294,7 +299,7 @@ def test_the_worker_never_runs_from_the_operators_client_home(
 
 
 def test_a_relative_client_home_is_the_absolute_home_the_launch_runs_from(tmp_path, monkeypatch) -> None:
-    from test_graph_transports import FAKE_VERSION, LIMITS, REQUEST, fake, recorded
+    from test_graph_transports import LIMITS, REQUEST, fake, recorded
 
     from baton.graph.contract import SCHEMA
     from baton.graph.transport import for_config
@@ -305,7 +310,7 @@ def test_a_relative_client_home_is_the_absolute_home_the_launch_runs_from(tmp_pa
     home.mkdir(parents=True)
     home.chmod(0o700)
     command, dump = fake(tmp_path, "codex")
-    raw = native_settings(tmp_path, "worker-home", command=command, client_version=FAKE_VERSION)
+    raw = native_settings(tmp_path, "worker-home", command=command)
     # A config file named by a relative path has a relative directory; its relative paths are taken from there.
     settings = config_module.graph_worker.parse(raw, config.indexer, config.data_dir, base=Path("conf"))
     assert settings.client_home == home
@@ -778,7 +783,7 @@ def wait_for(predicate, seconds=10.0):
 
 
 def test_service_owns_its_directory_for_life_and_stop_cancels_the_native_call(tmp_path) -> None:
-    from test_graph_transports import FAKE_VERSION, alive, fake, wait_gone, worker_home
+    from test_graph_transports import alive, fake, wait_gone, worker_home
 
     from baton.graph import native
     from baton.graph.worker import serve
@@ -788,7 +793,7 @@ def test_service_owns_its_directory_for_life_and_stop_cancels_the_native_call(tm
         cid, _ = converse(db, config, 2)
     config = worker_config(tmp_path, conversations=[cid], poll_seconds=3600, call_timeout_seconds=600)
     command, dump = fake(tmp_path, "codex", "hang")
-    worker = Worker(config, transport=native.CodexTransport(command, "m", [], FAKE_VERSION, home=worker_home(tmp_path)))
+    worker = Worker(config, transport=native.CodexTransport(command, "m", [], home=worker_home(tmp_path)))
     stop = threading.Event()
     service = threading.Thread(target=serve, args=(config, stop), kwargs={"worker": worker}, daemon=True)
     service.start()

@@ -1,7 +1,9 @@
 """A synthetic `codex` executable for transport tests: no model, scripted behavior from a mode file.
 
 Usage: python graph_fake_codex.py DUMP_DIR [codex arguments...]. The file DUMP_DIR/mode selects the behavior
-and DUMP_DIR/version the reported client version. `debug models` prints a catalog whose entry for `m` adds
+and DUMP_DIR/version the reported client version. `--version` records the HOME and CODEX_HOME it ran under in
+DUMP_DIR/version-env.json, with what the home held, then writes under it as the installed client does on every
+run (only into a CODEX_HOME it was given). `debug models` prints a catalog whose entry for `m` adds
 tools through its tool fields. An `exec` given a base URL override is the launch check: it records itself in
 DUMP_DIR/probe.json, sends what a real client would send there (over a WebSocket, a prewarm and then the turn,
 or in `post_probe` mode one HTTP POST) and exits. That request offers a tool while the catalog entry still adds
@@ -43,6 +45,11 @@ NO_TOOL_FIELDS = {
 }
 
 if args == ["--version"]:
+    seen = {name: os.environ.get(name) for name in ("HOME", "CODEX_HOME")}
+    if seen["CODEX_HOME"]:
+        seen.update(entries=os.listdir(seen["CODEX_HOME"]), mode=oct(os.stat(seen["CODEX_HOME"]).st_mode & 0o777))
+        Path(seen["CODEX_HOME"], "tmp").mkdir(exist_ok=True)
+    (dump / "version-env.json").write_text(json.dumps(seen))
     print(f"codex-cli {version}")
     sys.exit(0)
 if args == ["debug", "models"]:
