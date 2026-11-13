@@ -244,6 +244,15 @@ def _introspect(argv: list[str], executable: str, env: dict[str, str]) -> str:
     return result.stdout.decode("utf-8", "replace")
 
 
+def _lines(output: str) -> list[str]:
+    """The non-blank lines of a client's output, split at "\\n" alone.
+
+    `str.splitlines` also splits at U+2028, U+2029, U+0085 and other separators, which JSON allows raw inside a
+    string and a plain-text row can carry too.
+    """
+    return [line for line in output.split("\n") if line.strip()]
+
+
 def _require_flags(help_text: str, flags: tuple[str, ...], client: str) -> None:
     """Each flag must appear as a whole option name, so `--append-system-prompt` never stands in for another."""
     for flag in flags:
@@ -342,7 +351,7 @@ class CodexTransport(NativeClient):
         version = self.require_version(self.introspect(executable, env, "--version"), r"codex-cli (\d+\.\d+\.\d+)")
         _require_flags(self.introspect(executable, env, "exec", "--help"), CODEX_EXEC_FLAGS, "codex exec")
         features = self.introspect(executable, env, "features", "list")
-        listed = {line.split()[0] for line in features.splitlines() if line.strip()}
+        listed = {line.split()[0] for line in _lines(features)}
         unknown = [name for name in CODEX_FEATURES if name not in listed]
         if unknown:
             raise TransportError(
@@ -427,9 +436,7 @@ def check_codex_events(stdout: bytes, returncode: int | None) -> tuple[Any, int]
     and no usage appear anywhere in the stream; otherwise the provider may have done work and it is charged.
     """
     events, unparsable = [], False
-    for line in stdout.decode("utf-8", "replace").split("\n"):
-        if not line.strip():
-            continue
+    for line in _lines(stdout.decode("utf-8", "replace")):
         try:
             events.append(json.loads(line))
         except ValueError:
