@@ -13,7 +13,7 @@ import baton.graph.cli as graph_cli
 from baton.graph.contract import GraphError
 from baton.graph.operations import apply, prepare, raw, read
 from baton.graph.provider import ProviderOptions, run
-from baton.graph.source import canonical, load_json, load_source
+from baton.graph.source import load_json, load_source
 
 
 def save(path, value):
@@ -61,15 +61,13 @@ def statement(seq, text, strands, *, ordinal=1, quote=None):
     }
 
 
-def strand(sid, members, end, *, resolved=False):
+def strand(sid, end, *, resolved=False):
     return {
         "id": sid,
         "title": "Format" if sid == "S1" else "Storage and reader",
         "summary": "JSON remains applicable; receipt retention is one hour." if end > 2 else "Initial proposal.",
         "open_work": [] if resolved else ["Implement the reader using files, preserving quotes."],
         "state": "resolved" if resolved else "active",
-        "statement_ids": members,
-        "summary_through": end,
         "evidence": [f"post:{end}"],
     }
 
@@ -93,7 +91,7 @@ def proposal(request):
             statement(1, "Use JSON — keep 24-hour receipts.", ["S1"]),
             statement(2, "Use SQLite.", ["S2"]),
         ]
-        result["strands"] = [strand("S1", ["1-1"], 2), strand("S2", ["2-1"], 2)]
+        result["strands"] = [strand("S1", 2), strand("S2", 2)]
         result["edges"] = [edge("2-1", "1-1", seq=2)]
     else:
         result["statements"] = [
@@ -106,10 +104,7 @@ def proposal(request):
             {"id": "1-1", "relevance": "partially_superseded", "surviving_text": "Use JSON.", "evidence": ["3-1"]},
             {"id": "2-1", "relevance": "completely_superseded", "surviving_text": None, "evidence": ["3-2"]},
         ]
-        result["strands"] = [
-            strand("S1", ["1-1", "3-1", "4-1"], 5, resolved=True),
-            strand("S2", ["2-1", "3-2", "4-1", "5-1"], 5),
-        ]
+        result["strands"] = [strand("S1", 5, resolved=True), strand("S2", 5)]
         result["decisions"] = [
             {
                 "id": "D1",
@@ -144,6 +139,13 @@ def test_incremental_native_publication_live_tail_and_history(tmp_path):
     save(source, snapshot(3))
     request = prepare(source, state, request_path, batch_size=2)
     assert request["source_head"] == 3 and len(request["new_posts"]) == 2
+    assert request["context"] == {
+        "outline": [],
+        "cards": [],
+        "entries": [],
+        "refresh": [],
+        "next_ids": {"strand": "S1", "decision": "D1"},
+    }
     # A later append is live tail, not a reason to discard the prepared batch.
     save(source, snapshot())
     save(proposal_path, proposal(request))
@@ -156,9 +158,25 @@ def test_incremental_native_publication_live_tail_and_history(tmp_path):
     assert raw(source, [2])["posts"][0]["reply_to"] == {"message_id": "m1", "seq": 1}
     request2 = prepare(source, state, tmp_path / "r2.json", batch_size=3)
     assert [p["seq"] for p in request2["new_posts"]] == [3, 4, 5]
-    assert request2["retained_state"]["statements"]["1-1"]["text"] == "Use JSON — keep 24-hour receipts."
-    assert request2["retained_state"]["statements"]["1-1"]["source"]["author"] == "author1"
-    assert all("messages" not in value for value in request2["retained_state"]["statements"].values())
+    # The graph so far reaches the model as the lines readers get, never as stored rows or old posts.
+    assert request2["context"] == {
+        "outline": [
+            "S1 | active | 1 statements, summarized through post 2 | Format",
+            "S2 | active | 1 statements, summarized through post 2 | Storage and reader",
+        ],
+        "cards": [
+            "S1 | active | Format\nInitial proposal.\nOpen work:\n"
+            "- Implement the reader using files, preserving quotes.\nEvidence: post:2",
+            "S2 | active | Storage and reader\nInitial proposal.\nOpen work:\n"
+            "- Implement the reader using files, preserving quotes.\nEvidence: post:2",
+        ],
+        "entries": [
+            "1-1 | S1 | responds_to<2-1 | Use JSON — keep 24-hour receipts.",
+            "2-1 | S2 | responds_to>1-1 | Use SQLite.",
+        ],
+        "refresh": [],
+        "next_ids": {"strand": "S3", "decision": "D1"},
+    }
     save(tmp_path / "p2.json", proposal(request2))
     apply(source, state, tmp_path / "r2.json", tmp_path / "p2.json")
     view = read(source, state)
@@ -166,10 +184,12 @@ def test_incremental_native_publication_live_tail_and_history(tmp_path):
     assert view["statements"] == {} and view["W"] == 5 and [p["seq"] for p in view["tail"]] == [6]
     assert "2-1" not in read(source, state, expand_statements=True)["statements"]
     history = read(source, state, history=True)
+    assert history["statements"]["1-1"]["source"]["author"] == "author1"
     assert history["statements"]["1-1"]["text"] == "Use JSON — keep 24-hour receipts."
     assert history["statements"]["1-1"]["surviving_text"] == "Use JSON."
     assert history["statements"]["1-1"]["quotes"] == ["Use JSON — keep 24-hour receipts."]
     assert history["strands"]["S1"]["summary_through"] == 5
+    assert history["strands"]["S2"]["statement_ids"] == ["2-1", "3-2", "4-1", "5-1"]
     assert set(history["decisions"]) == {"D1", "D2"}
     assert set(read(source, state, strands=["S1"])["decisions"]) == {"D1", "D2"}
     assert set(read(source, state, strands=["S2"])["decisions"]) == {"D1"}
@@ -185,7 +205,7 @@ def test_incremental_native_publication_live_tail_and_history(tmp_path):
     assert json.loads(result.stdout)["W"] == 5
 
 
-def test_rejections_leave_state_bytes_unchanged_and_allow_correction(tmp_path, monkeypatch):
+def test_rejections_leave_state_bytes_unchanged_and_allow_correction(tmp_path):
     source, state, request_path, proposal_path = paths(tmp_path)
     save(source, snapshot())
     request = prepare(source, state, request_path, batch_size=2)
@@ -218,6 +238,9 @@ def test_rejections_leave_state_bytes_unchanged_and_allow_correction(tmp_path, m
     bad["strands"] = bad["strands"][:1]
     invalid.append((bad, "refreshed summary"))
     bad = copy.deepcopy(valid)
+    bad["strands"][0]["statement_ids"] = ["1-1"]  # the host keeps the membership; a proposal cannot state it
+    invalid.append((bad, "unknown keys"))
+    bad = copy.deepcopy(valid)
     bad["relevance_updates"][0]["evidence"] = ["post:6"]
     invalid.append((bad, "unavailable source"))
     bad = copy.deepcopy(valid)
@@ -240,71 +263,26 @@ def test_rejections_leave_state_bytes_unchanged_and_allow_correction(tmp_path, m
     # Preparing again includes no old raw prefix, only the actual tail.
     request3 = prepare(source, state, tmp_path / "r3.json")
     assert [p["seq"] for p in request3["new_posts"]] == [6]
-    assert request3["retained_state"]["statements"]["1-1"]["source"] == {
-        "seq": 1,
-        "message_id": "m1",
-        "author": "author1",
-        "at": "2026-11-07T10:00:01Z",
-        "reply_to": None,
-        "conversation_id": "native-conversation",
-    }
-    assert request3["retained_state"]["statements"]["1-1"]["text"] == "Use JSON."
-    assert "2-1" in request3["retained_state"]["archived_statement_ids"]
-    assert "2-1" not in request3["retained_state"]["statements"]
-
-    recalled = prepare(
-        source,
-        state,
-        tmp_path / "recall.json",
-        recall_statements=("2-1", "1-1", "2-1"),
-    )["retained_state"]["recalled_statements"]
-    assert list(recalled) == ["1-1", "2-1"]
-    assert recalled["1-1"] == {
-        "id": "1-1",
-        "seq": 1,
-        "text": "Use JSON — keep 24-hour receipts.",
-        "quotes": ["Use JSON — keep 24-hour receipts."],
-        "source": {
-            "seq": 1,
-            "message_id": "m1",
-            "author": "author1",
-            "at": "2026-11-07T10:00:01Z",
-            "reply_to": None,
-            "conversation_id": "native-conversation",
-        },
-        "relevance": "partially_superseded",
-        "surviving_text": "Use JSON.",
-        "strand_ids": ["S1"],
-        "evidence": ["post:1"],
-        "relevance_evidence": ["3-1"],
-    }
-    assert recalled["2-1"]["relevance"] == "completely_superseded"
-    assert recalled["2-1"]["text"] == "Use SQLite."
-    assert recalled["2-1"]["quotes"] == ["Use SQLite."]
-    reordered = prepare(
-        source,
-        state,
-        tmp_path / "recall-reordered.json",
-        recall_statements=("1-1", "2-1"),
+    # What still stands of a partly replaced statement is shown; a fully replaced one is not shown at all.
+    assert request3["context"]["entries"] == [
+        "1-1 | S1 | supersedes<3-1 responds_to<4-1 | Use JSON.",
+        "3-1 | S1 | supersedes>1-1 | Keep receipts for one hour.",
+        "3-2 | S2 | responds_to<4-1 | Use files instead of SQLite.",
+        "4-1 | S1 S2 | responds_to>1-1 responds_to>3-2 | Exact source quotes remain mandatory.",
+        "5-1 | S2 | - | Implement the reader.",
+        "D1 | all | rests on 4-1 | changed at post 5 | Retain exact source quotes.",
+        "D2 | S1 | rests on 1-1 | changed at post 5 | Use JSON.",
+    ]
+    assert request3["context"]["cards"][0] == (
+        "S1 | resolved | Format\nJSON remains applicable; receipt retention is one hour.\n"
+        "Open work:\n(none)\nEvidence: post:5"
     )
-    assert (
-        reordered["binding"]["request_id"]
-        == prepare(
-            source,
-            state,
-            tmp_path / "recall-deduplicated.json",
-            recall_statements=("2-1", "1-1", "2-1"),
-        )["binding"]["request_id"]
-    )
-    committed = state.read_bytes()
-    from baton.graph.operations import MissingRecall
+    assert request3["context"]["next_ids"] == {"strand": "S3", "decision": "D3"}
 
-    with pytest.raises(MissingRecall):
-        prepare(source, state, tmp_path / "unknown-recall.json", recall_statements=("S999",))
-    assert not (tmp_path / "unknown-recall.json").exists()
-    assert state.read_bytes() == committed
 
-    cli_request = tmp_path / "cli-recall.json"
+def test_command_line_prepares_a_request_and_forwards_run_limits(tmp_path, monkeypatch):
+    source, state, request_path, _ = paths(tmp_path)
+    save(source, snapshot())
     result = subprocess.run(
         [
             sys.executable,
@@ -316,18 +294,16 @@ def test_rejections_leave_state_bytes_unchanged_and_allow_correction(tmp_path, m
             "--state",
             str(state),
             "--request",
-            str(cli_request),
-            "--recall-statement",
-            "2-1",
-            "--recall-statement",
-            "1-1",
+            str(request_path),
+            "--batch-size",
+            "3",
         ],
         capture_output=True,
         text=True,
         check=True,
     )
     assert json.loads(result.stdout)["source_head"] == 6
-    assert list(load_json(cli_request)["retained_state"]["recalled_statements"]) == ["1-1", "2-1"]
+    assert load_json(request_path)["binding"]["batch"] == {"start": 1, "end": 3}
 
     forwarded = {}
     monkeypatch.setattr(graph_cli, "run", lambda *args, **kwargs: forwarded.update(kwargs) or {})
@@ -347,14 +323,14 @@ def test_rejections_leave_state_bytes_unchanged_and_allow_correction(tmp_path, m
             "--model",
             "explicit-model",
             "--allow-no-key",
-            "--recall-statement",
-            "2-1",
-            "--recall-statement",
-            "1-1",
+            "--batch-size",
+            "3",
+            "--max-input-bytes",
+            "5000",
         ]
     )
     graph_cli.dispatch(args)
-    assert forwarded["recall_statements"] == ["2-1", "1-1"]
+    assert forwarded == {"batch_size": 3, "max_input_bytes": 5000}
 
 
 def test_source_limits_artifact_aliases_and_disposition(tmp_path):
@@ -413,11 +389,8 @@ def test_api_serialization_converges_with_native_and_never_retries(tmp_path, mon
         assert [p["seq"] for p in request["new_posts"]] == list(
             range(request["binding"]["batch"]["start"], request["binding"]["batch"]["end"] + 1)
         )
-        if request["binding"]["batch"]["start"] == 1:
-            assert not request["retained_state"]["recalled_statements"]
-        else:
-            assert request["retained_state"]["recalled_statements"]["2-1"]["text"] == "Use SQLite."
-            assert request["retained_state"]["recalled_statements"]["2-1"]["source"]["author"] == "author0"
+        shown = [line.split(" | ")[0] for line in request["context"]["entries"]]
+        assert shown == ([] if request["binding"]["batch"]["start"] == 1 else ["1-1", "2-1"])
         graph = proposal(request)
         message = {"content": json.dumps(graph)}
         finish = "stop"
@@ -457,25 +430,6 @@ def test_api_serialization_converges_with_native_and_never_retries(tmp_path, mon
         )
         assert result["usage"] == {"prompt_tokens": 70, "completion_tokens": 90}
         assert result["provider_calls"] == len(calls) == 1
-        base_request = prepare(source, tmp_path / "api-state", tmp_path / "api-bound-base-request", batch_size=3)
-        base_request_bytes = len(canonical(base_request).encode("utf-8"))
-        api_state_before_recall_overflow = (tmp_path / "api-state").read_bytes()
-        with pytest.raises(GraphError, match="exceeds"):
-            run(
-                source,
-                tmp_path / "api-state",
-                tmp_path / "api-overflow-request",
-                tmp_path / "api-overflow-proposal",
-                options,
-                batch_size=3,
-                max_input_bytes=base_request_bytes,
-                recall_statements=("2-1",),
-                client=client,
-            )
-        assert len(calls) == 1
-        assert (tmp_path / "api-state").read_bytes() == api_state_before_recall_overflow
-        assert load_json(tmp_path / "api-overflow-request")["retained_state"]["recalled_statements"]["2-1"]
-        assert not (tmp_path / "api-overflow-proposal").exists()
         native_request = prepare(source, tmp_path / "native-state", tmp_path / "native-request", batch_size=2)
         save(tmp_path / "native-proposal", proposal(native_request))
         apply(source, tmp_path / "native-state", tmp_path / "native-request", tmp_path / "native-proposal")
@@ -487,25 +441,9 @@ def test_api_serialization_converges_with_native_and_never_retries(tmp_path, mon
             tmp_path / "api-proposal-2",
             options,
             batch_size=3,
-            recall_statements=("2-1",),
             client=client,
         )
         assert second["provider_calls"] == 1 and len(calls) == 2
-        before = len(calls)
-        api_state_before = (tmp_path / "api-state").read_bytes()
-        with pytest.raises(GraphError, match="unknown requested recall"):
-            run(
-                source,
-                tmp_path / "api-state",
-                tmp_path / "unknown-api-request",
-                tmp_path / "unknown-api-proposal",
-                options,
-                recall_statements=("S999",),
-                client=client,
-            )
-        assert len(calls) == before
-        assert (tmp_path / "api-state").read_bytes() == api_state_before
-        assert not (tmp_path / "unknown-api-request").exists()
         for artifact in ("api-state", "api-request", "api-proposal"):
             assert "private-test-secret" not in (tmp_path / artifact).read_text()
         for failure in ("truncated", "refusal", "malformed", "absent", "invalid", "http_error"):
