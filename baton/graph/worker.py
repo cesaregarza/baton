@@ -319,9 +319,8 @@ class Worker:
             request = load_json(request_path)
             binding = request.get("binding", {}) if isinstance(request, dict) else {}
             if current(request):
-                if binding.get("base_revision") != state["revision"] or binding.get("base_state_digest") != digest(
-                    state
-                ):
+                base = (binding.get("base_revision"), binding.get("base_state_digest"))
+                if base != (state["revision"], digest(state)):
                     raise Blocked("unsafe_source")
                 return request, request_path
             # Written under another producer contract, so no answer to it could be applied. Its saved proposals

@@ -107,8 +107,10 @@ def test_a_refresh_edits_only_the_lines_its_card_showed_and_retires_what_it_repl
     def line(key, text="The reader waits on the question."):
         return {"id": key, "text": text}
 
-    def edited(*others, **changes):
-        return base | {"new_strands": [new_strand("S3", 6)], "strand_edits": [strand_edit("S2", 6, **changes), *others]}
+    def edited(*others, new=None, **changes):
+        """The proposal with S2 edited by `changes`, `others` edited too and S3 new, as `new` says or else valid."""
+        created = new_strand("S3", 6) | (new or {})
+        return base | {"new_strands": [created], "strand_edits": [strand_edit("S2", 6, **changes), *others]}
 
     longest, over = "é" * 120, "é" * 120 + "!"  # 240 and 241 UTF-8 bytes, half as many characters
     for candidate, refusal in (
@@ -124,9 +126,10 @@ def test_a_refresh_edits_only_the_lines_its_card_showed_and_retires_what_it_repl
         (edited(replace=[line("S2.1", over)]), "at most 240 UTF-8 bytes"),
         (edited(add=[line("S2.2", over)]), "at most 240 UTF-8 bytes"),
         (edited(work_add=[line("S2.w2", over)]), "at most 240 UTF-8 bytes"),
-        (base | {"new_strands": [new_strand("S3", 6) | {"summary": [line("S3.1", over)]}]}, "at most 240"),
-        (base | {"new_strands": [new_strand("S3", 6) | {"summary": [line("S3.2")]}]}, "consecutive"),
-        (base | {"new_strands": [new_strand("S2", 6), new_strand("S3", 6)]}, "refreshed by an edit"),
+        (edited(new={"summary": [line("S3.1", over)]}), "at most 240 UTF-8 bytes"),
+        (edited(new={"summary": [line("S3.2")]}), "consecutive"),
+        (edited(new={"open_work": [line("S3.w2")]}), "consecutive"),
+        (edited() | {"new_strands": [new_strand("S2", 6), new_strand("S3", 6)]}, "refreshed by an edit"),
     ):
         with pytest.raises(GraphError, match=refusal):
             build_patch(graph, candidate, posts, shown)
