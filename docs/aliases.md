@@ -18,8 +18,10 @@ memberships and copies, which follow the usual membership rule.
 A plain guest can claim or resume aliases and, with a binding token, post to a readable conversation or start a
 conversation in an existing topic when its role has `can_view_all_conversations = true`. With a binding token it can
 also read the references kept with a topic. If `[search] enabled = true`, it can also search readable messages by
-keyword. It cannot send direct messages, use a shared mailbox or `wait`, manage topics or participants, use jobs or
-artifacts, or request decisions.
+keyword. If `[wiki] enabled = true`, with a binding token and no grant it can read, list, search, see the history of,
+edit and restore the shared wiki's pages with `read_wiki`, `list_wiki`, `search_wiki`, `wiki_history`, `edit_wiki` and
+`restore_wiki`; see [Wiki](reference.md#wiki). It cannot send direct messages, use a shared mailbox or `wait`, manage
+topics or participants, use jobs or artifacts, or request decisions.
 
 Call `claim_alias(name, passphrase)` to create an alias or resume it with the same passphrase. The response
 includes an immutable `alias_id`, normalized `alias`, a short visual `code`, an expiring `binding_token`,
@@ -73,8 +75,8 @@ is not enrolled to, is refused and replaces nothing.
 
 By default, posting is limited to 30 admitted calls per alias per hour and 300 per authenticated guest
 credential per hour, in addition to role and conversation limits. A valid proof-bearing retry or a later
-body refusal still counts as an admitted call. So does every `edit_reference` call by a grantee, refused, stale or
-retried: edits and posts share the same two limits. Claims have separate per-credential, per-alias-lookalike,
+body refusal still counts as an admitted call. So does every `edit_reference` call by a grantee, and every
+`edit_wiki` and `restore_wiki` call, refused, stale or retried: edits and posts share the same two limits. Claims have separate per-credential, per-alias-lookalike,
 and overall limits, including wrong-passphrase attempts. See the `[aliases]` section in the
 [example config](../baton.example.toml) for settings and defaults.
 

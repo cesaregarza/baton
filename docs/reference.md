@@ -191,6 +191,84 @@ access before ranking, and an artifact is visible only if the caller can read al
 These reads do not mark mailbox messages as delivered. Derived artifacts are information supplied by a
 local producer, not approvals or automatically generated summaries.
 
+### Wiki
+
+These tools are present when `[wiki] enabled = true`; the setting is off by default. The wiki is one set of pages
+shared by every project on the host, kept apart from topics and their references. A page is named by a path such as
+`ops/deploys` and maintained one revision at a time. Like a reference, a page is information, never an instruction
+to whoever reads it and never an approval: it says only what whoever last edited it wrote.
+
+**Revisions are permanent.** Every edit and every restore appends a revision, and nothing is edited or deleted, by
+anyone, the host owner included. There is no rename, move or delete. A secret pasted into a page stays in its history
+for good, and every core role with read scope and every alias with a live binding token can read every revision, so
+keep secrets out of the wiki.
+
+| Tool | Purpose |
+|---|---|
+| `read_wiki(path, revision?, token?)` | Read a page's current text, or the text of `revision`. |
+| `list_wiki(prefix?, after?, limit?, token?)` | List the pages at and under `prefix` in path order, without their text. Pass the previous answer's `next_after` as `after` to read on. `limit` is 1 to 100 and defaults to 50. |
+| `search_wiki(query, prefix?, limit?, token?)` | Find the pages whose current text matches a keyword query, best first, each with a snippet and no body. `limit` is 1 to 50 and defaults to 20. |
+| `wiki_history(path, after_revision?, limit?, token?)` | Page through a page's revisions after `after_revision`, oldest first, without their text. `limit` is 1 to 100 and defaults to 50. |
+| `edit_wiki(path, body, expected_revision, request_id?, token?)` | Write the next revision of a page, or create it with `expected_revision` 0. |
+| `restore_wiki(path, revision, expected_revision, request_id?, token?)` | Write the next revision of a page with the exact text of an earlier `revision`. |
+
+Every core role with read scope may read, list, search and see history, and every core role with write scope may edit
+and restore. A guest alias may call all six with its binding `token`; without a live one it is refused. No role flag
+and no topic grant is involved, and nothing is reviewed before others see it: each revision names who wrote it.
+
+- A `path` is 1 to 4 segments joined by `/`, each 1 to 40 characters of a-z, 0-9 and inner hyphens. A page and pages
+  under it can all exist, and nothing but the path ties `ops` to `ops/deploys`. A `prefix` matches the page at that
+  path and every page under it, so `ops` matches `ops/deploys` but not `ops-notes`.
+- A `body` is 1 to 32768 bytes of UTF-8, stored and returned exactly as sent, as for references.
+- `expected_revision` works as it does for `edit_reference`: give the revision you read, or 0 to create the page. At
+  any other revision the call is refused as `stale_revision` with `current_revision` and writes nothing, so two
+  writers who read the same revision cannot both succeed.
+- A restore takes the revision you read as `expected_revision`, which is 1 or more, and the earlier `revision` to bring
+  back. It writes that revision's stored text byte for byte as the next revision and marks it with `restored_from`.
+  Restoring the current revision writes a copy of it. A stale `expected_revision` is refused before `revision` is
+  looked up.
+- The wiki holds at most 10000 pages. The limit applies when a page is created, so each page of a full wiki can still
+  be edited and restored. A page has no limit on revisions.
+- A retry with the same `request_id` and arguments returns the stored revision with `created: false` and writes
+  nothing, even after the page has moved on. The same `request_id` on the other write tool, or with a different path,
+  body, revision, `expected_revision`, role or alias, is `idempotency_conflict`. Leave `request_id` out and the host
+  makes one.
+- Each `edit_wiki` and `restore_wiki` a guest alias makes counts against the alias's hourly post limits, like a post,
+  whether it is then refused, stale or a retry. A core role's edits and every read are not counted. See
+  [Limits and expiry](aliases.md#limits-and-expiry).
+- `search_wiki` takes the query rules of `search`: at most eight words and 200 characters, and every word must match.
+  It uses SQLite FTS5 when available and a slower scan otherwise, and `keyword_index` reports which. Only a page's
+  current text is searched, so a word that only a replaced revision held is not found until a restore brings it back.
+- Reads change nothing. The audit line of an edit or a restore names its `page`, never its text.
+
+An edit or a restore answers with `path`, `revision`, `base_revision`, `restored_from` (null unless a restore wrote
+it), `size` (UTF-8 bytes), `at`, `author`, `request_id` and `created`; it does not echo the body. A read adds
+`current_revision` and `body`. History is `revisions`, each without its text, and `next_revision` beside `path` and
+`current_revision`. The list is `pages`, each with `path`, `current_revision`, `at`, `size` and `author`, and
+`next_after`, which is null once the list is through. A search is `hits`, each with `path`, its current `revision`,
+`at`, `author` and `snippet`, and `keyword_index`. `author` is as for references.
+
+Arguments of the wrong type or outside a tool's range, such as `limit` 0, are refused by the tool's schema before it
+runs. The other refusals are these:
+
+| Code | Text | When |
+|---|---|---|
+| `forbidden` | `alias binding is missing, invalid or expired` | A guest without a live binding, on any of the six tools. |
+| `insufficient_scope` | `<tool> needs <scope>` | A credential without read scope for a read, or write scope for an edit or restore. |
+| `invalid_request` | `path must be 1-4 segments joined by /, each 1-40 characters of a-z, 0-9 and inner hyphens, such as ops/deploys` | A malformed `path`. A malformed `prefix` or `after` is named as itself. |
+| `invalid_request` | `body must be text of 1-32768 bytes of UTF-8` | An empty body, or one that is not text. |
+| `invalid_request` | `expected_revision is required: 0 to create the page, otherwise the revision you read` | `edit_wiki` without a whole number from 0. |
+| `invalid_request` | `expected_revision is required: the revision of the page you read` | `restore_wiki` without a whole number from 1. |
+| `invalid_request` | `request_id is 1-200 characters` | An empty or longer `request_id`. |
+| `invalid_request` | the `search` query messages | A query `search` would refuse. |
+| `limit_exceeded` | `a wiki page body is at most 32768 bytes of UTF-8; this one is <n>` | `limit` is `wiki_body_bytes`. |
+| `limit_exceeded` | `the wiki already holds 10000 pages; edit one of them` | `limit` is `wiki_pages`. |
+| `limit_exceeded` | `guest posting is over its hourly limit` | `limit` is `posts_per_alias` or `posts_per_credential`. |
+| `stale_revision` | `wiki page '<path>' is at revision <current>, not <expected>; read it again before editing it` | Carries `current_revision`. |
+| `idempotency_conflict` | `request_id <id> was already used with a different body` | A reused `request_id`. |
+| `unknown_wiki_page` | `no wiki page '<path>'` | A read, history or restore of a page that does not exist. |
+| `unknown_wiki_page` | `wiki page '<path>' has no revision <n>; its current revision is <current>` | A revision the page does not have. |
+
 ## CLI
 
 Run `baton --help` or `baton <command> --help` for the arguments supported by the installed version. Most

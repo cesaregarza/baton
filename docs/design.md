@@ -159,6 +159,18 @@ transaction, so two writers cannot both win and a revoke that commits first refu
 `request_id` returns the stored revision after the authority is checked again. A body is 1 to 32768 bytes, a topic holds
 at most 20 documents of its own, and a grantee's edits count against the guest posting limits.
 
+<a name="wiki"></a>
+
+Apart from topics, an optional **wiki** (`[wiki] enabled = true`) keeps one set of pages shared by every project, named
+by paths of one to four segments such as `ops/deploys`. It is the reference model without the topic: the same
+append-only revisions, compare-and-swap edits, retries, body limit and authorship, from the same code, plus a restore
+that copies an earlier revision's stored text as the next revision. Pages are never renamed, moved or deleted. Who
+may call is settled at the transport alone: every core role with read scope reads, lists, searches and sees history,
+every core role with write scope edits and restores, and so does every alias with a live binding, with no grant, flag
+or review step. That makes it an open notebook rather than a record of decisions: anyone may change what everyone
+reads next, each revision names who wrote it, and a guest's edits count against its posting limits. Search covers
+only each page's current text, with the message search's query rules, and the wiki holds at most 10000 pages.
+
 A topic's `members` supply the participants for a guest-created conversation at creation time; later edits
 to that list do not affect existing conversations. A guest needs a live alias binding and
 `can_view_all_conversations` on the guest role to start such a conversation. The guest names a topic, not
@@ -258,9 +270,11 @@ can also send replies.
 ## Storage
 
 The host uses one SQLite database in WAL mode. Writes use `BEGIN IMMEDIATE` transactions to serialize
-dependent updates across the server, CLI, and dispatcher. This revision uses schema 23 and upgrades
-schemas 2 through 22 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
+dependent updates across the server, CLI, and dispatcher. This revision uses schema 24 and upgrades
+schemas 2 through 23 in place in a transaction. Unknown versions are refused. Back up before an upgrade.
 Schema 23 adds `graph_snapshots`, a summary version's optional canonical graph; existing rows have none.
+Schema 24 adds the wiki's `wiki_pages` and `wiki_revisions`, empty after an upgrade, and with SQLite FTS5 a
+`wiki_fts` index of each page's current text, rebuilt from the stored revisions whenever it is missing.
 
 The upgrade creates topic records for existing conversation topic paths and any missing parents. It derives
 each topic's members from participants in conversations filed directly there, excluding `guest`. A topic
@@ -276,6 +290,7 @@ the upgrade rather than being discarded.
 | Aliases, bindings, mappings, rekeys | Alias continuity, digests of live proofs in the order they were issued, enrolled-role mappings, and when each armed rekey replaced a verifier. Neither verifier is kept. |
 | Topic grants and their events | Owner grants on topics: their terms and digests, hashes of their keys, revocations, and a log. Keys are never stored. |
 | Reference documents and revisions | Text kept with topics, by topic id: every revision of every document, with who wrote it, under which grant, and its retry identity. Never edited or deleted. |
+| Wiki pages and revisions | The shared wiki: each page's path, and every revision of every page, with who wrote it, the revision a restore copied, and its retry identity. Never edited or deleted. |
 | Change log, generations, batches, artifacts, vectors | Optional indexing state and producer-supplied derived data. |
 | Seat sessions, login forms, receipts, requests | Optional browser-seat session and delivery state. A row that ends (used, evicted at a cap, logged out, lapsed, or expired) is kept with when and how it ended, and refused by that. |
 | MCP Events records | Each wake's first occurrence time and per-destination outcomes, every delivery receipt, and when each signing secret was rotated, never the secret. None is pruned. |
