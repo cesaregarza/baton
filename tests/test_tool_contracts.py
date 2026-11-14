@@ -6,6 +6,9 @@ recomputing snapshots. Activating a grant does not change schemas or authorize a
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
 import test_topic_guest_surface as surface
 from test_aliases import dispatch, rpc
 from test_topic_guest_surface import call, claim, make_topic
@@ -14,7 +17,16 @@ from topic_grant_support import CAPABILITIES, grants_module
 from baton.database import store
 
 guest_host = surface.guest_host  # the credentials the topic host is built on
-topic_host = surface.topic_host
+topic_host_without_wiki = surface.topic_host
+
+
+@pytest.fixture
+def topic_host(topic_host_without_wiki):
+    """The topic host with the wiki switched on, so every optional tool group is listed."""
+    config = topic_host_without_wiki.config
+    topic_host_without_wiki.config = replace(config, wiki=replace(config.wiki, enabled=True))
+    return topic_host_without_wiki
+
 
 # The public tool names are stable. Individual argument and permission contracts are covered at their
 # behavior boundaries and in their owning test modules.
@@ -56,6 +68,12 @@ TOOL_NAMES = [
     "read_graph_statement",
     "search_graph",
     "read_graph_entries",
+    "read_wiki",
+    "list_wiki",
+    "search_wiki",
+    "wiki_history",
+    "edit_wiki",
+    "restore_wiki",
 ]
 GRANT_ARGUMENTS = {
     "grant_token": {"create_topic", "set_topic", "edit_reference"},
@@ -80,6 +98,12 @@ GUEST_MAY_CALL = {
     "read_graph_statement",
     "search_graph",
     "read_graph_entries",
+    "read_wiki",
+    "list_wiki",
+    "search_wiki",
+    "wiki_history",
+    "edit_wiki",
+    "restore_wiki",
 }
 
 

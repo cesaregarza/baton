@@ -29,6 +29,7 @@ from .models import (
     Seat,
     StaticToken,
     Wake,
+    Wiki,
 )
 
 ROLE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}")
@@ -159,7 +160,18 @@ def parse(raw: dict[str, Any], *, base: Path = Path(".")) -> Config:
         indexer=indexer,
         aliases=_aliases(raw.get("aliases", {}), roles),
         graph_worker=graph_worker,
+        wiki=_wiki(raw.get("wiki", {})),
     )
+
+
+def _wiki(value: Any) -> Wiki:
+    """The `[wiki]` section, whose one setting is `enabled`. Any other key is refused, so a misspelt one is not
+    silently a wiki left off."""
+    table = _table(value, "wiki")
+    unknown = sorted(str(key) for key in table if key != "enabled")
+    if unknown:
+        raise ConfigError(f"wiki.{unknown[0]} is not a setting: [wiki] takes only enabled")
+    return Wiki(enabled=_boolean(table, "enabled", False, "wiki.enabled"))
 
 
 def _aliases(table: dict[str, Any], roles: dict[str, Role]) -> Aliases:

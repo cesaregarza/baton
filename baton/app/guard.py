@@ -23,6 +23,7 @@ from baton.app.tool_policy import BY_NAME, ToolPolicy
 from baton.config import Config
 from baton.database.store import connect
 from baton.errors import BatonError, Forbidden, InvalidRequest
+from baton.wiki import pages as wiki_pages
 
 from .catalog import (
     AUDITED_IDS,
@@ -293,6 +294,7 @@ class Guard:
             else {}
         )
         ids.update(topics.audit_fields(name, kwargs, outcome, call.get("topic", {})))
+        ids.update(wiki_pages.audit_fields(name, kwargs))
         # Neither the binding token nor the grant key may reach the line, whichever argument carried it, topic
         # fields included.
         # A refusal before the guard has taken the key out audits the raw arguments: look there too, as for the token.

@@ -45,6 +45,7 @@ from .catalog import REFERENCE_TOOLS as REFERENCE_TOOLS
 from .catalog import SEARCH_TOOLS as SEARCH_TOOLS
 from .catalog import TOKEN_ARGUMENT as TOKEN_ARGUMENT
 from .catalog import TOOLS as TOOLS
+from .catalog import WIKI_TOOLS as WIKI_TOOLS
 from .guard import HOURLY_LIMITS as HOURLY_LIMITS
 from .guard import Guard as Guard
 from .guard import _call_context as _call_context
@@ -89,13 +90,14 @@ def create_app(config: Config, integrations: dict[str, Integration] | None = Non
         TOOLS
         + (CONVERSATION_TOOLS if config.conversations.enabled else ())
         + (SEARCH_TOOLS + ARTIFACT_TOOLS + GRAPH_TOOLS if config.search.enabled else ())
+        + (WIKI_TOOLS if config.wiki.enabled else ())
     ):
         server.add_tool(
             guard.wrap(name, scope, getattr(tools, name)),
             name=name,
             annotations=ToolAnnotations(read_only_hint=read_only, destructive_hint=False, open_world_hint=False),
         )
-        if name in LITERAL_TOOLS:  # these take every argument as sent: a reference may be named "null"
+        if name in LITERAL_TOOLS:  # these take every argument as sent: a reference or a page may be named "null"
             tool = server._tool_manager.get_tool(name)
             assert tool is not None  # add_tool above registered this exact name.
             guard.take_literally(tool)

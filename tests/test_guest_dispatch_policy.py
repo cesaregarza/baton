@@ -33,6 +33,8 @@ def _host(tmp_path, *, events: bool = False, guest_view_all: bool = False) -> tu
         enabled = true
         [search]
         enabled = true
+        [wiki]
+        enabled = true
     """
     if events:
         extra += '\n[integrations.openai_mcp_events]\nenabled = true\ncallback_prefixes = ["https://callbacks.example.test/hooks"]\n'
@@ -160,6 +162,12 @@ def test_guest_policy_enumerates_every_registered_tool_and_allows_only_the_read_
             "read_graph_statement",
             "search_graph",
             "read_graph_entries",
+            "read_wiki",
+            "list_wiki",
+            "search_wiki",
+            "wiki_history",
+            "edit_wiki",
+            "restore_wiki",
         }
         if hasattr(app_module, "GUEST_TOOLS"):
             assert app_module.GUEST_TOOLS & registered == allowed

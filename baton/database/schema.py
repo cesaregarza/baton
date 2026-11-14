@@ -255,6 +255,30 @@ _SCHEMA = (
         at TEXT NOT NULL,
         PRIMARY KEY (doc_id, revision)
     )""",
+    # A wiki page, by its path. The id is an INTEGER PRIMARY KEY so that it can be the page's row in the keyword
+    # index: a VACUUM never renumbers it, as it may an implicit rowid. Nothing deletes or renames a page.
+    """CREATE TABLE IF NOT EXISTS wiki_pages (
+        id INTEGER PRIMARY KEY,
+        path TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    )""",
+    # Every revision of every wiki page, appended and never edited or deleted, with the columns a reference revision
+    # has but its grant. `restored_from` is the earlier revision a restore copied, NULL for an ordinary edit.
+    """CREATE TABLE IF NOT EXISTS wiki_revisions (
+        page_id INTEGER NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        body TEXT NOT NULL,
+        author_role TEXT NOT NULL,
+        author_alias_id TEXT,
+        author_alias_name TEXT,
+        author_alias_code TEXT,
+        restored_from INTEGER CHECK (restored_from BETWEEN 1 AND revision - 1),
+        request_id TEXT NOT NULL UNIQUE,
+        request_digest TEXT NOT NULL,
+        base_revision INTEGER NOT NULL CHECK (base_revision = revision - 1),
+        at TEXT NOT NULL,
+        PRIMARY KEY (page_id, revision)
+    )""",
     # Every change to a conversation's source, in order: a message added, a participant added or removed, and,
     # in logs from before copies stopped expiring, a copy expired by retention. Each carries the revision it
     # bumped the conversation to. Only source changes are logged; reading logs nothing. See baton.changes.
