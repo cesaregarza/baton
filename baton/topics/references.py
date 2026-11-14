@@ -20,25 +20,21 @@ from __future__ import annotations
 import secrets
 from typing import Any
 
-from baton import events, messages, topics
+from baton import events, revisions, topics
 from baton.agents.permissions import Capability, Permissions
 from baton.config import Config
 from baton.database import Connection, Row
-from baton.errors import InvalidRequest, LimitExceeded, StaleReference, UnknownReference
+from baton.errors import InvalidRequest, LimitExceeded, UnknownReference
 from baton.topics import grants as topic_grants
 from baton.topics import paths as topic_paths
 
 CAPABILITY = "reference.edit"
-MAX_BODY_BYTES = 32768
+MAX_BODY_BYTES = revisions.MAX_BODY_BYTES
 MAX_DOCS_PER_TOPIC = 20
 MAX_NAME = topic_paths.MAX_TOPIC_SEGMENT
-MAX_HISTORY_PAGE = 100
-# A revision as every answer describes it, without its text. SQLite counts the size in UTF-8 bytes, so a list of
-# documents or a page of history never loads a body.
-_DESCRIBED = (
-    "revision, base_revision, at, author_role, author_alias_id, author_alias_name, author_alias_code,"
-    " grant_id, LENGTH(CAST(body AS BLOB)) AS size"
-)
+MAX_HISTORY_PAGE = revisions.MAX_HISTORY_PAGE
+# What a reference revision records beside what every revision does: the topic grant a guest edited under.
+REVISIONS = revisions.Revisions("reference_revisions", "doc_id", ("grant_id",))
 
 
 def is_name(value: Any) -> bool:
@@ -46,57 +42,9 @@ def is_name(value: Any) -> bool:
     return topic_paths.is_segment(value)
 
 
-def _is_count(value: Any, minimum: int) -> bool:
-    # A bool is an int in Python, and `True` must not pass as revision 1.
-    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
-
-
 def _check_name(name: Any) -> None:
     if not is_name(name):
         raise InvalidRequest(f"name must be 1-{MAX_NAME} characters of a-z, 0-9 and inner hyphens, such as job-board")
-
-
-def _utf8_size(body: Any) -> int:
-    """A body's size in bytes of UTF-8, or 0 if it is not text a database can keep. A lone surrogate is not: it
-    arrives from JSON, and has no UTF-8 form."""
-    if not isinstance(body, str):
-        return 0
-    try:
-        return len(body.encode())
-    except UnicodeEncodeError:
-        return 0
-
-
-def _check_body(body: Any) -> None:
-    """Text with something in it and at most 32768 bytes: bytes, so a two-byte letter counts twice."""
-    size = _utf8_size(body)
-    if size == 0:
-        raise InvalidRequest(f"body must be text of 1-{MAX_BODY_BYTES} bytes of UTF-8")
-    if size > MAX_BODY_BYTES:
-        raise LimitExceeded(
-            f"a reference body is at most {MAX_BODY_BYTES} bytes of UTF-8; this one is {size}", "reference_body_bytes"
-        )
-
-
-def _check_expected(expected: Any) -> None:
-    """The revision the caller read must be given: a missing one would skip the compare, so the schema's
-    requirement is not left to the schema alone."""
-    if not _is_count(expected, 0):
-        raise InvalidRequest(
-            "expected_revision is required: 0 to create the reference, otherwise the revision you read"
-        )
-
-
-def _request_id(request_id: Any) -> str:
-    """The caller's request id, or one the host makes when it left it out. An empty one is not left out.
-
-    One with no UTF-8 form, a lone surrogate from JSON, is as malformed as one too long: the database cannot bind it.
-    """
-    if request_id is None:
-        return messages.new_request_id()
-    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 200 or _utf8_size(request_id) == 0:
-        raise InvalidRequest("request_id is 1-200 characters")
-    return request_id
 
 
 def _may_edit(config: Config, actor: str) -> None:
@@ -123,19 +71,10 @@ def _authorize(
 def _digest(actor: str, identity: dict[str, str] | None, topic_id: str, name: str, body: str, expected: int) -> str:
     """A request's identity: who asked, which document by the topic's id and the whole of the edit.
 
-    The alias is in it because every guest acts as the same role, and the topic's id because a path can be given
-    to another topic. Never a key or a binding token, so a retry made after claiming the alias again still replays.
+    The topic's id, not its path, because a path can be given to another topic.
     """
-    return events.request_digest(
-        "edit_reference",
-        {
-            "actor": actor,
-            "alias_id": (identity or {}).get("alias_id"),
-            "topic_id": topic_id,
-            "name": name,
-            "body": body,
-            "expected_revision": expected,
-        },
+    return revisions.digest(
+        "edit_reference", actor, identity, topic_id=topic_id, name=name, body=body, expected_revision=expected
     )
 
 
@@ -156,11 +95,7 @@ def _document(conn: Connection, topic_id: str, path: str, name: str, expected: i
     is full can still have each of its documents edited.
     """
     doc_id, current = _locate(conn, topic_id, name)
-    if expected != current:
-        raise StaleReference(
-            f"reference {name!r} in {path!r} is at revision {current}, not {expected}; read it again before editing it",
-            current,
-        )
+    revisions.require_current(f"reference {name!r} in {path!r}", current, expected)
     if doc_id is not None:
         return doc_id
     held = conn.execute("SELECT COUNT(*) FROM reference_docs WHERE topic_id = ?", (topic_id,)).one()[0]
@@ -174,76 +109,6 @@ def _document(conn: Connection, topic_id: str, path: str, name: str, expected: i
         (doc_id, topic_id, name, events.now()),
     )
     return doc_id
-
-
-def _append(
-    conn: Connection,
-    *,
-    doc_id: str,
-    number: int,
-    body: str,
-    actor: str,
-    identity: dict[str, str] | None,
-    grant_id: str | None,
-    request_id: str,
-    digest: str,
-) -> None:
-    """Write revision `number`, based on the one before it, with who wrote it and under which grant.
-
-    The alias's name and code are what it is called now, kept for reading only. The retry identity is stored with
-    the revision and lives as long as it does.
-    """
-    who = identity or {}
-    conn.execute(
-        "INSERT INTO reference_revisions (doc_id, revision, body, author_role, author_alias_id,"
-        " author_alias_name, author_alias_code, grant_id, request_id, request_digest, base_revision, at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            doc_id,
-            number,
-            body,
-            actor,
-            who.get("alias_id"),
-            who.get("alias"),
-            who.get("code"),
-            grant_id,
-            request_id,
-            digest,
-            number - 1,
-            events.now(),
-        ),
-    )
-
-
-def _revision(conn: Connection, doc_id: str, number: int) -> Row:
-    """A revision with its text. Revisions are exactly 1 to the current one, so a caller within that has its row.
-
-    Every answer about a revision is read back from here, so an edit, its retry and a later read cannot describe it
-    differently.
-    """
-    return conn.execute(
-        f"SELECT {_DESCRIBED}, body FROM reference_revisions WHERE doc_id = ? AND revision = ?", (doc_id, number)
-    ).one()
-
-
-def _author(row: Row) -> dict[str, str]:
-    """Who wrote a revision: the role it ran as, and the alias as it was called then if an alias was behind it."""
-    author = {"role": row["author_role"]}
-    if row["author_alias_id"] is not None:
-        author.update(alias_id=row["author_alias_id"], alias=row["author_alias_name"], code=row["author_alias_code"])
-    return author
-
-
-def _summary(row: Row) -> dict[str, Any]:
-    """What an answer says of a revision besides its text."""
-    return {
-        "revision": row["revision"],
-        "base_revision": row["base_revision"],
-        "at": row["at"],
-        "size": row["size"],
-        "author": _author(row),
-        "grant_id": row["grant_id"],
-    }
 
 
 def edit(
@@ -271,9 +136,9 @@ def edit(
         _may_edit(config, actor)
     path = topics.check_path(topic, field="topic")
     _check_name(name)
-    _check_body(body)
-    _check_expected(expected_revision)
-    request_id = _request_id(request_id)
+    revisions.check_body(body, "a reference body", "reference_body_bytes")
+    revisions.check_expected(expected_revision, "the reference")
+    request_id = revisions.request_id(request_id)
     with conn.transaction():
         topic_row, grant = _authorize(conn, identity, grant_key, path)
         grant_id = None if grant is None else grant["id"]
@@ -282,16 +147,16 @@ def edit(
         if stored is None:
             doc_id = _document(conn, topic_row["id"], path, name, expected_revision)
             number = expected_revision + 1
-            _append(
+            REVISIONS.append(
                 conn,
-                doc_id=doc_id,
-                number=number,
-                body=body,
+                doc_id,
+                number,
+                body,
                 actor=actor,
                 identity=identity,
-                grant_id=grant_id,
                 request_id=request_id,
                 digest=digest,
+                grant_id=grant_id,
             )
         else:
             doc_id, number = stored["doc_id"], stored["revision"]
@@ -300,7 +165,7 @@ def edit(
             "topic": path,
             "topic_id": topic_row["id"],
             "name": name,
-            **_summary(_revision(conn, doc_id, number)),
+            **REVISIONS.summary(REVISIONS.read(conn, doc_id, number)),
             "request_id": request_id,
             "created": stored is None,
         }
@@ -317,7 +182,7 @@ def _existing(conn: Connection, topic_id: str, path: str, name: str) -> tuple[st
 def _listing(conn: Connection, topic_id: str) -> list[dict[str, Any]]:
     """The topic's own documents by name, each described by its current revision."""
     rows = conn.execute(
-        f"SELECT d.name, {_DESCRIBED} FROM reference_docs d JOIN reference_revisions r"
+        f"SELECT d.name, {REVISIONS.described} FROM reference_docs d JOIN reference_revisions r"
         " ON r.doc_id = d.id WHERE d.topic_id = ? AND r.revision ="
         " (SELECT MAX(revision) FROM reference_revisions WHERE doc_id = d.id) ORDER BY d.name",
         (topic_id,),
@@ -328,7 +193,7 @@ def _listing(conn: Connection, topic_id: str) -> list[dict[str, Any]]:
             "current_revision": row["revision"],
             "at": row["at"],
             "size": row["size"],
-            "author": _author(row),
+            "author": revisions.author(row),
             "grant_id": row["grant_id"],
         }
         for row in rows
@@ -346,8 +211,8 @@ def read(
     path = topics.check_path(topic, field="topic")
     if name is not None:
         _check_name(name)
-    if revision is not None and not _is_count(revision, 1):
-        raise InvalidRequest("revision is a whole number from 1")
+    if revision is not None:
+        revisions.check_revision(revision)
     if revision is not None and name is None:
         raise InvalidRequest("revision needs a name")
     with conn.snapshot():  # one view, so a write in between cannot mix two revisions into one answer
@@ -356,20 +221,16 @@ def read(
         if name is None:
             return {"topic": path, "topic_id": topic_row["id"], "references": _listing(conn, topic_row["id"])}
         doc_id, current = _existing(conn, topic_row["id"], path, name)
-        # Compared here, not asked of the database: it cannot take a number beyond its integers, and every number up
-        # to the current revision has a row.
-        if revision is not None and revision > current:
-            raise UnknownReference(
-                f"reference {name!r} in {path!r} has no revision {revision}; its current revision is {current}"
-            )
-        found = _revision(conn, doc_id, current if revision is None else revision)
+        if revision is not None:
+            revisions.require_revision(UnknownReference, f"reference {name!r} in {path!r}", revision, current)
+        found = REVISIONS.read(conn, doc_id, current if revision is None else revision)
         return {
             "topic": path,
             "topic_id": topic_row["id"],
             "name": name,
             "current_revision": current,
             "body": found["body"],
-            **_summary(found),
+            **REVISIONS.summary(found),
         }
 
 
@@ -389,27 +250,15 @@ def history(
     """
     path = topics.check_path(topic, field="topic")
     _check_name(name)
-    if not (_is_count(after_revision, 0) and _is_count(limit, 1) and limit <= MAX_HISTORY_PAGE):
-        raise InvalidRequest(f"limit is 1-{MAX_HISTORY_PAGE} and after_revision at least 0")
+    revisions.check_page(after_revision, limit)
     with conn.snapshot():
         topic_row = topics.require_topic(conn, path)
         topics.record_seen(seen, path, topic_row, reference=name)
         doc_id, current = _existing(conn, topic_row["id"], path, name)
-        # A cursor at or past the last revision reads nothing, and one beyond the database's integers cannot be bound.
-        rows = (
-            []
-            if after_revision >= current
-            else conn.execute(
-                f"SELECT {_DESCRIBED} FROM reference_revisions "
-                "WHERE doc_id = ? AND revision > ? ORDER BY revision LIMIT ?",
-                (doc_id, after_revision, limit),
-            ).fetchall()
-        )
         return {
             "topic": path,
             "topic_id": topic_row["id"],
             "name": name,
             "current_revision": current,
-            "revisions": [_summary(row) for row in rows],
-            "next_revision": rows[-1]["revision"] if rows else after_revision,
+            **REVISIONS.page(conn, doc_id, current, after_revision, limit),
         }
