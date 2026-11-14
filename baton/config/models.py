@@ -142,6 +142,13 @@ class Search:
 
 
 @dataclass(frozen=True)
+class Wiki:
+    """The shared wiki, off unless enabled: while off, none of its tools is offered."""
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class Indexer:
     """The host owner's local indexing worker: the producer names its writer commands may act as, and the bounds
     every batch and commit is held to. Empty `producers` turns the writer off; the read-only commands need none."""
@@ -258,6 +265,7 @@ class Config:
     indexer: Indexer = field(default_factory=Indexer)
     aliases: Aliases = field(default_factory=Aliases)
     graph_worker: GraphWorker = field(default_factory=GraphWorker)
+    wiki: Wiki = field(default_factory=Wiki)
 
     @property
     def resource_url(self) -> str:

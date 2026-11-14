@@ -297,6 +297,13 @@ def test_valid_proof_does_not_allow_guest_authority_or_forged_identity(posting_h
             "read_graph_statement",
             "search_graph",
             "read_graph_entries",
+            # The shared wiki: an alias with a live binding may read, search, edit and restore its pages.
+            "read_wiki",
+            "list_wiki",
+            "search_wiki",
+            "wiki_history",
+            "edit_wiki",
+            "restore_wiki",
         }
         assert app.GUEST_TOOLS == allowed
         for tool in listed:

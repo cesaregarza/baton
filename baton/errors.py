@@ -42,7 +42,7 @@ class StaleRevision(BatonError):
 
 
 class StaleReference(StaleRevision):
-    """A reference was edited from a revision it is no longer at; `current_revision` says where it is.
+    """A reference or a wiki page was edited from a revision it is no longer at; `current_revision` says where it is.
 
     A job's stale refusal carries no such field, so this one adds it and `StaleRevision` itself stays as it was.
     """
@@ -84,6 +84,12 @@ class UnknownReference(BatonError):
     """The topic has no such reference, or the reference has no such revision."""
 
     code = "unknown_reference"
+
+
+class UnknownWikiPage(BatonError):
+    """The wiki has no page at that path, or the page has no such revision."""
+
+    code = "unknown_wiki_page"
 
 
 class NotAParticipant(BatonError):

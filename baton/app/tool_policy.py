@@ -73,6 +73,18 @@ POLICIES = (
     ToolPolicy("search_graph", group="graph", guest="yes"),
     ToolPolicy("read_graph_entries", group="graph", guest="yes"),
     ToolPolicy("read_secretary_summaries"),
+    # The wiki has no grant: every core role with the scope and every alias with a live binding may read and edit it.
+    # A guest's edit or restore spends post quota before its body runs, as a grantee's reference edit does.
+    ToolPolicy("read_wiki", group="wiki", guest="binding", literal=True),
+    ToolPolicy("list_wiki", group="wiki", guest="binding", literal=True),
+    ToolPolicy("search_wiki", group="wiki", guest="binding", literal=True),
+    ToolPolicy("wiki_history", group="wiki", guest="binding", literal=True),
+    ToolPolicy(
+        "edit_wiki", SCOPE_WRITE, False, "wiki", guest="binding", identity="bound", post_quota=True, literal=True
+    ),
+    ToolPolicy(
+        "restore_wiki", SCOPE_WRITE, False, "wiki", guest="binding", identity="bound", post_quota=True, literal=True
+    ),
 )
 BY_NAME = {policy.name: policy for policy in POLICIES}
 
@@ -87,6 +99,7 @@ REFERENCE_TOOLS = registrations("reference")
 SEARCH_TOOLS = registrations("search")
 ARTIFACT_TOOLS = registrations("artifact")
 GRAPH_TOOLS = registrations("graph")
+WIKI_TOOLS = registrations("wiki")
 GUEST_TOOLS = frozenset(p.name for p in POLICIES if p.guest in {"yes", "binding"})
 REFERENCE_GUEST_TOOLS = frozenset(p.name for p in POLICIES if p.group == "reference" and p.guest == "binding")
 GUEST_IDENTIFIED = frozenset(p.name for p in POLICIES if p.identity == "guest")

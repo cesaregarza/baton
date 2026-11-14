@@ -8,9 +8,9 @@ from collections.abc import Callable
 
 from .driver import Connection
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 # The older versions `connect` upgrades in place, oldest first; any other is refused.
-MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22)
+MIGRATES_FROM = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)
 
 
 # The version-2 tables a migration rebuilds, with the columns they keep.
@@ -126,6 +126,9 @@ _ADDED_TABLES = {
     21: ("secretary_summaries",),
     # A summary version's optional canonical graph snapshot (`baton.graph.snapshot`). Existing rows have none.
     23: ("graph_snapshots",),
+    # The shared wiki's pages and every revision of them (`baton.wiki`). Its keyword index is not listed, for the same
+    # reason as the messages'.
+    24: ("wiki_pages", "wiki_revisions"),
 }
 
 

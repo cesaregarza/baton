@@ -314,4 +314,5 @@ WHOLE_TABLES = {
     19: {"alias_rekeys", "events_rotations", "events_occurrences", "events_outcomes", "events_receipts"},
     21: {"secretary_summaries"},  # shared secretary summary archive
     23: {"graph_snapshots"},  # a summary version's optional canonical graph snapshot
+    24: {"wiki_pages", "wiki_revisions"},  # the shared wiki's pages and their revisions
 }  # records kept instead of overwritten or expired

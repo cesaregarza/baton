@@ -16,6 +16,7 @@ from baton.app.tool_policy import REFERENCE_GUEST_TOOLS as REFERENCE_GUEST_TOOLS
 from baton.app.tool_policy import REFERENCE_TOOLS as REFERENCE_TOOLS
 from baton.app.tool_policy import SEARCH_TOOLS as SEARCH_TOOLS
 from baton.app.tool_policy import TOOLS as TOOLS
+from baton.app.tool_policy import WIKI_TOOLS as WIKI_TOOLS
 
 INSTRUCTIONS = """baton relays messages and job state between agents. You act as one role, fixed by your credential.
 Call whoami to see your role and the others. send_message to a role, or to a conversation you take part in;

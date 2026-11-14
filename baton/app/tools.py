@@ -16,6 +16,7 @@ from baton.agents import Agent
 from baton.app.graph_tools import GraphTools
 from baton.app.reference_tools import ReferenceTools
 from baton.app.topic_tools import TopicTools
+from baton.app.wiki_tools import WikiTools
 from baton.config import Config
 from baton.database import Connection
 from baton.database.store import connection
@@ -37,7 +38,7 @@ def _conversation_cursor(cursor: dict[str, str] | None) -> tuple[str, str] | Non
     return cursor["created_at"], cursor["conversation_id"]
 
 
-class Tools(TopicTools, ReferenceTools, GraphTools):
+class Tools(TopicTools, ReferenceTools, GraphTools, WikiTools):
     """The tool bodies. `role` is the caller's; each call opens its own connection."""
 
     def __init__(self, config: Config) -> None:

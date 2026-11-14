@@ -15,6 +15,8 @@ baton/
   messages/            DirectMessage, Inbox, Post and mailbox delivery
   conversations/       Conversation, membership, group delivery, history and listing
   topics/              Topic containers, paths, grants and reference documents
+  wiki/                The shared wiki: pages, their revisions and restores, listing and search
+  revisions.py         Append-only revision rules shared by reference documents and wiki pages
   jobs.py              Job creation, transitions, revisions and events
   database/            Connection driver, checked files, schema and migrations
   derived/             Index generations, batches, artifacts and vectors
@@ -26,7 +28,7 @@ baton/
   events.py            Event records, request digests and event cursors
   changes.py           Conversation change feed for indexers
   wakes.py             Wake scheduling and delivery
-  search.py            Message and artifact search
+  search.py            Message and artifact search, and the query rules the wiki's search shares
   dashboard.py         Read-only browser dashboard
   seat/                Interactive human browser seat
   remote.py            MCP client used by remote CLI commands
@@ -45,7 +47,7 @@ import from those canonical modules. The separate Python API exports `Secretary`
 | Task | Start here | Related code |
 | --- | --- | --- |
 | Add or change a CLI flag | `cli/<feature>.py` | `cli/main.py` wires the command families; `cli/remote.py` forwards remote calls |
-| Add or change an MCP tool | `app/tools.py`, `app/topic_tools.py`, `app/reference_tools.py` or `app/graph_tools.py` | `app/tool_policy.py` declares registration and caller policy; `app/guard.py` enforces it |
+| Add or change an MCP tool | `app/tools.py`, `app/topic_tools.py`, `app/reference_tools.py`, `app/graph_tools.py` or `app/wiki_tools.py` | `app/tool_policy.py` declares registration and caller policy; `app/guard.py` enforces it |
 | Change configured capabilities or guest restrictions | `agents/permissions.py` | `Permissions` owns capability checks; the MCP guard supplies authenticated context |
 | Change an agent's thread access | `agents/thread.py` | Binds read, send and membership operations to the agent's role |
 | Change who a message is sent as | `agents/agent.py` | Authentication resolves the role before constructing an agent |
@@ -57,6 +59,9 @@ import from those canonical modules. The separate Python API exports `Secretary`
 | Change retained history | `Conversation.history()` | `conversations/retention.py` computes visibility boundaries and gaps |
 | Change topic membership or lifecycle | `topics/catalog.py` | `paths.py` validates names; `grants.py` handles delegated permissions |
 | Change reference documents | `topics/references.py` | `app/reference_tools.py` is the MCP adapter |
+| Change how revisions are checked, stored or described | `revisions.py` | Shared by `topics/references.py` and `wiki/pages.py`; a change here changes both |
+| Change wiki pages, edits or restores | `wiki/pages.py` | `app/wiki_tools.py` is the MCP adapter; `app/tool_policy.py` says who may call; `[wiki]` is in `config/parsing.py` |
+| Change wiki search | `wiki/search.py` | Takes its query rules, index choice and snippets from `search.py`; `database/store.py` builds the `wiki_fts` index |
 | Change job transitions | `jobs.py` | `Job.move()` owns revision checks, retries and atomic event recording |
 | Change connection mechanics | `database/driver.py` | `files.py` checks private database files |
 | Change the authoritative schema | `database/schema.py`, `database/migrations.py` | `database/store.py` opens and initializes the database |

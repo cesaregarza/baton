@@ -11,6 +11,8 @@ Search applies that rule inside the query, before ranking and before the limit, 
 caller can't read never displaces, or reveals itself through, a hit it can. Hits are one per message, however
 many copies matched. Keyword search uses SQLite FTS5 where the host's SQLite has it, otherwise a bounded LIKE
 scan; `keyword_mode` says which. Nothing here writes, so searching and fetching consume nothing.
+
+The wiki's search (`baton.wiki.search`) takes its query rules, its limit, the index choice and its snippets from here.
 """
 
 from __future__ import annotations
@@ -39,8 +41,25 @@ FIRST_INPUT = "(SELECT MIN(i.from_seq) FROM artifact_inputs i WHERE i.version_id
 HAS_GRAPH = "EXISTS (SELECT 1 FROM graph_snapshots g WHERE g.version_id = v.id) AS has_graph"
 
 
-def keyword_mode(conn: Connection) -> str:
-    return "fts5" if conn.table_exists("messages_fts") else "like"
+def keyword_mode(conn: Connection, index: str = "messages_fts") -> str:
+    return "fts5" if conn.table_exists(index) else "like"
+
+
+def check_limit(limit: Any) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_HITS:
+        raise InvalidRequest(f"limit must be 1-{MAX_HITS}")
+
+
+def query_terms(query: Any) -> list[str]:
+    # Every word must appear, so a query is refused whole rather than shortened to fit.
+    if len(str(query)) > MAX_QUERY:
+        raise InvalidRequest(f"a query is at most {MAX_QUERY} characters")
+    found = re.findall(r"\w+", str(query))
+    if not found:
+        raise InvalidRequest("give at least one word to search for")
+    if len(found) > MAX_TERMS:
+        raise InvalidRequest(f"a query is at most {MAX_TERMS} words, and this one has {len(found)}")
+    return found
 
 
 def readable(config: Config, role: str) -> tuple[str, dict[str, Any]]:
@@ -97,18 +116,10 @@ def search(
         kinds = ["message"]
     if not isinstance(kinds, list) or not kinds or not set(kinds) <= {"message", *ARTIFACT_KINDS}:
         raise UnsupportedKind(f"kinds is a non-empty list from message, {', '.join(ARTIFACT_KINDS)}")
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_HITS:
-        raise InvalidRequest(f"limit must be 1-{MAX_HITS}")
+    check_limit(limit)
     if producer is not None and not isinstance(producer, str):
         raise InvalidRequest("producer is a name")
-    # Every word must appear, so a query is refused whole rather than shortened to fit.
-    if len(str(query)) > MAX_QUERY:
-        raise InvalidRequest(f"a query is at most {MAX_QUERY} characters")
-    terms = re.findall(r"\w+", str(query))
-    if not terms:
-        raise InvalidRequest("give at least one word to search for")
-    if len(terms) > MAX_TERMS:
-        raise InvalidRequest(f"a query is at most {MAX_TERMS} words, and this one has {len(terms)}")
+    terms = query_terms(query)
     profiles = _query_profiles(conn, config, query_vector, model) if query_vector is not None or model else None
     pool = min(limit * POOL_FACTOR, MAX_HITS * POOL_FACTOR) if profiles else limit
     mode = keyword_mode(conn)
@@ -250,13 +261,13 @@ def _message_hits(
     filters, extra = _filters(conversation_id, topic, before)
     values |= extra
     if mode == "fts5":
-        values["match"] = _match(terms)
+        values["match"] = fts_match(terms)
         # The readable matches are ranked first (materialized, so the ranking functions run per row), then
         # reduced to one hit per message.
         rows = conn.execute(
             "WITH matched AS MATERIALIZED (SELECT m.id AS message_id, m.conversation_id, m.conversation_seq, m.seq,"
             " m.sender, m.alias_id, m.alias, m.alias_code, m.at,"
-            " snippet(messages_fts, 0, '[', ']', '…', 12) AS snippet, bm25(messages_fts) AS score"
+            f" {fts_snippet('messages_fts')} AS snippet, bm25(messages_fts) AS score"
             " FROM messages_fts JOIN messages m ON m.recipient = messages_fts.recipient AND m.seq = messages_fts.seq"
             f" WHERE messages_fts MATCH :match AND {condition}{filters})"
             " SELECT message_id, conversation_id, conversation_seq, seq, sender, alias_id, alias, alias_code, at,"
@@ -265,7 +276,7 @@ def _message_hits(
             {**values, "limit": limit},
         ).fetchall()
     else:
-        likes = _likes(terms, "m.text", values)
+        likes = like_all(terms, "m.text", values)
         rows = conn.execute(
             "SELECT m.id AS message_id, m.conversation_id, m.conversation_seq, m.seq, m.sender,"
             " m.alias_id, m.alias, m.alias_code, MAX(m.at) AS at,"
@@ -283,7 +294,7 @@ def _message_hits(
                 "seq": row["conversation_seq"] if row["conversation_id"] is not None else row["seq"],
                 "from_role": row["sender"],
                 "at": row["at"],
-                "snippet": row["snippet"] if mode == "fts5" else _snippet(row["text"], terms),
+                "snippet": row["snippet"] if mode == "fts5" else snippet(row["text"], terms),
                 "derived": False,
             },
         )
@@ -309,10 +320,10 @@ def _artifact_hits(
     filters, extra = _artifact_filters(kinds, conversation_id, topic, before, producer)
     values |= extra
     if mode == "fts5":
-        values["match"] = _match(terms)
+        values["match"] = fts_match(terms)
         rows = conn.execute(
             f"WITH matched AS MATERIALIZED (SELECT v.*, c.last_seq, {FIRST_INPUT}, {HAS_GRAPH},"
-            " snippet(artifacts_fts, 0, '[', ']', '…', 12)"
+            f" {fts_snippet('artifacts_fts')}"
             " AS snippet, bm25(artifacts_fts) AS score FROM artifacts_fts"
             " JOIN artifact_versions v ON v.id = artifacts_fts.version_id"
             " JOIN conversations c ON c.id = v.conversation_id"
@@ -321,7 +332,7 @@ def _artifact_hits(
             {**values, "limit": limit},
         ).fetchall()
     else:
-        likes = _likes(terms, "v.body", values)
+        likes = like_all(terms, "v.body", values)
         rows = conn.execute(
             f"SELECT v.*, c.last_seq, {FIRST_INPUT}, {HAS_GRAPH}, 0 AS score FROM artifact_versions v"
             f" JOIN conversations c ON c.id = v.conversation_id WHERE {likes} AND {condition}{filters}"
@@ -334,7 +345,7 @@ def _artifact_hits(
             {
                 **_labels(row),
                 "at": row["created_at"],
-                "snippet": row["snippet"] if mode == "fts5" else _snippet(row["body"], terms),
+                "snippet": row["snippet"] if mode == "fts5" else snippet(row["body"], terms),
             },
         )
         for row in rows
@@ -465,11 +476,15 @@ def _artifact_filters(
     return sql, values
 
 
-def _match(terms: list[str]) -> str:
+def fts_match(terms: list[str]) -> str:
     return " ".join('"' + term.replace('"', '""') + '"' for term in terms)
 
 
-def _likes(terms: list[str], column: str, values: dict[str, Any]) -> str:
+def fts_snippet(index: str) -> str:
+    return f"snippet({index}, 0, '[', ']', '…', 12)"
+
+
+def like_all(terms: list[str], column: str, values: dict[str, Any]) -> str:
     likes = []
     for index, term in enumerate(terms):
         values[f"term{index}"] = "%" + re.sub(r"([\\%_])", r"\\\1", term) + "%"
@@ -502,7 +517,7 @@ def _topic_filter(alias: str, topic: str | None) -> tuple[str, dict[str, Any]]:
     )
 
 
-def _snippet(text: str, terms: list[str]) -> str:
+def snippet(text: str, terms: list[str]) -> str:
     lowered = text.lower()
     found = min((lowered.find(term.lower()) for term in terms if term.lower() in lowered), default=0)
     start = max(0, found - SNIPPET_CHARS // 3)

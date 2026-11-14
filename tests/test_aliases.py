@@ -540,7 +540,10 @@ def test_claim_tools_errors_audit_and_replay_paths_are_secret_safe(guest_host, m
 def test_claim_tools_keep_registered_guest_restrictions_in_force_in_real_dispatch(guest_host):
     config = guest_host.config
     guest_host.config = replace(
-        config, conversations=replace(config.conversations, enabled=True), search=replace(config.search, enabled=True)
+        config,
+        conversations=replace(config.conversations, enabled=True),
+        search=replace(config.search, enabled=True),
+        wiki=replace(config.wiki, enabled=True),
     )
 
     async def scenario(client):

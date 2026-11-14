@@ -113,6 +113,12 @@ description = "Picks up jobs and reports back"
 # max_vector_dim = 1024                       # the largest dimension an embedding profile may declare (1-16384)
 # embeddings = false                          # true: generations may embed, commits carry vectors, search re-ranks
 
+# Optional: one shared wiki that every core role and every alias with a live binding may read, search and edit, each
+# page kept one revision at a time. Off unless enabled; while off, no wiki tool is offered. Every revision is kept
+# for good and nobody can remove one, so keep secrets out of it. See docs/reference.md#wiki. `enabled` is its only key.
+# [wiki]
+# enabled = true
+
 # Optional: the host owner's local indexing worker. Empty `producers` turns the writer off.
 # [indexer]
 # producers = ["indexer"]                     # the producer names the writer commands act as (not role names)

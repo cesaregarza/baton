@@ -114,6 +114,7 @@ def _ensure_schema(conn: Connection) -> None:
         )
         _ensure_search_index(conn)
         _ensure_artifact_index(conn)
+        _ensure_wiki_index(conn)
         _update_schema_version(conn, version)
 
 
@@ -121,13 +122,16 @@ def _ensure_optional_search_indexes(conn: Connection) -> None:
     """Add optional indexes to a current database if SQLite now supports FTS5."""
     existing = {
         row["name"]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE name IN ('messages_fts', 'artifacts_fts')")
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE name IN ('messages_fts', 'artifacts_fts', 'wiki_fts')"
+        )
     }
-    if existing == {"messages_fts", "artifacts_fts"} or not fts5_available(conn):
+    if existing == {"messages_fts", "artifacts_fts", "wiki_fts"} or not fts5_available(conn):
         return
     with transaction(conn):
         _ensure_search_index(conn)
         _ensure_artifact_index(conn)
+        _ensure_wiki_index(conn)
 
 
 def _create_or_upgrade_tables(conn: Connection) -> int | None:
@@ -238,6 +242,27 @@ def _ensure_artifact_index(conn: Connection) -> None:
     conn.execute(
         "CREATE TRIGGER artifacts_fts_delete AFTER DELETE ON artifact_versions BEGIN"
         " DELETE FROM artifacts_fts WHERE rowid = old.rowid AND version_id = old.id; END"
+    )
+
+
+def _ensure_wiki_index(conn: Connection) -> None:
+    """The keyword index over each wiki page's current text, one row per page, keyed by the page's id.
+
+    Unlike the other two it is never appended to: the trigger replaces a page's row with the text of each revision
+    written, in the write's own transaction, so an older revision's words are never found. Revisions are only ever
+    appended, each the page's highest, so no other trigger is needed.
+    """
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'wiki_fts'").fetchone() or not fts5_available(conn):
+        return
+    conn.execute("CREATE VIRTUAL TABLE wiki_fts USING fts5(body, tokenize = 'unicode61 remove_diacritics 2')")
+    conn.execute(
+        "INSERT INTO wiki_fts (rowid, body) SELECT r.page_id, r.body FROM wiki_revisions r"
+        " WHERE r.revision = (SELECT MAX(o.revision) FROM wiki_revisions o WHERE o.page_id = r.page_id)"
+    )
+    conn.execute(
+        "CREATE TRIGGER wiki_fts_current AFTER INSERT ON wiki_revisions BEGIN"
+        " DELETE FROM wiki_fts WHERE rowid = new.page_id;"
+        " INSERT INTO wiki_fts (rowid, body) VALUES (new.page_id, new.body); END"
     )
 
 
