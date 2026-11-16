@@ -293,6 +293,9 @@ def _end_token(token: dict, how: str, now: float) -> None:
     token.update(ended=how, issued_expires_at=token["expires_at"], expires_at=int(now))
 
 
+NO_FILE = (0, 0, 0)  # the signature of a state file that does not exist
+
+
 @dataclass
 class TokenStore:
     """Clients and token digests in one 0600 JSON file, which is the source of truth.
@@ -300,6 +303,8 @@ class TokenStore:
     Reads re-load the file when it has changed, so `baton oauth revoke-all`
     takes effect at once. Writes run inside `mutation()`, under an exclusive
     lock and after a fresh load, so a write never resurrects a revoked grant.
+    A write that fails loads the file again and raises, so memory never keeps a
+    change the file lacks.
 
     Nothing is deleted but a registration left unused for UNUSED_CLIENT_TTL. A
     revoked or spent token stays, ended (`_end_token`), and an entry
@@ -313,7 +318,7 @@ class TokenStore:
     access: dict[str, dict] = field(default_factory=dict)
     refresh: dict[str, dict] = field(default_factory=dict)
     unused: dict[str, float] = field(default_factory=dict)  # registrations not yet authorized, by arrival
-    _signature: tuple[int, int, int] | None = None
+    _signature: tuple[int, int, int] | None = None  # of the file as loaded; None when memory may differ from it
 
     @classmethod
     def load(cls, path: Path) -> TokenStore:
@@ -327,7 +332,7 @@ class TokenStore:
             try:
                 fd = datadir.open_file(dir_fd, self.path.name, os.O_RDONLY, directory=directory)
             except FileNotFoundError:
-                signature, raw = None, b"{}"
+                signature, raw = NO_FILE, b"{}"
             else:
                 with os.fdopen(fd, "rb") as state:
                     info = os.fstat(state.fileno())
@@ -350,9 +355,14 @@ class TokenStore:
                 self._signature = None
                 self.sync()
                 self._drop_unused()
-                yield self
-                self._settle(dir_fd, time.time())
-                self._save(dir_fd)
+                try:
+                    yield self
+                    self._settle(dir_fd, time.time())
+                    self._save(dir_fd)
+                except BaseException:
+                    self._signature = None  # if loading the file fails too, the next read loads it again
+                    self.sync()
+                    raise
             finally:
                 os.close(lock)
 
