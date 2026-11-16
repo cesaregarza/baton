@@ -210,6 +210,23 @@ def test_a_revocation_that_fails_to_write_is_neither_enforced_nor_reported_as_do
     assert mcp_status() == 401
 
 
+def test_a_first_registration_that_fails_to_write_leaves_no_trace(start_host, monkeypatch) -> None:
+    host = start_host(oauth=True)
+    provider = auth.PassphraseProvider(host.config)
+    failed = OAuthClientInformationFull(client_id="failed", redirect_uris=[REDIRECT])
+    assert not host.config.oauth_state_path.exists()
+
+    with monkeypatch.context() as patch:
+        failing_rename(patch)
+        with pytest.raises(OSError):
+            anyio.run(provider.register_client, failed)
+    assert not host.config.oauth_state_path.exists()
+    assert held(provider) == {"clients": {}, "access": {}, "refresh": {}, "unused": {}}
+
+    anyio.run(provider.register_client, OAuthClientInformationFull(client_id="later", redirect_uris=[REDIRECT]))
+    assert list(stored(host)["clients"]) == ["later"], "the failed registration does not come back with the next write"
+
+
 def test_redirect_rules() -> None:
     config = parse(
         {
