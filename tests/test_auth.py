@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
+import json
+import os
 import secrets
 from urllib.parse import parse_qs, urlparse
 
 import anyio
 import httpx
 import httpx2
+import pytest
 from conftest import PASSPHRASE, REDIRECT, Host
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.auth import OAuthClientInformationFull
 from test_integration import payload
 
 from baton import auth
@@ -129,6 +134,97 @@ def test_registration_needs_an_allowed_redirect(start_host) -> None:
     host = start_host(oauth=True)
     assert register(host, "https://elsewhere.example.test/cb").status_code == 400
     assert register(host, "http://127.0.0.1:43123/callback").status_code == 201
+
+
+def failing_rename(patch: pytest.MonkeyPatch) -> None:
+    """Make the rename that puts oauth.json in place raise, as a full or failing disk does."""
+    real = os.replace
+
+    def replace(src, dst, **kwargs):
+        if dst == "oauth.json":
+            raise OSError(errno.EIO, "disk write failed")
+        return real(src, dst, **kwargs)
+
+    patch.setattr(os, "replace", replace)
+
+
+def held(provider: auth.PassphraseProvider) -> dict:
+    store = provider.store
+    return {"clients": store.clients, "access": store.access, "refresh": store.refresh, "unused": store.unused}
+
+
+def stored(host: Host) -> dict:
+    return json.loads(host.config.oauth_state_path.read_text())
+
+
+@pytest.mark.parametrize("operation", ["registration", "refresh", "revocation"])
+def test_a_write_that_fails_leaves_the_store_as_the_file_has_it(start_host, monkeypatch, operation) -> None:
+    host = start_host(oauth=True)
+    tokens = authorize(host)
+    provider = auth.PassphraseProvider(host.config)
+    client = anyio.run(provider.get_client, tokens["client_id"])
+    newcomer = OAuthClientInformationFull(client_id="newcomer", redirect_uris=[REDIRECT])
+    refresh_token = anyio.run(provider.load_refresh_token, client, tokens["refresh_token"])
+    access_token = anyio.run(provider.load_access_token, tokens["access_token"])
+    attempts = {
+        "registration": lambda: provider.register_client(newcomer),
+        "refresh": lambda: provider.exchange_refresh_token(client, refresh_token, []),
+        "revocation": lambda: provider.revoke_token(access_token),
+    }
+    before = stored(host)
+    assert held(provider) == before
+
+    with monkeypatch.context() as patch:
+        failing_rename(patch)
+        with pytest.raises(OSError):
+            anyio.run(attempts[operation])
+    assert stored(host) == before, "the write failed, so the file is as it was"
+    assert held(provider) == before, "memory holds what the file holds, not the change that failed"
+
+    anyio.run(attempts[operation])  # the same operation, once the disk works
+    assert stored(host) != before and held(provider) == stored(host)
+
+
+def test_a_revocation_that_fails_to_write_is_neither_enforced_nor_reported_as_done(start_host, monkeypatch) -> None:
+    host = start_host(oauth=True)
+    tokens = authorize(host)
+
+    def revoke() -> httpx.Response:
+        # The SDK's revocation form needs a client_secret field, empty for a public client.
+        form = {"token": tokens["access_token"], "client_id": tokens["client_id"], "client_secret": ""}
+        return httpx.post(host.base + "/revoke", data=form)
+
+    def mcp_status() -> int:
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+        return httpx.post(host.mcp_url, json={}, headers=headers).status_code
+
+    accepted = mcp_status()
+    assert accepted != 401
+
+    with monkeypatch.context() as patch:
+        failing_rename(patch)
+        assert revoke().status_code == 500, "the request fails instead of reporting the revocation done"
+    assert mcp_status() == accepted, "the file still holds the grant, so a restart would honor it too"
+
+    assert revoke().status_code == 200
+    assert mcp_status() == 401
+
+
+def test_a_first_registration_that_fails_to_write_leaves_no_trace(start_host, monkeypatch) -> None:
+    host = start_host(oauth=True)
+    provider = auth.PassphraseProvider(host.config)
+    failed = OAuthClientInformationFull(client_id="failed", redirect_uris=[REDIRECT])
+    assert not host.config.oauth_state_path.exists()
+
+    with monkeypatch.context() as patch:
+        failing_rename(patch)
+        with pytest.raises(OSError):
+            anyio.run(provider.register_client, failed)
+    assert not host.config.oauth_state_path.exists()
+    assert held(provider) == {"clients": {}, "access": {}, "refresh": {}, "unused": {}}
+
+    anyio.run(provider.register_client, OAuthClientInformationFull(client_id="later", redirect_uris=[REDIRECT]))
+    assert list(stored(host)["clients"]) == ["later"], "the failed registration does not come back with the next write"
 
 
 def test_redirect_rules() -> None:
